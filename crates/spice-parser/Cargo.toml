@@ -1,0 +1,16 @@
+[package]
+name = "spice-parser"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "SPICE netlist parser producing a typed AST"
+
+[lints]
+workspace = true
+
+[dependencies]
+chumsky.workspace = true
+thiserror.workspace = true
+log.workspace = true
