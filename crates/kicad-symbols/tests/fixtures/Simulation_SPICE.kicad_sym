@@ -1,0 +1,23 @@
+(kicad_symbol_lib
+  ; Hand-written test fixture for the kicad-symbols crate.
+  ; Geometry references the real KiCad library at
+  ; /usr/share/kicad/symbols/Simulation_SPICE.kicad_sym (KiCad 9.x).
+  ; Pins are on the 1.27 mm grid.
+  (version 20231120)
+  (generator "kicad_symbol_editor")
+  (symbol "VDC"
+    (pin_names (offset 0))
+    (symbol "VDC_0_1"
+      (circle (center 0 0) (radius 1.27)))
+    (symbol "VDC_1_1"
+      (pin passive line
+        (at 0 5.08 270)
+        (length 2.54)
+        (name "+")
+        (number "1"))
+      (pin passive line
+        (at 0 -5.08 90)
+        (length 2.54)
+        (name "-")
+        (number "2"))))
+)

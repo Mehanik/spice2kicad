@@ -226,6 +226,12 @@ D1 a k DMOD          ;@ symbol=Device:D pinmap=1:A,2:K
 - `<anchor>` is a reference identifier (§2.1).
 - Spacing is chosen by the layout engine; the spec does not expose
   numeric gaps.
+- The geometric effect is on the **connecting pins**, not the
+  symbol centers: `right-of` makes the element's leftmost
+  connecting pin colinear (in y) with — and to the right of —
+  the anchor's rightmost connecting pin. The converter decides
+  which pin counts as "left/right/top/bottom" by inspecting the
+  resolved KiCad symbol after `pinmap` is applied.
 
 Examples:
 
@@ -250,6 +256,10 @@ Block-form only:
 - All references in one `align` directive must resolve within the
   same parent sheet (i.e. you cannot align across an `.include`
   boundary or across a `.subckt` instance).
+- "Equal Y" / "equal X" applies to the **connecting pins**, not
+  to the symbol centers. For uniformly-oriented parts the
+  distinction is invisible; for mixed orientations the behaviour
+  is currently under-specified — see §9.
 
 ### 4.5 `power` — voltage source as power symbol
 
@@ -352,8 +362,20 @@ for future expansion within each class.
 The converter reports, in this order:
 
 - **E001** unknown refdes in directive
-- **E002** symbol pin count mismatch with no `pinmap`
+- **E002** symbol pin count mismatch (with or without `pinmap`)
+- **E003** unknown library symbol — the `lib_id` (from a `symbol`
+  directive or the built-in default table) is not present in any
+  loaded `.kicad_sym` library, *or* an element has no symbol
+  mapping (e.g. `X…` subckt instance with no `;@ symbol=` tag)
 - **E004** `align` references cross a sheet boundary
+- **E005** invalid `pinmap` — references an unknown pin (by number
+  or name), uses an out-of-range SPICE terminal index, or repeats
+  a SPICE index or KiCad pin
+- **E006** directional cycle in `place` graph within a single axis
+  (e.g. `A right-of B`, `B right-of A`)
+- **E007** internal: layout could not resolve a `place` directive
+  after the policy pass (worklist stalled). Should not normally
+  fire on inputs that pass the policy pass; treat as a bug.
 - **W101** conflicting `place` constraints (which one was kept)
 - **W102** `align` cluster has fewer than two members
 - **W103** annotation on a line the parser did not recognize as an
@@ -400,6 +422,12 @@ Two caveats:
 - **Wire routing hints** (`*@route via=…`).
 - **Bus / vector notation alignment** — deferred until the parser
   learns bus syntax.
+- **`align` under mixed orientation** — the spec does not
+  currently say which pin's coordinate is shared when aligned
+  parts are rotated differently. Likely resolutions: (a) require
+  uniform orientation within an `align` block, warn otherwise;
+  (b) define a canonical pin per element kind. Defer until a real
+  file demonstrates the need.
 - **Round-trip from KiCad back to annotations** (so manual sheet
   edits survive a re-conversion) — needs a stable element-to-symbol
   identity scheme first.

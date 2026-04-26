@@ -1,17 +1,19 @@
 [package]
-name = "spice-parser"
+name = "spice-policy"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "SPICE netlist parser producing a typed AST"
+description = "Pre-flight layout policy / conflict-check pass for spice2kicad"
 
 [lints]
 workspace = true
 
 [dependencies]
+spice-resolve.workspace = true
 spice-diagnostics.workspace = true
-chumsky.workspace = true
-thiserror.workspace = true
-log.workspace = true
+
+[dev-dependencies]
+kicad-symbols.workspace = true
+proptest.workspace = true

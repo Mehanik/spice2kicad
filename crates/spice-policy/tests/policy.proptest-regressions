@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc da052bebfeddf21a552776e76f4541754c302ee194cebd5d395245a5f46deb30 # shrinks to input = ResolvedNetlist { elements: [ResolvedElement { refdes: "R0", kind: Resistor, lib_id: "Device:R", symbol: Symbol { lib_id: "Device:R", name: "R", pins: [] }, pin_mapping: [], nodes: [], value: None, role: Normal }, ResolvedElement { refdes: "R1", kind: Resistor, lib_id: "Device:R", symbol: Symbol { lib_id: "Device:R", name: "R", pins: [] }, pin_mapping: [], nodes: [], value: None, role: Normal }, ResolvedElement { refdes: "R2", kind: Resistor, lib_id: "Device:R", symbol: Symbol { lib_id: "Device:R", name: "R", pins: [] }, pin_mapping: [], nodes: [], value: None, role: Normal }], align: [AlignSpec { axis: Vertical, refdes: ["R0", "R1"], span: None }], place: [PlaceSpec { refdes: "R0", relation: RightOf, anchor: "R1", span: None }, PlaceSpec { refdes: "R1", relation: RightOf, anchor: "R0", span: None }] }

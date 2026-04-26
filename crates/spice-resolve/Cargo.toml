@@ -1,17 +1,16 @@
 [package]
-name = "spice-parser"
+name = "spice-resolve"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "SPICE netlist parser producing a typed AST"
+description = "Resolve a parsed SPICE netlist against a KiCad symbol library"
 
 [lints]
 workspace = true
 
 [dependencies]
+spice-parser.workspace = true
+kicad-symbols.workspace = true
 spice-diagnostics.workspace = true
-chumsky.workspace = true
-thiserror.workspace = true
-log.workspace = true

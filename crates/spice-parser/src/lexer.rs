@@ -1,11 +1,13 @@
 //! SPICE tokenizer. Handles line continuation (`+`), comments (`*`, `;`),
 //! and case-insensitive directives (`.tran`, `.subckt`, ...).
 
-use crate::error::ParseError;
+use spice_diagnostics::{FileId, Span};
+
+use crate::ParseResult;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Token {
-    pub line: usize,
+    pub span: Span,
     pub kind: TokenKind,
 }
 
@@ -19,7 +21,7 @@ pub enum TokenKind {
     Eol,
 }
 
-pub fn tokenize(_source: &str) -> Result<Vec<Token>, ParseError> {
+pub fn tokenize(_source: &str, _file: FileId) -> ParseResult<Vec<Token>> {
     // TODO: implement. Stub returns empty stream.
     Ok(Vec::new())
 }

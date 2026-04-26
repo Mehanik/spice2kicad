@@ -1,0 +1,20 @@
+[package]
+name = "spice-layout"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Auto-placer for spice2kicad: ResolvedNetlist + Library -> Placement"
+
+[lints]
+workspace = true
+
+[dependencies]
+spice-resolve.workspace = true
+spice-policy.workspace = true
+spice-diagnostics.workspace = true
+kicad-symbols.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

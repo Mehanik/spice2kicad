@@ -1,8 +1,13 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/spice-diagnostics",
     "crates/spice-parser",
     "crates/kicad-emitter",
+    "crates/kicad-symbols",
+    "crates/spice-resolve",
+    "crates/spice-policy",
+    "crates/spice-layout",
     "crates/spice2kicad",
 ]
 
@@ -13,16 +18,23 @@ license = "MIT"
 repository = "https://github.com/eugene/spice2eeschema"
 
 [workspace.dependencies]
+spice-diagnostics = { path = "crates/spice-diagnostics" }
 spice-parser = { path = "crates/spice-parser" }
 kicad-emitter = { path = "crates/kicad-emitter" }
+kicad-symbols = { path = "crates/kicad-symbols" }
+spice-resolve = { path = "crates/spice-resolve" }
+spice-policy = { path = "crates/spice-policy" }
+spice-layout = { path = "crates/spice-layout" }
 
 anyhow = "1"
+proptest = "1"
 thiserror = "2"
 clap = { version = "4", features = ["derive"] }
 chumsky = "0.10"
 ariadne = "0.5"
 log = "0.4"
 env_logger = "0.11"
+lexpr = "0.2"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

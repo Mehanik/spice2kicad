@@ -23,6 +23,34 @@ see `docs/annotation-spec.md`. That spec is the source of truth for
 what the parser accepts; this file describes the *thinking* behind
 it.
 
+## Project status: research / unstable
+
+This is a **research project with no stability guarantees yet**.
+Public APIs (crate boundaries, the annotation spec, sidecar formats,
+diagnostic codes) all churn freely. There are no external users to
+protect.
+
+Practical consequences:
+
+- **Don't write back-compat shims.** When a type or signature
+  changes, just change all call sites in the same commit.
+- **Don't write migration guides, deprecation notices, or
+  `#[deprecated]` attributes.** Delete the old thing and update
+  callers.
+- **Don't preserve unused code "in case we need it later".**
+  Delete it; git remembers.
+- **Renumber / reshape diagnostic codes freely** if a better
+  numbering emerges. Spec §7 is updated in lock-step.
+- **Breaking changes to the annotation spec are fine right now**
+  (§9 already calls out spec versioning as a v0.2 concern). The
+  "additive vs breaking" rules in the "When changing the
+  annotation spec" section below describe the *future* contract,
+  not the present one — apply judgment.
+
+When this project gets real users, this section gets removed and
+the contracts harden. Until then: prefer the change that leaves
+the codebase simpler over the one that preserves history.
+
 ## Repository layout
 
 ```
@@ -127,6 +155,24 @@ For full grammar, examples, and diagnostics, see
 - **Diagnostics.** Use `ariadne` for source-spanned error rendering.
   Every error/warning code in spec §7 should round-trip through
   `ariadne` with the offending line highlighted.
+
+## Layout invariants
+
+Two invariants the placer must preserve, both invisible to the
+annotation spec but load-bearing for implementation:
+
+- **Constraints are pin-anchored.** `place` and `align` describe
+  relationships between *connecting pins*, not symbol centers.
+  The constraint resolver therefore consumes resolved symbol pin
+  geometry (after `symbol` and `pinmap`), not just the AST.
+- **Everything lands on the KiCad schematic grid** (50 mil =
+  1.27 mm). Symbol origins, pin coordinates, and wire endpoints
+  are integer multiples of the grid. The placer can use grid
+  cells as its internal coordinate system; the emitter converts
+  to mm.
+
+See `docs/layout-roadmap.md` for the consequences on placer
+architecture.
 
 ## When changing the annotation spec
 

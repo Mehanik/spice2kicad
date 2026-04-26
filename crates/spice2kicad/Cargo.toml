@@ -15,6 +15,7 @@ name = "spice2kicad"
 path = "src/main.rs"
 
 [dependencies]
+spice-diagnostics.workspace = true
 spice-parser.workspace = true
 kicad-emitter.workspace = true
 clap.workspace = true
@@ -22,3 +23,7 @@ anyhow.workspace = true
 ariadne.workspace = true
 log.workspace = true
 env_logger.workspace = true
+
+[dev-dependencies]
+lexpr = "0.2"
+kicad-symbols.workspace = true
