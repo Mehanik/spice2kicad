@@ -1,0 +1,20 @@
+* Inverting op-amp: gain = -Rf/Rin = -10.
+* Op-amp modelled as a .subckt so it lands on its own hierarchical sheet.
+*@symbol Device:R_US for=R*
+
+.subckt OPAMP inp inn out vcc vee
+* Trivial VCVS model — fine for a topology round-trip.
+E1 out 0 inp inn 1e5
+.ends
+
+VCC vcc 0   DC  15   ;@ power=+15V
+VEE vee 0   DC -15   ;@ power=-15V
+VIN in  0   AC 1     ;@ ignore
+
+RIN in  inv 1k
+RF  inv out 10k
+
+X1  0 inv out vcc vee OPAMP
+
+.ac dec 10 1 1Meg
+.end

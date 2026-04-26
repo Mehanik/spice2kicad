@@ -1,0 +1,22 @@
+* Common-emitter BJT amplifier with bypassed emitter degeneration.
+*@symbol Device:R_US     for=R*
+*@symbol Device:C        for=C*
+*@symbol Device:Q_NPN_BCE for=Q*
+
+VCC vcc 0   DC 12        ;@ power=+12V
+VIN in  0   AC 1          ;@ ignore
+
+R1  vcc b   47k
+R2  b   0   10k
+RC  vcc c   3k3
+RE  e   0   1k
+CE  e   0   100u
+CIN in  b   1u
+COUT c   out 1u
+RL  out 0   100k          ;@ ignore
+
+Q1  c b e   QGENERIC
+
+.model QGENERIC NPN (BF=200 IS=1e-15)
+.ac dec 20 10 10Meg
+.end

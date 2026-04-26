@@ -1,0 +1,8 @@
+* RC low-pass filter — single-pole, 1.6 kHz corner.
+*@symbol Device:R_US for=R*
+*@symbol Device:C for=C*
+V1 in  0   AC 1   ;@ ignore
+R1 in  out 1k
+C1 out 0   100n
+.ac dec 10 1 1Meg
+.end

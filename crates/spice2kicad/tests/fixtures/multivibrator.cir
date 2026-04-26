@@ -1,0 +1,22 @@
+* Symmetric astable multivibrator. Two cross-coupled NPNs, ~1 kHz.
+*@symbol Device:R_US      for=R*
+*@symbol Device:C         for=C*
+*@symbol Device:Q_NPN_BCE for=Q*
+*@align horizontal Q1 Q2
+
+VCC vcc 0   DC 5   ;@ power=+5V
+
+RC1 vcc c1  10k
+RC2 vcc c2  10k
+RB1 vcc b1  100k
+RB2 vcc b2  100k
+
+C1  c1 b2 10n
+C2  c2 b1 10n
+
+Q1  c1 b1 0  QGENERIC
+Q2  c2 b2 0  QGENERIC   ;@ place=right-of Q1
+
+.model QGENERIC NPN (BF=200 IS=1e-15)
+.tran 10u 5m
+.end

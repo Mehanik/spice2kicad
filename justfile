@@ -20,6 +20,12 @@ clippy:
 test:
     cargo test --workspace
 
+# Round-trip functional tests. Requires kicad-cli on PATH (skipped otherwise;
+# set REQUIRE_KICAD_CLI=1 to fail-hard instead). Most are #[ignore]d until
+# the schematic emitter lands.
+test-roundtrip:
+    cargo test -p spice2kicad --test roundtrip -- --ignored --nocapture
+
 build:
     cargo build --workspace
 
