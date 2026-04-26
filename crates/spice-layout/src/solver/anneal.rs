@@ -119,11 +119,14 @@ pub(super) fn refine(
         if it % LOG_EVERY == 0 {
             log::debug!(
                 "  it={it} T={temperature:.4} cost={current_cost:.3} \
-                 hpwl={:.2} overlap={:.2} crossings={:.0} cv={:.3}",
+                 hpwl={:.2} overlap={:.2} crossings={:.0} cv={:.3} \
+                 rail={:.2} flow={:.2}",
                 current_breakdown.hpwl,
                 current_breakdown.overlap,
                 current_breakdown.crossings,
                 current_breakdown.constraint_violation,
+                current_breakdown.rail_direction,
+                current_breakdown.signal_flow,
             );
         }
     }

@@ -10,7 +10,7 @@ use spice_layout::{GridPoint, PlacedElement, Placement, place};
 use spice_policy::{CheckedNetlist, check};
 use spice_resolve::{
     AlignSpec, Axis, ElementKind, ElementRole, PlaceSpec, Relation, ResolvedElement,
-    ResolvedNetlist,
+    ResolvedNetlist, SubcktPorts,
 };
 
 const STEP_MM: f64 = 1.27;
@@ -24,6 +24,26 @@ fn make_r_with_nodes(refdes: &str, nodes: &[&str]) -> ResolvedElement {
     let mut e = make_r(refdes);
     e.nodes = nodes.iter().map(|s| (*s).to_owned()).collect();
     e
+}
+
+/// Build a `Simulation_SPICE:VDC` voltage source flagged as a power
+/// rail. Terminal 1 is the rail node; terminal 2 is ground.
+fn make_v_power(refdes: &str, rail: &str) -> ResolvedElement {
+    let lib = fixture_library();
+    let symbol = lib
+        .lookup("Simulation_SPICE:VDC")
+        .expect("VDC fixture")
+        .clone();
+    ResolvedElement {
+        refdes: refdes.to_owned(),
+        kind: ElementKind::VoltageSrc,
+        lib_id: "Simulation_SPICE:VDC".to_owned(),
+        symbol,
+        pin_mapping: vec!["1".into(), "2".into()],
+        nodes: vec![rail.to_owned(), "0".to_owned()],
+        value: None,
+        role: ElementRole::Power(rail.to_owned()),
+    }
 }
 
 fn checked_from_resolved(rn: ResolvedNetlist) -> CheckedNetlist {
@@ -63,6 +83,7 @@ fn hpwl_two_pin_net_is_manhattan_distance() {
         ],
         align: vec![],
         place: vec![],
+        subckts: vec![],
     };
     let checked = checked_from_resolved(rn);
     // R1 at origin (0,0), R2 placed 6 grid cells right + 4 cells up.
@@ -98,6 +119,7 @@ fn hpwl_skips_ground_net_zero() {
         ],
         align: vec![],
         place: vec![],
+        subckts: vec![],
     };
     let checked = checked_from_resolved(rn);
     let p = manual_placement(&checked, &[(0, 0), (10, 0)]);
@@ -126,6 +148,7 @@ fn overlap_zero_when_far_apart() {
         elements: vec![make_r("R1"), make_r("R2")],
         align: vec![],
         place: vec![],
+        subckts: vec![],
     };
     let checked = checked_from_resolved(rn);
     // CELL_W = 6 grid units; place 6 units apart.
@@ -140,6 +163,7 @@ fn overlap_full_when_origins_coincide() {
         elements: vec![make_r("R1"), make_r("R2")],
         align: vec![],
         place: vec![],
+        subckts: vec![],
     };
     let checked = checked_from_resolved(rn);
     let p = manual_placement(&checked, &[(0, 0), (0, 0)]);
@@ -169,6 +193,7 @@ fn crossings_zero_for_parallel_nets() {
         ],
         align: vec![],
         place: vec![],
+        subckts: vec![],
     };
     let checked = checked_from_resolved(rn);
     let p = manual_placement(&checked, &[(0, 0), (10, 0)]);
@@ -202,6 +227,7 @@ fn crossings_one_for_diagonal_pair() {
         ],
         align: vec![],
         place: vec![],
+        subckts: vec![],
     };
     let checked = checked_from_resolved(rn);
     let p = manual_placement(&checked, &[(0, 0), (10, 10), (10, 0), (0, 10)]);
@@ -277,6 +303,7 @@ fn constraint_violation_right_of_violated_when_target_left() {
             anchor: "A".into(),
             span: None,
         }],
+        subckts: vec![],
     };
     let checked = checked_from_resolved(rn);
     // A at x=10, B at x=0 (so B is left of A → hinged X term active).
@@ -301,9 +328,140 @@ fn total_uses_default_weights_linearly() {
     let p = place(checked.clone(), fixture_library()).expect("placement");
     let bd = breakdown(&p, &checked, fixture_library());
     let t = total(&bd, &CostWeights::DEFAULT);
-    let manual =
-        bd.crossings * 100.0 + bd.constraint_violation * 1000.0 + bd.overlap * 50.0 + bd.hpwl * 1.0;
+    let manual = bd.crossings * 100.0
+        + bd.constraint_violation * 1000.0
+        + bd.overlap * 50.0
+        + bd.hpwl * 1.0
+        + bd.rail_direction * 50.0
+        + bd.signal_flow * 25.0;
     assert!((t - manual).abs() < 1e-9, "total {t} manual {manual}");
+}
+
+// ---------------------------------------------------------------------------
+// Rail direction (ζ)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn rail_direction_power_above_zero_below() {
+    // V1 is a Vcc-tagged power source; R1 has a ground pin. The
+    // "correct" placement puts V1 above R1; the swapped placement
+    // inverts them. Both cases share the same pin extents, so only
+    // the rail-direction term should change.
+    // R1 is connected only to ground (and an unrelated signal node);
+    // V1 is the power source. With the rail and the ground tied to
+    // distinct elements, the ordering is no longer mirror-symmetric.
+    let rn = ResolvedNetlist {
+        elements: vec![
+            make_v_power("V1", "vcc"),
+            make_r_with_nodes("R1", &["0", "sig"]),
+        ],
+        align: vec![],
+        place: vec![],
+        subckts: vec![],
+    };
+    let checked = checked_from_resolved(rn);
+
+    let p_correct = manual_placement(&checked, &[(0, 8), (0, 0)]);
+    let p_swapped = manual_placement(&checked, &[(0, 0), (0, 8)]);
+
+    let bd_correct = breakdown(&p_correct, &checked, fixture_library());
+    let bd_swapped = breakdown(&p_swapped, &checked, fixture_library());
+
+    assert!(
+        bd_swapped.rail_direction > bd_correct.rail_direction,
+        "expected swapped > correct, got swapped={} correct={}",
+        bd_swapped.rail_direction,
+        bd_correct.rail_direction
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Signal flow (η)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn signal_flow_left_to_right_better_than_right_to_left() {
+    // A subckt with ports = ["vin", "vout"] and a single resistor
+    // connecting them. Left→right places the input pin on the left
+    // edge; right→left swaps it.
+    let rn = ResolvedNetlist {
+        elements: vec![make_r_with_nodes("R1", &["vin", "vout"])],
+        align: vec![],
+        place: vec![],
+        subckts: vec![SubcktPorts {
+            name: "amp".into(),
+            ports: vec!["vin".into(), "vout".into()],
+        }],
+    };
+    let checked = checked_from_resolved(rn);
+
+    // Single element — extents collapse, so use two elements to give
+    // a non-degenerate x-range.
+    let rn2 = ResolvedNetlist {
+        elements: vec![
+            make_r_with_nodes("R1", &["vin", "mid"]),
+            make_r_with_nodes("R2", &["mid", "vout"]),
+        ],
+        align: vec![],
+        place: vec![],
+        subckts: vec![SubcktPorts {
+            name: "amp".into(),
+            ports: vec!["vin".into(), "vout".into()],
+        }],
+    };
+    let checked2 = checked_from_resolved(rn2);
+
+    // Correct: R1 (carries vin) on the left, R2 (carries vout) on the right.
+    let p_correct = manual_placement(&checked2, &[(0, 0), (10, 0)]);
+    // Reversed: R1 on the right, R2 on the left.
+    let p_reversed = manual_placement(&checked2, &[(10, 0), (0, 0)]);
+
+    let bd_correct = breakdown(&p_correct, &checked2, fixture_library());
+    let bd_reversed = breakdown(&p_reversed, &checked2, fixture_library());
+
+    assert!(
+        bd_reversed.signal_flow > bd_correct.signal_flow,
+        "expected reversed > correct, got reversed={} correct={}",
+        bd_reversed.signal_flow,
+        bd_correct.signal_flow
+    );
+
+    // Sanity: the single-element placement should produce zero
+    // signal-flow because both extents collapse.
+    let p_single = manual_placement(&checked, &[(0, 0)]);
+    let bd_single = breakdown(&p_single, &checked, fixture_library());
+    assert!(bd_single.signal_flow >= 0.0);
+}
+
+#[test]
+fn zero_annotations_zero_rail_and_flow() {
+    let rn = ResolvedNetlist {
+        elements: vec![
+            make_r_with_nodes("R1", &["a", "b"]),
+            make_r_with_nodes("R2", &["b", "c"]),
+        ],
+        align: vec![],
+        place: vec![],
+        subckts: vec![],
+    };
+    let checked = checked_from_resolved(rn);
+    let p = manual_placement(&checked, &[(0, 0), (10, 0)]);
+    let bd = breakdown(&p, &checked, fixture_library());
+    // Both terms are exactly 0.0 by construction (no rail/ground/subckt
+    // pins to penalise), so a strict-equality compare is intentional.
+    #[allow(clippy::float_cmp)]
+    {
+        assert!(
+            bd.rail_direction == 0.0,
+            "rail_direction should be 0, got {}",
+            bd.rail_direction
+        );
+        assert!(
+            bd.signal_flow == 0.0,
+            "signal_flow should be 0, got {}",
+            bd.signal_flow
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -366,6 +524,7 @@ fn build_scenario(scenario: &Scenario) -> (Placement, CheckedNetlist) {
         elements,
         align: align_specs,
         place: place_specs,
+        subckts: vec![],
     };
     let (checked, _w) = check(rn).expect("policy");
     let p = place(checked.clone(), fixture_library()).expect("placement");
@@ -435,7 +594,14 @@ proptest! {
     fn cost_finite_and_nonneg(scenario in arb_scenario()) {
         let (p, checked) = build_scenario(&scenario);
         let bd = breakdown(&p, &checked, fixture_library());
-        for v in [bd.hpwl, bd.overlap, bd.crossings, bd.constraint_violation] {
+        for v in [
+            bd.hpwl,
+            bd.overlap,
+            bd.crossings,
+            bd.constraint_violation,
+            bd.rail_direction,
+            bd.signal_flow,
+        ] {
             prop_assert!(v.is_finite(), "non-finite component: {v}");
             prop_assert!(v >= 0.0, "negative component: {v}");
         }
@@ -449,7 +615,9 @@ proptest! {
         let manual = bd.crossings * 100.0
             + bd.constraint_violation * 1000.0
             + bd.overlap * 50.0
-            + bd.hpwl * 1.0;
+            + bd.hpwl * 1.0
+            + bd.rail_direction * 50.0
+            + bd.signal_flow * 25.0;
         prop_assert!((t - manual).abs() < 1e-9);
     }
 

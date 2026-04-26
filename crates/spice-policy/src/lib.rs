@@ -34,7 +34,9 @@
 use std::collections::{HashMap, HashSet};
 
 use spice_diagnostics::{Diagnostic, Label, Severity, Span};
-use spice_resolve::{AlignSpec, PlaceSpec, Relation, ResolvedElement, ResolvedNetlist};
+use spice_resolve::{
+    AlignSpec, PlaceSpec, Relation, ResolvedElement, ResolvedNetlist, SubcktPorts,
+};
 
 // ---------------------------------------------------------------------------
 // Output type
@@ -55,6 +57,7 @@ pub struct CheckedNetlist {
     pub elements: Vec<ResolvedElement>,
     pub align: Vec<AlignSpec>,
     pub place: Vec<PlaceSpec>,
+    pub subckts: Vec<SubcktPorts>,
 }
 
 // ---------------------------------------------------------------------------
@@ -79,6 +82,7 @@ pub fn check(
         elements,
         align,
         place,
+        subckts,
     } = resolved;
 
     let mut diags: Vec<Diagnostic> = Vec::new();
@@ -208,6 +212,7 @@ pub fn check(
             elements,
             align: clean_align,
             place: clean_place,
+            subckts,
         },
         diags,
     ))

@@ -108,6 +108,7 @@ fn refined_cost_no_worse_than_stage1_on_connected_chain() {
         elements,
         align: vec![],
         place: vec![],
+        subckts: vec![],
     };
     let (checked, _) = check(resolved).expect("policy check");
 

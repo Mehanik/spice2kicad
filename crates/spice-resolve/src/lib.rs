@@ -43,6 +43,16 @@ pub struct ResolvedNetlist {
     pub align: Vec<AlignSpec>,
     /// `;@ place=…` tags preserved for the layout pass.
     pub place: Vec<PlaceSpec>,
+    /// Subckt port lists, one entry per `.subckt` block. Used by the
+    /// layout signal-flow term to identify input / output nets.
+    pub subckts: Vec<SubcktPorts>,
+}
+
+/// Port list for a `.subckt` definition.
+#[derive(Debug, Clone)]
+pub struct SubcktPorts {
+    pub name: String,
+    pub ports: Vec<String>,
 }
 
 /// A SPICE element bound to a KiCad symbol.
@@ -141,6 +151,15 @@ pub fn resolve(netlist: &Netlist, library: &Library) -> Result<ResolvedNetlist, 
         )
         .collect();
 
+    let subckts: Vec<SubcktPorts> = netlist
+        .subckts
+        .iter()
+        .map(|s| SubcktPorts {
+            name: s.name.clone(),
+            ports: s.ports.clone(),
+        })
+        .collect();
+
     if diags.iter().any(|d| d.severity == Severity::Error) {
         return Err(diags);
     }
@@ -150,6 +169,7 @@ pub fn resolve(netlist: &Netlist, library: &Library) -> Result<ResolvedNetlist, 
         elements: out_elements,
         align,
         place,
+        subckts,
     })
 }
 

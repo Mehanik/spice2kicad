@@ -55,6 +55,7 @@ fn mk_resolved(
                 span: None,
             })
             .collect(),
+        subckts: vec![],
     }
 }
 
@@ -269,6 +270,7 @@ fn idempotence_after_cleanup() {
         elements: out.elements.clone(),
         align: out.align.clone(),
         place: out.place.clone(),
+        subckts: out.subckts.clone(),
     };
     let (out2, warns) = check(again).expect("idempotent");
     assert!(warns.is_empty());
@@ -339,6 +341,7 @@ fn arb_acyclic_input() -> impl Strategy<Value = ResolvedNetlist> {
                 elements: refs.iter().map(|r| make_element(r)).collect(),
                 align,
                 place,
+                subckts: vec![],
             }
         })
     })
@@ -403,6 +406,7 @@ proptest! {
             elements: out.elements,
             align: out.align,
             place: out.place,
+            subckts: out.subckts,
         };
         let (_, warns) = check(again).expect("re-check ok");
         prop_assert!(warns.is_empty(), "stray warnings on re-check: {:?}", warns.iter().map(|w| w.code).collect::<Vec<_>>());

@@ -32,17 +32,24 @@
 //!   equals pin Y up to a constant offset within an `align` cluster
 //!   (all members use the identity orientation), so the variance is
 //!   identical.
-//! * Components `rail_direction`, `signal_flow`, and
-//!   `non_orthogonal_segments` from roadmap §5 are **not** computed
-//!   in stage 2 — they require power-flag tracking, signal-flow DAG
-//!   analysis, and continuous-coord output respectively. They will
-//!   be added in stages 3+/5+ as new fields on [`CostBreakdown`].
+//! * `non_orthogonal_segments` from roadmap §5 is **not** computed
+//!   in stage 2 — it requires continuous-coord output and will be
+//!   added alongside the orthogonal-router pass.
+//!
+//! # Signal-flow scope
+//!
+//! `signal_flow` is computed only inside `.subckt` blocks, where the
+//! port list gives an unambiguous input → output direction. For
+//! top-level netlists (no subckts) the term is `0`. Heuristic per the
+//! stage-3 plan: the first port is treated as the sole input net and
+//! the last port as the sole output net; intermediate ports do not
+//! contribute.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use kicad_symbols::Library;
 use spice_policy::CheckedNetlist;
-use spice_resolve::{Axis, Relation, ResolvedElement};
+use spice_resolve::{Axis, ElementRole, Relation, ResolvedElement};
 
 use crate::{CELL_H, CELL_W, GridPoint, PlacedElement, Placement};
 
@@ -63,8 +70,12 @@ pub struct CostBreakdown {
     pub crossings: f64,
     /// `align`-variance + `place`-residual penalty, in mm² units.
     pub constraint_violation: f64,
-    // Stage 5+ additions: rail_direction, signal_flow,
-    // non_orthogonal_segments (see module docs).
+    /// Hinged squared distance of power-rail pins below the top edge
+    /// and of ground pins above the bottom edge, in mm².
+    pub rail_direction: f64,
+    /// Hinged squared distance of subckt input pins right of the left
+    /// edge and of subckt output pins left of the right edge, in mm².
+    pub signal_flow: f64,
 }
 
 /// Linear-combination weights for [`total`].
@@ -74,6 +85,8 @@ pub struct CostWeights {
     pub overlap: f64,
     pub crossings: f64,
     pub constraint_violation: f64,
+    pub rail_direction: f64,
+    pub signal_flow: f64,
 }
 
 impl CostWeights {
@@ -87,6 +100,10 @@ impl CostWeights {
         constraint_violation: 1000.0,
         overlap: 50.0,
         hpwl: 1.0,
+        // not yet tuned — see docs/layout-roadmap.md §7
+        rail_direction: 50.0,
+        // not yet tuned — see docs/layout-roadmap.md §7
+        signal_flow: 25.0,
     };
 }
 
@@ -109,6 +126,8 @@ pub fn breakdown(
         overlap: overlap(&placement.elements),
         crossings: crossings(&nets),
         constraint_violation: constraint_violation(placement, checked, library),
+        rail_direction: rail_direction(&checked.elements, &pin_world),
+        signal_flow: signal_flow(&checked.elements, &pin_world, &checked.subckts),
     }
 }
 
@@ -119,6 +138,8 @@ pub fn total(breakdown: &CostBreakdown, weights: &CostWeights) -> f64 {
         + weights.overlap * breakdown.overlap
         + weights.crossings * breakdown.crossings
         + weights.constraint_violation * breakdown.constraint_violation
+        + weights.rail_direction * breakdown.rail_direction
+        + weights.signal_flow * breakdown.signal_flow
 }
 
 // ---------------------------------------------------------------------------
@@ -541,4 +562,153 @@ fn segments_cross(s1: &Segment, s2: &Segment) -> bool {
 /// Signed area of the triangle (a, b, c) × 2.
 fn orient(ax: f64, ay: f64, bx: f64, by: f64, cx: f64, cy: f64) -> f64 {
     (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+}
+
+// ---------------------------------------------------------------------------
+// Rail direction (ζ)
+// ---------------------------------------------------------------------------
+
+/// Sum of hinged squared distances pulling rail pins to the top of
+/// the placement and ground pins to the bottom.
+///
+/// The placement's own pin extents (`y_top` = max pin Y, `y_bot` =
+/// min pin Y) provide a self-normalising reference: there is no
+/// absolute "top of sheet" until the emitter pins one down. When the
+/// extents collapse (single row of pins) both hinges read zero.
+///
+/// Rails are identified by `ElementRole::Power(rail)`; ground is the
+/// literal node `"0"` per Berkeley SPICE convention. Power-source
+/// elements' own pins participate so the power-flag symbol is pulled
+/// up alongside the rail it labels.
+fn rail_direction(elements: &[ResolvedElement], pin_world: &PinWorld) -> f64 {
+    let power_rails: HashSet<&str> = elements
+        .iter()
+        .filter_map(|e| match &e.role {
+            ElementRole::Power(rail) => Some(rail.as_str()),
+            ElementRole::Normal => None,
+        })
+        .collect();
+
+    let (y_top, y_bot) = pin_extents_y(pin_world);
+
+    let mut total = 0.0;
+    for (i, elem) in elements.iter().enumerate() {
+        for (term_idx, node_name) in elem.nodes.iter().enumerate() {
+            let Some(kicad_pin) = elem.pin_mapping.get(term_idx) else {
+                continue;
+            };
+            let Some(world_pins) = pin_world.get(i) else {
+                continue;
+            };
+            let Some(&(_, _, y)) = world_pins.iter().find(|(num, _, _)| num == kicad_pin) else {
+                continue;
+            };
+            if power_rails.contains(node_name.as_str()) {
+                let d = (y_top - y).max(0.0);
+                total += d * d;
+            } else if node_name == "0" {
+                let d = (y - y_bot).max(0.0);
+                total += d * d;
+            }
+        }
+    }
+    total
+}
+
+fn pin_extents_y(pin_world: &PinWorld) -> (f64, f64) {
+    let mut y_min = f64::INFINITY;
+    let mut y_max = f64::NEG_INFINITY;
+    for pins in pin_world {
+        for &(_, _, y) in pins {
+            if y < y_min {
+                y_min = y;
+            }
+            if y > y_max {
+                y_max = y;
+            }
+        }
+    }
+    if y_min.is_infinite() || y_max.is_infinite() {
+        (0.0, 0.0)
+    } else {
+        (y_max, y_min)
+    }
+}
+
+fn pin_extents_x(pin_world: &PinWorld) -> (f64, f64) {
+    let mut x_min = f64::INFINITY;
+    let mut x_max = f64::NEG_INFINITY;
+    for pins in pin_world {
+        for &(_, x, _) in pins {
+            if x < x_min {
+                x_min = x;
+            }
+            if x > x_max {
+                x_max = x;
+            }
+        }
+    }
+    if x_min.is_infinite() || x_max.is_infinite() {
+        (0.0, 0.0)
+    } else {
+        (x_min, x_max)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Signal flow (η)
+// ---------------------------------------------------------------------------
+
+/// Sum of hinged squared distances pulling subckt input pins to the
+/// left edge and subckt output pins to the right edge.
+///
+/// For each subckt with two or more ports, the first port is treated
+/// as the sole input net and the last as the sole output net.
+/// Top-level netlists (no subckts) contribute zero.
+fn signal_flow(
+    elements: &[ResolvedElement],
+    pin_world: &PinWorld,
+    subckts: &[spice_resolve::SubcktPorts],
+) -> f64 {
+    if subckts.is_empty() {
+        return 0.0;
+    }
+    let mut input_nets: HashSet<&str> = HashSet::new();
+    let mut output_nets: HashSet<&str> = HashSet::new();
+    for sc in subckts {
+        if sc.ports.len() < 2 {
+            continue;
+        }
+        input_nets.insert(sc.ports[0].as_str());
+        output_nets.insert(sc.ports.last().expect("len >= 2").as_str());
+    }
+    if input_nets.is_empty() && output_nets.is_empty() {
+        return 0.0;
+    }
+
+    let (x_left, x_right) = pin_extents_x(pin_world);
+
+    let mut total = 0.0;
+    for (i, elem) in elements.iter().enumerate() {
+        for (term_idx, node_name) in elem.nodes.iter().enumerate() {
+            let Some(kicad_pin) = elem.pin_mapping.get(term_idx) else {
+                continue;
+            };
+            let Some(world_pins) = pin_world.get(i) else {
+                continue;
+            };
+            let Some(&(_, x, _)) = world_pins.iter().find(|(num, _, _)| num == kicad_pin) else {
+                continue;
+            };
+            if input_nets.contains(node_name.as_str()) {
+                let d = (x - x_left).max(0.0);
+                total += d * d;
+            }
+            if output_nets.contains(node_name.as_str()) {
+                let d = (x_right - x).max(0.0);
+                total += d * d;
+            }
+        }
+    }
+    total
 }

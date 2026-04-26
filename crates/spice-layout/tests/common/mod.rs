@@ -77,5 +77,6 @@ pub fn mk_resolved(
                 span: None,
             })
             .collect(),
+        subckts: vec![],
     }
 }
