@@ -191,10 +191,17 @@ force-directed for that cluster.
 
 ## 7. Sequencing
 
-- **Now:** crate skeleton, types, partition pass, constraint
-  lowering. Stub solver returns trivial grid placement.
-- **Next:** FR seeding + SA refinement; instrumented cost
-  breakdown; tune weights against `examples/`.
+- **Done:** crate skeleton, types, constraint-aware stage-1 placer,
+  cost function (HPWL, overlap, MST-crossings, constraint
+  violation).
+- **Done (first cut):** FR seeding + SA refinement behind
+  `LayoutOptions { refine: true, .. }`. Move set is jitter +
+  4-rotation; mirror moves and signal-flow / rail-direction cost
+  terms still deferred. Per-component cost logging via `log` at
+  `debug` level.
+- **Next:** tune SA weights and budgets against `examples/`; add
+  mirror-Y to the move set; pull signal-flow / rail-direction
+  cost terms in (roadmap §5).
 - **After:** orthogonal router as a separate crate.
 - **v0.2:** idiom detectors feeding the constraint pipeline.
 

@@ -1,14 +1,19 @@
-//! Stage 1 auto-placer: `CheckedNetlist + Library -> Placement`.
+//! Auto-placer: `CheckedNetlist + Library -> Placement`.
 //!
-//! This crate implements the *trivial* end-to-end placer described in
-//! `docs/layout-roadmap.md` §7 ("Now: ... Stub solver returns trivial
-//! grid placement"). It honours hard constraints from `align` and
-//! `place` but does not optimise for crossings, HPWL, or anything
-//! aesthetic — that lands in stage 3 (FR seeding + SA refinement).
+//! Two pipelines share the same crate:
 //!
-//! See `docs/layout-adr.md` ADR-3 (orientation/mirroring in search,
-//! deferred to stage 3 — this stage uses identity orientation
-//! everywhere) and ADR-7 (property-test strategy).
+//! * **Stage 1** ([`place`]): trivial deterministic placement that
+//!   honours hard constraints from `align` and `place`. Produces a
+//!   valid (if ugly) layout in O(n).
+//! * **Stage 3** ([`place_with`] with [`LayoutOptions::refine`]):
+//!   stage-1 seed → Fruchterman-Reingold continuous seeding → discrete
+//!   simulated-annealing refinement. Minimises the cost in
+//!   [`cost::CostBreakdown`].
+//!
+//! See `docs/layout-roadmap.md` §7 (sequencing) and `docs/layout-adr.md`
+//! ADR-3 (orientation/mirroring — stage 3 implements 4-rotation moves;
+//! mirror moves are deferred), ADR-4 (sidecar — not yet wired), and
+//! ADR-7 (property-test strategy).
 //!
 //! # Diagnostic codes emitted
 //!
@@ -19,6 +24,9 @@
 #![forbid(unsafe_code)]
 
 pub mod cost;
+mod solver;
+
+pub use solver::LayoutOptions;
 
 use std::collections::{HashMap, HashSet};
 
@@ -114,24 +122,43 @@ const CLUSTER_GAP: i32 = 1;
 // Public entry point
 // ---------------------------------------------------------------------------
 
-/// Run the stage-1 placer.
+/// Run the stage-1 placer with default options (no refinement).
+pub fn place(checked: CheckedNetlist, library: &Library) -> Result<Placement, Vec<Diagnostic>> {
+    place_with(checked, library, &LayoutOptions::default())
+}
+
+/// Run the placer.
 ///
-/// Returns a [`Placement`] on success. The signature returns
-/// `Vec<Diagnostic>` (rather than a single error) so the placer can
-/// fit alongside the parser/resolver/policy passes; in stage 1 it
-/// should normally not fail because [`spice_policy::check`] has
-/// already validated everything.
+/// With [`LayoutOptions::refine`] disabled (default), this is the
+/// stage-1 deterministic placer. With refinement enabled, the stage-1
+/// output is fed to the FR seeder and the SA refiner; constrained
+/// (`align`/`place`-fixed) elements remain pinned through both passes.
+// Takes the netlist by value for parity with `place`. The body only
+// reads it, but the by-value signature mirrors `spice_policy::check`
+// and lets future callers stop holding the resolved netlist after
+// placement.
+#[allow(clippy::needless_pass_by_value)]
+pub fn place_with(
+    checked: CheckedNetlist,
+    library: &Library,
+    opts: &LayoutOptions,
+) -> Result<Placement, Vec<Diagnostic>> {
+    let (placement, pinned) = place_seed(&checked)?;
+    if !opts.refine {
+        return Ok(placement);
+    }
+    Ok(solver::refine(placement, &pinned, &checked, library, opts))
+}
+
+/// Stage-1 placer body: returns the seed placement plus a per-element
+/// `pinned` mask (`true` for elements whose position is fixed by an
+/// `align` or `place` directive).
 // Placer is a four-phase pipeline (init / align / place / auto-fill).
 // Splitting it into helpers per phase obscures the shared state
 // (`placed`, `fixed`) and the careful ordering between phases. Allow
 // the long body here.
 #[allow(clippy::too_many_lines)]
-pub fn place(checked: CheckedNetlist, _library: &Library) -> Result<Placement, Vec<Diagnostic>> {
-    // The `_library` parameter is reserved: every `ResolvedElement`
-    // already carries an owned `Symbol` (attached by `spice-resolve`),
-    // so stage 1 has the pin geometry it needs without consulting the
-    // library again. Stage 3 will need the library directly when it
-    // searches over orientations the resolver did not pre-pick.
+fn place_seed(checked: &CheckedNetlist) -> Result<(Placement, Vec<bool>), Vec<Diagnostic>> {
     let CheckedNetlist {
         elements,
         align,
@@ -296,7 +323,7 @@ pub fn place(checked: CheckedNetlist, _library: &Library) -> Result<Placement, V
         fill_col += 1;
     }
 
-    Ok(Placement { elements: placed })
+    Ok((Placement { elements: placed }, fixed))
 }
 
 // ---------------------------------------------------------------------------

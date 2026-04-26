@@ -736,6 +736,7 @@ name = "spice-layout"
 version = "0.1.0"
 dependencies = [
  "kicad-symbols",
+ "log",
  "proptest",
  "spice-diagnostics",
  "spice-policy",
