@@ -17,7 +17,11 @@ path = "src/main.rs"
 [dependencies]
 spice-diagnostics.workspace = true
 spice-parser.workspace = true
+spice-resolve.workspace = true
+spice-policy.workspace = true
+spice-layout.workspace = true
 kicad-emitter.workspace = true
+kicad-symbols.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 ariadne.workspace = true

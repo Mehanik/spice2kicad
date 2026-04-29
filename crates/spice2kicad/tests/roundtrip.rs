@@ -53,31 +53,31 @@ fn tempdir(name: &str) -> PathBuf {
 }
 
 #[test]
-#[ignore = "schematic emitter is a stub — see crates/kicad-emitter/src/schematic.rs"]
+#[ignore = "spice-parser is a stub — parser::parse returns Netlist::default()"]
 fn rc_lowpass() {
     run_roundtrip("rc_lowpass");
 }
 
 #[test]
-#[ignore = "schematic emitter is a stub"]
+#[ignore = "spice-parser is a stub — parser::parse returns Netlist::default()"]
 fn common_emitter() {
     run_roundtrip("common_emitter");
 }
 
 #[test]
-#[ignore = "schematic emitter is a stub"]
+#[ignore = "spice-parser is a stub — parser::parse returns Netlist::default()"]
 fn opamp_inverting() {
     run_roundtrip("opamp_inverting");
 }
 
 #[test]
-#[ignore = "schematic emitter is a stub"]
+#[ignore = "spice-parser is a stub — parser::parse returns Netlist::default()"]
 fn multivibrator() {
     run_roundtrip("multivibrator");
 }
 
 #[test]
-#[ignore = "schematic emitter is a stub"]
+#[ignore = "spice-parser is a stub — parser::parse returns Netlist::default()"]
 fn diff_pair() {
     run_roundtrip("diff_pair");
 }

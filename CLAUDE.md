@@ -204,6 +204,14 @@ already records the reason it isn't in v0.1; respect that or update
 - Don't bypass `unsafe_code = forbid` or weaken the workspace lints
   without explicit discussion.
 
+## Reference: KiCad source
+
+The KiCad source tree is checked out at `../kicad-source/` (sibling
+to this repo). Consult it when you need ground truth on `.kicad_sch`
+S-expression schema, symbol library file format, or how the official
+tools render specific constructs. Prefer reading the KiCad source
+over guessing format details.
+
 ## Useful commands
 
 ```sh

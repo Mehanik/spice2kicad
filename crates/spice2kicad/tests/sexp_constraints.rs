@@ -48,7 +48,7 @@ fn emit_sch(name: &str) -> KicadSch {
 // --- per-fixture constraint tests ---------------------------------------
 
 #[test]
-#[ignore = "schematic emitter is a stub"]
+#[ignore = "spice-parser is a stub — parser::parse returns Netlist::default()"]
 fn rc_lowpass_constraints() {
     let sch = emit_sch("rc_lowpass");
     // Topology: a voltage source, one resistor, one capacitor.
@@ -60,7 +60,7 @@ fn rc_lowpass_constraints() {
 }
 
 #[test]
-#[ignore = "schematic emitter is a stub"]
+#[ignore = "spice-parser is a stub — parser::parse returns Netlist::default()"]
 fn common_emitter_constraints() {
     let sch = emit_sch("common_emitter");
     assert_has_components(
@@ -77,7 +77,7 @@ fn common_emitter_constraints() {
 }
 
 #[test]
-#[ignore = "schematic emitter is a stub"]
+#[ignore = "spice-parser is a stub — parser::parse returns Netlist::default()"]
 fn opamp_inverting_constraints() {
     let sch = emit_sch("opamp_inverting");
     assert_has_components(&sch, &["VCC", "VEE", "RIN", "RF", "X1"]);
@@ -90,7 +90,7 @@ fn opamp_inverting_constraints() {
 }
 
 #[test]
-#[ignore = "schematic emitter is a stub"]
+#[ignore = "spice-parser is a stub — parser::parse returns Netlist::default()"]
 fn multivibrator_constraints() {
     let sch = emit_sch("multivibrator");
     assert_has_components(
@@ -106,7 +106,7 @@ fn multivibrator_constraints() {
 }
 
 #[test]
-#[ignore = "schematic emitter is a stub"]
+#[ignore = "spice-parser is a stub — parser::parse returns Netlist::default()"]
 fn diff_pair_constraints() {
     let sch = emit_sch("diff_pair");
     assert_has_components(&sch, &["VCC", "VEE", "RC1", "RC2", "RTAIL", "Q1", "Q2"]);

@@ -262,12 +262,23 @@ pub fn spice_to_kicad(fixture: &Path, out_dir: &Path) -> Result<std::path::PathB
     let stem = fixture.file_stem().unwrap().to_string_lossy();
     let out = out_dir.join(format!("{stem}.kicad_sch"));
     let bin = env!("CARGO_BIN_EXE_spice2kicad");
+    // Tests share the kicad-symbols fixture libraries (Device + Simulation_SPICE).
+    let workspace = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("workspace root")
+        .to_path_buf();
+    let lib_dir = workspace.join("crates/kicad-symbols/tests/fixtures");
     let status = Command::new(bin)
         .arg(fixture)
         .arg("-t")
         .arg("schematic")
         .arg("-o")
         .arg(&out)
+        .arg("-l")
+        .arg(lib_dir.join("Device.kicad_sym"))
+        .arg("-l")
+        .arg(lib_dir.join("Simulation_SPICE.kicad_sym"))
         .status()
         .map_err(|e| format!("failed to invoke spice2kicad: {e}"))?;
     if !status.success() {

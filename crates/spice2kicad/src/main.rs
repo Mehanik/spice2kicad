@@ -3,8 +3,11 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use clap::{Parser, ValueEnum};
+use kicad_symbols::Library;
+use spice_diagnostics::{Diagnostic, Severity};
+use spice_layout::LayoutOptions;
 
 mod render;
 
@@ -35,6 +38,44 @@ struct Cli {
     /// Output target
     #[arg(short, long, value_enum, default_value_t = Target::Schematic)]
     target: Target,
+
+    /// KiCad symbol library file (`.kicad_sym`). May be passed multiple
+    /// times; later libraries override earlier ones on `lib_id` collision.
+    /// Required for the schematic target.
+    #[arg(short = 'l', long = "lib")]
+    libs: Vec<PathBuf>,
+
+    /// Run the stage-3 force-directed + simulated-annealing refinement
+    /// after the deterministic seed placer. Schematic target only.
+    #[arg(long)]
+    refine: bool,
+}
+
+fn load_library(paths: &[PathBuf]) -> Result<Library> {
+    if paths.is_empty() {
+        return Err(anyhow!(
+            "the schematic target requires at least one --lib <FILE.kicad_sym>"
+        ));
+    }
+    let mut lib = Library::default();
+    for p in paths {
+        let part = Library::from_file(p).with_context(|| format!("loading {}", p.display()))?;
+        lib = lib.merge(part);
+    }
+    Ok(lib)
+}
+
+/// Render diagnostics to stderr and exit non-zero if any are errors.
+/// Returns true when execution should continue (no fatal diags).
+fn surface_diags(diags: &[Diagnostic], sources: &SourceMap) -> bool {
+    if diags.is_empty() {
+        return true;
+    }
+    let stderr = io::stderr();
+    let mut handle = stderr.lock();
+    let _ = render::render_all(diags, sources, &mut handle);
+    let _ = handle.flush();
+    !diags.iter().any(|d| d.severity == Severity::Error)
 }
 
 fn run(cli: &Cli) -> Result<()> {
@@ -47,19 +88,49 @@ fn run(cli: &Cli) -> Result<()> {
     let netlist = match spice_parser::parse(&source, file_id) {
         Ok(n) => n,
         Err(diags) => {
-            let stderr = io::stderr();
-            let mut handle = stderr.lock();
-            // Best-effort render; if rendering fails we still want
-            // to surface a non-zero exit, so swallow the io error.
-            let _ = render::render_all(&diags, &sources, &mut handle);
-            let _ = handle.flush();
+            surface_diags(&diags, &sources);
             std::process::exit(1);
         }
     };
 
     let rendered = match cli.target {
         Target::Netlist => kicad_emitter::emit_netlist(&netlist)?,
-        Target::Schematic => kicad_emitter::emit_schematic(&netlist)?,
+        Target::Schematic => {
+            let library = load_library(&cli.libs)?;
+
+            let resolved = match spice_resolve::resolve(&netlist, &library) {
+                Ok(r) => r,
+                Err(diags) => {
+                    surface_diags(&diags, &sources);
+                    std::process::exit(1);
+                }
+            };
+
+            let (checked, warnings) = match spice_policy::check(resolved) {
+                Ok(ok) => ok,
+                Err(diags) => {
+                    surface_diags(&diags, &sources);
+                    std::process::exit(1);
+                }
+            };
+            if !surface_diags(&warnings, &sources) {
+                std::process::exit(1);
+            }
+
+            let opts = LayoutOptions {
+                refine: cli.refine,
+                ..LayoutOptions::default()
+            };
+            let placement = match spice_layout::place_with(checked, &library, &opts) {
+                Ok(p) => p,
+                Err(diags) => {
+                    surface_diags(&diags, &sources);
+                    std::process::exit(1);
+                }
+            };
+
+            kicad_emitter::emit_schematic(&placement, &library)?
+        }
     };
 
     match &cli.output {

@@ -1,14 +1,18 @@
-//! Emit KiCad outputs from a parsed SPICE [`Netlist`].
+//! Emit KiCad outputs from upstream pipeline products.
 //!
 //! Two targets:
-//! - [`netlist`]: KiCad `.net` (logical netlist, no geometry).
-//! - [`schematic`]: KiCad `.kicad_sch` (auto-placed schematic).
+//! - [`netlist`]: KiCad `.net` (logical netlist, no geometry) from a
+//!   parsed [`Netlist`].
+//! - [`schematic`]: KiCad `.kicad_sch` from a [`spice_layout::Placement`]
+//!   plus a resolved [`kicad_symbols::Library`].
 
 pub mod mapping;
 pub mod netlist;
 pub mod schematic;
 pub mod sexpr;
 
+use kicad_symbols::Library;
+use spice_layout::Placement;
 use spice_parser::Netlist;
 use thiserror::Error;
 
@@ -25,6 +29,6 @@ pub fn emit_netlist(netlist: &Netlist) -> Result<String, EmitError> {
     netlist::emit(netlist)
 }
 
-pub fn emit_schematic(netlist: &Netlist) -> Result<String, EmitError> {
-    schematic::emit(netlist)
+pub fn emit_schematic(placement: &Placement, library: &Library) -> Result<String, EmitError> {
+    schematic::emit(placement, library)
 }
