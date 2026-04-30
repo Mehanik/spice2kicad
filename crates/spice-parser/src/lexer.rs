@@ -156,6 +156,14 @@ pub fn scan(source: &str, file: FileId) -> Scanned {
             continue;
         }
 
+        // `$` at start of a line is a whole-line comment in ngspice
+        // (`inpcom.c` `inp_stripcomments_line`). The qualifying-prev-char
+        // rule only governs *inline* `$` — at column zero it is always a
+        // comment introducer regardless of what follows.
+        if trimmed.starts_with('$') {
+            continue;
+        }
+
         // Comment line, possibly an annotation.
         if let Some(after_star) = trimmed.strip_prefix('*') {
             if let Some(body) = after_star.strip_prefix('@') {

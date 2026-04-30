@@ -22,6 +22,22 @@
         (length 1.27)
         (name "~")
         (number "2"))))
+  (symbol "R_US"
+    (pin_numbers (hide yes))
+    (pin_names (offset 0))
+    (symbol "R_US_0_1"
+      (polyline (pts (xy 0 -2.54) (xy 1.016 -2.159) (xy -1.016 -1.397) (xy 1.016 -0.635) (xy -1.016 0.127) (xy 1.016 0.889) (xy -1.016 1.651) (xy 0 2.54))))
+    (symbol "R_US_1_1"
+      (pin passive line
+        (at 0 3.81 270)
+        (length 1.27)
+        (name "~")
+        (number "1"))
+      (pin passive line
+        (at 0 -3.81 90)
+        (length 1.27)
+        (name "~")
+        (number "2"))))
   (symbol "C"
     (pin_names (offset 0.254))
     (symbol "C_0_1"

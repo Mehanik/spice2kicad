@@ -295,6 +295,23 @@ fn parse_element(
             if let Some(gain) = bare_words.get(3) {
                 element.value = Some(parse_value_token(&gain.text));
             }
+            if bare_words.len() < 4 {
+                let kind_name = if matches!(kind, ElementKind::Cccs) {
+                    "CCCS (F)"
+                } else {
+                    "CCVS (H)"
+                };
+                diags.push(error(
+                    "E905",
+                    format!(
+                        "{} `{}` requires `n+ n- Vname gain` (got {} token(s))",
+                        kind_name,
+                        element.designator,
+                        bare_words.len()
+                    ),
+                    Label::new(line.span, "malformed F/H source"),
+                ));
+            }
         }
         _ => {
             // Decide how many positional tokens are nodes.
@@ -412,9 +429,23 @@ fn parse_subckt_header(words: &[Word], diags: &mut Vec<Diagnostic>) -> Option<Su
     let name = name_w.text.clone();
 
     let rest: Vec<Word> = iter.cloned().collect();
+    // ngspice accepts `.subckt NAME ports... params: KEY=val ...`. The
+    // `params:` keyword (case-insensitive) splits the trailing word list
+    // into ports (before) and parameters (after). When absent, the entire
+    // tail is fed through `collect_positional`, which picks any inline
+    // `key=val` triples out of the port list.
+    let split_at = rest
+        .iter()
+        .position(|w| w.text.eq_ignore_ascii_case("params:"));
     let mut params = Vec::new();
-    let positional = collect_positional(&rest, &mut params);
-    let ports = positional.into_iter().map(|w| w.text).collect();
+    let ports: Vec<String> = if let Some(idx) = split_at {
+        let positional = collect_positional(&rest[..idx], &mut params);
+        let _ = collect_positional(&rest[idx + 1..], &mut params);
+        positional.into_iter().map(|w| w.text).collect()
+    } else {
+        let positional = collect_positional(&rest, &mut params);
+        positional.into_iter().map(|w| w.text).collect()
+    };
 
     Some(Subckt {
         name,

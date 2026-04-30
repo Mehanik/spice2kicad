@@ -48,19 +48,19 @@ fn emit_sch(name: &str) -> KicadSch {
 // --- per-fixture constraint tests ---------------------------------------
 
 #[test]
-#[ignore = "spice-parser is a stub — parser::parse returns Netlist::default()"]
+
 fn rc_lowpass_constraints() {
     let sch = emit_sch("rc_lowpass");
-    // Topology: a voltage source, one resistor, one capacitor.
-    assert_has_components(&sch, &["V1", "R1", "C1"]);
-    // Default mapping (see kicad-emitter::mapping::default_symbol).
-    assert_lib_id(&sch, "R1", "Device:R");
+    // Topology: one resistor, one capacitor (V1 is `;@ ignore`d).
+    assert_has_components(&sch, &["R1", "C1"]);
+    assert_lacks_components(&sch, &["V1"]);
+    // *@symbol Device:R_US for=R* / *@symbol Device:C for=C*
+    assert_lib_id(&sch, "R1", "Device:R_US");
     assert_lib_id(&sch, "C1", "Device:C");
-    assert_lib_id(&sch, "V1", "Simulation_SPICE:VDC");
 }
 
 #[test]
-#[ignore = "spice-parser is a stub — parser::parse returns Netlist::default()"]
+
 fn common_emitter_constraints() {
     let sch = emit_sch("common_emitter");
     assert_has_components(
@@ -77,7 +77,7 @@ fn common_emitter_constraints() {
 }
 
 #[test]
-#[ignore = "spice-parser is a stub — parser::parse returns Netlist::default()"]
+#[ignore = "opamp_inverting fixture instantiates `X1 ... OPAMP` subckt but no OPAMP symbol exists in the fixture library and emitter rejects unmapped X with E003; hierarchical-sheet emission for `.subckt` is not implemented yet"]
 fn opamp_inverting_constraints() {
     let sch = emit_sch("opamp_inverting");
     assert_has_components(&sch, &["VCC", "VEE", "RIN", "RF", "X1"]);
@@ -90,7 +90,7 @@ fn opamp_inverting_constraints() {
 }
 
 #[test]
-#[ignore = "spice-parser is a stub — parser::parse returns Netlist::default()"]
+#[ignore = "BJT pin geometry (B at left, C/E at right) cannot satisfy both `*@align horizontal Q1 Q2` (same origin Y, hence same pin Y rows) and the pin-anchored `;@ place=right-of Q1` (Q1's rightmost pin Y must equal Q2's leftmost pin Y); placer correctly drops the redundant place with W104 — needs a richer placer or a relaxed assertion"]
 fn multivibrator_constraints() {
     let sch = emit_sch("multivibrator");
     assert_has_components(
@@ -106,7 +106,7 @@ fn multivibrator_constraints() {
 }
 
 #[test]
-#[ignore = "spice-parser is a stub — parser::parse returns Netlist::default()"]
+#[ignore = "BJT pin geometry (B at left, C/E at right) cannot satisfy both `*@align horizontal Q1 Q2` (same origin Y, hence same pin Y rows) and the pin-anchored `;@ place=right-of Q1` (Q1's rightmost pin Y must equal Q2's leftmost pin Y); placer correctly drops the redundant place with W104 — needs a richer placer or a relaxed assertion"]
 fn diff_pair_constraints() {
     let sch = emit_sch("diff_pair");
     assert_has_components(&sch, &["VCC", "VEE", "RC1", "RC2", "RTAIL", "Q1", "Q2"]);

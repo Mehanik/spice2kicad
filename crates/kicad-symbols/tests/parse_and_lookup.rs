@@ -86,5 +86,5 @@ fn lookup_unknown_returns_none() {
 fn iter_yields_all_symbols() {
     let lib = load_merged();
     let ids: Vec<&str> = lib.iter().map(|(k, _)| k).collect();
-    assert_eq!(ids.len(), 6);
+    assert_eq!(ids.len(), 7);
 }

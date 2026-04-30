@@ -40,7 +40,6 @@ fn subckt_ports_with_kv_params() {
 }
 
 #[test]
-#[ignore = "params: keyword (ngspice extension) not yet parsed — ports and params keyword land in ports vec"]
 fn subckt_params_keyword() {
     // ngspice also accepts `.subckt NAME ports params: KEY=val`.
     // The `params:` token currently ends up in the ports list.

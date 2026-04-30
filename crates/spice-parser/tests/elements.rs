@@ -8,7 +8,7 @@
 //! test marked `#[ignore = "..."]` asserts the ngspice-correct shape.
 
 mod common;
-use common::{assert_kind, assert_value_number, elem, expect_tag, parse_ok, parse_with_diags};
+use common::{assert_kind, assert_value_number, elem, expect_tag, parse_err, parse_ok};
 use spice_parser::ast::{ElementKind, PinRef, Tag, Value};
 
 // ---------------------------------------------------------------------------
@@ -294,28 +294,23 @@ fn cccs_f_basic_ngspice_correct() {
     assert_value_number(e, 100.0);
 }
 
-/// CCCS (F) with too few tokens (control but no gain). Documents that the
-/// parser currently does NOT emit an E-code diagnostic; tracked as a gap.
+/// CCCS (F) with too few tokens (control but no gain). Emits E905.
 #[test]
-#[ignore = "no diagnostic emitted; documented gap (parser.rs:281-302 Cccs branch)"]
 fn cccs_f_too_few_tokens() {
-    let out = parse_with_diags("* t\nF1 out 0 Vsense\n");
+    let diags = parse_err("* t\nF1 out 0 Vsense\n");
     assert!(
-        out.diagnostics.iter().any(|d| d.code.starts_with('E')),
-        "expected E-code diagnostic; got: {:?}",
-        out.diagnostics
+        diags.iter().any(|d| d.code == "E905"),
+        "expected E905; got: {diags:?}"
     );
 }
 
-/// CCCS (F) with no control reference at all (only nodes). Documents the gap.
+/// CCCS (F) with no control reference at all (only nodes). Emits E905.
 #[test]
-#[ignore = "no diagnostic emitted; documented gap (parser.rs:281-302 Cccs branch)"]
 fn cccs_f_no_control() {
-    let out = parse_with_diags("* t\nF1 out 0\n");
+    let diags = parse_err("* t\nF1 out 0\n");
     assert!(
-        out.diagnostics.iter().any(|d| d.code.starts_with('E')),
-        "expected E-code diagnostic; got: {:?}",
-        out.diagnostics
+        diags.iter().any(|d| d.code == "E905"),
+        "expected E905; got: {diags:?}"
     );
 }
 

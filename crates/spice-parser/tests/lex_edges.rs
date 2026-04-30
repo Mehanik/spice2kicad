@@ -574,7 +574,6 @@ fn nested_subckt_block_annotation_scope() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "ngspice strips lines starting with `$` (inpcom.c inp_stripcomments_line); our lexer treats them as code"]
 fn dollar_at_start_of_line() {
     let nl = parse_ok("* t\nR1 a b 1k\n$ standalone comment\nR2 a b 2k\n");
     // ngspice would have only R1 and R2; our lexer would try to parse the
@@ -830,7 +829,6 @@ fn trailing_spaces_after_value() {
 }
 
 #[test]
-#[ignore = "split_directive treats tab as separator → Symbol(\"=\"); see parser.rs split_directive"]
 fn tab_inside_tag_body() {
     let nl = parse_ok("* t\nR1 a b 1k ;@ symbol\t=\tDevice:R\n");
     let r1 = elem(&nl, "R1");
