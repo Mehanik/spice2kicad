@@ -315,6 +315,41 @@ spec.
 A `place` directive on an element already fixed by `align` is dropped
 with a `W104` warning.
 
+### 5.1 Wire emission and label policy
+
+After phase 4 (auto-fill), a routing pass emits `(wire …)` segments
+connecting pins on the same net. Wires are the default carrier of
+connectivity; labels are not a substitute. The emitter never emits a
+label "instead of" routing a wire it could otherwise have drawn.
+
+Per-sheet label budget:
+
+- **At most two labels of the same net name per sheet.** Used only
+  when geometry truly cannot be reached by orthogonal wires
+  (crossing-heavy nets, very long jumps). The two labels mark each
+  terminal of the "label jump" — typical KiCad practice for
+  un-routable connections.
+- More than two coincident labels for one net is a defect, not a
+  style preference. (Project invariant V4 in `CLAUDE.md`.)
+
+```
+* Allowed: one label at each end of a long un-routable jump.
+*   net SDA — pin on U1 (top-left), pin on U7 (bottom-right):
+*   two `(label "SDA" …)` placements, one at each pin.
+
+* Disallowed: three or more `(label "SDA" …)` on the same sheet.
+*   Indicates the router gave up; route a wire or split the sheet.
+```
+
+Power rails declared via `*@power` (§4.5) render as KiCad
+power-flag symbols, not labels — one flag per element terminal that
+connects to the rail. They do not count against the ≤ 2 label
+budget.
+
+Hierarchical-sheet pins / labels (the cross-sheet boundary at
+`.subckt` instances, §3) are exempt from the budget — the boundary
+itself is what makes them necessary.
+
 ---
 
 ## 6. Worked example
@@ -424,7 +459,16 @@ Two caveats:
   from `XU2`) — likely a `for=` extension scoped by instance path.
 - **Multi-unit symbols** (opamps with separate power-pin units, dual
   gates packaged as one part). Needs a `unit=` story.
-- **Wire routing hints** (`*@route via=…`).
+- **Wire routing hints** (`*@route via=…`). Note: the default
+  routing policy is fixed by invariant V4 (`CLAUDE.md`) — wires for
+  connectivity, ≤ 2 labels per net per sheet. A `*@route` directive
+  would only be needed to override that default; defer until a real
+  file demonstrates the need.
+- **ERC warning policy under V2.** Invariant V2 makes ERC *errors*
+  blocking and tolerates *warnings* for now. Which warnings should
+  remain tolerated vs. promoted to blocking (e.g. unconnected pin,
+  pin-type conflict) is unresolved. Decide once the emitter is
+  producing real schematics and we can survey what actually fires.
 - **Bus / vector notation alignment** — deferred until the parser
   learns bus syntax.
 - **`align` under mixed orientation** — the spec does not

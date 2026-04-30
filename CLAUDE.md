@@ -150,6 +150,15 @@ For full grammar, examples, and diagnostics, see
   dropped.
 - **Emitter.** KiCad `.kicad_sch` is S-expression based. The emitter
   takes a placed AST (positions resolved) and renders it.
+- **`lib_symbols` are verbatim passthrough.** Symbol-library entries
+  inside `(lib_symbols …)` are copied byte-for-byte from the source
+  `.kicad_sym` (modulo `lib_id` name normalization) — no typed
+  primitive model. At parse time `lexpr::Value` is mirrored into an
+  internal `RawSexpr` and stashed on `Symbol::body`; the emitter
+  re-serialises that body unchanged. This guarantees portability:
+  emitted files render identically without the consumer having
+  matching libraries installed at the same path. Final for v0.1
+  (see invariant V3).
 - **Layout.** Currently stubbed. The constraint resolver from
   spec §5 lives between the parser and the emitter.
 - **Diagnostics.** Use `ariadne` for source-spanned error rendering.
@@ -205,6 +214,60 @@ annotation spec but load-bearing for implementation:
 
 See `docs/layout-roadmap.md` for the consequences on placer
 architecture.
+
+## Visual quality invariants
+
+Project-level acceptance criteria for any emitted `.kicad_sch`.
+These are not part of the user-facing annotation language; they
+are falsifiable properties a checker can measure on the output.
+Every invariant has a verifier — the test that enforces it. The
+verifiers are being added in a parallel work stream; their names
+below describe intent.
+
+- **V1 — Symbols render visibly.** Every emitted `.kicad_sch` opens
+  in eeschema with all components drawn at non-zero extent (no
+  invisible glyphs, no missing graphics). The common failure mode
+  is a `(symbol …)` instance whose `lib_id` resolves to an empty
+  or stub library entry, so the body has no `(rectangle …)` /
+  `(polyline …)` graphics. Verified by an SVG-export glyph-count
+  test: render with `kicad-cli sch export svg`, count drawn glyphs,
+  assert one per placed `Symbol`. Lives downstream of
+  `crates/kicad-emitter/src/schematic.rs`.
+
+- **V2 — Zero ERC errors.** `kicad-cli sch erc` on every emitted
+  `.kicad_sch` reports zero errors. Warning policy is **TBD**:
+  warnings are tolerated for now, errors are blocking. Verified
+  by a fixture-driven integration test that runs `kicad-cli sch
+  erc` on every example under `examples/` and asserts the report's
+  `errors` count is zero. Tolerated-warning policy is tracked in
+  spec §9.
+
+- **V3 — `lib_symbols` are inlined verbatim.** Library entries
+  emitted under `(lib_symbols)` are byte-for-byte copies of the
+  corresponding `.kicad_sym` body, modulo `lib_id` name
+  normalization. Rationale: portability — a consumer opening the
+  emitted file must not need the same libraries installed at the
+  same path. Implementation is the `Symbol::body` raw passthrough
+  described in "Implementation notes". This decision is final for
+  v0.1; revisiting is a v0.2 concern. Verified by a round-trip
+  test that re-parses the source `.kicad_sym`, locates each used
+  symbol in the emitted file's `(lib_symbols)`, and asserts byte
+  equality of the body sub-tree.
+
+- **V4 — Wires for connectivity, ≤ 2 labels per net.** Pins on the
+  same net are connected by `(wire …)` segments emitted by the
+  placer / router. `(global_label …)` and `(label …)` are reserved
+  for: (a) `*@power` rails; (b) hierarchical-sheet ports
+  (cross-sheet); (c) named nets the user explicitly tagged or that
+  span otherwise unreachable regions. **Hard rule:** at most two
+  labels carry the same net name on a single sheet — one at each
+  terminal of a "label jump" (typical KiCad practice for
+  un-routable connections). Three or more coincident labels for one
+  net is a defect, not a style preference (cf. commit `22cb630`).
+  Hierarchical-sheet pins are exempt — they're the cross-sheet
+  boundary. Verified by a per-sheet label-tally test that scans
+  emitted `(label …)` / `(global_label …)` nodes and asserts no
+  net name occurs more than twice on the same sheet.
 
 ## When changing the annotation spec
 
