@@ -195,6 +195,7 @@ fn place_seed(checked: &CheckedNetlist) -> Result<(Placement, Vec<bool>), Vec<Di
         align,
         place,
         subckts: _,
+        sheet_instances: _,
     } = checked;
 
     // Index elements by refdes for O(1) lookups.

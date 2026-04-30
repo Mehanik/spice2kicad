@@ -55,9 +55,30 @@ impl Canonical {
             }
         }
 
+        // First pass: gather subckt definitions so we can expand top-level
+        // `X<n>` instances into their body elements (matching what KiCad's
+        // hierarchical-netlist exporter does on the round-tripped side).
+        let subckts = collect_subckts(&logical, &ignored);
+
+        let mut in_subckt = false;
         for line in &logical {
             let body = strip_comment(line).trim();
             if body.is_empty() {
+                continue;
+            }
+            let lower = body.to_ascii_lowercase();
+            if lower.starts_with(".subckt") {
+                in_subckt = true;
+                continue;
+            }
+            if lower.starts_with(".ends") {
+                in_subckt = false;
+                continue;
+            }
+            // Skip everything inside a `.subckt` block — body elements are
+            // accounted for by `expand_subckt` when each X instance is
+            // processed below.
+            if in_subckt {
                 continue;
             }
             // Skip directives, models, subckt headers.
@@ -73,8 +94,23 @@ impl Canonical {
                 continue;
             }
             let kind = refdes_up.chars().next().unwrap();
-            let arity = element_arity(kind);
             let tokens: Vec<&str> = body.split_whitespace().collect();
+            if kind == 'X' {
+                // Last positional token is the subckt name; everything in
+                // between is the port-net list. Expand the body if we
+                // recognise the subckt.
+                if let Some(model) = tokens.last()
+                    && let Some(def) = subckts.get(&model.to_ascii_uppercase())
+                {
+                    let parent_nets: Vec<String> = tokens[1..tokens.len() - 1]
+                        .iter()
+                        .map(|s| (*s).to_string())
+                        .collect();
+                    elements.extend(expand_subckt(def, &parent_nets));
+                }
+                continue;
+            }
+            let arity = element_arity(kind);
             if tokens.len() < 1 + arity {
                 continue;
             }
@@ -179,10 +215,113 @@ fn is_ground(n: &str) -> bool {
     matches!(n, "0" | "GND" | "gnd" | "Gnd")
 }
 
+/// Collect every `.subckt` block as `(name, ports, body-elements)`.
+/// Body elements are stored in the same lossy form the canonicalizer
+/// uses for top-level elements, so [`expand_subckt`] can plug them
+/// straight into the partition graph after net substitution.
+struct SubcktDef {
+    ports: Vec<String>,
+    body: Vec<Element>,
+}
+
+fn collect_subckts(logical: &[String], ignored: &BTreeSet<String>) -> BTreeMap<String, SubcktDef> {
+    let mut out: BTreeMap<String, SubcktDef> = BTreeMap::new();
+    let mut current: Option<(String, SubcktDef)> = None;
+    for line in logical {
+        let body = strip_comment(line).trim();
+        if body.is_empty() {
+            continue;
+        }
+        let lower = body.to_ascii_lowercase();
+        if let Some(rest) = lower.strip_prefix(".subckt") {
+            // Re-tokenize against the *original* (case-preserved) line so
+            // names round-trip cleanly.
+            let _ = rest;
+            let toks: Vec<&str> = body.split_whitespace().collect();
+            if toks.len() >= 2 {
+                let name = toks[1].to_ascii_uppercase();
+                let ports = toks[2..].iter().map(|s| (*s).to_string()).collect();
+                current = Some((
+                    name,
+                    SubcktDef {
+                        ports,
+                        body: Vec::new(),
+                    },
+                ));
+            }
+            continue;
+        }
+        if lower.starts_with(".ends") {
+            if let Some((name, def)) = current.take() {
+                out.insert(name, def);
+            }
+            continue;
+        }
+        let Some((_, def)) = current.as_mut() else {
+            continue;
+        };
+        let first = body.chars().next().unwrap();
+        if first == '.' || first == '*' {
+            continue;
+        }
+        let Some(refdes) = first_token(body) else {
+            continue;
+        };
+        let refdes_up = refdes.to_ascii_uppercase();
+        if ignored.contains(&refdes_up) {
+            continue;
+        }
+        let kind = refdes_up.chars().next().unwrap();
+        if kind == 'X' {
+            // Nested subckt instances aren't expanded here — KISS, the
+            // first level is enough for the current fixture set.
+            continue;
+        }
+        let arity = element_arity(kind);
+        let tokens: Vec<&str> = body.split_whitespace().collect();
+        if tokens.len() < 1 + arity {
+            continue;
+        }
+        let nodes = tokens[1..=arity].iter().map(|s| (*s).to_string()).collect();
+        let value = tokens.get(1 + arity).map(|s| normalize_value(s));
+        def.body.push(Element {
+            refdes: refdes_up,
+            kind,
+            value,
+            nodes,
+        });
+    }
+    out
+}
+
+/// Expand one `X<n>` instance into the body elements of its `.subckt`
+/// definition with port nets remapped to the parent's nets.
+fn expand_subckt(def: &SubcktDef, parent_nets: &[String]) -> Vec<Element> {
+    let mut map: BTreeMap<String, String> = BTreeMap::new();
+    for (port, parent) in def.ports.iter().zip(parent_nets.iter()) {
+        map.insert(port.clone(), parent.clone());
+    }
+    def.body
+        .iter()
+        .map(|el| Element {
+            refdes: el.refdes.clone(),
+            kind: el.kind,
+            value: el.value.clone(),
+            nodes: el
+                .nodes
+                .iter()
+                .map(|n| map.get(n).cloned().unwrap_or_else(|| n.clone()))
+                .collect(),
+        })
+        .collect()
+}
+
 fn element_arity(kind: char) -> usize {
     match kind {
         'Q' | 'J' => 3,
-        'M' => 4, // d g s b
+        // M (MOSFET): d g s b. E (VCVS) and G (VCCS) take four nodes:
+        // out+, out-, ctrl+, ctrl-.
+        'M' | 'E' | 'G' => 4,
         // R, C, L, V, I, D, X (subckt, variadic — caller doesn't compare topology of
         // X instances yet) and anything else default to 2.
         _ => 2,

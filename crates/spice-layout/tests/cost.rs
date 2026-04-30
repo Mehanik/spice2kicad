@@ -87,6 +87,7 @@ fn hpwl_two_pin_net_is_manhattan_distance() {
         align: vec![],
         place: vec![],
         subckts: vec![],
+        sheet_instances: vec![],
     };
     let checked = checked_from_resolved(rn);
     // R1 at origin (0,0), R2 placed 6 grid cells right + 4 cells up.
@@ -123,6 +124,7 @@ fn hpwl_skips_ground_net_zero() {
         align: vec![],
         place: vec![],
         subckts: vec![],
+        sheet_instances: vec![],
     };
     let checked = checked_from_resolved(rn);
     let p = manual_placement(&checked, &[(0, 0), (10, 0)]);
@@ -152,6 +154,7 @@ fn overlap_zero_when_far_apart() {
         align: vec![],
         place: vec![],
         subckts: vec![],
+        sheet_instances: vec![],
     };
     let checked = checked_from_resolved(rn);
     // CELL_W = 6 grid units; place 6 units apart.
@@ -167,6 +170,7 @@ fn overlap_full_when_origins_coincide() {
         align: vec![],
         place: vec![],
         subckts: vec![],
+        sheet_instances: vec![],
     };
     let checked = checked_from_resolved(rn);
     let p = manual_placement(&checked, &[(0, 0), (0, 0)]);
@@ -197,6 +201,7 @@ fn crossings_zero_for_parallel_nets() {
         align: vec![],
         place: vec![],
         subckts: vec![],
+        sheet_instances: vec![],
     };
     let checked = checked_from_resolved(rn);
     let p = manual_placement(&checked, &[(0, 0), (10, 0)]);
@@ -231,6 +236,7 @@ fn crossings_one_for_diagonal_pair() {
         align: vec![],
         place: vec![],
         subckts: vec![],
+        sheet_instances: vec![],
     };
     let checked = checked_from_resolved(rn);
     let p = manual_placement(&checked, &[(0, 0), (10, 10), (10, 0), (0, 10)]);
@@ -307,6 +313,7 @@ fn constraint_violation_right_of_violated_when_target_left() {
             span: None,
         }],
         subckts: vec![],
+        sheet_instances: vec![],
     };
     let checked = checked_from_resolved(rn);
     // A at x=10, B at x=0 (so B is left of A → hinged X term active).
@@ -361,6 +368,7 @@ fn rail_direction_power_above_zero_below() {
         align: vec![],
         place: vec![],
         subckts: vec![],
+        sheet_instances: vec![],
     };
     let checked = checked_from_resolved(rn);
 
@@ -394,7 +402,9 @@ fn signal_flow_left_to_right_better_than_right_to_left() {
         subckts: vec![SubcktPorts {
             name: "amp".into(),
             ports: vec!["vin".into(), "vout".into()],
+            elements: vec![],
         }],
+        sheet_instances: vec![],
     };
     let checked = checked_from_resolved(rn);
 
@@ -410,7 +420,9 @@ fn signal_flow_left_to_right_better_than_right_to_left() {
         subckts: vec![SubcktPorts {
             name: "amp".into(),
             ports: vec!["vin".into(), "vout".into()],
+            elements: vec![],
         }],
+        sheet_instances: vec![],
     };
     let checked2 = checked_from_resolved(rn2);
 
@@ -446,6 +458,7 @@ fn zero_annotations_zero_rail_and_flow() {
         align: vec![],
         place: vec![],
         subckts: vec![],
+        sheet_instances: vec![],
     };
     let checked = checked_from_resolved(rn);
     let p = manual_placement(&checked, &[(0, 0), (10, 0)]);
@@ -528,6 +541,7 @@ fn build_scenario(scenario: &Scenario) -> (Placement, CheckedNetlist) {
         align: align_specs,
         place: place_specs,
         subckts: vec![],
+        sheet_instances: vec![],
     };
     let (checked, _w) = check(rn).expect("policy");
     let p = place(checked.clone(), fixture_library()).expect("placement");

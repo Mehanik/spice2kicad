@@ -63,7 +63,6 @@ fn common_emitter() {
 }
 
 #[test]
-#[ignore = "opamp_inverting fixture instantiates `X1 ... OPAMP` subckt but no OPAMP symbol exists in the fixture library and emitter rejects unmapped X with E003; hierarchical-sheet emission for `.subckt` is not implemented yet"]
 fn opamp_inverting() {
     run_roundtrip("opamp_inverting");
 }

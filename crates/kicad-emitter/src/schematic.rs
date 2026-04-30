@@ -43,7 +43,53 @@ const GENERATOR: &str = "spice2kicad";
 const UUID_NAMESPACE: Uuid = Uuid::from_u128(0x7363_6932_6b69_6361_6432_6b69_6361_6431);
 
 pub fn emit(placement: &Placement, library: &Library) -> Result<String, EmitError> {
-    let mut items: Vec<Sexpr> = Vec::with_capacity(placement.elements.len() * 4 + 8);
+    emit_root(placement, library, &[])
+}
+
+/// One top-level `X<n>` SPICE instance lowered to a KiCad hierarchical
+/// sheet on the parent schematic.
+#[derive(Debug, Clone)]
+pub struct SheetBlock {
+    /// The instance refdes (e.g. `"X1"`).
+    pub refdes: String,
+    /// Child sheet filename, relative to the parent (e.g.
+    /// `"OPAMP.kicad_sch"`).
+    pub sheet_file: String,
+    /// Port name → SPICE net name on the parent. Order matches the
+    /// child sheet's port list.
+    pub ports: Vec<SheetPort>,
+}
+
+/// One port of a [`SheetBlock`] — the port name visible on the sheet
+/// symbol plus the parent-scope net it connects to.
+#[derive(Debug, Clone)]
+pub struct SheetPort {
+    pub name: String,
+    pub net: String,
+}
+
+/// A child schematic's body plus its port list. Used by
+/// [`emit_child_sheet`].
+#[derive(Debug, Clone)]
+pub struct ChildSheet<'a> {
+    pub name: String,
+    pub placement: &'a Placement,
+    pub ports: Vec<String>,
+    /// Refdeses of every parent-level instance pointing at this child
+    /// sheet file. Each one becomes a `(path …)` entry in the child's
+    /// symbol-instance blocks so kicad-cli can resolve refdes
+    /// annotations during netlist export.
+    pub instance_refdeses: Vec<String>,
+}
+
+/// Emit a top-level (root) schematic. Same as [`emit`] but additionally
+/// embeds a `(sheet …)` block for each entry in `sheets`.
+pub fn emit_root(
+    placement: &Placement,
+    library: &Library,
+    sheets: &[SheetBlock],
+) -> Result<String, EmitError> {
+    let mut items: Vec<Sexpr> = Vec::with_capacity(placement.elements.len() * 4 + sheets.len() + 8);
     items.push(atom("kicad_sch"));
     items.push(list(vec![atom("version"), atom(SCHEMA_VERSION)]));
     items.push(list(vec![atom("generator"), qstring(GENERATOR)]));
@@ -58,6 +104,17 @@ pub fn emit(placement: &Placement, library: &Library) -> Result<String, EmitErro
         }
     }
 
+    // Hierarchical-sheet instances. Each block lives at a unique
+    // location on the parent canvas; pin coordinates are derived from
+    // the block's origin.
+    for (idx, block) in sheets.iter().enumerate() {
+        let (sheet_node, pin_labels) = sheet_block(block, idx);
+        items.push(sheet_node);
+        for label in pin_labels {
+            items.push(label);
+        }
+    }
+
     items.push(list(vec![
         atom("sheet_instances"),
         list(vec![
@@ -68,6 +125,302 @@ pub fn emit(placement: &Placement, library: &Library) -> Result<String, EmitErro
     ]));
 
     Ok(Sexpr::List(items).to_pretty())
+}
+
+/// Emit a hierarchical-sheet child schematic. The child carries a
+/// `(hierarchical_label …)` per port at the same world-coordinate as
+/// a body-element pin connected to the same SPICE net (so the port and
+/// the body net resolve to one connectivity class).
+pub fn emit_child_sheet(child: &ChildSheet<'_>, library: &Library) -> Result<String, EmitError> {
+    let mut items: Vec<Sexpr> = vec![
+        atom("kicad_sch"),
+        list(vec![atom("version"), atom(SCHEMA_VERSION)]),
+        list(vec![atom("generator"), qstring(GENERATOR)]),
+        list(vec![atom("uuid"), qstring(&child_uuid(&child.name))]),
+        list(vec![atom("paper"), qstring("A4")]),
+        lib_symbols(child.placement, library),
+    ];
+
+    // Place hierarchical labels off to the left of the body, on grid,
+    // one row per port. The exact location is irrelevant for
+    // connectivity (the labels share their net via name with the body
+    // global_label of the same port-name), but distinct positions stop
+    // KiCad from collapsing them into one symbol.
+    for (i, port) in child.ports.iter().enumerate() {
+        #[allow(clippy::cast_precision_loss)]
+        let y = -(i as f64) * 5.08;
+        items.push(hierarchical_label(port, -25.4, y));
+        // A co-located global label so the port name is part of the
+        // child's connectivity graph even when no body element happens
+        // to use that exact net name (e.g. an unused port).
+        items.push(global_label_simple(port, -25.4, y, &child.name, i));
+    }
+
+    for el in &child.placement.elements {
+        items.push(child_symbol_instance(el, &child.instance_refdeses));
+        for label in pin_labels(el, library) {
+            items.push(label);
+        }
+    }
+
+    // Child-sheet-instances: one path entry per parent instance,
+    // rooted at the parent sheet uuid + the per-instance sheet uuid.
+    let mut sheet_instances_items = vec![atom("sheet_instances")];
+    for refdes in &child.instance_refdeses {
+        sheet_instances_items.push(list(vec![
+            atom("path"),
+            qstring(&format!("/{}/{}", sheet_uuid(), child_sheet_uuid(refdes))),
+            list(vec![atom("page"), qstring("2")]),
+        ]));
+    }
+    if child.instance_refdeses.is_empty() {
+        sheet_instances_items.push(list(vec![
+            atom("path"),
+            qstring("/"),
+            list(vec![atom("page"), qstring("2")]),
+        ]));
+    }
+    items.push(Sexpr::List(sheet_instances_items));
+
+    Ok(Sexpr::List(items).to_pretty())
+}
+
+/// Render a `(sheet …)` block plus the `(global_label …)` pieces that
+/// pin its port symbols to the parent net coordinates.
+fn sheet_block(block: &SheetBlock, idx: usize) -> (Sexpr, Vec<Sexpr>) {
+    // Lay out sheets one above the next, leftmost column. Coordinates
+    // are arbitrary; KiCad's connectivity engine matches by sheet pin
+    // name + colocated label, not by geometry.
+    #[allow(clippy::cast_precision_loss)]
+    let origin_x: f64 = 200.0;
+    #[allow(clippy::cast_precision_loss)]
+    let origin_y: f64 = 50.0 + (idx as f64) * 60.0;
+    let pin_count = block.ports.len();
+    #[allow(clippy::cast_precision_loss)]
+    let height = (pin_count as f64).max(2.0) * 5.08 + 5.08;
+
+    let mut sheet_items: Vec<Sexpr> = vec![
+        atom("sheet"),
+        list(vec![
+            atom("at"),
+            atom(&format_coord(origin_x)),
+            atom(&format_coord(origin_y)),
+        ]),
+        list(vec![
+            atom("size"),
+            atom(&format_coord(30.48)),
+            atom(&format_coord(height)),
+        ]),
+        list(vec![
+            atom("uuid"),
+            qstring(&child_sheet_uuid(&block.refdes)),
+        ]),
+        // Sheetname carries the SPICE refdes so the test wrapper sees X1.
+        sheet_property("Sheetname", &block.refdes, origin_x, origin_y - 1.0),
+        sheet_property(
+            "Sheetfile",
+            &block.sheet_file,
+            origin_x,
+            origin_y + height + 1.0,
+        ),
+    ];
+
+    // One pin per port, plus a co-located global_label so the parent's
+    // SPICE net joins the sheet pin.
+    let mut pin_labels: Vec<Sexpr> = Vec::with_capacity(pin_count);
+    for (i, port) in block.ports.iter().enumerate() {
+        #[allow(clippy::cast_precision_loss)]
+        let py = origin_y + 5.08 + (i as f64) * 5.08;
+        let px = origin_x; // left edge
+        let pin_uuid = Uuid::new_v5(
+            &UUID_NAMESPACE,
+            format!("sheetpin:{}:{}", block.refdes, port.name).as_bytes(),
+        )
+        .to_string();
+        sheet_items.push(list(vec![
+            atom("pin"),
+            qstring(&port.name),
+            atom("input"),
+            list(vec![
+                atom("at"),
+                atom(&format_coord(px)),
+                atom(&format_coord(py)),
+                atom("180"),
+            ]),
+            list(vec![atom("uuid"), qstring(&pin_uuid)]),
+            list(vec![
+                atom("effects"),
+                list(vec![
+                    atom("font"),
+                    list(vec![atom("size"), atom("1.27"), atom("1.27")]),
+                ]),
+                list(vec![atom("justify"), atom("left")]),
+            ]),
+        ]));
+        pin_labels.push(global_label_simple(&port.net, px, py, &block.refdes, i));
+    }
+
+    sheet_items.push(list(vec![
+        atom("instances"),
+        list(vec![
+            atom("project"),
+            qstring(GENERATOR),
+            list(vec![
+                atom("path"),
+                qstring(&format!("/{}", sheet_uuid())),
+                list(vec![atom("page"), qstring("2")]),
+            ]),
+        ]),
+    ]));
+
+    (Sexpr::List(sheet_items), pin_labels)
+}
+
+fn sheet_property(name: &str, value: &str, x: f64, y: f64) -> Sexpr {
+    list(vec![
+        atom("property"),
+        qstring(name),
+        qstring(value),
+        list(vec![
+            atom("at"),
+            atom(&format_coord(x)),
+            atom(&format_coord(y)),
+            atom("0"),
+        ]),
+        list(vec![
+            atom("effects"),
+            list(vec![
+                atom("font"),
+                list(vec![atom("size"), atom("1.27"), atom("1.27")]),
+            ]),
+        ]),
+    ])
+}
+
+fn hierarchical_label(text: &str, x: f64, y: f64) -> Sexpr {
+    let uuid =
+        Uuid::new_v5(&UUID_NAMESPACE, format!("hlabel:{text}:{x}:{y}").as_bytes()).to_string();
+    list(vec![
+        atom("hierarchical_label"),
+        qstring(text),
+        list(vec![atom("shape"), atom("input")]),
+        list(vec![
+            atom("at"),
+            atom(&format_coord(x)),
+            atom(&format_coord(y)),
+            atom("0"),
+        ]),
+        list(vec![
+            atom("effects"),
+            list(vec![
+                atom("font"),
+                list(vec![atom("size"), atom("1.27"), atom("1.27")]),
+            ]),
+        ]),
+        list(vec![atom("uuid"), qstring(&uuid)]),
+    ])
+}
+
+fn global_label_simple(text: &str, x: f64, y: f64, scope: &str, idx: usize) -> Sexpr {
+    let uuid = Uuid::new_v5(
+        &UUID_NAMESPACE,
+        format!("glabel:{scope}:{idx}:{text}").as_bytes(),
+    )
+    .to_string();
+    list(vec![
+        atom("global_label"),
+        qstring(text),
+        list(vec![atom("shape"), atom("input")]),
+        list(vec![
+            atom("at"),
+            atom(&format_coord(x)),
+            atom(&format_coord(y)),
+            atom("0"),
+        ]),
+        list(vec![
+            atom("effects"),
+            list(vec![
+                atom("font"),
+                list(vec![atom("size"), atom("1.27"), atom("1.27")]),
+            ]),
+        ]),
+        list(vec![atom("uuid"), qstring(&uuid)]),
+    ])
+}
+
+fn child_sheet_uuid(refdes: &str) -> String {
+    Uuid::new_v5(
+        &UUID_NAMESPACE,
+        format!("sheet-instance:{refdes}").as_bytes(),
+    )
+    .to_string()
+}
+
+fn child_uuid(subckt_name: &str) -> String {
+    Uuid::new_v5(&UUID_NAMESPACE, format!("sheet:{subckt_name}").as_bytes()).to_string()
+}
+
+/// Per-symbol `(instances …)` block for a symbol that lives on a child
+/// hierarchical sheet rather than the root. The path is
+/// `/<root>/<sheet-instance>` and the reference is the body element's
+/// refdes. One `(path …)` entry per parent instance pointing at this
+/// sheet file (typically just one).
+fn child_instances_block(refdes: &str, instance_refdeses: &[String]) -> Sexpr {
+    let mut project = vec![atom("project"), qstring(GENERATOR)];
+    if instance_refdeses.is_empty() {
+        // Standalone child (no parent instance) — fall back to a
+        // single-path block so kicad-cli has something to resolve.
+        project.push(list(vec![
+            atom("path"),
+            qstring("/"),
+            list(vec![atom("reference"), qstring(refdes)]),
+            list(vec![atom("unit"), atom("1")]),
+        ]));
+    } else {
+        for instance_refdes in instance_refdeses {
+            project.push(list(vec![
+                atom("path"),
+                qstring(&format!(
+                    "/{}/{}",
+                    sheet_uuid(),
+                    child_sheet_uuid(instance_refdes)
+                )),
+                list(vec![atom("reference"), qstring(refdes)]),
+                list(vec![atom("unit"), atom("1")]),
+            ]));
+        }
+    }
+    list(vec![atom("instances"), Sexpr::List(project)])
+}
+
+fn child_symbol_instance(el: &PlacedElement, instance_refdeses: &[String]) -> Sexpr {
+    let (x_mm, y_mm) = el.origin.to_mm();
+    let angle = rotation_degrees(el.orientation);
+    let mirror = mirror_token(el.orientation);
+
+    let mut fields = vec![
+        atom("symbol"),
+        list(vec![atom("lib_id"), qstring(&el.lib_id)]),
+        list(vec![
+            atom("at"),
+            atom(&format_coord(x_mm)),
+            atom(&format_coord(y_mm)),
+            atom(&angle.to_string()),
+        ]),
+        list(vec![atom("unit"), atom("1")]),
+    ];
+    if let Some(m) = mirror {
+        fields.push(list(vec![atom("mirror"), atom(m)]));
+    }
+    fields.push(list(vec![atom("uuid"), qstring(&instance_uuid(el))]));
+    fields.push(reference_property(&el.refdes, x_mm, y_mm));
+    let value_text = el.value.as_deref().unwrap_or(&el.refdes);
+    fields.push(value_property(value_text, x_mm, y_mm));
+    for prop in sim_properties(&el.lib_id, value_text) {
+        fields.push(prop);
+    }
+    fields.push(child_instances_block(&el.refdes, instance_refdeses));
+    Sexpr::List(fields)
 }
 
 /// Emit a `(lib_symbols …)` block listing every `lib_id` referenced
@@ -239,6 +592,36 @@ fn sim_properties(lib_id: &str, value: &str) -> Vec<Sexpr> {
         ("NJFET", "SHICHMANHODGES")
     } else if bare.starts_with("Q_PJFET") {
         ("PJFET", "SHICHMANHODGES")
+    } else if bare == "ESOURCE" {
+        // Voltage-controlled voltage source. KiCad's TYPE::V_VCL has
+        // empty `Sim.Type`, so we emit an empty subtype field — that
+        // empty-vs-empty match is enough for the SPICE exporter to
+        // recognise the device. The gain rides in `Sim.Params` as
+        // `gain=<value>` per
+        // `eeschema/sim/sim_model_source.cpp:makeVcParamInfos`.
+        return vec![
+            sim_property("Sim.Device", "E"),
+            sim_property("Sim.Type", ""),
+            sim_property("Sim.Params", &format!("gain={value}")),
+        ];
+    } else if bare == "GSOURCE" {
+        return vec![
+            sim_property("Sim.Device", "G"),
+            sim_property("Sim.Type", ""),
+            sim_property("Sim.Params", &format!("gain={value}")),
+        ];
+    } else if bare == "FSOURCE" {
+        return vec![
+            sim_property("Sim.Device", "F"),
+            sim_property("Sim.Type", ""),
+            sim_property("Sim.Params", &format!("gain={value}")),
+        ];
+    } else if bare == "HSOURCE" {
+        return vec![
+            sim_property("Sim.Device", "H"),
+            sim_property("Sim.Type", ""),
+            sim_property("Sim.Params", &format!("gain={value}")),
+        ];
     } else {
         return Vec::new();
     };

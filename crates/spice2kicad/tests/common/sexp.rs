@@ -68,15 +68,30 @@ impl KicadSch {
             .collect()
     }
 
+    /// Every hierarchical-`(sheet …)` block directly under the root,
+    /// surfaced as a [`Symbol`] view whose `Reference` is the
+    /// `Sheetname` property and whose `lib_id` is the `Sheetfile`.
+    /// Combined with [`Self::symbols`] in [`Self::refdes_set`] so test
+    /// assertions can treat sheet instances and flat symbols
+    /// uniformly.
+    pub fn sheets(&self) -> Vec<Symbol<'_>> {
+        children(&self.root, "sheet")
+            .into_iter()
+            .map(|node| Symbol { node })
+            .collect()
+    }
+
     pub fn symbol(&self, refdes: &str) -> Option<Symbol<'_>> {
         self.symbols()
             .into_iter()
+            .chain(self.sheets())
             .find(|s| s.refdes() == Some(refdes))
     }
 
     pub fn refdes_set(&self) -> Vec<String> {
         self.symbols()
             .iter()
+            .chain(self.sheets().iter())
             .filter_map(|s| s.refdes().map(str::to_string))
             .collect()
     }
@@ -157,7 +172,11 @@ impl Symbol<'_> {
     }
 
     pub fn refdes(&self) -> Option<&str> {
+        // For `(symbol …)` we read `Reference`; for `(sheet …)` we
+        // surface `Sheetname` so hierarchical-sheet instances appear
+        // as components in test assertions.
         self.property("Reference")
+            .or_else(|| self.property("Sheetname"))
     }
 }
 

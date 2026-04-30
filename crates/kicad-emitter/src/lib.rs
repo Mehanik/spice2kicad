@@ -32,3 +32,5 @@ pub fn emit_netlist(netlist: &Netlist) -> Result<String, EmitError> {
 pub fn emit_schematic(placement: &Placement, library: &Library) -> Result<String, EmitError> {
     schematic::emit(placement, library)
 }
+
+pub use schematic::{ChildSheet, SheetBlock, SheetPort, emit_child_sheet, emit_root};

@@ -78,5 +78,6 @@ pub fn mk_resolved(
             })
             .collect(),
         subckts: vec![],
+        sheet_instances: vec![],
     }
 }

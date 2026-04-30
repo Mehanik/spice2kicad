@@ -398,9 +398,13 @@ fn subckt_body_resolves() {
         ..Netlist::default()
     };
     let r = ok(&n);
-    assert_eq!(r.elements.len(), 1);
-    assert_eq!(r.elements[0].refdes, "R1");
-    assert_eq!(r.elements[0].lib_id, "Device:R");
+    // Body elements live on the subckt's child hierarchical sheet, not
+    // on the top-level element list.
+    assert!(r.elements.is_empty());
+    assert_eq!(r.subckts.len(), 1);
+    assert_eq!(r.subckts[0].elements.len(), 1);
+    assert_eq!(r.subckts[0].elements[0].refdes, "R1");
+    assert_eq!(r.subckts[0].elements[0].lib_id, "Device:R");
 }
 
 #[test]

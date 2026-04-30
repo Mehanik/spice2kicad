@@ -77,7 +77,6 @@ fn common_emitter_constraints() {
 }
 
 #[test]
-#[ignore = "opamp_inverting fixture instantiates `X1 ... OPAMP` subckt but no OPAMP symbol exists in the fixture library and emitter rejects unmapped X with E003; hierarchical-sheet emission for `.subckt` is not implemented yet"]
 fn opamp_inverting_constraints() {
     let sch = emit_sch("opamp_inverting");
     assert_has_components(&sch, &["VCC", "VEE", "RIN", "RF", "X1"]);

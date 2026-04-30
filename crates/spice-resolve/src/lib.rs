@@ -36,23 +36,43 @@ pub use spice_parser::ast::{Axis, ElementKind, PinRef, PinmapEntry, Relation, Va
 /// A fully resolved netlist: every kept element has a concrete symbol
 /// and an explicit terminal-to-pin mapping. Layout directives are
 /// carried through verbatim.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ResolvedNetlist {
     pub elements: Vec<ResolvedElement>,
     /// `*@align` directives preserved for the layout pass.
     pub align: Vec<AlignSpec>,
     /// `;@ place=…` tags preserved for the layout pass.
     pub place: Vec<PlaceSpec>,
-    /// Subckt port lists, one entry per `.subckt` block. Used by the
-    /// layout signal-flow term to identify input / output nets.
+    /// One entry per `.subckt` definition. Carries the port list (used
+    /// by the layout signal-flow term) and the resolved body elements
+    /// (placed on a child hierarchical sheet by the emitter).
     pub subckts: Vec<SubcktPorts>,
+    /// Top-level `X<n>` instances. Each becomes a `(sheet …)` block on
+    /// the parent schematic. Nested X instances (X inside a subckt
+    /// body) are not yet supported.
+    pub sheet_instances: Vec<SheetInstance>,
 }
 
-/// Port list for a `.subckt` definition.
+/// Port list and resolved body for a `.subckt` definition.
 #[derive(Debug, Clone)]
 pub struct SubcktPorts {
     pub name: String,
     pub ports: Vec<String>,
+    /// Resolved elements that live inside this `.subckt` body. They
+    /// appear only on the corresponding child hierarchical sheet, not
+    /// on the parent schematic.
+    pub elements: Vec<ResolvedElement>,
+}
+
+/// A top-level `X<n> ... <subckt-name>` instance. Lowered to a KiCad
+/// hierarchical-sheet block by the emitter.
+#[derive(Debug, Clone)]
+pub struct SheetInstance {
+    pub refdes: String,
+    pub subckt_name: String,
+    /// SPICE nodes wired to the instance, in the same order as
+    /// `SubcktPorts.ports` for the matching subckt definition.
+    pub nodes: Vec<String>,
 }
 
 /// A SPICE element bound to a KiCad symbol.
@@ -117,11 +137,36 @@ pub fn resolve(netlist: &Netlist, library: &Library) -> Result<ResolvedNetlist, 
     let mut diags: Vec<Diagnostic> = Vec::new();
     let mut out_elements: Vec<ResolvedElement> = Vec::new();
     let mut place: Vec<PlaceSpec> = Vec::new();
+    let mut sheet_instances: Vec<SheetInstance> = Vec::new();
 
     // Top-level annotations only apply to top-level elements.
     let block_symbols = collect_symbol_defaults(&netlist.annotations);
 
+    let defined_subckts: HashSet<&str> = netlist.subckts.iter().map(|s| s.name.as_str()).collect();
+
     for element in &netlist.elements {
+        // Top-level `X…` instances become hierarchical-sheet blocks
+        // unless the user supplied an explicit `;@ symbol=` (in which
+        // case the user opted into a flat-symbol mapping and we keep
+        // the existing path). Instances whose subckt is not defined
+        // in the file fall through to the regular element resolver,
+        // which will emit `E003` for the missing symbol mapping.
+        if element.kind == ElementKind::Subckt
+            && !has_explicit_symbol_tag(element)
+            && let Some(name) = subckt_name(element)
+            && defined_subckts.contains(name.as_str())
+        {
+            // Skip if `;@ ignore` is set.
+            if element.tags.iter().any(|t| matches!(t.tag, Tag::Ignore)) {
+                continue;
+            }
+            sheet_instances.push(SheetInstance {
+                refdes: element.designator.clone(),
+                subckt_name: name,
+                nodes: element.nodes.clone(),
+            });
+            continue;
+        }
         resolve_element(
             element,
             &block_symbols,
@@ -133,12 +178,17 @@ pub fn resolve(netlist: &Netlist, library: &Library) -> Result<ResolvedNetlist, 
     }
 
     // Subckts: each subckt has its own scope of *@symbol defaults.
-    // For now we resolve subckt bodies the same way (the hierarchical
-    // sheet treatment is a layout concern). Their elements feed the
-    // same `out_elements` list — refdes uniqueness across hierarchy
-    // is not the resolver's job (ADR-2 / spec §3).
+    // Body elements live on the child hierarchical sheet, so we collect
+    // them into a per-subckt list rather than the flat top-level
+    // `out_elements`. (ADR-2 / spec §3.)
+    let mut subckts: Vec<SubcktPorts> = Vec::with_capacity(netlist.subckts.len());
     for subckt in &netlist.subckts {
-        resolve_subckt(subckt, library, &mut out_elements, &mut place, &mut diags);
+        let body = resolve_subckt(subckt, library, &mut place, &mut diags);
+        subckts.push(SubcktPorts {
+            name: subckt.name.clone(),
+            ports: subckt.ports.clone(),
+            elements: body,
+        });
     }
 
     let align = collect_align(&netlist.annotations)
@@ -151,15 +201,6 @@ pub fn resolve(netlist: &Netlist, library: &Library) -> Result<ResolvedNetlist, 
         )
         .collect();
 
-    let subckts: Vec<SubcktPorts> = netlist
-        .subckts
-        .iter()
-        .map(|s| SubcktPorts {
-            name: s.name.clone(),
-            ports: s.ports.clone(),
-        })
-        .collect();
-
     if diags.iter().any(|d| d.severity == Severity::Error) {
         return Err(diags);
     }
@@ -170,20 +211,35 @@ pub fn resolve(netlist: &Netlist, library: &Library) -> Result<ResolvedNetlist, 
         align,
         place,
         subckts,
+        sheet_instances,
     })
+}
+
+fn has_explicit_symbol_tag(element: &Element) -> bool {
+    element.tags.iter().any(|t| matches!(t.tag, Tag::Symbol(_)))
+}
+
+/// For an `X…` instance, the subckt name is the last positional token,
+/// stored by the parser in `value` as `Value::String`.
+fn subckt_name(element: &Element) -> Option<String> {
+    match &element.value {
+        Some(Value::String(s)) => Some(s.clone()),
+        _ => None,
+    }
 }
 
 fn resolve_subckt(
     subckt: &Subckt,
     library: &Library,
-    out_elements: &mut Vec<ResolvedElement>,
     place: &mut Vec<PlaceSpec>,
     diags: &mut Vec<Diagnostic>,
-) {
+) -> Vec<ResolvedElement> {
     let block_symbols = collect_symbol_defaults(&subckt.annotations);
+    let mut body: Vec<ResolvedElement> = Vec::new();
     for element in &subckt.body {
-        resolve_element(element, &block_symbols, library, out_elements, place, diags);
+        resolve_element(element, &block_symbols, library, &mut body, place, diags);
     }
+    body
 }
 
 // ---------------------------------------------------------------------------
