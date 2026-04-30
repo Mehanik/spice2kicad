@@ -211,15 +211,16 @@ pub fn assert_all_on_grid(sch: &KicadSch) {
     }
 }
 
-/// `b` is to the right of `a`, pin-anchored.
+/// `b` is to the right of `a`, pin-anchored on the X axis.
 ///
 /// Picks `a`'s rightmost world-X pin and `b`'s leftmost world-X pin, then
-/// asserts (1) `b.left.x > a.right.x` and (2) some such pair shares Y
-/// (within tolerance). Tolerating multi-pin ties on the extreme X column
-/// makes vertical two-pin parts (a default-orientation R or C) work
-/// naturally: both pins sit at local `x = 0`, so any pin on the symbol
-/// can be the "rightmost" — we accept the relation as long as a Y match
-/// exists across the two symbols.
+/// asserts `b.left.x > a.right.x`. Per `docs/annotation-spec.md`,
+/// `place=right-of` describes horizontal *direction*, not pin-to-pin
+/// alignment — it does not promise that any pair of facing pins shares
+/// a Y row, and for multi-pin asymmetric symbols (e.g. `Q_NPN_BCE`,
+/// whose B sits at one Y and C/E at another) such a row literally
+/// cannot exist while the elements are also `align horizontal`. So we
+/// only enforce the X-ordering and leave Y matters to `align`.
 pub fn assert_right_of(sch: &KicadSch, b: &str, a: &str) {
     let (a_pins, _a_orient) = world_pins(sch, a);
     let (b_pins, _b_orient) = world_pins(sch, b);
@@ -230,24 +231,6 @@ pub fn assert_right_of(sch: &KicadSch, b: &str, a: &str) {
     assert!(
         b_min_x > a_max_x + POS_TOL_MM,
         "{b} is not right of {a}: {b}.min_pin_x={b_min_x} <= {a}.max_pin_x={a_max_x}"
-    );
-
-    let a_right: Vec<_> = a_pins
-        .iter()
-        .filter(|p| (p.x - a_max_x).abs() <= POS_TOL_MM)
-        .collect();
-    let b_left: Vec<_> = b_pins
-        .iter()
-        .filter(|p| (p.x - b_min_x).abs() <= POS_TOL_MM)
-        .collect();
-    let matched = a_right
-        .iter()
-        .any(|ap| b_left.iter().any(|bp| approx_eq(ap.y, bp.y, POS_TOL_MM)));
-    assert!(
-        matched,
-        "{b} not horizontally aligned with {a}: no rightmost pin of {a} (ys={:?}) shares Y with any leftmost pin of {b} (ys={:?})",
-        a_right.iter().map(|p| p.y).collect::<Vec<_>>(),
-        b_left.iter().map(|p| p.y).collect::<Vec<_>>(),
     );
 }
 

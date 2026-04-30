@@ -90,7 +90,6 @@ fn opamp_inverting_constraints() {
 }
 
 #[test]
-#[ignore = "BJT pin geometry (B at left, C/E at right) cannot satisfy both `*@align horizontal Q1 Q2` (same origin Y, hence same pin Y rows) and the pin-anchored `;@ place=right-of Q1` (Q1's rightmost pin Y must equal Q2's leftmost pin Y); placer correctly drops the redundant place with W104 — needs a richer placer or a relaxed assertion"]
 fn multivibrator_constraints() {
     let sch = emit_sch("multivibrator");
     assert_has_components(
@@ -106,7 +105,6 @@ fn multivibrator_constraints() {
 }
 
 #[test]
-#[ignore = "BJT pin geometry (B at left, C/E at right) cannot satisfy both `*@align horizontal Q1 Q2` (same origin Y, hence same pin Y rows) and the pin-anchored `;@ place=right-of Q1` (Q1's rightmost pin Y must equal Q2's leftmost pin Y); placer correctly drops the redundant place with W104 — needs a richer placer or a relaxed assertion"]
 fn diff_pair_constraints() {
     let sch = emit_sch("diff_pair");
     assert_has_components(&sch, &["VCC", "VEE", "RC1", "RC2", "RTAIL", "Q1", "Q2"]);
