@@ -224,11 +224,29 @@ fn has_ignore_tag(line: &str) -> bool {
 
 /// Normalize SPICE value tokens so `1k`, `1K`, `1000` compare equal.
 /// Coarse but enough for the topology-focused comparison we do here.
+///
+/// Also strips a leading `<refdes>.` prefix from model names so KiCad's
+/// inline-model rename (`QGENERIC` → `Q1.QGENERIC`) doesn't trip the
+/// round-trip comparator. The trailing model name is what's
+/// semantically meaningful; the prefix is a KiCad-side
+/// uniquification artefact.
 fn normalize_value(s: &str) -> String {
     let s = s.trim().to_ascii_lowercase();
+    // SPICE `4k7` infix-decimal: a single suffix letter sandwiched between
+    // an integer and a fractional part (`4k7` → `4.7k`). Rewrite before
+    // splitting so the rest of the pipeline sees a familiar form.
+    let s = rewrite_infix_decimal(&s);
     let (num, suffix) = split_suffix(&s);
     let Ok(mut v) = num.parse::<f64>() else {
-        return s; // model name, expression — leave alone
+        // Non-numeric: model name or expression. Strip a leading
+        // `prefix.` if the result is still non-numeric (the rename is
+        // monotonic — KiCad never strips a prefix the user wrote).
+        if let Some((_, rest)) = s.rsplit_once('.') {
+            if !rest.is_empty() && rest.parse::<f64>().is_err() {
+                return rest.to_string();
+            }
+        }
+        return s;
     };
     let mult = match suffix {
         "f" => 1e-15,
@@ -245,6 +263,31 @@ fn normalize_value(s: &str) -> String {
     };
     v *= mult;
     format!("{v:e}")
+}
+
+/// Rewrite `4k7` → `4.7k`, leaving anything else unchanged. The suffix
+/// must be one of the engineering letters we already recognise.
+fn rewrite_infix_decimal(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut int_end = 0;
+    while int_end < bytes.len() && bytes[int_end].is_ascii_digit() {
+        int_end += 1;
+    }
+    if int_end == 0 || int_end == bytes.len() {
+        return s.to_string();
+    }
+    let suffix_char = bytes[int_end];
+    if !matches!(
+        suffix_char,
+        b'f' | b'p' | b'n' | b'u' | b'm' | b'k' | b'g' | b't'
+    ) {
+        return s.to_string();
+    }
+    let after = &s[int_end + 1..];
+    if after.is_empty() || !after.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        return s.to_string();
+    }
+    format!("{}.{after}{}", &s[..int_end], suffix_char as char)
 }
 
 fn split_suffix(s: &str) -> (&str, &str) {

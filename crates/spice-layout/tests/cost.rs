@@ -62,6 +62,9 @@ fn manual_placement(checked: &CheckedNetlist, origins: &[(i32, i32)]) -> Placeme
             lib_id: e.lib_id.clone(),
             origin: GridPoint::new(x, y),
             orientation: Orientation::IDENTITY,
+            nodes: e.nodes.clone(),
+            pin_mapping: e.pin_mapping.clone(),
+            value: None,
         })
         .collect();
     Placement { elements }

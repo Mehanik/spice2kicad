@@ -53,13 +53,11 @@ fn tempdir(name: &str) -> PathBuf {
 }
 
 #[test]
-#[ignore = "schematic emitter does not yet produce wires/labels/junctions, so kicad-cli netlist export of the emitted .kicad_sch yields an empty netlist (see crates/kicad-emitter/src/schematic.rs:4)"]
 fn rc_lowpass() {
     run_roundtrip("rc_lowpass");
 }
 
 #[test]
-#[ignore = "schematic emitter does not yet produce wires/labels/junctions, so kicad-cli netlist export of the emitted .kicad_sch yields an empty netlist (see crates/kicad-emitter/src/schematic.rs:4)"]
 fn common_emitter() {
     run_roundtrip("common_emitter");
 }
@@ -71,13 +69,11 @@ fn opamp_inverting() {
 }
 
 #[test]
-#[ignore = "schematic emitter does not yet produce wires/labels/junctions, so kicad-cli netlist export of the emitted .kicad_sch yields an empty netlist (see crates/kicad-emitter/src/schematic.rs:4)"]
 fn multivibrator() {
     run_roundtrip("multivibrator");
 }
 
 #[test]
-#[ignore = "schematic emitter does not yet produce wires/labels/junctions, so kicad-cli netlist export of the emitted .kicad_sch yields an empty netlist (see crates/kicad-emitter/src/schematic.rs:4)"]
 fn diff_pair() {
     run_roundtrip("diff_pair");
 }

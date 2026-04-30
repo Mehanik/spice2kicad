@@ -33,7 +33,7 @@ use std::collections::{HashMap, HashSet};
 use kicad_symbols::{Library, Orientation, Symbol};
 use spice_diagnostics::{Diagnostic, Label, Span};
 use spice_policy::CheckedNetlist;
-use spice_resolve::{Axis, Relation};
+use spice_resolve::{Axis, Relation, Value};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -75,6 +75,20 @@ pub struct PlacedElement {
     pub lib_id: String,
     pub origin: GridPoint,
     pub orientation: Orientation,
+    /// SPICE node names in original terminal order. Carried through so
+    /// the schematic emitter can drop a label at each pin's world
+    /// position (the only mechanism by which KiCad infers connectivity
+    /// in the absence of explicit wires).
+    pub nodes: Vec<String>,
+    /// KiCad pin numbers indexed by SPICE terminal (parallel to
+    /// [`nodes`]). `pin_mapping[i]` is the KiCad pin number
+    /// corresponding to SPICE terminal `i + 1`.
+    pub pin_mapping: Vec<String>,
+    /// The element's SPICE value, formatted as the original token
+    /// (e.g. `"1k"`, `"100n"`, `"QGENERIC"`). Carried so the schematic
+    /// emitter can populate the symbol's `Value` property and the
+    /// round-trip through kicad-cli preserves component values.
+    pub value: Option<String>,
 }
 
 impl PlacedElement {
@@ -102,6 +116,23 @@ pub struct Placement {
     pub elements: Vec<PlacedElement>,
     // Future: cluster bounding boxes, sheet hierarchy. Stage 1 carries
     // only the per-element list.
+}
+
+/// Render a parsed SPICE [`Value`] back to its source-equivalent token.
+///
+/// The schematic emitter uses this to populate the symbol's `Value`
+/// property so the round-trip through kicad-cli preserves component
+/// values. This is a coarse one-way formatter — it does not attempt
+/// to reconstruct engineering-suffixed forms (`1k`, `100n`); a numeric
+/// `1000` and the original `1k` both come out as decimal here. The
+/// canonicaliser in the round-trip tests collapses these to the same
+/// equivalence class, so topology-level checks still pass.
+fn format_value(v: &Value) -> String {
+    match v {
+        Value::Number(n) => format!("{n}"),
+        Value::String(s) => s.clone(),
+        Value::Expr(e) => e.clone(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -181,6 +212,9 @@ fn place_seed(checked: &CheckedNetlist) -> Result<(Placement, Vec<bool>), Vec<Di
             lib_id: e.lib_id.clone(),
             origin: GridPoint::new(0, 0),
             orientation: Orientation::IDENTITY,
+            nodes: e.nodes.clone(),
+            pin_mapping: e.pin_mapping.clone(),
+            value: e.value.as_ref().map(format_value),
         })
         .collect();
 
