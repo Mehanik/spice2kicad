@@ -2,72 +2,152 @@
   ; Hand-written test fixture for the kicad-symbols crate.
   ; Geometry references the real KiCad library at
   ; /usr/share/kicad/symbols/Simulation_SPICE.kicad_sym (KiCad 9.x).
-  ; Pins are on the 1.27 mm grid.
+  ; Pins are on the 1.27 mm grid. Bodies carry stroke/fill specs and
+  ; per-symbol property blocks so verbatim lib_symbols passthrough
+  ; renders visibly in eeschema (V1 / V3 invariants).
   (version 20231120)
   (generator "kicad_symbol_editor")
   (symbol "VDC"
     (pin_names (offset 0))
+    (exclude_from_sim no)
+    (in_bom yes)
+    (on_board yes)
+    (property "Reference" "V" (at 2.54 2.54 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (property "Value" "VDC" (at 2.54 -2.54 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (property "Footprint" "" (at 0 0 0)
+      (effects (font (size 1.27 1.27)) (hide yes)))
+    (property "Datasheet" "~" (at 0 0 0)
+      (effects (font (size 1.27 1.27)) (hide yes)))
+    (property "Description" "DC voltage source" (at 0 0 0)
+      (effects (font (size 1.27 1.27)) (hide yes)))
     (symbol "VDC_0_1"
-      (circle (center 0 0) (radius 1.27)))
+      (circle (center 0 0) (radius 1.27)
+        (stroke (width 0.254) (type default))
+        (fill (type none)))
+      (polyline
+        (pts (xy -0.635 0.508) (xy 0.635 0.508))
+        (stroke (width 0.254) (type default))
+        (fill (type none)))
+      (polyline
+        (pts (xy 0 0.127) (xy 0 0.889))
+        (stroke (width 0.254) (type default))
+        (fill (type none)))
+      (polyline
+        (pts (xy -0.635 -0.508) (xy 0.635 -0.508))
+        (stroke (width 0.254) (type default))
+        (fill (type none))))
     (symbol "VDC_1_1"
       (pin passive line
         (at 0 5.08 270)
         (length 2.54)
-        (name "+")
-        (number "1"))
+        (name "+" (effects (font (size 1.27 1.27))))
+        (number "1" (effects (font (size 1.27 1.27)))))
       (pin passive line
         (at 0 -5.08 90)
         (length 2.54)
-        (name "-")
-        (number "2"))))
+        (name "-" (effects (font (size 1.27 1.27))))
+        (number "2" (effects (font (size 1.27 1.27)))))))
   (symbol "ESOURCE"
     (pin_names (offset 0))
+    (exclude_from_sim no)
+    (in_bom yes)
+    (on_board yes)
+    (property "Reference" "E" (at 2.54 2.54 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (property "Value" "ESOURCE" (at 2.54 -2.54 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (property "Footprint" "" (at 0 0 0)
+      (effects (font (size 1.27 1.27)) (hide yes)))
+    (property "Datasheet" "~" (at 0 0 0)
+      (effects (font (size 1.27 1.27)) (hide yes)))
+    (property "Description" "VCVS, voltage-controlled voltage source"
+      (at 0 0 0)
+      (effects (font (size 1.27 1.27)) (hide yes)))
     (symbol "ESOURCE_0_1"
-      (circle (center 0 0) (radius 1.27)))
+      (circle (center 0 0) (radius 1.27)
+        (stroke (width 0.254) (type default))
+        (fill (type none)))
+      (polyline
+        (pts (xy -1.27 0) (xy -0.508 0))
+        (stroke (width 0.254) (type default))
+        (fill (type none)))
+      (polyline
+        (pts (xy 0.508 0) (xy 1.27 0))
+        (stroke (width 0.254) (type default))
+        (fill (type none)))
+      (polyline
+        (pts (xy 0 0.508) (xy 0 1.27))
+        (stroke (width 0.254) (type default))
+        (fill (type none))))
     (symbol "ESOURCE_1_1"
       (pin passive line
         (at 0 5.08 270)
         (length 2.54)
-        (name "N+")
-        (number "1"))
+        (name "N+" (effects (font (size 1.27 1.27))))
+        (number "1" (effects (font (size 1.27 1.27)))))
       (pin passive line
         (at 0 -5.08 90)
         (length 2.54)
-        (name "N-")
-        (number "2"))
+        (name "N-" (effects (font (size 1.27 1.27))))
+        (number "2" (effects (font (size 1.27 1.27)))))
       (pin passive line
         (at -5.08 0 0)
         (length 2.54)
-        (name "C+")
-        (number "3"))
+        (name "C+" (effects (font (size 1.27 1.27))))
+        (number "3" (effects (font (size 1.27 1.27)))))
       (pin passive line
         (at 5.08 0 180)
         (length 2.54)
-        (name "C-")
-        (number "4"))))
+        (name "C-" (effects (font (size 1.27 1.27))))
+        (number "4" (effects (font (size 1.27 1.27)))))))
   (symbol "GSOURCE"
     (pin_names (offset 0))
+    (exclude_from_sim no)
+    (in_bom yes)
+    (on_board yes)
+    (property "Reference" "G" (at 2.54 2.54 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (property "Value" "GSOURCE" (at 2.54 -2.54 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (property "Footprint" "" (at 0 0 0)
+      (effects (font (size 1.27 1.27)) (hide yes)))
+    (property "Datasheet" "~" (at 0 0 0)
+      (effects (font (size 1.27 1.27)) (hide yes)))
+    (property "Description" "VCCS, voltage-controlled current source"
+      (at 0 0 0)
+      (effects (font (size 1.27 1.27)) (hide yes)))
     (symbol "GSOURCE_0_1"
-      (circle (center 0 0) (radius 1.27)))
+      (circle (center 0 0) (radius 1.27)
+        (stroke (width 0.254) (type default))
+        (fill (type none)))
+      (polyline
+        (pts (xy 0 -1.27) (xy 0 1.27))
+        (stroke (width 0.254) (type default))
+        (fill (type none)))
+      (polyline
+        (pts (xy -0.381 0.762) (xy 0 1.27) (xy 0.381 0.762))
+        (stroke (width 0.254) (type default))
+        (fill (type none))))
     (symbol "GSOURCE_1_1"
       (pin passive line
         (at 0 5.08 270)
         (length 2.54)
-        (name "N+")
-        (number "1"))
+        (name "N+" (effects (font (size 1.27 1.27))))
+        (number "1" (effects (font (size 1.27 1.27)))))
       (pin passive line
         (at 0 -5.08 90)
         (length 2.54)
-        (name "N-")
-        (number "2"))
+        (name "N-" (effects (font (size 1.27 1.27))))
+        (number "2" (effects (font (size 1.27 1.27)))))
       (pin passive line
         (at -5.08 0 0)
         (length 2.54)
-        (name "C+")
-        (number "3"))
+        (name "C+" (effects (font (size 1.27 1.27))))
+        (number "3" (effects (font (size 1.27 1.27)))))
       (pin passive line
         (at 5.08 0 180)
         (length 2.54)
-        (name "C-")
-        (number "4"))))
-)
+        (name "C-" (effects (font (size 1.27 1.27))))
+        (number "4" (effects (font (size 1.27 1.27))))))))

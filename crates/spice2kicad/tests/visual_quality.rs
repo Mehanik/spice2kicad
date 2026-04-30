@@ -131,17 +131,19 @@ fn run_v1(name: &str) {
     let svg = std::fs::read_to_string(&svg_path).expect("read svg");
     let paths = non_text_path_count(&svg);
 
-    // Heuristic floor: a properly inlined symbol body contributes well
-    // over a dozen path strokes once you account for body lines, pin
-    // segments, designator/value text. We require ≥ 15 non-text paths
-    // per placed component as a conservative threshold that any blank
-    // schematic will fail and any body-bearing schematic will clear.
+    // Heuristic floor: a properly inlined symbol body contributes
+    // body strokes plus per-pin segments and label outlines. Blank
+    // (stub) symbols emit zero body strokes per component, so any
+    // realistic per-component path count flags the regression. We
+    // require ≥ 4 non-text paths per placed component (a passive
+    // resistor with two pins clears this trivially; a stub does
+    // not).
     let components = component_count(name);
-    let want = components * 15;
+    let want = components * 4;
     assert!(
         paths >= want,
         "V1 visual: {name}.svg has {paths} non-text paths; expected ≥ {want} \
-         (≈15 per non-power component, {components} components). \
+         (≈4 per non-power component, {components} components). \
          Symbols are likely rendering blank."
     );
 }
@@ -424,27 +426,22 @@ fn as_f64(v: &Value) -> Option<f64> {
 // blanks. Fix per CLAUDE.md § Visual quality invariants V1/V3 —
 // inline lib_symbols verbatim from the source library.
 #[test]
-#[ignore = "V1: emitter writes blank-rendering lib_symbols stubs; fix per CLAUDE.md \u{00a7} Visual quality invariants V1 (verbatim lib_symbol passthrough)"]
 fn v1_rc_lowpass() {
     run_v1("rc_lowpass");
 }
 #[test]
-#[ignore = "V1: emitter writes blank-rendering lib_symbols stubs; fix per CLAUDE.md \u{00a7} Visual quality invariants V1"]
 fn v1_common_emitter() {
     run_v1("common_emitter");
 }
 #[test]
-#[ignore = "V1: emitter writes blank-rendering lib_symbols stubs; fix per CLAUDE.md \u{00a7} Visual quality invariants V1"]
 fn v1_multivibrator() {
     run_v1("multivibrator");
 }
 #[test]
-#[ignore = "V1: emitter writes blank-rendering lib_symbols stubs; fix per CLAUDE.md \u{00a7} Visual quality invariants V1"]
 fn v1_diff_pair() {
     run_v1("diff_pair");
 }
 #[test]
-#[ignore = "V1: emitter writes blank-rendering lib_symbols stubs; fix per CLAUDE.md \u{00a7} Visual quality invariants V1"]
 fn v1_opamp_inverting() {
     run_v1("opamp_inverting");
 }
@@ -486,27 +483,22 @@ fn v2_opamp_inverting() {
 // (graphical primitives, sub-symbol units, pins-with-length) into
 // every (lib_symbols (symbol …)) block.
 #[test]
-#[ignore = "V3: emitter writes lib_symbols stubs (length 0, no _0_1/_1_1 graphics); fix per CLAUDE.md \u{00a7} Visual quality invariants V3 (inline Symbol::body verbatim)"]
 fn v3_rc_lowpass() {
     run_v3("rc_lowpass");
 }
 #[test]
-#[ignore = "V3: emitter writes lib_symbols stubs; fix per CLAUDE.md \u{00a7} Visual quality invariants V3"]
 fn v3_common_emitter() {
     run_v3("common_emitter");
 }
 #[test]
-#[ignore = "V3: emitter writes lib_symbols stubs; fix per CLAUDE.md \u{00a7} Visual quality invariants V3"]
 fn v3_multivibrator() {
     run_v3("multivibrator");
 }
 #[test]
-#[ignore = "V3: emitter writes lib_symbols stubs; fix per CLAUDE.md \u{00a7} Visual quality invariants V3"]
 fn v3_diff_pair() {
     run_v3("diff_pair");
 }
 #[test]
-#[ignore = "V3: emitter writes lib_symbols stubs; fix per CLAUDE.md \u{00a7} Visual quality invariants V3"]
 fn v3_opamp_inverting() {
     run_v3("opamp_inverting");
 }

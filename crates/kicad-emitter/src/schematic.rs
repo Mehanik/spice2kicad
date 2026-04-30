@@ -30,7 +30,7 @@ use std::collections::BTreeSet;
 
 use crate::EmitError;
 use crate::sexpr::Sexpr;
-use kicad_symbols::{Library, Orientation, Rotation, Symbol, TransformedPin};
+use kicad_symbols::{Library, Orientation, RawSexpr, Rotation, Symbol, TransformedPin};
 use spice_layout::{PlacedElement, Placement};
 use uuid::Uuid;
 
@@ -424,12 +424,19 @@ fn child_symbol_instance(el: &PlacedElement, instance_refdeses: &[String]) -> Se
 }
 
 /// Emit a `(lib_symbols …)` block listing every `lib_id` referenced
-/// by the placement. Each entry is a stub that contains only the
-/// information kicad-cli needs to resolve pin geometry: pin numbers
-/// and their local positions/angles. Symbols missing from `library`
-/// are skipped silently — kicad-cli will then drop their nets, which
-/// is the same outcome as a stub-less file. Future work: surface a
-/// diagnostic when this happens.
+/// by the placement.
+///
+/// Each entry is the raw `(symbol …)` body captured at library-parse
+/// time (see [`kicad_symbols::Symbol::body`]) — copied verbatim, with
+/// the bare symbol name in slot `[1]` rewritten to the full `Lib:Name`
+/// form KiCad expects in instance-side `lib_id` references. This
+/// preserves the source library's graphical primitives (rectangles,
+/// polylines, etc.) and pin lengths, fulfilling V1 and V3 from
+/// CLAUDE.md's Visual quality invariants.
+///
+/// Symbols missing from `library` are skipped silently — upstream
+/// resolution (E003) is responsible for catching that case before the
+/// emitter ever sees it.
 fn lib_symbols(placement: &Placement, library: &Library) -> Sexpr {
     let mut seen: BTreeSet<&str> = BTreeSet::new();
     let mut entries: Vec<Sexpr> = vec![atom("lib_symbols")];
@@ -438,101 +445,43 @@ fn lib_symbols(placement: &Placement, library: &Library) -> Sexpr {
             continue;
         }
         if let Some(symbol) = library.lookup(&el.lib_id) {
-            entries.push(lib_symbol_stub(symbol));
+            entries.push(lib_symbol_inline(symbol));
         }
     }
     Sexpr::List(entries)
 }
 
-fn lib_symbol_stub(symbol: &Symbol) -> Sexpr {
-    let mut pin_unit: Vec<Sexpr> = Vec::with_capacity(symbol.pins.len() + 2);
-    pin_unit.push(atom("symbol"));
-    pin_unit.push(qstring(&format!("{}_1_1", symbol.name)));
-    for pin in &symbol.pins {
-        pin_unit.push(pin_def(pin));
+/// Render a `Symbol` as a verbatim `(symbol …)` block.
+///
+/// The captured body has the structure
+/// `(symbol "<bare>" …)`; KiCad requires the slot-1 name on the
+/// library entry to match the `lib_id` referenced by instances, so we
+/// rewrite that one slot before emitting. Everything else (graphics,
+/// nested unit symbols, pins-with-length, properties) is forwarded
+/// untouched.
+///
+/// TODO: a body that uses `(extends "Base")` is forwarded as-is. The
+/// referenced base symbol is *not* automatically pulled in, so KiCad
+/// may render incomplete graphics. Detect this and emit a diagnostic
+/// when extended-symbol support lands.
+fn lib_symbol_inline(symbol: &Symbol) -> Sexpr {
+    let mut sx = Sexpr::from(symbol.body.clone());
+    if let Sexpr::List(items) = &mut sx {
+        if items.len() >= 2 {
+            items[1] = qstring(&symbol.lib_id);
+        }
     }
-    Sexpr::List(vec![
-        atom("symbol"),
-        qstring(&symbol.lib_id),
-        list(vec![atom("exclude_from_sim"), atom("no")]),
-        list(vec![atom("in_bom"), atom("yes")]),
-        list(vec![atom("on_board"), atom("yes")]),
-        property_field("Reference", "U", 0.0, 0.0, true),
-        property_field("Value", &symbol.name, 0.0, 0.0, false),
-        property_field("Footprint", "", 0.0, 0.0, true),
-        property_field("Datasheet", "", 0.0, 0.0, true),
-        Sexpr::List(pin_unit),
-    ])
+    sx
 }
 
-fn property_field(name: &str, value: &str, x: f64, y: f64, hidden: bool) -> Sexpr {
-    let mut items = vec![
-        atom("property"),
-        qstring(name),
-        qstring(value),
-        list(vec![
-            atom("at"),
-            atom(&format_coord(x)),
-            atom(&format_coord(y)),
-            atom("0"),
-        ]),
-    ];
-    if hidden {
-        items.push(list(vec![
-            atom("effects"),
-            list(vec![
-                atom("font"),
-                list(vec![atom("size"), atom("1.27"), atom("1.27")]),
-            ]),
-            list(vec![atom("hide"), atom("yes")]),
-        ]));
-    } else {
-        items.push(list(vec![
-            atom("effects"),
-            list(vec![
-                atom("font"),
-                list(vec![atom("size"), atom("1.27"), atom("1.27")]),
-            ]),
-        ]));
+impl From<RawSexpr> for Sexpr {
+    fn from(r: RawSexpr) -> Self {
+        match r {
+            RawSexpr::Atom(s) => Sexpr::Atom(s),
+            RawSexpr::QString(s) => Sexpr::QString(s),
+            RawSexpr::List(items) => Sexpr::List(items.into_iter().map(Sexpr::from).collect()),
+        }
     }
-    list(items)
-}
-
-fn pin_def(pin: &kicad_symbols::Pin) -> Sexpr {
-    list(vec![
-        atom("pin"),
-        atom("passive"),
-        atom("line"),
-        list(vec![
-            atom("at"),
-            atom(&format_coord(pin.x)),
-            atom(&format_coord(pin.y)),
-            atom(&pin.angle.to_string()),
-        ]),
-        list(vec![atom("length"), atom(&format_coord(0.0))]),
-        list(vec![
-            atom("name"),
-            qstring(&pin.name),
-            list(vec![
-                atom("effects"),
-                list(vec![
-                    atom("font"),
-                    list(vec![atom("size"), atom("1.27"), atom("1.27")]),
-                ]),
-            ]),
-        ]),
-        list(vec![
-            atom("number"),
-            qstring(&pin.number),
-            list(vec![
-                atom("effects"),
-                list(vec![
-                    atom("font"),
-                    list(vec![atom("size"), atom("1.27"), atom("1.27")]),
-                ]),
-            ]),
-        ]),
-    ])
 }
 
 fn symbol_instance(el: &PlacedElement) -> Sexpr {

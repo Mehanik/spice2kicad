@@ -1,6 +1,6 @@
 //! Unit + property tests for the policy / conflict-check pass.
 
-use kicad_symbols::Symbol;
+use kicad_symbols::{RawSexpr, Symbol};
 use proptest::prelude::*;
 use spice_diagnostics::Severity;
 use spice_resolve::{
@@ -23,6 +23,7 @@ fn make_element(refdes: &str) -> ResolvedElement {
             lib_id: "Device:R".to_owned(),
             name: "R".to_owned(),
             pins: Vec::new(),
+            body: RawSexpr::List(Vec::new()),
         },
         pin_mapping: Vec::new(),
         nodes: Vec::new(),

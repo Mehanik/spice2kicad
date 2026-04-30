@@ -181,6 +181,50 @@ pub struct TransformedPin {
     pub angle: u16,
 }
 
+/// Verbatim mirror of an `lexpr::Value` sub-tree using the same three
+/// shapes as the emitter's own `Sexpr` writer.
+///
+/// Used to stash the entire `(symbol …)` body from a parsed
+/// `.kicad_sym` so the emitter can re-serialise it byte-for-byte under
+/// `(lib_symbols)` (see CLAUDE.md § Visual quality invariants V3).
+/// Kept opaque on purpose — we deliberately do *not* model graphical
+/// primitives.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RawSexpr {
+    Atom(String),
+    QString(String),
+    List(Vec<RawSexpr>),
+}
+
+impl RawSexpr {
+    /// Recursive conversion from a parsed `lexpr::Value`.
+    ///
+    /// `.kicad_sym` files only use lists of atoms, quoted strings, and
+    /// numbers in practice; the other lexpr shapes are converted on a
+    /// best-effort basis.
+    #[must_use]
+    pub fn from_lexpr(value: &Value) -> Self {
+        match value {
+            Value::Nil | Value::Null => Self::List(Vec::new()),
+            Value::Bool(b) => Self::Atom(if *b { "true".into() } else { "false".into() }),
+            Value::Number(n) => Self::Atom(format!("{n}")),
+            Value::Char(c) => Self::Atom(c.to_string()),
+            Value::String(s) => Self::QString(s.to_string()),
+            Value::Symbol(s) => Self::Atom(s.to_string()),
+            Value::Keyword(k) => Self::Atom(k.to_string()),
+            Value::Bytes(b) => Self::Atom(format!("{b:?}")),
+            Value::Cons(_) => {
+                // Walk the proper list with `list_iter` so improper
+                // tails (rare in .kicad_sym) just stop at the first
+                // non-cons cdr.
+                let items = list_iter(value).map(Self::from_lexpr).collect();
+                Self::List(items)
+            }
+            Value::Vector(items) => Self::List(items.iter().map(Self::from_lexpr).collect()),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Symbol {
     /// Library identifier in `"Lib:Name"` form.
@@ -188,6 +232,11 @@ pub struct Symbol {
     /// Bare symbol name (without library prefix).
     pub name: String,
     pub pins: Vec<Pin>,
+    /// Raw `(symbol …)` body captured at parse time, used by the
+    /// emitter for verbatim `lib_symbols` passthrough. The second
+    /// element is the bare symbol name; emitters rewrite it to the
+    /// full `lib_id` before serialising.
+    pub body: RawSexpr,
 }
 
 impl Symbol {
@@ -268,8 +317,17 @@ impl Library {
                 })?
                 .to_owned();
             let pins = collect_pins(child, path)?;
+            let body = RawSexpr::from_lexpr(child);
             let lib_id = format!("{prefix}:{name}");
-            by_lib_id.insert(lib_id.clone(), Symbol { lib_id, name, pins });
+            by_lib_id.insert(
+                lib_id.clone(),
+                Symbol {
+                    lib_id,
+                    name,
+                    pins,
+                    body,
+                },
+            );
         }
         Ok(Self { by_lib_id })
     }
