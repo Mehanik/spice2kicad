@@ -8,10 +8,10 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use kicad_symbols::Library;
-use spice_diagnostics::Severity;
+use spice_diagnostics::{FileId, Severity};
 use spice_parser::ast::{
     Annotation, Axis, Element, ElementKind, Netlist, PinRef, PinmapEntry, Relation,
-    SpannedAnnotation, SpannedTag, Subckt, Tag,
+    SpannedAnnotation, SpannedTag, Subckt, Tag, Value,
 };
 use spice_resolve::{ElementRole, ResolvedNetlist, resolve};
 
@@ -68,6 +68,24 @@ fn ok(n: &Netlist) -> ResolvedNetlist {
 fn err_codes(n: &Netlist) -> Vec<String> {
     let diags = resolve(n, library()).expect_err("resolve should fail");
     diags.iter().map(|d| d.code.to_string()).collect()
+}
+
+fn parse_netlist(source: &str) -> Netlist {
+    spice_parser::parse(source, FileId(0))
+        .expect("parse should succeed")
+        .netlist
+}
+
+fn parse_and_resolve(source: &str) -> ResolvedNetlist {
+    resolve(&parse_netlist(source), library()).expect("resolve should succeed")
+}
+
+fn parse_and_resolve_codes(source: &str) -> Vec<String> {
+    resolve(&parse_netlist(source), library())
+        .expect_err("expected resolve error")
+        .iter()
+        .map(|d| d.code.to_string())
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -383,4 +401,146 @@ fn subckt_body_resolves() {
     assert_eq!(r.elements.len(), 1);
     assert_eq!(r.elements[0].refdes, "R1");
     assert_eq!(r.elements[0].lib_id, "Device:R");
+}
+
+#[test]
+fn vcvs_default_resolves_to_esource() {
+    // E1 with no annotation defaults to Simulation_SPICE:ESOURCE (4-pin VCVS).
+    let n = nl_with(vec![elem(
+        "E1",
+        ElementKind::Vcvs,
+        &["out+", "out-", "in+", "in-"],
+    )]);
+    let r = ok(&n);
+    assert_eq!(r.elements.len(), 1);
+    assert_eq!(r.elements[0].lib_id, "Simulation_SPICE:ESOURCE");
+}
+
+#[test]
+fn vccs_default_resolves_to_gsource() {
+    // G1 with no annotation defaults to Simulation_SPICE:GSOURCE (4-pin VCCS).
+    let n = nl_with(vec![elem(
+        "G1",
+        ElementKind::Vccs,
+        &["out+", "out-", "in+", "in-"],
+    )]);
+    let r = ok(&n);
+    assert_eq!(r.elements.len(), 1);
+    assert_eq!(r.elements[0].lib_id, "Simulation_SPICE:GSOURCE");
+}
+
+// ---------------------------------------------------------------------------
+// End-to-end pipeline tests: raw SPICE source -> parse -> resolve.
+// Complements the hand-built-AST tests above by exercising parser + resolver
+// together for the controlled-source kinds (E/G/F/H/K).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn vcvs_pipeline_no_annotation_resolves_to_esource() {
+    let src = "* t\nE1 out 0 in 0 1e5\n";
+    let r = parse_and_resolve(src);
+    assert_eq!(r.elements.len(), 1);
+    let e = &r.elements[0];
+    assert_eq!(e.refdes, "E1");
+    assert_eq!(e.lib_id, "Simulation_SPICE:ESOURCE");
+    assert_eq!(e.kind, ElementKind::Vcvs);
+    assert_eq!(e.nodes, vec!["out", "0", "in", "0"]);
+
+    // Confirm the parsed AST carried the gain through as a numeric value.
+    let nl = parse_netlist(src);
+    match nl.elements[0].value {
+        Some(Value::Number(n)) => assert!((n - 1e5).abs() < 1e-6),
+        ref other => panic!("expected Value::Number(1e5), got {other:?}"),
+    }
+}
+
+#[test]
+fn vccs_pipeline_no_annotation_resolves_to_gsource() {
+    let src = "* t\nG1 out 0 in 0 1e-3\n";
+    let r = parse_and_resolve(src);
+    assert_eq!(r.elements.len(), 1);
+    let e = &r.elements[0];
+    assert_eq!(e.refdes, "G1");
+    assert_eq!(e.lib_id, "Simulation_SPICE:GSOURCE");
+    assert_eq!(e.kind, ElementKind::Vccs);
+    assert_eq!(e.nodes, vec!["out", "0", "in", "0"]);
+}
+
+#[test]
+fn vcvs_pipeline_with_explicit_symbol_annotation_overrides_default() {
+    // Trailing `;@ symbol=` should win over the kind-based default.
+    // Device:R has 2 pins while VCVS supplies 4 nodes, so we expect
+    // the override to take effect and the resolver to flag E002
+    // (pin-count mismatch) rather than silently reverting to ESOURCE.
+    let src = "* t\nE1 out 0 in 0 1e5 ;@ symbol=Device:R\n";
+    let codes = parse_and_resolve_codes(src);
+    assert!(codes.iter().any(|c| c == "E002"), "got {codes:?}");
+}
+
+#[test]
+fn cccs_pipeline_no_annotation_yields_e003() {
+    let src = "* t\nF1 out 0 V1 100\n";
+    let codes = parse_and_resolve_codes(src);
+    assert!(codes.iter().any(|c| c == "E003"), "got {codes:?}");
+}
+
+#[test]
+fn ccvs_pipeline_no_annotation_yields_e003() {
+    let src = "* t\nH1 out 0 V1 100\n";
+    let codes = parse_and_resolve_codes(src);
+    assert!(codes.iter().any(|c| c == "E003"), "got {codes:?}");
+}
+
+#[test]
+fn k_pipeline_no_annotation_yields_e003() {
+    let src = "* t\nK1 L1 L2 0.999\n";
+    let codes = parse_and_resolve_codes(src);
+    assert!(codes.iter().any(|c| c == "E003"), "got {codes:?}");
+}
+
+#[test]
+fn cccs_pipeline_with_explicit_symbol_resolves() {
+    // F has nodes=[out+, out-]; pair with a 2-pin override so the
+    // resolver accepts it. VDC is semantically wrong but pin-shaped right.
+    let src = "* t\nF1 out 0 V1 100 ;@ symbol=Simulation_SPICE:VDC\n";
+    let r = parse_and_resolve(src);
+    assert_eq!(r.elements.len(), 1);
+    assert_eq!(r.elements[0].refdes, "F1");
+    assert_eq!(r.elements[0].lib_id, "Simulation_SPICE:VDC");
+}
+
+#[test]
+fn cccs_pipeline_preserves_control_field() {
+    // The parser should attach the controlling-source refdes (V1) to
+    // Element.control, regardless of any trailing annotation.
+    let src = "* t\nF1 out 0 V1 100 ;@ symbol=Simulation_SPICE:VDC\n";
+    let nl = parse_netlist(src);
+    assert_eq!(nl.elements.len(), 1);
+    let e = &nl.elements[0];
+    assert_eq!(e.kind, ElementKind::Cccs);
+    assert_eq!(e.control.as_deref(), Some("V1"));
+    assert_eq!(e.nodes, vec!["out", "0"]);
+}
+
+#[test]
+fn mutual_k_pipeline_preserves_coupled_field() {
+    // K's two operands are inductor refdes refs, not nets — they live
+    // in `coupled`, and `nodes` stays empty.
+    let src = "* t\nK1 L1 L2 0.999 ;@ symbol=Device:L\n";
+    let nl = parse_netlist(src);
+    assert_eq!(nl.elements.len(), 1);
+    let e = &nl.elements[0];
+    assert_eq!(e.kind, ElementKind::MutualInductance);
+    assert_eq!(e.coupled, vec!["L1".to_owned(), "L2".to_owned()]);
+    assert!(e.nodes.is_empty(), "K nodes should be empty: {:?}", e.nodes);
+}
+
+#[test]
+fn vcvs_lowercase_e_resolves_same_as_uppercase() {
+    // Lowercase refdes prefix should still classify as Vcvs.
+    let src = "* t\ne1 out 0 in 0 1e5\n";
+    let r = parse_and_resolve(src);
+    assert_eq!(r.elements.len(), 1);
+    assert_eq!(r.elements[0].kind, ElementKind::Vcvs);
+    assert_eq!(r.elements[0].lib_id, "Simulation_SPICE:ESOURCE");
 }

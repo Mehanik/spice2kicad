@@ -21,11 +21,20 @@ pub type Ident = String;
 pub struct Element {
     pub designator: Ident,
     pub kind: ElementKind,
+    /// `nodes[i]` is a net name. Refdes references (e.g. K's coupled
+    /// inductors) live in `coupled`; controlling-source refdes (F/H's
+    /// Vname) lives in `control`.
     pub nodes: Vec<NodeRef>,
     pub value: Option<Value>,
     pub params: Vec<(Ident, Value)>,
     /// Trailing `;@…` annotations on this element. Empty if none.
     pub tags: Vec<SpannedTag>,
+    /// Refdes of a controlling element (set on F/H — the SPICE Vname
+    /// that names the voltage source whose current we read).
+    pub control: Option<Ident>,
+    /// Refdes references to coupled elements (set on K — the two
+    /// inductor refdes the coupling refers to).
+    pub coupled: Vec<Ident>,
 }
 
 impl Element {
@@ -40,6 +49,8 @@ impl Element {
             value: None,
             params: Vec::new(),
             tags: Vec::new(),
+            control: None,
+            coupled: Vec::new(),
         }
     }
 }
@@ -52,10 +63,23 @@ pub enum ElementKind {
     VoltageSrc, // V
     CurrentSrc, // I
     Diode,      // D
-    Bjt,        // Q
+    Bjt,        // Q — 3 or 4 terminals (c b e [sub] model)
     Mosfet,     // M
     Jfet,       // J
     Subckt,     // X
+    /// K — mutual inductance; `coupled` stores [L1, L2] (inductor refdes
+    /// refs), `nodes` is empty, `value` stores the coupling coefficient.
+    MutualInductance, // K
+    /// F — current-controlled current source; nodes=[out+, out-],
+    /// `control` holds the Vname refdes, value = gain.
+    Cccs, // F
+    /// H — current-controlled voltage source; same shape as Cccs.
+    Ccvs, // H
+    /// E — voltage-controlled voltage source; nodes=[out+, out-, ctrl+, ctrl-],
+    /// value = gain.
+    Vcvs, // E
+    /// G — voltage-controlled current source; same shape as Vcvs.
+    Vccs, // G
     Other,
 }
 

@@ -170,6 +170,11 @@ Block form with `for=` (defaults across many elements):
   validates that the symbol's pin count is compatible with the SPICE
   element's terminals; on mismatch it errors unless `pinmap=` is also
   supplied.
+- The value is required; an empty value (e.g. `;@ symbol=`) is
+  malformed and should produce a diagnostic. Implementations that
+  silently accept an empty value violate the spec. (Current parser
+  produces `Tag::Symbol("")` without a diagnostic — known gap;
+  see `tests/edge_inputs.rs::semicolon_at_equals_only`.)
 
 **Glob syntax.** Shell-style: `*` matches any run of characters
 (including empty). No other metacharacters. Matching is

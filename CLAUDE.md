@@ -155,6 +155,38 @@ For full grammar, examples, and diagnostics, see
 - **Diagnostics.** Use `ariadne` for source-spanned error rendering.
   Every error/warning code in spec §7 should round-trip through
   `ariadne` with the offending line highlighted.
+- **Bare `\r` line endings.** The lexer strips `\r` only when it
+  precedes `\n` (CRLF). Bare `\r` (legacy Mac line endings) is
+  treated as part of the line. This matches ngspice
+  (`inpcom.c:1864`) and means files using only `\r` would parse
+  as a single physical line. Convert legacy files before feeding
+  them in. See `tests/edge_inputs.rs::bare_cr_line_endings` and
+  `tests/edge_inputs.rs::lone_cr_in_middle_of_line`.
+- **Dangling `+` continuation at unusual positions.** A `+`
+  continuation line with nothing to continue (e.g. as the first
+  non-title line of a file, or immediately after a `*@` block
+  annotation) is parsed as a code line whose first token is `+`,
+  producing an `ElementKind::Other` element with refdes `"+"`.
+  Benign in practice but visible to downstream passes; emit
+  error/warning diagnostics here once the parser has policy
+  support for them. See
+  `tests/edge_inputs.rs::continuation_at_start_of_file` and
+  `tests/edge_inputs.rs::continuation_after_block_annotation_only`.
+- **Numeric overflow is silent.** Values beyond `f64::MAX` parse
+  to `Value::Number(f64::INFINITY)` (matching ngspice's
+  `INPevaluate`). Downstream emitters should guard with
+  `is_finite()` when serialising. See
+  `tests/edge_inputs.rs::number_overflow_input`.
+- **Tag span semantics.** Trailing-tag (`;@…`) spans cover the
+  entire byte range from the leading `;@` marker through to the
+  next `;` or end-of-line. When two `;@` tags share a line (e.g.
+  `R1 a b 1k ;@ symbol=Device:R ;@ place=right-of V1`), the first
+  tag's span ends just before the second `;`, including any
+  trailing whitespace. Diagnostic renderers using these spans
+  highlight the marker bytes; if a tighter "value-only" highlight
+  is desired, slice the body manually. See
+  `tests/spans.rs::tag_span_simple` and
+  `tests/spans.rs::tag_span_multiple_on_one_line`.
 
 ## Layout invariants
 

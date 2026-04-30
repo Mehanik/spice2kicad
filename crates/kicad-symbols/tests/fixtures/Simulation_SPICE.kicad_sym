@@ -20,4 +20,54 @@
         (length 2.54)
         (name "-")
         (number "2"))))
+  (symbol "ESOURCE"
+    (pin_names (offset 0))
+    (symbol "ESOURCE_0_1"
+      (circle (center 0 0) (radius 1.27)))
+    (symbol "ESOURCE_1_1"
+      (pin passive line
+        (at 0 5.08 270)
+        (length 2.54)
+        (name "N+")
+        (number "1"))
+      (pin passive line
+        (at 0 -5.08 90)
+        (length 2.54)
+        (name "N-")
+        (number "2"))
+      (pin passive line
+        (at -5.08 0 0)
+        (length 2.54)
+        (name "C+")
+        (number "3"))
+      (pin passive line
+        (at 5.08 0 180)
+        (length 2.54)
+        (name "C-")
+        (number "4"))))
+  (symbol "GSOURCE"
+    (pin_names (offset 0))
+    (symbol "GSOURCE_0_1"
+      (circle (center 0 0) (radius 1.27)))
+    (symbol "GSOURCE_1_1"
+      (pin passive line
+        (at 0 5.08 270)
+        (length 2.54)
+        (name "N+")
+        (number "1"))
+      (pin passive line
+        (at 0 -5.08 90)
+        (length 2.54)
+        (name "N-")
+        (number "2"))
+      (pin passive line
+        (at -5.08 0 0)
+        (length 2.54)
+        (name "C+")
+        (number "3"))
+      (pin passive line
+        (at 5.08 0 180)
+        (length 2.54)
+        (name "C-")
+        (number "4"))))
 )

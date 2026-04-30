@@ -86,7 +86,12 @@ fn run(cli: &Cli) -> Result<()> {
     let file_id = sources.add(cli.input.clone(), source.clone());
 
     let netlist = match spice_parser::parse(&source, file_id) {
-        Ok(n) => n,
+        Ok(outcome) => {
+            if !surface_diags(&outcome.diagnostics, &sources) {
+                std::process::exit(1);
+            }
+            outcome.netlist
+        }
         Err(diags) => {
             surface_diags(&diags, &sources);
             std::process::exit(1);

@@ -550,6 +550,11 @@ fn resolve_lib_id(
         ElementKind::Subckt => {
             "subckt instances (`X…`) require an explicit `;@ symbol=` tag".to_owned()
         }
+        ElementKind::Cccs | ElementKind::Ccvs | ElementKind::MutualInductance => {
+            "current-controlled sources (F/H) and mutual inductance (K) have no canonical \
+             KiCad symbol; supply `;@ symbol=Lib:Name` (and `;@ pinmap=…` if needed)"
+                .to_owned()
+        }
         ElementKind::Other => "no built-in default for this element kind".to_owned(),
         _ => "no built-in default and no matching annotation".to_owned(),
     })
@@ -566,7 +571,13 @@ fn default_lib_id(kind: ElementKind) -> Option<&'static str> {
         ElementKind::Jfet => "Device:Q_NJFET_GDS",
         ElementKind::VoltageSrc => "Simulation_SPICE:VDC",
         ElementKind::CurrentSrc => "Simulation_SPICE:IDC",
-        ElementKind::Subckt | ElementKind::Other => return None,
+        ElementKind::Vcvs => "Simulation_SPICE:ESOURCE",
+        ElementKind::Vccs => "Simulation_SPICE:GSOURCE",
+        ElementKind::Subckt
+        | ElementKind::MutualInductance
+        | ElementKind::Cccs
+        | ElementKind::Ccvs
+        | ElementKind::Other => return None,
     })
 }
 
