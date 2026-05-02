@@ -23,6 +23,7 @@
 
 #![forbid(unsafe_code)]
 
+mod archetype;
 pub mod cost;
 mod solver;
 
@@ -174,7 +175,15 @@ pub fn place_with(
     library: &Library,
     opts: &LayoutOptions,
 ) -> Result<Placement, Vec<Diagnostic>> {
-    let (mut placement, pinned) = place_seed(&checked)?;
+    let (mut placement, mut pinned) = place_seed(&checked)?;
+    // V6: overlay topology archetype seeds (if any matched) on top of
+    // the stage-1 placement before the V5 orientation pass runs. The
+    // archetype owns the *origins* of its matched elements; V5 still
+    // chooses orientations against neighbours that aren't pinned.
+    let seeds = archetype::detect_and_seed(&checked);
+    if !seeds.is_empty() {
+        archetype::apply_seeds(&mut placement, &mut pinned, &seeds);
+    }
     pick_orientations(&mut placement, &pinned, &checked);
     if !opts.refine {
         return Ok(placement);
