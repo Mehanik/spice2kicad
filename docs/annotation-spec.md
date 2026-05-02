@@ -308,6 +308,17 @@ override constraints from earlier phases.
 4. **Auto-fill** — anything still unconstrained is laid out by the
    default heuristic (force-directed within the parent cluster).
 
+Orientation (rotation / mirror) is **not** part of the user-facing
+annotation language in v0.1. The placer chooses orientation
+automatically as a sub-step of phases 3 and 4, after positions are
+fixed: for each pair of adjacent elements that share a net, it picks
+the orientation pair that minimises the Manhattan distance between
+the two pin positions on that net (CLAUDE.md invariant V5). The
+search space is the eight rotation-and-mirror states of each symbol;
+ties are broken by source order. A future `;@ orientation=…`
+directive (§9 deferred) would override the auto-choice when the
+heuristic picks a poor orientation.
+
 A constraint that references an unknown refdes is a **hard error**
 (E001), not a warning, because silent typos defeat the purpose of the
 spec.
@@ -471,6 +482,15 @@ Two caveats:
   producing real schematics and we can survey what actually fires.
 - **Bus / vector notation alignment** — deferred until the parser
   learns bus syntax.
+- **User-controlled orientation override** (`;@ orientation=…` —
+  e.g. `0`, `90`, `180`, `270`, optionally with a `mirror=` flag).
+  The placer auto-chooses orientation per CLAUDE.md V5; an override
+  is only useful when the auto-choice picks badly. Defer until the
+  auto-orientation is good enough that overrides are the
+  exception. Adding it earlier would invite users to over-specify
+  geometry — exactly the failure mode core principle 3 ("no
+  geometry numbers in user input") guards against. Promote when a
+  real file demonstrates a layout the auto-orienter cannot reach.
 - **`align` under mixed orientation** — the spec does not
   currently say which pin's coordinate is shared when aligned
   parts are rotated differently. Likely resolutions: (a) require

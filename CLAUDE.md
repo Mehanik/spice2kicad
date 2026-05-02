@@ -269,6 +269,29 @@ below describe intent.
   emitted `(label …)` / `(global_label …)` nodes and asserts no
   net name occurs more than twice on the same sheet.
 
+- **V5 — Pin-facing orientation.** For any two adjacent placed
+  elements that share a net, the placer must choose orientations
+  (rotation / mirror) such that the pins on the shared net are the
+  closest pair — i.e. the chosen orientations minimise the
+  Manhattan distance between the two pin positions on the shared
+  net, subject to the grid (1.27 mm) and 90°-rotation /
+  mirror-only orientation set (ADR-3). Default identity orientation
+  for every element is the current behaviour and is the symptom
+  this invariant exists to flag: it puts R1's `out` pin and V1's
+  `out` pin on opposite sides of the layout, forcing a long
+  trunk wire across the schematic
+  (`/tmp/spice2kicad-demo/rc_lowpass/rc_lowpass.kicad_sch`).
+  This is a *quality* metric, not a hard correctness invariant —
+  a wire-routed schematic with bad orientations is still
+  electrically correct, just ugly. Verified by a wire-length test:
+  for each two-element internal net, the total emitted `(wire …)`
+  length on that net is bounded by a small multiple of the larger
+  symbol's bounding-box diagonal (a fixture-specific threshold,
+  e.g. ≤ 30 mm for `rc_lowpass`'s `out` net — see
+  `crates/spice2kicad/tests/placement_quality.rs`). Lives
+  downstream of `crates/spice-layout/src/` (the placer chooses
+  orientation; the router measures the consequence).
+
 ## When changing the annotation spec
 
 The spec is the user-facing contract. Treat changes as you would
