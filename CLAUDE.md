@@ -292,6 +292,49 @@ below describe intent.
   downstream of `crates/spice-layout/src/` (the placer chooses
   orientation; the router measures the consequence).
 
+- **V6 — Topology-aware placement.** When the resolved netlist
+  matches a recognised analog topology archetype (common-emitter
+  amplifier, common-source amplifier, differential pair, current
+  mirror, voltage divider, RC filter ladder, op-amp inverting /
+  non-inverting, …), the placer must position the matched
+  subgraph per a built-in template that mirrors how the topology
+  is *traditionally drawn*. Concretely:
+    - **Power rails run horizontally**: positive supply
+      (`*@power`-marked sources, `Vcc`/`Vdd`) at the top, ground
+      (net `0` and `.global`) at the bottom of the matched
+      subgraph's bounding box.
+    - **Signal flows left-to-right.** Designated input nets sit
+      on the left, output nets on the right; intermediate stages
+      between them.
+    - **Bias networks cluster on the input side** of the active
+      device they bias (base bias divider sits to the left of the
+      BJT, gate bias to the left of the FET, etc.).
+    - **Decoupling and bypass capacitors sit beside their
+      associated active device** (emitter-bypass cap next to the
+      emitter resistor, supply-decoupling cap next to the rail it
+      decouples), not floating in a separate cluster.
+  Like V5 this is a **quality** invariant, not a correctness one
+  — a force-directed hairball is electrically valid but unreadable;
+  V6 is what makes the output recognisable as the schematic an
+  engineer would draw by hand. V6 *builds on* V5: V5 ensures
+  pins on a shared net face each other; V6 ensures the components
+  themselves are placed in the conventional positions in the
+  first place.
+  Verifier: a structural test on each archetype fixture. For the
+  common-emitter fixture (`tests/fixtures/common_emitter.cir`,
+  refdes `Q1`, `R1`/`R2` base divider, `RC` collector, `RE`
+  emitter, `CE` bypass, `CIN`/`COUT` AC coupling) it asserts
+  (a) at least two distinct Y bands corresponding to Vcc-rail and
+  GND-rail elements (RC's top and RE's bottom are not coplanar
+  with Q1's centre); (b) Q1 sits vertically between RC (above)
+  and RE (below); (c) signal-flow X-ordering
+  `VIN.x < CIN.x < Q1.x < COUT.x`. Scope: V6 is a v0.2+ direction
+  — v0.1 may emit a correct but topology-blind layout even with
+  V5 satisfied. The archetype matcher is expected to grow inside
+  `crates/spice-layout/src/` (a new pass between policy
+  resolution and the existing four placement phases — see
+  annotation spec §5).
+
 ## When changing the annotation spec
 
 The spec is the user-facing contract. Treat changes as you would

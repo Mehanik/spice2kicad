@@ -14,6 +14,14 @@
 //!   the shared net are the closest pair. The verifier sums emitted
 //!   `(wire …)` segment lengths on a target net and asserts the total
 //!   stays under a fixture-specific threshold.
+//! * **V6** — topology-aware placement (CLAUDE.md § Visual quality
+//!   invariants V6). When the netlist matches a recognised analog
+//!   archetype (common-emitter amp, diff pair, …), elements are placed
+//!   per a template: rails horizontal, signal flows left-to-right,
+//!   bias network on the input side, bypass caps next to their device.
+//!   Verifiers extract per-element `(at x y)` from the emitted
+//!   `(symbol …)` instances and assert structural relations between
+//!   refdeses (Q1 between RC and RE on Y; VIN < CIN < Q1 < COUT on X).
 //!
 //! Tests that fail against the current placer are `#[ignore]`d with a
 //! pointer to the relevant CLAUDE.md section.
@@ -275,6 +283,158 @@ fn smoke_wire_segments_extracts_endpoints() {
     assert_eq!(segs.len(), 2);
     assert_eq!(segs[0], ((1.0, 2.0), (3.0, 4.0)));
     assert_eq!(segs[1], ((5.0, 6.0), (7.0, 8.0)));
+}
+
+// --- element position helpers (V6) ---------------------------------------
+
+/// Position of a placed `(symbol …)` instance whose `Reference` property
+/// matches `refdes`, in millimetres.
+///
+/// The emitter writes one top-level `(symbol (lib_id …) (at x y rot)
+/// … (property "Reference" "<refdes>" …))` per placed element. We scan
+/// those and return the first match.
+fn element_position(root: &Value, refdes: &str) -> Option<Pt> {
+    for sym in children(root, "symbol") {
+        // Skip `lib_symbols` entries: those are nested inside a parent
+        // `(lib_symbols …)` list and are handled by `children` only when
+        // we descend into it. Top-level instance symbols always carry
+        // `(at …)` directly.
+        let Some(at) = find_child(sym, "at") else {
+            continue;
+        };
+        // Find the Reference property.
+        let mut found_ref = None;
+        for prop in children(sym, "property") {
+            let mut it = list_iter(prop);
+            it.next(); // head "property"
+            let key = it.next().and_then(as_str);
+            let val = it.next().and_then(as_str);
+            if key == Some("Reference") {
+                found_ref = val.map(str::to_owned);
+                break;
+            }
+        }
+        if found_ref.as_deref() != Some(refdes) {
+            continue;
+        }
+        let mut it = list_iter(at);
+        it.next(); // head "at"
+        let x = it.next().and_then(as_f64)?;
+        let y = it.next().and_then(as_f64)?;
+        return Some((x, y));
+    }
+    None
+}
+
+fn element_x(root: &Value, refdes: &str) -> Option<f64> {
+    element_position(root, refdes).map(|(x, _)| x)
+}
+
+fn element_y(root: &Value, refdes: &str) -> Option<f64> {
+    element_position(root, refdes).map(|(_, y)| y)
+}
+
+// --- V6: common_emitter topology-aware placement -------------------------
+
+const V6_HINT: &str = "V6: placer treats elements generically; needs an \
+    archetype matcher (see CLAUDE.md \u{a7} Visual quality invariants V6)";
+
+#[test]
+#[ignore = "V6: placer treats elements generically; needs archetype matcher \
+    (see CLAUDE.md \u{a7} Visual quality invariants V6)"]
+fn v6_common_emitter_rails_horizontal() {
+    // The conventional CE amp has a Vcc rail above Q1 and a GND rail
+    // below it, so RC (collector resistor, hangs from Vcc) and
+    // RE / CE (emitter pair, drop to GND) must sit at distinctly
+    // different Y values from Q1. The current placer puts everything on
+    // one horizontal line, so all three Ys are equal and this test fails.
+    let sch = emit("common_emitter");
+    let root = parse_sch(&sch);
+
+    let q_y = element_y(&root, "Q1").expect("Q1 placed");
+    let collector_y = element_y(&root, "RC").expect("RC placed");
+    let emitter_r_y = element_y(&root, "RE").expect("RE placed");
+    let bypass_y = element_y(&root, "CE").expect("CE placed");
+
+    // RC must be above (smaller y, since KiCad y grows downward) and
+    // RE/CE below. Use a small tolerance to ignore mm rounding.
+    let tol = 0.5;
+    assert!(
+        collector_y + tol < q_y,
+        "{V6_HINT}: expected RC above Q1 (rc.y={collector_y:.2} < q1.y={q_y:.2})"
+    );
+    assert!(
+        emitter_r_y > q_y + tol,
+        "{V6_HINT}: expected RE below Q1 (re.y={emitter_r_y:.2} > q1.y={q_y:.2})"
+    );
+    assert!(
+        bypass_y > q_y + tol,
+        "{V6_HINT}: expected CE below Q1 (ce.y={bypass_y:.2} > q1.y={q_y:.2})"
+    );
+}
+
+#[test]
+#[ignore = "V6: placer treats elements generically; needs archetype matcher \
+    (see CLAUDE.md \u{a7} Visual quality invariants V6)"]
+fn v6_common_emitter_signal_flow_ordering() {
+    // Signal flows left-to-right: AC-coupling input cap, BJT, output
+    // cap. Refdeses come from `tests/fixtures/common_emitter.cir`.
+    // (`VIN` itself is `;@ ignore`d in the fixture and therefore not
+    // emitted as a placed symbol — the input chain starts at CIN.)
+    let sch = emit("common_emitter");
+    let root = parse_sch(&sch);
+
+    let cin_x = element_x(&root, "CIN").expect("CIN placed");
+    let q_x = element_x(&root, "Q1").expect("Q1 placed");
+    let cout_x = element_x(&root, "COUT").expect("COUT placed");
+
+    assert!(
+        cin_x < q_x,
+        "{V6_HINT}: expected CIN.x ({cin_x:.2}) < Q1.x ({q_x:.2})"
+    );
+    assert!(
+        q_x < cout_x,
+        "{V6_HINT}: expected Q1.x ({q_x:.2}) < COUT.x ({cout_x:.2})"
+    );
+}
+
+#[test]
+#[ignore = "V6: placer treats elements generically; needs archetype matcher \
+    (see CLAUDE.md \u{a7} Visual quality invariants V6)"]
+fn v6_common_emitter_q1_central() {
+    // Q1 must sit vertically between RC (collector resistor, above) and
+    // RE (emitter resistor, below) — a strictly weaker form of the
+    // rails-horizontal test, kept separate as a focused verifier of the
+    // "BJT-in-the-middle" template invariant.
+    let sch = emit("common_emitter");
+    let root = parse_sch(&sch);
+
+    let q_y = element_y(&root, "Q1").expect("Q1 placed");
+    let collector_y = element_y(&root, "RC").expect("RC placed");
+    let emitter_r_y = element_y(&root, "RE").expect("RE placed");
+
+    assert!(
+        collector_y < q_y && q_y < emitter_r_y,
+        "{V6_HINT}: expected RC.y ({collector_y:.2}) < Q1.y ({q_y:.2}) < RE.y ({emitter_r_y:.2})"
+    );
+}
+
+// --- framework smoke tests for the V6 helpers ----------------------------
+
+#[test]
+fn smoke_element_position_finds_by_reference_property() {
+    let src = r#"(kicad_sch
+        (symbol (lib_id "Device:R_US") (at 10 20 0)
+            (property "Reference" "R1" (at 10 20 0))
+            (property "Value" "1k" (at 10 20 0)))
+        (symbol (lib_id "Device:C") (at 30 40 0)
+            (property "Reference" "C1" (at 30 40 0))
+            (property "Value" "1u" (at 30 40 0))))"#;
+    let v: Value = lexpr::from_str(src).unwrap();
+    assert_eq!(element_position(&v, "R1"), Some((10.0, 20.0)));
+    assert_eq!(element_x(&v, "C1"), Some(30.0));
+    assert_eq!(element_y(&v, "C1"), Some(40.0));
+    assert_eq!(element_position(&v, "Q9"), None);
 }
 
 #[test]

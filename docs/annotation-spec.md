@@ -302,10 +302,22 @@ override constraints from earlier phases.
    `.include` boundaries (visual clusters).
 2. **Aligned** — every `align` directive fixes both the shared axis
    and the order along the free axis (declaration order).
-3. **Placed** — every `place` directive on an element not already
-   constrained by `align`. Within this phase, source order wins on
-   conflict (`W101`).
-4. **Auto-fill** — anything still unconstrained is laid out by the
+3. **Topology-matched** *(v0.2+; not implemented in v0.1)* — the
+   resolved netlist is matched against a built-in library of analog
+   archetype templates (common-emitter / common-source amplifier,
+   differential pair, current mirror, voltage divider, RC ladder,
+   inverting / non-inverting op-amp, …). When a subgraph matches an
+   archetype, its members are positioned per the archetype's
+   template (rails horizontal, signal flow left-to-right, bias
+   network on the input side, bypass caps beside their active
+   device — see CLAUDE.md invariant V6). Members already pinned by
+   phases 1–2 are *not* moved; the archetype templates fill in
+   relative positions for everything else in the matched subgraph.
+   Subgraphs that match no archetype fall through unchanged.
+4. **Placed** — every `place` directive on an element not already
+   constrained by `align` or by a matched archetype. Within this
+   phase, source order wins on conflict (`W101`).
+5. **Auto-fill** — anything still unconstrained is laid out by the
    default heuristic (force-directed within the parent cluster).
 
 Orientation (rotation / mirror) is **not** part of the user-facing
@@ -497,6 +509,23 @@ Two caveats:
   uniform orientation within an `align` block, warn otherwise;
   (b) define a canonical pin per element kind. Defer until a real
   file demonstrates the need.
+- **Archetype library** — concrete set of built-in topology
+  templates that the phase-3 *Topology-matched* pass (§5)
+  recognises and positions. Candidate archetypes: common-emitter
+  amp, common-source amp, common-base / common-gate, differential
+  pair, current mirror, cascode, voltage divider, RC low/high-pass
+  ladder, op-amp inverting and non-inverting, Schmitt trigger.
+  Each template specifies the element *roles* (active device,
+  bias network, supply rail, signal-coupling cap, load) and the
+  relative positions those roles occupy in the conventional
+  drawing. Defer the concrete template set until V6 implementation
+  begins; current fixtures cover common-emitter
+  (`tests/fixtures/common_emitter.cir`) and the differential-pair
+  fixture is the next planned addition. A future
+  `;@ ignore-archetype` (or similarly named) trailing tag would
+  let the user opt a sub-network out of matching when the
+  template picks a layout the user dislikes — defer until matching
+  is real and a real file demonstrates the need.
 - **Round-trip from KiCad back to annotations** (so manual sheet
   edits survive a re-conversion) — needs a stable element-to-symbol
   identity scheme first.
