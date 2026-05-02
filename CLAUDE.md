@@ -335,6 +335,42 @@ below describe intent.
   resolution and the existing four placement phases — see
   annotation spec §5).
 
+- **V7 — Symmetry-aware placement.** When the placer detects a
+  structural symmetry in the netlist — a refdes pairing under which
+  the resolved netlist is graph-isomorphic, modulo node renames —
+  elements in mirrored pairs must be placed at mirrored coordinates
+  about a single common axis (vertical or horizontal), with mirrored
+  orientation. The classic motivating fixture is the symmetric
+  astable multivibrator (`tests/fixtures/multivibrator.cir`): the
+  pairing `Q1↔Q2, RC1↔RC2, RB1↔RB2, C1↔C2` makes the netlist
+  isomorphic to itself, and the conventional schematic mirrors the
+  whole circuit about a vertical axis through its centre, making the
+  cross-coupling visible as two diagonal wires. V7 *builds on* V6:
+  many archetype templates (differential pair, current mirror,
+  long-tailed pair, multivibrator) have symmetry baked in, but V7
+  applies more broadly — any subgraph whose graph automorphism
+  group is non-trivial benefits.
+  Verifier: a structural test on the multivibrator fixture that,
+  with `axis_x = (Q1.x + Q2.x) / 2`, asserts (a)
+  `|RC1.x - axis_x| == |RC2.x - axis_x|`,
+  `|RB1.x - axis_x| == |RB2.x - axis_x|`,
+  `|C1.x  - axis_x| == |C2.x  - axis_x|`
+  (each within one grid cell, 1.27 mm), about the **same** axis;
+  (b) each mirrored pair shares its Y coordinate (the symmetry axis
+  is vertical, so `Q1.y == Q2.y`, `RC1.y == RC2.y`, …); (c) Q1 and
+  Q2 carry mirrored orientations — same rotation, but exactly one
+  of the two has a `(mirror y)` token in its `(symbol …)` instance
+  (so the BJT arrows point toward each other). Today's placer
+  arranges the eight elements left-to-right with equal stride,
+  which makes *pairwise* distances equal but does **not** put the
+  pairs on a common axis (RB1/RB2 and C1/C2 sit far to the right
+  of the Q axis), so verifier (a) fails by roughly one cell width
+  per pair. Scope: v0.2+ quality metric. The symmetry detector is
+  expected to live in `crates/spice-layout/src/`, alongside (and
+  composing with) the V6 archetype matcher — likely as an extra
+  pass that runs after archetype matching and before phase 4
+  auto-fill (annotation spec §5).
+
 ## When changing the annotation spec
 
 The spec is the user-facing contract. Treat changes as you would

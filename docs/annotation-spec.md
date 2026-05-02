@@ -314,6 +314,16 @@ override constraints from earlier phases.
    phases 1–2 are *not* moved; the archetype templates fill in
    relative positions for everything else in the matched subgraph.
    Subgraphs that match no archetype fall through unchanged.
+   This phase also performs **symmetry detection** as a sub-step:
+   when a non-trivial refdes pairing makes the resolved netlist
+   graph-isomorphic to itself (modulo node renames), members of
+   each mirrored pair are co-positioned about a common axis with
+   mirrored orientation. The classic case is the symmetric astable
+   multivibrator (CLAUDE.md invariant V7). Symmetry detection
+   composes with archetype matching — many archetypes (diff pair,
+   current mirror, multivibrator) imply symmetry, and detected
+   symmetry is exploited for any remaining roles the archetype
+   template did not pin.
 4. **Placed** — every `place` directive on an element not already
    constrained by `align` or by a matched archetype. Within this
    phase, source order wins on conflict (`W101`).
@@ -526,6 +536,18 @@ Two caveats:
   let the user opt a sub-network out of matching when the
   template picks a layout the user dislikes — defer until matching
   is real and a real file demonstrates the need.
+- **Symmetry hints** — `;@ symmetric-with=…` (or similarly named)
+  trailing tag to override or guide the auto-detector when it picks
+  the wrong pairing or misses a non-obvious one. Defer until
+  auto-detection proves insufficient on real circuits. The
+  motivating fixture (`tests/fixtures/multivibrator.cir`) is
+  detectable from topology alone.
+- **Symmetry detection algorithm** — graph-isomorphism over the
+  resolved netlist, with refdes-class equivalence (same SPICE
+  prefix and value tier) as the equivalence relation on candidate
+  pairings. Concrete algorithm and tie-breaking rules are deferred;
+  the current bar for auto-detection is the multivibrator fixture
+  (CLAUDE.md invariant V7).
 - **Round-trip from KiCad back to annotations** (so manual sheet
   edits survive a re-conversion) — needs a stable element-to-symbol
   identity scheme first.

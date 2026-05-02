@@ -437,6 +437,157 @@ fn smoke_element_position_finds_by_reference_property() {
     assert_eq!(element_position(&v, "Q9"), None);
 }
 
+// --- V7: symmetry-aware placement (multivibrator) ------------------------
+
+const V7_HINT: &str = "V7: placer does not detect circuit symmetry; needs \
+    graph-isomorphism matcher (see CLAUDE.md \u{a7} Visual quality \
+    invariants V7)";
+
+/// Orientation of a placed `(symbol …)` instance: `(rotation_degrees,
+/// mirrored)`. The KiCad emitter writes rotation as the third number
+/// inside `(at x y rot)`, and (when mirrored) emits a separate
+/// `(mirror x)` or `(mirror y)` token. Returns `None` if no instance
+/// matches `refdes`.
+fn element_orientation(root: &Value, refdes: &str) -> Option<(f64, Option<String>)> {
+    for sym in children(root, "symbol") {
+        let Some(at) = find_child(sym, "at") else {
+            continue;
+        };
+        let mut found_ref = None;
+        for prop in children(sym, "property") {
+            let mut it = list_iter(prop);
+            it.next();
+            let key = it.next().and_then(as_str);
+            let val = it.next().and_then(as_str);
+            if key == Some("Reference") {
+                found_ref = val.map(str::to_owned);
+                break;
+            }
+        }
+        if found_ref.as_deref() != Some(refdes) {
+            continue;
+        }
+        let mut it = list_iter(at);
+        it.next();
+        it.next(); // x
+        it.next(); // y
+        let rotation = it.next().and_then(as_f64).unwrap_or(0.0);
+        let mirror = find_child(sym, "mirror")
+            .and_then(|m| list_iter(m).nth(1).and_then(as_str).map(str::to_owned));
+        return Some((rotation, mirror));
+    }
+    None
+}
+
+// Tolerance for "mirrored about a common axis": one KiCad grid cell
+// (1.27 mm). Today's placer arranges the eight emitted elements
+// left-to-right with equal stride (one cell per slot), so RB and C
+// pairs sit ~8.89 mm = 7 grid cells off the Q1/Q2 axis — well above
+// the threshold. A real symmetric layout reuses the Q axis for all
+// four pairs and lands them within a fraction of a cell.
+const V7_AXIS_TOLERANCE_MM: f64 = 1.27;
+
+/// Asserts both elements of a pair sit at mirrored x-distances about
+/// `axis_x`, within [`V7_AXIS_TOLERANCE_MM`].
+fn assert_x_symmetric(root: &Value, axis_x: f64, left: &str, right: &str) {
+    let lx = element_x(root, left).unwrap_or_else(|| panic!("{left} placed"));
+    let rx = element_x(root, right).unwrap_or_else(|| panic!("{right} placed"));
+    let dl = (lx - axis_x).abs();
+    let dr = (rx - axis_x).abs();
+    let delta = (dl - dr).abs();
+    assert!(
+        delta <= V7_AXIS_TOLERANCE_MM,
+        "{V7_HINT}: pair ({left}, {right}) not mirrored about x={axis_x:.2}: \
+         |{left}.x - axis| = {dl:.2}, |{right}.x - axis| = {dr:.2}, \
+         delta = {delta:.2} mm > {V7_AXIS_TOLERANCE_MM:.2} mm"
+    );
+}
+
+#[test]
+#[ignore = "V7: placer does not detect circuit symmetry; needs graph-isomorphism \
+    matcher (see CLAUDE.md \u{a7} Visual quality invariants V7)"]
+fn v7_multivibrator_x_symmetry() {
+    // Multivibrator pairs (from tests/fixtures/multivibrator.cir):
+    // Q1↔Q2, RC1↔RC2, RB1↔RB2, C1↔C2 — all mirrored about the
+    // vertical axis through Q1/Q2's midpoint.
+    let sch = emit("multivibrator");
+    let root = parse_sch(&sch);
+    let q1x = element_x(&root, "Q1").expect("Q1 placed");
+    let q2x = element_x(&root, "Q2").expect("Q2 placed");
+    let axis_x = f64::midpoint(q1x, q2x);
+
+    assert_x_symmetric(&root, axis_x, "RC1", "RC2");
+    assert_x_symmetric(&root, axis_x, "RB1", "RB2");
+    assert_x_symmetric(&root, axis_x, "C1", "C2");
+}
+
+#[test]
+#[ignore = "V7: placer does not detect circuit symmetry; needs graph-isomorphism \
+    matcher (see CLAUDE.md \u{a7} Visual quality invariants V7)"]
+fn v7_multivibrator_y_alignment() {
+    // Vertical symmetry axis ⇒ each mirrored pair shares its Y.
+    let sch = emit("multivibrator");
+    let root = parse_sch(&sch);
+
+    let tol = V7_AXIS_TOLERANCE_MM;
+    for (a, b) in [("Q1", "Q2"), ("RC1", "RC2"), ("RB1", "RB2"), ("C1", "C2")] {
+        let ay = element_y(&root, a).unwrap_or_else(|| panic!("{a} placed"));
+        let by = element_y(&root, b).unwrap_or_else(|| panic!("{b} placed"));
+        assert!(
+            (ay - by).abs() <= tol,
+            "{V7_HINT}: pair ({a}, {b}) not coplanar in Y: \
+             {a}.y = {ay:.2}, {b}.y = {by:.2}, delta = {:.2} mm",
+            (ay - by).abs()
+        );
+    }
+}
+
+#[test]
+#[ignore = "V7: placer does not detect circuit symmetry; needs graph-isomorphism \
+    matcher (see CLAUDE.md \u{a7} Visual quality invariants V7)"]
+fn v7_multivibrator_orientation_mirrored() {
+    // Q1 and Q2 must carry mirrored orientations: same rotation, but
+    // exactly one of the two has a `(mirror y)` token so the BJT
+    // arrows point toward each other. Today both are emitted with
+    // identity orientation (rot=0, no mirror), so this test fails.
+    let sch = emit("multivibrator");
+    let root = parse_sch(&sch);
+
+    let (q1_rot, q1_mirror) = element_orientation(&root, "Q1").expect("Q1 placed");
+    let (q2_rot, q2_mirror) = element_orientation(&root, "Q2").expect("Q2 placed");
+
+    assert!(
+        (q1_rot - q2_rot).abs() < 1e-6,
+        "{V7_HINT}: Q1 and Q2 must share rotation for a clean Y-mirror; \
+         got Q1.rot = {q1_rot}, Q2.rot = {q2_rot}"
+    );
+    let q1_mirrored_y = q1_mirror.as_deref() == Some("y");
+    let q2_mirrored_y = q2_mirror.as_deref() == Some("y");
+    assert!(
+        q1_mirrored_y ^ q2_mirrored_y,
+        "{V7_HINT}: exactly one of Q1, Q2 must carry `(mirror y)`; \
+         got Q1.mirror = {q1_mirror:?}, Q2.mirror = {q2_mirror:?}"
+    );
+}
+
+// --- framework smoke tests for the V7 helpers ----------------------------
+
+#[test]
+fn smoke_element_orientation_reads_rotation_and_mirror() {
+    let src = r#"(kicad_sch
+        (symbol (lib_id "Device:Q_NPN_BCE") (at 10 20 0)
+            (property "Reference" "Q1" (at 10 20 0)))
+        (symbol (lib_id "Device:Q_NPN_BCE") (at 30 20 0) (mirror y)
+            (property "Reference" "Q2" (at 30 20 0)))
+        (symbol (lib_id "Device:R_US") (at 5 5 90)
+            (property "Reference" "R1" (at 5 5 90))))"#;
+    let v: Value = lexpr::from_str(src).unwrap();
+    assert_eq!(element_orientation(&v, "Q1"), Some((0.0, None)));
+    assert_eq!(element_orientation(&v, "Q2"), Some((0.0, Some("y".into()))));
+    assert_eq!(element_orientation(&v, "R1"), Some((90.0, None)));
+    assert_eq!(element_orientation(&v, "Nope"), None);
+}
+
 #[test]
 fn smoke_label_positions_filters_by_net_name() {
     let src = r#"(kicad_sch
