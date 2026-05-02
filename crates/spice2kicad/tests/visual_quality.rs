@@ -471,7 +471,6 @@ fn v2_diff_pair() {
     run_v2("diff_pair");
 }
 #[test]
-#[ignore = "V2: hierarchical sheet emits dangling hierarchical_labels (label_dangling errors); fix per CLAUDE.md \u{00a7} Visual quality invariants V2 (connect subckt port labels)"]
 fn v2_opamp_inverting() {
     run_v2("opamp_inverting");
 }

@@ -141,19 +141,41 @@ pub fn emit_child_sheet(child: &ChildSheet<'_>, library: &Library) -> Result<Str
         lib_symbols(child.placement, library),
     ];
 
+    // Determine which subckt ports are actually consumed by a body
+    // element. A port is "used" if any body element has a node whose
+    // name matches the port name — in that case the body's
+    // pin-emitted global_label of the same name carries the
+    // connectivity, and a colocated global_label by the hierarchical
+    // label keeps the port-side endpoint on the same net. An unused
+    // port (e.g. a power rail wired straight through the sheet)
+    // would otherwise leave the hierarchical_label dangling, so we
+    // attach a `(no_connect …)` to mark the non-connection
+    // deliberate and keep ERC clean.
+    let used_ports: BTreeSet<&str> = child
+        .placement
+        .elements
+        .iter()
+        .flat_map(|el| el.nodes.iter().map(String::as_str))
+        .collect();
+
     // Place hierarchical labels off to the left of the body, on grid,
-    // one row per port. The exact location is irrelevant for
-    // connectivity (the labels share their net via name with the body
-    // global_label of the same port-name), but distinct positions stop
-    // KiCad from collapsing them into one symbol.
+    // one row per port. Distinct positions stop KiCad from collapsing
+    // them into one symbol.
     for (i, port) in child.ports.iter().enumerate() {
         #[allow(clippy::cast_precision_loss)]
         let y = -(i as f64) * 5.08;
         items.push(hierarchical_label(port, -25.4, y));
-        // A co-located global label so the port name is part of the
-        // child's connectivity graph even when no body element happens
-        // to use that exact net name (e.g. an unused port).
-        items.push(global_label_simple(port, -25.4, y, &child.name, i));
+        if used_ports.contains(port.as_str()) {
+            // Colocated global_label joins the port to the body's
+            // own global_labels (which the pin emitter places at body
+            // pin coordinates) by net name.
+            items.push(global_label_simple(port, -25.4, y, &child.name, i));
+        } else {
+            // Port is exposed by the parent but unused by the body.
+            // Mark the hierarchical_label endpoint as a deliberate
+            // no-connect so ERC doesn't flag it as dangling.
+            items.push(no_connect(-25.4, y, &child.name, i));
+        }
     }
 
     for el in &child.placement.elements {
@@ -316,6 +338,19 @@ fn hierarchical_label(text: &str, x: f64, y: f64) -> Sexpr {
                 atom("font"),
                 list(vec![atom("size"), atom("1.27"), atom("1.27")]),
             ]),
+        ]),
+        list(vec![atom("uuid"), qstring(&uuid)]),
+    ])
+}
+
+fn no_connect(x: f64, y: f64, scope: &str, idx: usize) -> Sexpr {
+    let uuid = Uuid::new_v5(&UUID_NAMESPACE, format!("nc:{scope}:{idx}").as_bytes()).to_string();
+    list(vec![
+        atom("no_connect"),
+        list(vec![
+            atom("at"),
+            atom(&format_coord(x)),
+            atom(&format_coord(y)),
         ]),
         list(vec![atom("uuid"), qstring(&uuid)]),
     ])
