@@ -144,6 +144,18 @@ preserved verbatim in netlist output.
 The net `0` (and any net declared with `.global`) is automatically
 rendered as a ground symbol — no annotation needed.
 
+### 3.2 Numeric value normalization
+
+Element values that are numeric (`100n`, `4.7k`, `1e-6`,
+`0.000001`) are normalized to a `f64` at parse time
+(`Value::Number` in `spice_parser::ast`). The schematic emitter
+re-formats that `f64` to an SI-suffixed string (`100n`, `4.7k`,
+`1u`) when writing the symbol's `Value` property — see CLAUDE.md
+invariant V9 for the suffix table, mantissa rules, and verifier.
+Non-numeric values (model names, `DC 15`, brace expressions like
+`{2*RBASE}`) parse as `Value::String` / `Value::Expr` and pass
+through verbatim.
+
 ---
 
 ## 4. Directives
@@ -610,3 +622,12 @@ Two caveats:
 - **Round-trip from KiCad back to annotations** (so manual sheet
   edits survive a re-conversion) — needs a stable element-to-symbol
   identity scheme first.
+- **User-controlled value-formatting policy** —
+  `*@value-format=spice|si|raw` directive (block, file-scoped) to
+  override the SI-suffix output policy. `spice` would re-emit the
+  source token; `si` is the v0.1 default per CLAUDE.md V9; `raw`
+  would emit `format!("{n}")` decimals. Defer until a real user
+  asks; the v0.1 emitter unconditionally applies the SI-suffix
+  formatter described in §3.2 / V9. A trailing-tag form
+  (`;@ value-format=…`) on individual elements is also possible
+  but adds the same complexity for no current user benefit.

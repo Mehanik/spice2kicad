@@ -414,6 +414,70 @@ below describe intent.
   is the explicit-override floor; V6's archetype matcher is the
   zero-annotation ceiling.
 
+- **V9 — SI-suffixed value formatting.** Every `(property "Value"
+  "<text>")` emitted for a placeable element whose SPICE value
+  parsed as a numeric `f64` (i.e. `Value::Number(_)` from
+  `spice_parser::ast`) MUST be rendered with the SI prefix that
+  yields the shortest reasonable representation, not as a raw
+  decimal. Today's emitter writes `format!("{n}")` (see
+  `format_value` in `crates/spice-layout/src/lib.rs`, commit
+  `22cb630`), producing schematics where C1 = 100n shows up as
+  `0.0000001` and a 100 µF cap as `0.00009999999999999999`. Both
+  are unreadable and bear no relation to how SPICE source or KiCad
+  conventionally express the same value.
+    - **Suffix table.** Pick the suffix whose multiplier brings the
+      mantissa into `[1, 1000)`:
+      `1e-15→f`, `1e-12→p`, `1e-9→n`, `1e-6→u` (ASCII; renderers
+      may substitute `µ` for display), `1e-3→m`, none, `1e3→k`,
+      `1e6→Meg` (matches SPICE — `M` alone means milli),
+      `1e9→G`, `1e12→T`. Values outside `[1e-15, 1e15)` fall back
+      to `format!("{n:e}")`.
+    - **Mantissa formatting.** Up to three significant digits;
+      trim trailing zeros and a trailing `.`. `1.0e-6` → `1u`;
+      `4.7e3` → `4.7k`; `1e-4` → `100u` (not `0.1m` — keep the
+      mantissa ≥ 1 where a smaller suffix is available); `1.5e6`
+      → `1.5Meg`.
+    - **Unit suffix.** v0.1 emits the SI prefix only — no
+      trailing `F` / `H` / `Ω`. SPICE source rarely writes them
+      and the refdes (`R*`/`C*`/`L*`) already encodes the unit;
+      adding them now is noise. Documented as a project policy,
+      not a hard restriction; a future spec directive
+      (`*@value-format=…`, see annotation-spec §9) may opt back
+      in.
+    - **Edge cases.**
+      `0.0` → `"0"` (no suffix).
+      Negative numerics carry the sign through the same formatter
+      (`-0.015` → `"-15m"`).
+      `NaN` / `±Inf` → emit the `format!("{n}")` text and raise a
+      diagnostic (code TBD; reuse the overflow path from
+      `tests/edge_inputs.rs::number_overflow_input`).
+      Non-numeric values (`Value::String`, `Value::Expr` — model
+      names like `QGENERIC`, `DC 15`, brace expressions like
+      `{2*RBASE}`) pass through verbatim. The formatter only
+      touches `Value::Number(_)`.
+    - **Verifier.** For each `(symbol …)` instance whose refdes
+      starts with `R`, `C`, or `L`, parse the `(property "Value"
+      "<text>")` argument and assert it matches
+      `^-?(0|[0-9]{1,3}(\.[0-9]{1,2})?)(f|p|n|u|m|k|Meg|G|T)?$`.
+      The unit-letter (`F`/`H`/`Ω`) is intentionally excluded per
+      project policy above — extending the regex is a v0.2
+      decision tracked under spec §9. Verifier lives at
+      `crates/spice2kicad/tests/visual_quality.rs` (or a sibling
+      `value_formatting.rs` if that file gets crowded).
+    - **Out of scope.** V9 governs only the on-schematic `Value`
+      property text. The SPICE netlist exporter and the round-trip
+      canonicalizer (`tests/common/mod.rs::normalize_value`) are
+      separate concerns — the canonicalizer already collapses
+      `4k7`, `4.7k`, and `4700` into the same equivalence class
+      for topology comparison.
+    - **Where to implement.** Replace the `Value::Number(n) =>
+      format!("{n}")` arm in
+      `crates/spice-layout/src/lib.rs::format_value`. That helper
+      is the single chokepoint between parser-side `f64` and
+      emitter-side string and already feeds every
+      `(property "Value" …)` write in
+      `crates/kicad-emitter/src/schematic.rs`.
+
 ## When changing the annotation spec
 
 The spec is the user-facing contract. Treat changes as you would
