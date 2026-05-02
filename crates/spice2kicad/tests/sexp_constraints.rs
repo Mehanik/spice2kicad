@@ -220,7 +220,7 @@ fn off_grid_position_panics() {
 }
 
 #[test]
-#[should_panic(expected = "mixed orientation")]
+#[should_panic(expected = "incompatible orientation")]
 fn assert_aligned_horizontal_mixed_orientation_panics() {
     let bad = r#"
         (kicad_sch (version 20231120) (generator t)

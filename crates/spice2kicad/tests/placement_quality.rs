@@ -497,8 +497,6 @@ fn assert_x_symmetric(root: &Value, axis_x: f64, left: &str, right: &str) {
 }
 
 #[test]
-#[ignore = "V7: placer does not detect circuit symmetry; needs graph-isomorphism \
-    matcher (see CLAUDE.md \u{a7} Visual quality invariants V7)"]
 fn v7_multivibrator_x_symmetry() {
     // Multivibrator pairs (from tests/fixtures/multivibrator.cir):
     // Q1↔Q2, RC1↔RC2, RB1↔RB2, C1↔C2 — all mirrored about the
@@ -515,8 +513,6 @@ fn v7_multivibrator_x_symmetry() {
 }
 
 #[test]
-#[ignore = "V7: placer does not detect circuit symmetry; needs graph-isomorphism \
-    matcher (see CLAUDE.md \u{a7} Visual quality invariants V7)"]
 fn v7_multivibrator_y_alignment() {
     // Vertical symmetry axis ⇒ each mirrored pair shares its Y.
     let sch = emit("multivibrator");
@@ -536,8 +532,6 @@ fn v7_multivibrator_y_alignment() {
 }
 
 #[test]
-#[ignore = "V7: placer does not detect circuit symmetry; needs graph-isomorphism \
-    matcher (see CLAUDE.md \u{a7} Visual quality invariants V7)"]
 fn v7_multivibrator_orientation_mirrored() {
     // Q1 and Q2 must carry mirrored orientations: same rotation, but
     // exactly one of the two has a `(mirror y)` token so the BJT

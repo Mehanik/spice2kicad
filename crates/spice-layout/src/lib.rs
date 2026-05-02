@@ -26,6 +26,7 @@
 mod archetype;
 pub mod cost;
 mod solver;
+mod symmetry;
 
 pub use solver::LayoutOptions;
 
@@ -183,6 +184,15 @@ pub fn place_with(
     let seeds = archetype::detect_and_seed(&checked);
     if !seeds.is_empty() {
         archetype::apply_seeds(&mut placement, &mut pinned, &seeds);
+    }
+    // V7: detect structural symmetry in the netlist and mirror paired
+    // elements about a common vertical axis. Runs after V6 archetype
+    // seeding so the axis is computed from a topology-aware base
+    // layout when one exists, and before V5 orientation so the pinned
+    // pair geometry guides the orientation chooser for the rest of
+    // the circuit.
+    if let Some(plan) = symmetry::detect_pairs(&checked) {
+        symmetry::apply(&mut placement, &mut pinned, &plan);
     }
     pick_orientations(&mut placement, &pinned, &checked);
     if !opts.refine {

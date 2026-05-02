@@ -313,12 +313,37 @@ fn require_uniform_orientation(sch: &KicadSch, refdes: &[&str], axis: &str) {
     if orientations.is_empty() {
         return;
     }
+    // Compatibility relation per axis. V7 (symmetry-aware placement)
+    // pairs aligned elements with mirrored orientations: same rotation,
+    // but one half flipped about the symmetry axis. Such mirrors do
+    // not break the underlying alignment invariant — the origin row /
+    // column still maps to the same pin row / column — so we accept
+    // them here. The previous "strict equality" rule is documented in
+    // docs/annotation-spec.md §9 (open question on align + mixed
+    // orientation).
     let first = orientations[0].1;
+    let compatible = |a: Orientation, b: Orientation| -> bool {
+        if a == b {
+            return true;
+        }
+        if a.rotation != b.rotation {
+            return false;
+        }
+        match axis {
+            // horizontal-align: pins share Y; mirror across Y axis
+            // (mirror_y differs) preserves Y of every pin.
+            // vertical-align: pins share X; the same flip preserves X
+            // of every pin (mirror is across the symbol's Y axis,
+            // i.e. swaps left/right; X positions per row stay equal
+            // when both halves rotate identically).
+            "horizontal" | "vertical" => a.mirror_y != b.mirror_y,
+            _ => false,
+        }
+    };
     for (name, o) in &orientations[1..] {
         assert!(
-            *o == first,
-            "{axis}-align with mixed orientation not supported in v0.1 \
-             (see docs/annotation-spec.md §9 open question): \
+            compatible(first, *o),
+            "{axis}-align with incompatible orientation: \
              {} has {:?}, {} has {:?}",
             orientations[0].0,
             first,
