@@ -371,6 +371,49 @@ below describe intent.
   pass that runs after archetype matching and before phase 4
   auto-fill (annotation spec §5).
 
+- **V8 — Standard symbol mapping for subckts.** A SPICE `.subckt`
+  whose top-level instantiation `X<n>` carries a `*@symbol <lib_id>`
+  directive (either as a trailing `;@ symbol=…` tag on the X line
+  or as a block `*@symbol <lib_id> for=X<n>` directive) renders that
+  single library symbol at the placement, with `pinmap=` mapping the
+  subckt port order to the symbol's pin numbers (or names). The
+  `.subckt` body is treated as a SPICE-side simulation model only —
+  it is **not** emitted as a hierarchical sheet, no child
+  `<subckt>.kicad_sch` file is written, and no `(sheet …)` block
+  appears on the parent. The default behaviour for a `.subckt` with
+  no `*@symbol` override on its instances is unchanged: each
+  top-level `X<n>` becomes a hierarchical sheet (commit `4a9f062`
+  feat(parser): wire pipeline end-to-end through placed-symbol
+  emitter). V8 is a *refinement* of that default — the user opts in
+  per X instance (or per subckt definition via `for=`).
+  Motivating fixture: `tests/fixtures/opamp_inverting.cir` today
+  emits `OPAMP.kicad_sch` as a child sheet with a single VCVS inside;
+  `tests/fixtures/opamp_inverting_real.cir` adds
+  `*@symbol Amplifier_Operational:OPAMP for=X1 pinmap=…` and expects
+  a real triangle symbol on the parent instead.
+  Today the resolver's `has_explicit_symbol_tag` only inspects
+  trailing `Tag::Symbol(_)` tags on the element itself
+  (`crates/spice-resolve/src/lib.rs`); block `*@symbol … for=X1`
+  matches the resolver's per-element symbol resolution but does
+  **not** suppress the `SheetInstance` routing decision that runs
+  before symbol resolution. Closing this gap is the V8 work.
+  Verifier: parse the resulting parent `.kicad_sch` and assert
+  (a) a `(symbol …)` instance with the requested `lib_id` (e.g.
+  `Amplifier_Operational:OPAMP`) at refdes `X1`; (b) NO
+  `(sheet …)` block named after the subckt on the parent; (c) NO
+  `<subckt>.kicad_sch` file written into the output directory; (d)
+  the symbol's pin world positions are wired (or labelled per V4)
+  to the same parent-sheet nets that X1's terminals reference in
+  SPICE. Verifier lives at
+  `crates/spice2kicad/tests/symbol_mapping.rs`.
+  Interaction with V6 (topology archetypes): once V6 ships, the
+  archetype matcher can recognise canonical opamp subckt patterns
+  (single VCVS or two-pole with port names like
+  `inp inn vcc vee out` / `+ - V+ V- OUT`) and auto-promote them
+  to the standard symbol without the user writing `*@symbol`. V8
+  is the explicit-override floor; V6's archetype matcher is the
+  zero-annotation ceiling.
+
 ## When changing the annotation spec
 
 The spec is the user-facing contract. Treat changes as you would

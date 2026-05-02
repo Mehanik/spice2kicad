@@ -192,6 +192,39 @@ case-insensitive.
 *@symbol Device:R_PHOTO for=R10    # exception, comes later → wins for R10
 ```
 
+**Targeting `.subckt` instances (`X<n>`).** A `symbol` directive may
+target a SPICE subcircuit instance — either as a trailing tag on the
+`X<n>` line or via `for=X<n>` (or a glob like `for=XU*`). When it
+does, the converter emits the named library symbol at X1's
+placement *instead of* a hierarchical sheet referencing the
+matching `.subckt` body. The `.subckt` definition is then treated
+as a SPICE-side simulation model: it round-trips through any
+emitted netlist but contributes no schematic geometry. This is the
+mechanism for rendering an op-amp `.subckt` as a real
+`Amplifier_Operational:*` triangle, a comparator `.subckt` as a
+`Comparator:*` symbol, a logic-gate macro as the conventional gate
+shape, and so on. Without a targeting `symbol` directive the
+default behaviour is unchanged — each top-level `X<n>` becomes a
+hierarchical sheet (CLAUDE.md V8).
+
+```
+*@symbol Amplifier_Operational:OPAMP for=X1 pinmap=1:3,2:2,3:1,4:8,5:4
+.subckt OPAMP inp inn out vcc vee
+E1 out 0 inp inn 1e5
+.ends
+X1 0 inv out vcc vee OPAMP
+```
+
+The `pinmap=` value uses the same syntax described in §4.2; for
+`X<n>` instances the SPICE indices refer to the `.subckt` port list
+in the order it was declared (`inp`=1, `inn`=2, `out`=3, `vcc`=4,
+`vee`=5 in the example above). KiCad pin references on the
+right-hand side may be numbers or names exactly as for any other
+element. (Implementation status: trailing `;@ symbol=` on `X<n>`
+already overrides sheet emission today; the `for=X<n>` block form
+is being introduced as an additive extension. Until it lands, the
+trailing-tag form is the only working override.)
+
 ### 4.2 `pinmap` — terminal remapping
 
 ```
@@ -212,6 +245,15 @@ M1 d g s b NMOS L=…  ;@ symbol=Foo:Q_NMOS_GDS pinmap=1:2,2:1,3:3,4:4
 * Diode by pin name (KiCad uses A/K, not 1/2):
 D1 a k DMOD          ;@ symbol=Device:D pinmap=1:A,2:K
 ```
+
+For `.subckt` instances (§4.1, "Targeting `.subckt` instances"),
+the SPICE indices refer to the *port positions* in the matching
+`.subckt PORTNAME …` declaration rather than to terminals on a
+SPICE primitive. The KiCad-side syntax is unchanged. A future
+extension may accept port names on the left-hand side
+(`pinmap=inp:3,inn:2,…`) for readability; v0.1 keeps the
+positional `<spice_index>:<kicad_pin>` form for both primitives
+and `X<n>` instances to avoid two parallel grammars.
 
 ### 4.3 `place` — relative position
 
@@ -548,6 +590,23 @@ Two caveats:
   pairings. Concrete algorithm and tie-breaking rules are deferred;
   the current bar for auto-detection is the multivibrator fixture
   (CLAUDE.md invariant V7).
+- **Auto-detect well-known subckt patterns** (op-amp, comparator,
+  logic gate, voltage reference, BJT pair, …) and suggest the
+  standard KiCad symbol without an explicit `*@symbol` directive on
+  the instance. The matcher would inspect the `.subckt` body
+  (single VCVS, two-pole opamp model, canonical port names like
+  `inp inn vcc vee out` or `+ - V+ V- OUT`, …) and offer the
+  conventional `Amplifier_Operational:*` / `Comparator:*` / … as a
+  default that an explicit `;@ symbol=` can still override. Defer
+  until the V6 archetype matcher exists (CLAUDE.md V6, V8) — the
+  same pattern-matching machinery serves both layout templating and
+  symbol promotion. Until then the user opts in per instance via
+  the §4.1 "Targeting `.subckt` instances" mechanism.
+- **Pinmap port-name syntax for `X<n>`** — accept
+  `pinmap=<port_name>:<kicad_pin>` on subckt instances so that
+  `pinmap=inp:3,inn:2,vcc:8,vee:4,out:1` reads as the schematic
+  intent rather than as port-position indices. Defer until the
+  positional form proves error-prone in real files.
 - **Round-trip from KiCad back to annotations** (so manual sheet
   edits survive a re-conversion) — needs a stable element-to-symbol
   identity scheme first.

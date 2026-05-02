@@ -1,0 +1,29 @@
+* Inverting op-amp: gain = -Rf/Rin = -10.
+* Same circuit as opamp_inverting.cir, but the .subckt OPAMP block is
+* a SPICE-side simulation model only — at the schematic level X1 is
+* upgraded to a real KiCad opamp triangle (CLAUDE.md V8).
+*
+* Pinmap maps the .subckt port order (inp inn out vcc vee) onto the
+* generic opamp symbol's pin numbers:
+*   inp -> 3 (+)        vcc -> 8 (V+)
+*   inn -> 2 (-)        vee -> 4 (V-)
+*   out -> 1 (output)
+*@symbol Device:R_US for=R*
+*@symbol Amplifier_Operational:OPAMP for=X1 pinmap=1:3,2:2,3:1,4:8,5:4
+
+.subckt OPAMP inp inn out vcc vee
+* Trivial VCVS model — fine for a topology round-trip.
+E1 out 0 inp inn 1e5
+.ends
+
+VCC vcc 0   DC  15   ;@ power=+15V
+VEE vee 0   DC -15   ;@ power=-15V
+VIN in  0   AC 1     ;@ ignore
+
+RIN in  inv 1k
+RF  inv out 10k
+
+X1  0 inv out vcc vee OPAMP
+
+.ac dec 10 1 1Meg
+.end

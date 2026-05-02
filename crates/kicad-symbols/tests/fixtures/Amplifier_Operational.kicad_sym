@@ -1,0 +1,63 @@
+(kicad_symbol_lib
+  ; Hand-written test fixture for the kicad-symbols crate.
+  ; Minimal generic op-amp symbol used by the V8 invariant tests
+  ; (CLAUDE.md § Visual quality invariants V8 — Standard symbol
+  ; mapping for subckts).
+  ;
+  ; Five pins, all on the 1.27 mm grid:
+  ;   1 = output
+  ;   2 = inverting input  (-)
+  ;   3 = non-inverting input (+)
+  ;   4 = V- (negative supply)
+  ;   8 = V+ (positive supply)   — pin number 8 is the conventional
+  ;                                 single-opamp DIP-8 V+ pin; we keep
+  ;                                 the same numbering so test pinmaps
+  ;                                 read like a real opamp wiring.
+  (version 20231120)
+  (generator "kicad_symbol_editor")
+  (symbol "OPAMP"
+    (pin_names (offset 0.127))
+    (exclude_from_sim no)
+    (in_bom yes)
+    (on_board yes)
+    (property "Reference" "U" (at 0 6.35 0)
+      (effects (font (size 1.27 1.27))))
+    (property "Value" "OPAMP" (at 0 -6.35 0)
+      (effects (font (size 1.27 1.27))))
+    (property "Footprint" "" (at 0 0 0)
+      (effects (font (size 1.27 1.27)) (hide yes)))
+    (property "Datasheet" "~" (at 0 0 0)
+      (effects (font (size 1.27 1.27)) (hide yes)))
+    (property "Description" "Generic operational amplifier" (at 0 0 0)
+      (effects (font (size 1.27 1.27)) (hide yes)))
+    (symbol "OPAMP_0_1"
+      (polyline
+        (pts (xy -5.08 5.08) (xy 5.08 0) (xy -5.08 -5.08) (xy -5.08 5.08))
+        (stroke (width 0.254) (type default))
+        (fill (type background))))
+    (symbol "OPAMP_1_1"
+      (pin output line
+        (at 7.62 0 180)
+        (length 2.54)
+        (name "~" (effects (font (size 1.27 1.27))))
+        (number "1" (effects (font (size 1.27 1.27)))))
+      (pin input line
+        (at -7.62 -2.54 0)
+        (length 2.54)
+        (name "-" (effects (font (size 1.27 1.27))))
+        (number "2" (effects (font (size 1.27 1.27)))))
+      (pin input line
+        (at -7.62 2.54 0)
+        (length 2.54)
+        (name "+" (effects (font (size 1.27 1.27))))
+        (number "3" (effects (font (size 1.27 1.27)))))
+      (pin power_in line
+        (at -2.54 -7.62 90)
+        (length 3.81)
+        (name "V-" (effects (font (size 1.27 1.27))))
+        (number "4" (effects (font (size 1.27 1.27)))))
+      (pin power_in line
+        (at -2.54 7.62 270)
+        (length 3.81)
+        (name "V+" (effects (font (size 1.27 1.27))))
+        (number "8" (effects (font (size 1.27 1.27))))))))
