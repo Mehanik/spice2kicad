@@ -174,11 +174,158 @@ pub fn place_with(
     library: &Library,
     opts: &LayoutOptions,
 ) -> Result<Placement, Vec<Diagnostic>> {
-    let (placement, pinned) = place_seed(&checked)?;
+    let (mut placement, pinned) = place_seed(&checked)?;
+    pick_orientations(&mut placement, &pinned, &checked);
     if !opts.refine {
         return Ok(placement);
     }
     Ok(solver::refine(placement, &pinned, &checked, library, opts))
+}
+
+/// V5: pin-facing orientation pass.
+///
+/// For each element whose origin is **not** pinned by `align` or
+/// `place`, pick the orientation in [`Orientation::ALL`] that
+/// minimises the sum of Manhattan distances over each shared-net pin
+/// pair against neighbours that have already been oriented (in
+/// deterministic index order). Origins are held fixed; only the
+/// orientation varies. Tie-break: prefer [`Orientation::IDENTITY`],
+/// then earlier in [`Orientation::ALL`] — this keeps tests that
+/// assume identity defaults stable when the V5 score is flat.
+///
+/// Elements whose origin is fixed by `align`/`place` keep identity
+/// orientation: their position was solved against identity and
+/// changing it would invalidate the pin-anchored math in
+/// [`solve_place`].
+#[allow(clippy::similar_names)] // ox_i/oy_i, ox_j/oy_j: i/j identify the two elements in a pair.
+fn pick_orientations(placement: &mut Placement, pinned: &[bool], checked: &CheckedNetlist) {
+    let n = placement.elements.len();
+    if n == 0 {
+        return;
+    }
+
+    // Build adjacency: element pairs sharing a non-ground net. We
+    // also remember which (terminal_idx pairs) each adjacency uses,
+    // so the scorer can directly compare connecting-pin world
+    // positions.
+    //
+    // adjacency[i] = Vec<(j, term_i, term_j)>
+    let mut adjacency: Vec<Vec<(usize, usize, usize)>> = vec![Vec::new(); n];
+    // Map net name -> Vec<(element_idx, terminal_idx)>.
+    let mut net_pins: HashMap<&str, Vec<(usize, usize)>> = HashMap::new();
+    for (i, elem) in checked.elements.iter().enumerate() {
+        for (term_idx, node_name) in elem.nodes.iter().enumerate() {
+            if node_name == "0" {
+                continue;
+            }
+            net_pins
+                .entry(node_name.as_str())
+                .or_default()
+                .push((i, term_idx));
+        }
+    }
+    for pins in net_pins.values() {
+        for a in 0..pins.len() {
+            for b in (a + 1)..pins.len() {
+                let (i, ti) = pins[a];
+                let (j, tj) = pins[b];
+                if i == j {
+                    continue;
+                }
+                adjacency[i].push((j, ti, tj));
+                adjacency[j].push((i, tj, ti));
+            }
+        }
+    }
+
+    // Iterate until orientations stabilise or we hit the pass cap.
+    // First pass establishes initial orientations (each element sees
+    // earlier-indexed neighbours' identity defaults); subsequent
+    // passes re-evaluate each element against the now-decided
+    // orientations of its later-indexed neighbours. Two passes are
+    // enough for small fixtures; cap at 8 to bound worst-case cost.
+    let max_passes = 8;
+    for _ in 0..max_passes {
+        let mut changed = false;
+        for i in 0..n {
+            if pinned[i] {
+                continue;
+            }
+            let symbol_i = &checked.elements[i].symbol;
+            let pin_mapping_i = &checked.elements[i].pin_mapping;
+
+            // After the first pass every neighbour has an orientation
+            // worth scoring against. On the first pass, later-indexed
+            // neighbours score against their identity defaults — also
+            // a valid starting point.
+            let neighbours: &[(usize, usize, usize)] = &adjacency[i];
+
+            if neighbours.is_empty() {
+                continue;
+            }
+
+            let mut best: Option<(i64, usize, Orientation)> = None;
+            for (rank, &orient) in Orientation::ALL.iter().enumerate() {
+                let pins_i = symbol_i.pins_in(orient);
+                let (ox_i, oy_i) = placement.elements[i].origin.to_mm();
+                let mut score: f64 = 0.0;
+                for &(j, ti, tj) in neighbours {
+                    let symbol_j = &checked.elements[j].symbol;
+                    let pin_mapping_j = &checked.elements[j].pin_mapping;
+                    let pins_j = symbol_j.pins_in(placement.elements[j].orientation);
+                    let (ox_j, oy_j) = placement.elements[j].origin.to_mm();
+
+                    let Some(kicad_pin_i) = pin_mapping_i.get(ti) else {
+                        continue;
+                    };
+                    let Some(kicad_pin_j) = pin_mapping_j.get(tj) else {
+                        continue;
+                    };
+                    let Some(p_i) = pins_i.iter().find(|p| &p.number == kicad_pin_i) else {
+                        continue;
+                    };
+                    let Some(p_j) = pins_j.iter().find(|p| &p.number == kicad_pin_j) else {
+                        continue;
+                    };
+                    let xi = ox_i + p_i.x;
+                    let yi = oy_i + p_i.y;
+                    let xj = ox_j + p_j.x;
+                    let yj = oy_j + p_j.y;
+                    score += (xi - xj).abs() + (yi - yj).abs();
+                }
+                // Convert to integer (mm * 1000) for stable comparison
+                // and deterministic tie-break. Pin coords are grid-aligned.
+                #[allow(clippy::cast_possible_truncation)]
+                let score_int = (score * 1000.0).round() as i64;
+                let identity_rank = if orient == Orientation::IDENTITY {
+                    0
+                } else {
+                    rank + 1
+                };
+                let candidate = (score_int, identity_rank, orient);
+                let take = match best {
+                    None => true,
+                    Some((bs, br, _)) => {
+                        candidate.0 < bs || (candidate.0 == bs && candidate.1 < br)
+                    }
+                };
+                if take {
+                    best = Some(candidate);
+                }
+            }
+
+            if let Some((_, _, orient)) = best
+                && placement.elements[i].orientation != orient
+            {
+                placement.elements[i].orientation = orient;
+                changed = true;
+            }
+        }
+        // Detect convergence: if no orientation moved this pass we're done.
+        if !changed {
+            break;
+        }
+    }
 }
 
 /// Stage-1 placer body: returns the seed placement plus a per-element

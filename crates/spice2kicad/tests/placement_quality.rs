@@ -227,7 +227,6 @@ fn as_f64(v: &Value) -> Option<f64> {
 const V5_RC_LOWPASS_OUT_MAX_MM: f64 = 30.0;
 
 #[test]
-#[ignore = "V5: placer does not yet choose pin-facing orientations; see CLAUDE.md \u{a7} Visual quality invariants V5 \u{2014} wire from V1.out to R1.out is excessively long because both components keep default orientation"]
 fn v5_rc_lowpass_short_out_wire() {
     let sch = emit("rc_lowpass");
     let root = parse_sch(&sch);

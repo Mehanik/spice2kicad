@@ -757,6 +757,15 @@ fn route_nets(
     nets: &std::collections::BTreeMap<String, Vec<(f64, f64, u16)>>,
     scope: &str,
 ) -> Vec<Sexpr> {
+    // Threshold for the 2-pin direct-route fast-path. Nets with
+    // exactly two pins whose Manhattan distance is at most this
+    // many millimetres skip the channel-and-trunk router and emit
+    // a single segment (collinear) or a 2-segment L (otherwise).
+    // 10 mm comfortably covers adjacent grid-stride placements
+    // (typical default stride is ~7.62 mm) without competing
+    // with the channel router for longer cross-board hauls.
+    const FAST_PATH_MAX_MM: f64 = 10.0;
+
     let mut out: Vec<Sexpr> = Vec::new();
     let mut endpoint_counts: std::collections::HashMap<(i64, i64), usize> =
         std::collections::HashMap::new();
@@ -832,6 +841,56 @@ fn route_nets(
     let mut upper_idx: usize = 0;
 
     for (net_idx, (net, pins)) in multi_nets.iter().enumerate() {
+        // 2-pin fast-path: short, direct route bypassing the
+        // channel router. Avoids the long lead-in + trunk overhead
+        // for adjacent components on shared nets (V5).
+        if pins.len() == 2 {
+            let (x0, y0, _) = pins[0];
+            let (x1, y1, _) = pins[1];
+            let manhattan = (x1 - x0).abs() + (y1 - y0).abs();
+            if manhattan <= FAST_PATH_MAX_MM {
+                if approx_eq(x0, x1) || approx_eq(y0, y1) {
+                    // Collinear: single straight segment.
+                    push_segment(
+                        &mut out,
+                        &mut endpoint_counts,
+                        &mut wire_seq,
+                        x0,
+                        y0,
+                        x1,
+                        y1,
+                        scope,
+                        net,
+                    );
+                } else {
+                    // L-shape via (x1, y0) elbow.
+                    push_segment(
+                        &mut out,
+                        &mut endpoint_counts,
+                        &mut wire_seq,
+                        x0,
+                        y0,
+                        x1,
+                        y0,
+                        scope,
+                        net,
+                    );
+                    push_segment(
+                        &mut out,
+                        &mut endpoint_counts,
+                        &mut wire_seq,
+                        x1,
+                        y0,
+                        x1,
+                        y1,
+                        scope,
+                        net,
+                    );
+                }
+                continue;
+            }
+        }
+
         #[allow(clippy::cast_precision_loss)]
         let trunk_x = trunk_x_base + (net_idx as f64) * 1.27;
 
