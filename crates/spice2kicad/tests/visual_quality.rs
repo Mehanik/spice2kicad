@@ -508,27 +508,22 @@ fn v3_opamp_inverting() {
 // (wire …) segments for internal nets and cap label use at ≤ 2 per
 // per-sheet net.
 #[test]
-#[ignore = "V4: emitter wires nets via global_labels only (no (wire …), > 2 labels per net); fix per CLAUDE.md \u{00a7} Visual quality invariants V4 (emit wire segments, cap labels)"]
 fn v4_rc_lowpass() {
     run_v4("rc_lowpass");
 }
 #[test]
-#[ignore = "V4: emitter wires nets via global_labels only; fix per CLAUDE.md \u{00a7} Visual quality invariants V4"]
 fn v4_common_emitter() {
     run_v4("common_emitter");
 }
 #[test]
-#[ignore = "V4: emitter wires nets via global_labels only; fix per CLAUDE.md \u{00a7} Visual quality invariants V4"]
 fn v4_multivibrator() {
     run_v4("multivibrator");
 }
 #[test]
-#[ignore = "V4: emitter wires nets via global_labels only; fix per CLAUDE.md \u{00a7} Visual quality invariants V4"]
 fn v4_diff_pair() {
     run_v4("diff_pair");
 }
 #[test]
-#[ignore = "V4: emitter wires nets via global_labels only; fix per CLAUDE.md \u{00a7} Visual quality invariants V4"]
 fn v4_opamp_inverting() {
     run_v4("opamp_inverting");
 }

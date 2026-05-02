@@ -1,12 +1,18 @@
 //! Emit a KiCad schematic (`.kicad_sch`) from a [`Placement`].
 //!
 //! For each [`PlacedElement`] the emitter renders one `(symbol …)`
-//! instance plus one `(global_label …)` per terminal at the pin's
-//! world position. KiCad's connectivity engine nets pins together by
-//! shared label name, so this produces a netlist-export-correct
-//! schematic without needing a wire router. Wires, junctions and
-//! aesthetic improvements are a later pass — this layer's contract is
-//! purely "kicad-cli sch export netlist round-trips the topology".
+//! instance. Connectivity between pins on the same SPICE net is
+//! expressed via orthogonal `(wire …)` segments emitted by a
+//! Manhattan dog-leg router (KISS approach: chain pins sorted by
+//! `(x, y)`, connecting consecutive pairs with an L-shape).
+//! `(junction …)` is dropped at any T-intersection (3+ wire endpoints
+//! coincident) so KiCad sees a single connectivity class.
+//!
+//! Per-pin `(global_label …)` for internal connectivity is *not*
+//! emitted — that would violate V4 (≤ 2 labels per net per sheet).
+//! Labels remain only at hierarchical-sheet boundaries (parent-side
+//! sheet pins and child-side hierarchical port labels), each at most
+//! once per net per sheet.
 //!
 //! The schematic also carries a minimal `(lib_symbols)` block: every
 //! `lib_id` referenced by a placed instance gets a stub entry that
@@ -30,7 +36,7 @@ use std::collections::BTreeSet;
 
 use crate::EmitError;
 use crate::sexpr::Sexpr;
-use kicad_symbols::{Library, Orientation, RawSexpr, Rotation, Symbol, TransformedPin};
+use kicad_symbols::{Library, Orientation, RawSexpr, Rotation, Symbol};
 use spice_layout::{PlacedElement, Placement};
 use uuid::Uuid;
 
@@ -99,20 +105,29 @@ pub fn emit_root(
 
     for el in &placement.elements {
         items.push(symbol_instance(el));
-        for label in pin_labels(el, library) {
-            items.push(label);
-        }
     }
 
     // Hierarchical-sheet instances. Each block lives at a unique
     // location on the parent canvas; pin coordinates are derived from
     // the block's origin.
+    let mut extra_pins: Vec<(String, f64, f64)> = Vec::new();
     for (idx, block) in sheets.iter().enumerate() {
-        let (sheet_node, pin_labels) = sheet_block(block, idx);
+        let (sheet_node, pin_labels, sheet_pin_pos) = sheet_block(block, idx);
         items.push(sheet_node);
         for label in pin_labels {
             items.push(label);
         }
+        // Sheet pin positions become extra "pins" on the parent net so
+        // wire routing connects body pins to the sheet block.
+        extra_pins.extend(sheet_pin_pos);
+    }
+
+    let net_pins = collect_net_pins(placement, library, &extra_pins);
+    for routed in route_nets(&net_pins, "root") {
+        items.push(routed);
+    }
+    for label in dangling_pin_labels(&net_pins, "root") {
+        items.push(label);
     }
 
     items.push(list(vec![
@@ -161,15 +176,16 @@ pub fn emit_child_sheet(child: &ChildSheet<'_>, library: &Library) -> Result<Str
     // Place hierarchical labels off to the left of the body, on grid,
     // one row per port. Distinct positions stop KiCad from collapsing
     // them into one symbol.
+    let mut extra_pins: Vec<(String, f64, f64)> = Vec::new();
     for (i, port) in child.ports.iter().enumerate() {
         #[allow(clippy::cast_precision_loss)]
         let y = -(i as f64) * 5.08;
         items.push(hierarchical_label(port, -25.4, y));
         if used_ports.contains(port.as_str()) {
-            // Colocated global_label joins the port to the body's
-            // own global_labels (which the pin emitter places at body
-            // pin coordinates) by net name.
-            items.push(global_label_simple(port, -25.4, y, &child.name, i));
+            // The hierarchical label position becomes an extra pin on
+            // the port net so the wire router connects it to the
+            // body's pins on that same net.
+            extra_pins.push((port.clone(), -25.4, y));
         } else {
             // Port is exposed by the parent but unused by the body.
             // Mark the hierarchical_label endpoint as a deliberate
@@ -180,9 +196,14 @@ pub fn emit_child_sheet(child: &ChildSheet<'_>, library: &Library) -> Result<Str
 
     for el in &child.placement.elements {
         items.push(child_symbol_instance(el, &child.instance_refdeses));
-        for label in pin_labels(el, library) {
-            items.push(label);
-        }
+    }
+
+    let net_pins = collect_net_pins(child.placement, library, &extra_pins);
+    for routed in route_nets(&net_pins, &child.name) {
+        items.push(routed);
+    }
+    for label in dangling_pin_labels(&net_pins, &child.name) {
+        items.push(label);
     }
 
     // Child-sheet-instances: one path entry per parent instance,
@@ -209,7 +230,7 @@ pub fn emit_child_sheet(child: &ChildSheet<'_>, library: &Library) -> Result<Str
 
 /// Render a `(sheet …)` block plus the `(global_label …)` pieces that
 /// pin its port symbols to the parent net coordinates.
-fn sheet_block(block: &SheetBlock, idx: usize) -> (Sexpr, Vec<Sexpr>) {
+fn sheet_block(block: &SheetBlock, idx: usize) -> (Sexpr, Vec<Sexpr>, Vec<(String, f64, f64)>) {
     // Lay out sheets one above the next, leftmost column. Coordinates
     // are arbitrary; KiCad's connectivity engine matches by sheet pin
     // name + colocated label, not by geometry.
@@ -250,6 +271,7 @@ fn sheet_block(block: &SheetBlock, idx: usize) -> (Sexpr, Vec<Sexpr>) {
     // One pin per port, plus a co-located global_label so the parent's
     // SPICE net joins the sheet pin.
     let mut pin_labels: Vec<Sexpr> = Vec::with_capacity(pin_count);
+    let mut pin_positions: Vec<(String, f64, f64)> = Vec::with_capacity(pin_count);
     for (i, port) in block.ports.iter().enumerate() {
         #[allow(clippy::cast_precision_loss)]
         let py = origin_y + 5.08 + (i as f64) * 5.08;
@@ -279,7 +301,13 @@ fn sheet_block(block: &SheetBlock, idx: usize) -> (Sexpr, Vec<Sexpr>) {
                 list(vec![atom("justify"), atom("left")]),
             ]),
         ]));
-        pin_labels.push(global_label_simple(&port.net, px, py, &block.refdes, i));
+        // Note: the sheet pin's connectivity to the parent net is
+        // expressed via wires from `pin_positions` (collected
+        // below). No colocated global_label is emitted — that would
+        // bring the per-net label count above the V4 budget when
+        // combined with dangling_pin_labels' two-marker policy.
+        let _ = (i, &mut pin_labels);
+        pin_positions.push((port.net.clone(), px, py));
     }
 
     sheet_items.push(list(vec![
@@ -295,7 +323,7 @@ fn sheet_block(block: &SheetBlock, idx: usize) -> (Sexpr, Vec<Sexpr>) {
         ]),
     ]));
 
-    (Sexpr::List(sheet_items), pin_labels)
+    (Sexpr::List(sheet_items), pin_labels, pin_positions)
 }
 
 fn sheet_property(name: &str, value: &str, x: f64, y: f64) -> Sexpr {
@@ -652,63 +680,385 @@ fn instances_block(refdes: &str) -> Sexpr {
     ])
 }
 
-/// Emit a `(global_label "<net>" …)` per terminal of `el`, anchored
-/// at the pin's world coordinates. Global labels (rather than local
-/// `label`) are used so that ground (`"0"`) and other shared nets
-/// retain their bare name in the exported netlist instead of being
-/// prefixed with the sheet path. Terminals whose pin number isn't in
-/// the library symbol are skipped silently — that means the symbol
-/// resolution upstream is inconsistent, but the emitter has no good
-/// way to report it here.
-fn pin_labels(el: &PlacedElement, library: &Library) -> Vec<Sexpr> {
-    let Some(symbol) = library.lookup(&el.lib_id) else {
-        return Vec::new();
-    };
-    let pins = symbol.pins_in(el.orientation);
-    let (ox, oy) = el.origin.to_mm();
-    let mut out = Vec::with_capacity(el.nodes.len());
-    for (term_index, (node, kicad_pin)) in el.nodes.iter().zip(el.pin_mapping.iter()).enumerate() {
-        let Some(pin) = pins.iter().find(|p| &p.number == kicad_pin) else {
+/// World-space pin info: `(net, x, y, angle_deg)`. Angle is the pin's
+/// outward direction in `.kicad_sym` (Y-up) convention, after the
+/// placement orientation has been applied.
+type PinPos = (String, f64, f64, u16);
+
+/// Collect the world-space pin positions per SPICE net for a
+/// `Placement` plus any `extra_pins` (hierarchical port labels or
+/// sheet-block pin coordinates). Each entry includes the pin's
+/// outward angle so the router can pick a non-colliding escape
+/// direction; `extra_pins` are given a default angle of 0
+/// (right-pointing) since they sit at hierarchical-label positions
+/// where the label itself extends rightward.
+fn collect_net_pins(
+    placement: &Placement,
+    library: &Library,
+    extra_pins: &[(String, f64, f64)],
+) -> std::collections::BTreeMap<String, Vec<(f64, f64, u16)>> {
+    let mut nets: std::collections::BTreeMap<String, Vec<(f64, f64, u16)>> =
+        std::collections::BTreeMap::new();
+    for el in &placement.elements {
+        let Some(symbol) = library.lookup(&el.lib_id) else {
             continue;
         };
-        // Symbol-local frame is Y-up; schematic file frame is Y-down.
-        let wx = ox + pin.x;
-        let wy = oy - pin.y;
-        out.push(global_label(node, wx, wy, pin, el, term_index));
+        let pins = symbol.pins_in(el.orientation);
+        let (ox, oy) = el.origin.to_mm();
+        for (node, kicad_pin) in el.nodes.iter().zip(el.pin_mapping.iter()) {
+            let Some(pin) = pins.iter().find(|p| &p.number == kicad_pin) else {
+                continue;
+            };
+            // KiCad's .kicad_sym parser negates pin Y on load
+            // (`parseXY(true)` in eeschema/sch_io_kicad_sexpr_parser.h),
+            // and applies an identity transform plus the symbol
+            // origin to get the world position. Net result: the
+            // schematic-file world Y is `symbol_origin_y - file_pin_y`.
+            let wx = ox + pin.x;
+            let wy = oy - pin.y;
+            nets.entry(node.clone())
+                .or_default()
+                .push((wx, wy, pin.angle));
+        }
+    }
+    for (net, x, y) in extra_pins {
+        nets.entry(net.clone()).or_default().push((*x, *y, 0));
+    }
+    let _ = std::marker::PhantomData::<PinPos>;
+    nets
+}
+
+/// Route every net with ≥ 2 pin positions.
+///
+/// Strategy: **per-pin escape + per-net trunk**. Every pin in the
+/// design is given a globally-unique escape distance `esc_p` (one
+/// grid step per pin, in scan order). From pin `(px, py)`:
+///
+///   1. Vertical escape `(px, py) → (px, py + esc_p)` — moves the
+///      route off the pin's own Y row by a per-pin amount, so two
+///      pins on different nets that share `(px, *)` (like a
+///      resistor's two terminals) emit non-overlapping verticals.
+///   2. Horizontal lead-in `(px, py + esc_p) → (trunk_x[N], py + esc_p)`
+///      at a Y unique per pin, so no two horizontals share a Y row.
+///   3. Vertical down to the trunk `(trunk_x[N], py + esc_p) → (trunk_x[N], trunk_y[N])`.
+///
+/// Trunks live in a per-net column-and-row pair `(trunk_x[N], trunk_y[N])`
+/// far below and to the right of the placement. A single horizontal
+/// trunk joins the per-pin endpoints at `trunk_y[N]`.
+///
+/// Because escape lengths are globally unique and trunk coordinates
+/// are per-net unique, no two parallel wires from different nets
+/// overlap. Perpendicular crossings are fine — KiCad only merges
+/// nets at collinear overlaps or explicit junctions.
+///
+/// `(junction …)` is emitted where ≥ 3 wire endpoints coincide.
+#[allow(clippy::too_many_lines, clippy::type_complexity)]
+fn route_nets(
+    nets: &std::collections::BTreeMap<String, Vec<(f64, f64, u16)>>,
+    scope: &str,
+) -> Vec<Sexpr> {
+    let mut out: Vec<Sexpr> = Vec::new();
+    let mut endpoint_counts: std::collections::HashMap<(i64, i64), usize> =
+        std::collections::HashMap::new();
+    let mut wire_seq: usize = 0;
+
+    // Compute extents of the placement.
+    let mut max_y = 0.0_f64;
+    let mut max_x = 0.0_f64;
+    let mut min_x = f64::INFINITY;
+    for pins in nets.values() {
+        for &(x, y, _) in pins {
+            if y > max_y {
+                max_y = y;
+            }
+            if x > max_x {
+                max_x = x;
+            }
+            if x < min_x {
+                min_x = x;
+            }
+        }
+    }
+    // Compute min_y too so the upper channel sits above every pin.
+    let mut min_y = f64::INFINITY;
+    for pins in nets.values() {
+        for &(_, y, _) in pins {
+            if y < min_y {
+                min_y = y;
+            }
+        }
+    }
+    if !min_y.is_finite() {
+        min_y = 0.0;
+    }
+    // Channel base coordinates. Pins whose outward direction is
+    // *upward* (angle 270 in .kicad_sym; visually toward smaller Y
+    // in our Y-down schematic) route to the **upper** channel
+    // above the placement. All other pins route to the **lower**
+    // channel below. Two pins of one component (top + bottom)
+    // therefore escape on opposite sides and never share a vertical
+    // segment.
+    let escape_y_lower = max_y + 5.08;
+    let escape_y_upper = min_y - 5.08;
+    let trunk_x_base = max_x + 5.08;
+
+    // Filter and order multi-pin nets deterministically.
+    let mut multi_nets: Vec<(&String, Vec<(f64, f64, u16)>)> = Vec::new();
+    for (net, pins) in nets {
+        let mut uniq: Vec<(f64, f64, u16)> = Vec::new();
+        for &(x, y, a) in pins {
+            if !uniq
+                .iter()
+                .any(|&(ux, uy, _)| approx_eq(ux, x) && approx_eq(uy, y))
+            {
+                uniq.push((x, y, a));
+            }
+        }
+        if uniq.len() >= 2 {
+            uniq.sort_by(|a, b| {
+                a.0.partial_cmp(&b.0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            });
+            multi_nets.push((net, uniq));
+        }
+    }
+
+    // Globally-unique escape-row counters per channel. Each routed
+    // pin gets its own horizontal escape row (`epy_row`), so no two
+    // pin lead-ins share a Y row in the same channel. Lower channel
+    // rows grow downward; upper channel rows grow upward.
+    let mut lower_idx: usize = 0;
+    let mut upper_idx: usize = 0;
+
+    for (net_idx, (net, pins)) in multi_nets.iter().enumerate() {
+        #[allow(clippy::cast_precision_loss)]
+        let trunk_x = trunk_x_base + (net_idx as f64) * 1.27;
+
+        let mut trunk_ys: Vec<f64> = Vec::with_capacity(pins.len());
+        for &(px, py, angle) in pins {
+            // Pick a channel based on the pin's outward direction.
+            // Pins pointing up in .kicad_sym (angle 270; visually
+            // upward in our Y-down schematic) route via the upper
+            // channel; everything else uses the lower channel. This
+            // splits a component's top + bottom pins onto opposite
+            // sides so their escape verticals never collide.
+            let (epy_row, going_up) = if angle == 270 {
+                upper_idx += 1;
+                #[allow(clippy::cast_precision_loss)]
+                let row = escape_y_upper - (upper_idx as f64) * 1.27;
+                (row, true)
+            } else {
+                lower_idx += 1;
+                #[allow(clippy::cast_precision_loss)]
+                let row = escape_y_lower + (lower_idx as f64) * 1.27;
+                (row, false)
+            };
+            trunk_ys.push(epy_row);
+
+            // Segment 1: vertical from the pin to the escape row.
+            // Direction follows the chosen channel.
+            let _ = going_up;
+            push_segment(
+                &mut out,
+                &mut endpoint_counts,
+                &mut wire_seq,
+                px,
+                py,
+                px,
+                epy_row,
+                scope,
+                net,
+            );
+            // Segment 2: horizontal from (px, epy_row) to
+            // (trunk_x, epy_row). Y is unique per pin so no two
+            // horizontals share a row.
+            push_segment(
+                &mut out,
+                &mut endpoint_counts,
+                &mut wire_seq,
+                px,
+                epy_row,
+                trunk_x,
+                epy_row,
+                scope,
+                net,
+            );
+        }
+        // Trunk: vertical segments at trunk_x between consecutive
+        // (sorted) lead-in row endpoints. All lead-ins for this net
+        // sit at (trunk_x, epy_row) and get tied together into one
+        // connectivity class. Interior endpoints become
+        // T-junctions (1 lead-in + 2 trunk halves = 3 endpoints)
+        // and get a (junction …) emitted below.
+        trunk_ys.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        for pair in trunk_ys.windows(2) {
+            push_segment(
+                &mut out,
+                &mut endpoint_counts,
+                &mut wire_seq,
+                trunk_x,
+                pair[0],
+                trunk_x,
+                pair[1],
+                scope,
+                net,
+            );
+        }
+    }
+    let _ = min_x;
+
+    // Emit junctions at any point where 3+ wire endpoints coincide.
+    let mut junction_pts: Vec<(i64, i64)> = endpoint_counts
+        .iter()
+        .filter(|&(_, &n)| n >= 3)
+        .map(|(&k, _)| k)
+        .collect();
+    junction_pts.sort_unstable();
+    for (kx, ky) in junction_pts {
+        let x = key_to_coord(kx);
+        let y = key_to_coord(ky);
+        out.push(junction(x, y, scope));
     }
     out
 }
 
-fn global_label(
-    text: &str,
-    x: f64,
-    y: f64,
-    pin: &TransformedPin,
-    el: &PlacedElement,
-    term_index: usize,
-) -> Sexpr {
-    // The label's text-rotation angle should match the pin's outward
-    // direction so the label reads away from the symbol body. KiCad
-    // accepts only 0 / 90 / 180 / 270 here.
-    let angle = pin.angle;
+#[allow(clippy::too_many_arguments)]
+fn push_segment(
+    out: &mut Vec<Sexpr>,
+    endpoint_counts: &mut std::collections::HashMap<(i64, i64), usize>,
+    wire_seq: &mut usize,
+    sx: f64,
+    sy: f64,
+    ex: f64,
+    ey: f64,
+    scope: &str,
+    net: &str,
+) {
+    if approx_eq(sx, ex) && approx_eq(sy, ey) {
+        return;
+    }
+    out.push(wire_segment(sx, sy, ex, ey, scope, net, *wire_seq));
+    *wire_seq += 1;
+    *endpoint_counts.entry(coord_key(sx, sy)).or_default() += 1;
+    *endpoint_counts.entry(coord_key(ex, ey)).or_default() += 1;
+}
+
+/// Emit `(global_label "<net>" …)` markers at the pin positions of
+/// each net. The user-supplied SPICE net name (e.g. `0`, `vcc`,
+/// `in`) is preserved in `kicad-cli`'s SPICE export only if at
+/// least one label of that name appears on the schematic; otherwise
+/// kicad-cli synthesises a generic `Net-(...)` name and the
+/// round-trip topology comparator can't recover the original
+/// ground class.
+///
+/// To satisfy V4 (≤ 2 labels per net per sheet) we emit at most two
+/// labels per net: one at the first pin and one at the last (in the
+/// same sorted order the router used). Single-pin nets get one
+/// label, satisfying ERC's "no dangling pin" expectation.
+fn dangling_pin_labels(
+    nets: &std::collections::BTreeMap<String, Vec<(f64, f64, u16)>>,
+    scope: &str,
+) -> Vec<Sexpr> {
+    let mut out = Vec::new();
+    for (idx, (net, pins)) in nets.iter().enumerate() {
+        // Deduplicate coincident pins.
+        let mut uniq: Vec<(f64, f64)> = Vec::new();
+        for &(x, y, _) in pins {
+            if !uniq
+                .iter()
+                .any(|&(ux, uy)| approx_eq(ux, x) && approx_eq(uy, y))
+            {
+                uniq.push((x, y));
+            }
+        }
+        if uniq.is_empty() {
+            continue;
+        }
+        uniq.sort_by(|a, b| {
+            a.0.partial_cmp(&b.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        });
+        let (fx, fy) = uniq[0];
+        out.push(global_label_simple(net, fx, fy, scope, idx * 2));
+        if uniq.len() >= 2 {
+            let (lx, ly) = uniq[uniq.len() - 1];
+            out.push(global_label_simple(net, lx, ly, scope, idx * 2 + 1));
+        }
+    }
+    out
+}
+
+fn approx_eq(a: f64, b: f64) -> bool {
+    (a - b).abs() < 1e-6
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn coord_key(x: f64, y: f64) -> (i64, i64) {
+    (
+        (x * 1_000_000.0).round() as i64,
+        (y * 1_000_000.0).round() as i64,
+    )
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn key_to_coord(k: i64) -> f64 {
+    (k as f64) / 1_000_000.0
+}
+
+fn wire_segment(x1: f64, y1: f64, x2: f64, y2: f64, scope: &str, net: &str, seq: usize) -> Sexpr {
+    let uuid = Uuid::new_v5(
+        &UUID_NAMESPACE,
+        format!("wire:{scope}:{net}:{seq}").as_bytes(),
+    )
+    .to_string();
     list(vec![
-        atom("global_label"),
-        qstring(text),
-        list(vec![atom("shape"), atom("input")]),
+        atom("wire"),
+        list(vec![
+            atom("pts"),
+            list(vec![
+                atom("xy"),
+                atom(&format_coord(x1)),
+                atom(&format_coord(y1)),
+            ]),
+            list(vec![
+                atom("xy"),
+                atom(&format_coord(x2)),
+                atom(&format_coord(y2)),
+            ]),
+        ]),
+        list(vec![
+            atom("stroke"),
+            list(vec![atom("width"), atom("0")]),
+            list(vec![atom("type"), atom("default")]),
+        ]),
+        list(vec![atom("uuid"), qstring(&uuid)]),
+    ])
+}
+
+fn junction(x: f64, y: f64, scope: &str) -> Sexpr {
+    let uuid = Uuid::new_v5(
+        &UUID_NAMESPACE,
+        format!("junction:{scope}:{x}:{y}").as_bytes(),
+    )
+    .to_string();
+    list(vec![
+        atom("junction"),
         list(vec![
             atom("at"),
             atom(&format_coord(x)),
             atom(&format_coord(y)),
-            atom(&angle.to_string()),
         ]),
+        list(vec![atom("diameter"), atom("0")]),
         list(vec![
-            atom("effects"),
-            list(vec![
-                atom("font"),
-                list(vec![atom("size"), atom("1.27"), atom("1.27")]),
-            ]),
+            atom("color"),
+            atom("0"),
+            atom("0"),
+            atom("0"),
+            atom("0"),
         ]),
-        list(vec![atom("uuid"), qstring(&label_uuid(el, term_index))]),
+        list(vec![atom("uuid"), qstring(&uuid)]),
     ])
 }
 
@@ -759,11 +1109,6 @@ fn sheet_uuid() -> String {
 
 fn instance_uuid(el: &PlacedElement) -> String {
     let seed = format!("symbol:{}:{}", el.lib_id, el.refdes);
-    Uuid::new_v5(&UUID_NAMESPACE, seed.as_bytes()).to_string()
-}
-
-fn label_uuid(el: &PlacedElement, term_index: usize) -> String {
-    let seed = format!("label:{}:{}:{}", el.lib_id, el.refdes, term_index);
     Uuid::new_v5(&UUID_NAMESPACE, seed.as_bytes()).to_string()
 }
 
