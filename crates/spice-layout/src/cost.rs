@@ -87,6 +87,9 @@ pub struct CostBreakdown {
     pub layer_order: f64,
     /// Cheap proxy for wire crossings: count of net-bbox cross-pairs across distinct nets.
     pub net_bbox_crossings: f64,
+    /// Sum of (yu - yd)² over each pair of elements whose
+    /// `soft_y_target_frac` orders them but the placement does not.
+    pub band_inversion: f64,
 }
 
 /// Linear-combination weights for [`total`].
@@ -102,6 +105,7 @@ pub struct CostWeights {
     pub soft_y_residual: f64,
     pub layer_order: f64,
     pub net_bbox_crossings: f64,
+    pub band_inversion: f64,
 }
 
 impl CostWeights {
@@ -113,17 +117,22 @@ impl CostWeights {
     pub const DEFAULT: Self = Self {
         crossings: 100.0,
         constraint_violation: 1000.0,
-        overlap: 50.0,
+        overlap: 200.0,
         hpwl: 1.0,
         // not yet tuned — see docs/layout-roadmap.md §7
-        rail_direction: 50.0,
+        rail_direction: 200.0,
         // not yet tuned — see docs/layout-roadmap.md §7
         signal_flow: 25.0,
-        // Stage-3 structural-layered terms (T6).
-        band_misalignment: 10.0,
-        soft_y_residual: 0.5,
-        layer_order: 2.0,
-        net_bbox_crossings: 0.5,
+        // Stage-3 structural-layered terms (T6, calibrated in T8).
+        // soft_y_residual carries the rail-ordering signal in
+        // fixtures with no Top/Bot-only band elements (e.g.
+        // common_emitter — VCC sits in Mid because it touches both
+        // power and ground), so it must dominate HPWL.
+        band_misalignment: 50.0,
+        soft_y_residual: 50.0,
+        layer_order: 20.0,
+        net_bbox_crossings: 4.0,
+        band_inversion: 100.0,
     };
 }
 
@@ -152,6 +161,7 @@ pub fn breakdown(
         soft_y_residual: soft_y_residual(placement, checked),
         layer_order: layer_order(placement, checked),
         net_bbox_crossings: net_bbox_crossings(&nets),
+        band_inversion: band_inversion(placement, checked),
     }
 }
 
@@ -168,6 +178,7 @@ pub fn total(breakdown: &CostBreakdown, weights: &CostWeights) -> f64 {
         + weights.soft_y_residual * breakdown.soft_y_residual
         + weights.layer_order * breakdown.layer_order
         + weights.net_bbox_crossings * breakdown.net_bbox_crossings
+        + weights.band_inversion * breakdown.band_inversion
 }
 
 // ---------------------------------------------------------------------------
@@ -862,6 +873,52 @@ pub fn band_misalignment(
 /// across *Mid-band* elements (not the rails — the soft target lives
 /// inside the Mid window). When fewer than two Mid elements exist the
 /// term is 0 (no span to measure against).
+/// Hard pairwise penalty for band-order inversions: any pair of
+/// elements `(i, j)` where `i`'s `soft_y_target_frac` is meaningfully
+/// smaller than `j`'s but `i.y > j.y` adds `(i.y - j.y)²` to the cost.
+/// This is the *absolute* counterpart to `soft_y_residual`: the
+/// latter pulls each element to its frac-target inside the placement
+/// span (which is a moving reference); this term anchors on
+/// pairwise *ordering*, which is invariant under uniform Y shifts.
+///
+/// "Meaningfully smaller" is defined as a frac difference of at
+/// least 0.1; pairs within that tolerance are not penalised because
+/// they are deliberately allowed to swap (e.g. two Mid 0.5 elements).
+#[must_use]
+pub fn band_inversion(placement: &Placement, checked: &CheckedNetlist) -> f64 {
+    let classes = classify_nets(checked);
+    let band_asg = assign_y_bands(checked, &classes);
+    if placement.elements.len() != band_asg.len() {
+        return 0.0;
+    }
+    let n = placement.elements.len();
+    let mut total = 0.0;
+    let ys: Vec<f64> = placement
+        .elements
+        .iter()
+        .map(|e| e.origin.to_mm().1)
+        .collect();
+    let fracs: Vec<f64> = band_asg.iter().map(|b| b.soft_y_target_frac).collect();
+    for i in 0..n {
+        for j_off in 1..(n - i) {
+            let j = i + j_off;
+            // i should be above j (yi < yj) iff fi < fj. Penalise
+            // only when |fi - fj| > 0.1 (clear ordering required).
+            if (fracs[i] - fracs[j]).abs() < 0.1 {
+                continue;
+            }
+            let (above, below) = if fracs[i] < fracs[j] { (i, j) } else { (j, i) };
+            let yu = ys[above];
+            let yd = ys[below];
+            if yu > yd {
+                let d = yu - yd;
+                total += d * d;
+            }
+        }
+    }
+    total
+}
+
 #[must_use]
 pub fn soft_y_residual(placement: &Placement, checked: &CheckedNetlist) -> f64 {
     let classes = classify_nets(checked);
@@ -871,26 +928,24 @@ pub fn soft_y_residual(placement: &Placement, checked: &CheckedNetlist) -> f64 {
         return 0.0;
     }
 
+    // Self-anchor on the *full* placement Y extent, not just the Mid
+    // sub-band. This stops SA from "drifting" all Mid elements
+    // together to nullify the residual: Power-Signal (frac < 0.5)
+    // is always pulled toward the upper third of the actual canvas,
+    // Ground-Signal (frac > 0.5) toward the lower third.
     let mut y_min = f64::INFINITY;
     let mut y_max = f64::NEG_INFINITY;
-    let mut mid_count = 0_usize;
-    for (pe, ba) in placement.elements.iter().zip(&band_asg) {
-        if ba.band == Band::Mid {
-            let (_, y) = pe.origin.to_mm();
-            if y < y_min {
-                y_min = y;
-            }
-            if y > y_max {
-                y_max = y;
-            }
-            mid_count += 1;
+    for pe in &placement.elements {
+        let (_, y) = pe.origin.to_mm();
+        if y < y_min {
+            y_min = y;
+        }
+        if y > y_max {
+            y_max = y;
         }
     }
-    if mid_count < 2 || !y_min.is_finite() || !y_max.is_finite() {
-        return 0.0;
-    }
     let span = y_max - y_min;
-    if span.abs() < f64::EPSILON {
+    if span.abs() < f64::EPSILON || !y_min.is_finite() {
         return 0.0;
     }
 

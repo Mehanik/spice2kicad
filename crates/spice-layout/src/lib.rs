@@ -469,42 +469,99 @@ fn pick_orientations(placement: &mut Placement, pinned: &[bool], checked: &Check
 /// initial grid coordinates from `(band, layer, rank_in_layer)`. User
 /// `align`/`place`/`power` directives then override the heuristic seed
 /// via [`apply_user_constraints`], which pins the affected elements.
+/// Y-band sub-slot used for band-aware seed stacking.
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+enum Slot {
+    Top,
+    MidUp,
+    MidCtr,
+    MidLo,
+    Bot,
+}
+
 fn place_seed(checked: &CheckedNetlist) -> Result<(Placement, Vec<bool>), Vec<Diagnostic>> {
     use crate::bands::{Band, assign_y_bands};
     use crate::layers::assign_x_layers;
     use crate::net_class::classify_nets;
 
     // Geometry constants in grid cells (1.27 mm each).
-    const X_STRIDE: i32 = 5; // grid cells per layer column
-    const Y_BAND_GAP: i32 = 4; // gap from rail edge into Mid band
-    const Y_RANK_STRIDE: i32 = 2; // vertical step per rank within layer
+    const X_STRIDE: i32 = 6; // grid cells per layer column
+    const Y_BAND_GAP: i32 = 6; // gap from rail edge into Mid band
+    const Y_RANK_STRIDE: i32 = 6; // vertical step per rank within layer
 
     let n = checked.elements.len();
     let classes = classify_nets(checked);
     let band_asg = assign_y_bands(checked, &classes);
     let layer_asg = assign_x_layers(checked, &classes);
 
-    // Total Y span sized to fit n elements with rail headroom.
+    // Group elements per (layer, band) for band-aware Y stacking.
+    // Within a layer, Top elements stack tightly at the top, Bot at
+    // the bottom, and Mid is sub-grouped by `soft_y_target_frac`
+    // class (≤ 0.4: upper-Mid, ≥ 0.6: lower-Mid, else centre).
+    // This ordering preserves rail-above-Mid-above-rail without
+    // letting `rank_in_layer` drift Power-only elements past
+    // Ground-only ones (V6/T8).
+    let n_i32 = i32::try_from(n).unwrap_or(i32::MAX);
     let y_top: i32 = 0;
-    let y_bot: i32 = (i32::try_from(n).unwrap_or(i32::MAX) + 2) * Y_RANK_STRIDE;
+    let y_bot: i32 = (n_i32 + 4) * Y_RANK_STRIDE;
     let y_mid_top = y_top + Y_BAND_GAP;
     let y_mid_bot = y_bot - Y_BAND_GAP;
-    let y_mid_span = (y_mid_bot - y_mid_top).max(1);
 
+    // Buckets: within a layer, classify each element into one of
+    // five bands (Top, MidUp, MidCtr, MidLo, Bot) and stack within
+    // bucket. Three Mid sub-buckets keep Power-Signal above Signal
+    // above Ground-Signal even when the longest-path layering put
+    // them in the same column.
+    let mut element_slot: Vec<Slot> = Vec::with_capacity(n);
+    for ba in &band_asg {
+        let s = match ba.band {
+            Band::Top => Slot::Top,
+            Band::Bot => Slot::Bot,
+            Band::Mid => {
+                if ba.soft_y_target_frac < 0.4 {
+                    Slot::MidUp
+                } else if ba.soft_y_target_frac > 0.6 {
+                    Slot::MidLo
+                } else {
+                    Slot::MidCtr
+                }
+            }
+        };
+        element_slot.push(s);
+    }
+
+    // Per-(layer, slot) running rank.
+    let mut bucket_rank: HashMap<(u32, Slot), i32> = HashMap::new();
     let mut placed: Vec<PlacedElement> = Vec::with_capacity(n);
     for (i, e) in checked.elements.iter().enumerate() {
         let layer = i32::try_from(layer_asg.layers[i]).unwrap_or(i32::MAX);
-        let rank = i32::try_from(layer_asg.rank_in_layer[i]).unwrap_or(i32::MAX);
-        let x = layer * X_STRIDE;
-        let y = match band_asg[i].band {
-            Band::Top => y_top,
-            Band::Bot => y_bot,
-            Band::Mid => {
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                let offset =
-                    (f64::from(y_mid_span) * band_asg[i].soft_y_target_frac).round() as i32;
-                y_mid_top + offset + rank * Y_RANK_STRIDE
-            }
+        let slot = element_slot[i];
+        let rank = bucket_rank
+            .entry((layer_asg.layers[i], slot))
+            .and_modify(|r| *r += 1)
+            .or_insert(0);
+        let rank = *rank;
+        // Within a (layer, slot) bucket, alternate elements left/
+        // right of the layer column so multiple elements at the
+        // same Y target don't pile on the same X.
+        let x_jitter = if rank % 2 == 0 {
+            -(rank / 2)
+        } else {
+            (rank + 1) / 2
+        };
+        let x = layer * X_STRIDE + x_jitter * 2;
+
+        // Reserve three sub-rows in Mid: upper / centre / lower.
+        let mid_span = (y_mid_bot - y_mid_top).max(1);
+        let mid_up_y = y_mid_top + mid_span / 4;
+        let mid_ctr_y = y_mid_top + mid_span / 2;
+        let mid_lo_y = y_mid_top + (3 * mid_span) / 4;
+        let y = match slot {
+            Slot::Top => y_top + rank * Y_RANK_STRIDE,
+            Slot::MidUp => mid_up_y + rank * Y_RANK_STRIDE,
+            Slot::MidCtr => mid_ctr_y + rank * Y_RANK_STRIDE,
+            Slot::MidLo => mid_lo_y + rank * Y_RANK_STRIDE,
+            Slot::Bot => y_bot - rank * Y_RANK_STRIDE,
         };
         placed.push(PlacedElement {
             refdes: e.refdes.clone(),
@@ -562,37 +619,46 @@ fn apply_user_constraints(
     let fixed = pinned;
 
     // ---- Phase 2: align ---------------------------------------------------
-    // Each cluster gets its own anchor on the diagonal so clusters do
-    // not collide. Within a cluster, members spread along the cluster
-    // axis at one-cell stride.
+    // Members of an `align horizontal` cluster all take the *first
+    // member's seed Y* (the seed already classifies elements into
+    // bands so this Y is band-correct), and spread along X at one
+    // cluster-stride per member. Symmetric for vertical clusters.
+    // This keeps `align` from dragging an element out of its band
+    // (e.g. multivibrator's `align horizontal Q1 Q2` would otherwise
+    // pin Q1 at the cluster-row Y regardless of band, V6/T8).
     for (cluster_index, spec) in align.iter().enumerate() {
-        // Cluster index `i` starts at `((i+1) * stride, (i+1) * stride)`
-        // — leaving the row/column at (0, 0) free for "default-pinned"
-        // place anchors (see phase 3 below).
         let cluster_index_i32 = i32::try_from(cluster_index + 1).unwrap_or(i32::MAX);
-        let anchor_x = cluster_index_i32 * (CELL_W + CLUSTER_GAP);
-        let anchor_y = cluster_index_i32 * (CELL_H + CLUSTER_GAP);
+        // Take the first cluster member's seed coordinate as the
+        // anchor row/column. (If the first member is itself already
+        // pinned by an earlier cluster, we fall through to its
+        // pinned coord.)
+        let anchor_idx = spec
+            .refdes
+            .iter()
+            .find_map(|r| refdes_to_index.get(r.as_str()).copied());
+        let Some(anchor_idx) = anchor_idx else {
+            continue;
+        };
+        let anchor_x_seed = placed[anchor_idx].origin.x;
+        let row_y_seed = placed[anchor_idx].origin.y;
+        // Stride: one cluster gap per cluster, biased away from
+        // other clusters by `cluster_index` so they don't collide
+        // when seeds happen to coincide.
+        let stride = CELL_W + CLUSTER_GAP;
+        let row_offset = cluster_index_i32 * (CELL_H + CLUSTER_GAP);
         for (member_index, refdes) in spec.refdes.iter().enumerate() {
             let member_index_i32 = i32::try_from(member_index).unwrap_or(i32::MAX);
-            let Some(&idx) = refdes_to_index.get(refdes) else {
-                // Policy pass guarantees every refdes is known; defensive.
+            let Some(&idx) = refdes_to_index.get(refdes.as_str()) else {
                 continue;
             };
             if fixed[idx] {
-                // Earlier `align` already pinned this element; spec
-                // §5 says later phases never override earlier. (And
-                // earlier within the same phase: first-cluster wins
-                // when an element appears in multiple align clusters.)
                 continue;
             }
             let (x, y) = match spec.axis {
-                Axis::Horizontal => (
-                    anchor_x + member_index_i32 * (CELL_W + CLUSTER_GAP),
-                    anchor_y,
-                ),
+                Axis::Horizontal => (anchor_x_seed + member_index_i32 * stride, row_y_seed),
                 Axis::Vertical => (
-                    anchor_x,
-                    anchor_y + member_index_i32 * (CELL_H + CLUSTER_GAP),
+                    anchor_x_seed + row_offset, // small per-cluster X bias
+                    row_y_seed + member_index_i32 * stride,
                 ),
             };
             placed[idx].origin = GridPoint::new(x, y);

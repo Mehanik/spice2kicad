@@ -5,7 +5,7 @@
 //! `LayerAssignment` whose `layers` vec is parallel to `checked.elements`.
 //! Used downstream by the seed placer to assign X coordinates.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use spice_policy::CheckedNetlist;
 use spice_resolve::{ElementKind, ElementRole};
@@ -45,7 +45,7 @@ pub fn assign_x_layers(checked: &CheckedNetlist, classes: &NetClassMap) -> Layer
 
     // --- Step 1: build adjacency via Signal nets ---------------------------
     // net_to_elements[net] = list of element indices on that net
-    let mut net_to_elements: HashMap<&str, Vec<usize>> = HashMap::new();
+    let mut net_to_elements: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (idx, el) in checked.elements.iter().enumerate() {
         for net in &el.nodes {
             if classes
@@ -85,7 +85,75 @@ pub fn assign_x_layers(checked: &CheckedNetlist, classes: &NetClassMap) -> Layer
     }
 
     // --- Step 2: no-source fallback ----------------------------------------
+    // When the netlist has no signal source (e.g. only `;@ power`-
+    // tagged voltage sources or none at all), fall back to a
+    // BFS-based layering rooted at every element that touches a
+    // Power-class net. These are the natural left-edge elements:
+    // bias resistors, collector resistors, AC-coupling inputs.
+    // The result is layer 0 = power-touching elements, layer 1+ =
+    // their signal-net neighbours, and so on. We still set
+    // `no_source_fallback = true` so callers can identify the
+    // fallback path; the layer term in cost is computed from the
+    // resulting structure normally.
     if sources.is_empty() {
+        return no_source_fallback(checked, classes, &net_to_elements, n);
+    }
+    // Step 3-5: directed DAG, longest-path layering.
+    let (dag, feedback_edges) = break_cycles(adj);
+    let layers = longest_path_layers(&dag, &sources, n);
+    let rank_in_layer = rank_by_layer(&layers, n);
+    LayerAssignment {
+        layers,
+        rank_in_layer,
+        feedback_edges,
+        no_source_fallback: false,
+    }
+}
+
+#[allow(clippy::too_many_lines)] // BFS + leaf-net heuristic are conceptually one phase.
+fn no_source_fallback(
+    checked: &CheckedNetlist,
+    classes: &NetClassMap,
+    net_to_elements: &BTreeMap<&str, Vec<usize>>,
+    n: usize,
+) -> LayerAssignment {
+    // Identify "leaf signal nets" — Signal-class nets touched by
+    // exactly one element in the netlist. These are external
+    // boundary points of the signal chain and their connecting
+    // element should sit on the left/right edge of the layout
+    // depending on the net name.
+    //
+    // Convention:
+    //   * `in` / `input` / `vin*` → leftmost (layer 0 root)
+    //   * `out` / `output` / `vout*` → rightmost (terminal sink)
+    //   * any other leaf net → no special handling
+    let mut leaf_input_elements: HashSet<usize> = HashSet::new();
+    let mut leaf_output_elements: HashSet<usize> = HashSet::new();
+    for (net, members) in net_to_elements {
+        if members.len() != 1 {
+            continue;
+        }
+        let lo = net.to_ascii_lowercase();
+        let owner = members[0];
+        if lo == "in" || lo == "input" || lo.starts_with("vin") {
+            leaf_input_elements.insert(owner);
+        } else if lo == "out" || lo == "output" || lo.starts_with("vout") {
+            leaf_output_elements.insert(owner);
+        }
+    }
+
+    let roots: HashSet<usize> = (0..n)
+        .filter(|&i| {
+            if leaf_input_elements.contains(&i) {
+                return true;
+            }
+            checked.elements[i]
+                .nodes
+                .iter()
+                .any(|net| matches!(classes.get(net.as_str()).copied(), Some(NetClass::Power)))
+        })
+        .collect();
+    if roots.is_empty() {
         return LayerAssignment {
             layers: vec![0; n],
             rank_in_layer: (0..u32::try_from(n).unwrap_or(u32::MAX)).collect(),
@@ -93,21 +161,61 @@ pub fn assign_x_layers(checked: &CheckedNetlist, classes: &NetClassMap) -> Layer
             no_source_fallback: true,
         };
     }
-
-    // --- Step 3: break cycles (iterative Tarjan + edge reversal) ----------
-    let (dag, feedback_edges) = break_cycles(adj);
-
-    // --- Step 4: longest-path layering from sources -----------------------
-    let layers = longest_path_layers(&dag, &sources, n);
-
-    // --- Step 5: rank within layer (index order) --------------------------
-    let rank_in_layer = rank_by_layer(&layers, n);
-
+    // Build undirected adjacency on Signal nets.
+    let mut sig_adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for members in net_to_elements.values() {
+        for &u in members {
+            for &v in members {
+                if u != v {
+                    sig_adj[u].push(v);
+                }
+            }
+        }
+    }
+    // BFS from all roots simultaneously.
+    let mut layers_bfs = vec![u32::MAX; n];
+    let mut frontier: Vec<usize> = Vec::new();
+    for &r in &roots {
+        layers_bfs[r] = 0;
+        frontier.push(r);
+    }
+    let mut depth = 0_u32;
+    while !frontier.is_empty() {
+        let mut next: Vec<usize> = Vec::new();
+        for u in &frontier {
+            for &v in &sig_adj[*u] {
+                if layers_bfs[v] == u32::MAX {
+                    layers_bfs[v] = depth + 1;
+                    next.push(v);
+                }
+            }
+        }
+        frontier = next;
+        depth += 1;
+    }
+    // Unreachable elements (no signal path to any root) → put
+    // at layer 0 so they don't tilt the X axis.
+    for layer in &mut layers_bfs {
+        if *layer == u32::MAX {
+            *layer = 0;
+        }
+    }
+    // Push leaf-output elements one layer past their current
+    // assignment, so they sit to the right of the rest of their
+    // signal chain. (CE: COUT touches `c` and `out`. `out` is
+    // a leaf, so COUT shifts past Q1 / RC.)
+    let max_layer = layers_bfs.iter().copied().max().unwrap_or(0);
+    for &i in &leaf_output_elements {
+        if i < n {
+            layers_bfs[i] = layers_bfs[i].max(max_layer) + 1;
+        }
+    }
+    let rank_in_layer = rank_by_layer(&layers_bfs, n);
     LayerAssignment {
-        layers,
+        layers: layers_bfs,
         rank_in_layer,
-        feedback_edges,
-        no_source_fallback: false,
+        feedback_edges: Vec::new(),
+        no_source_fallback: true,
     }
 }
 
@@ -371,7 +479,6 @@ mod tests {
     /// RC low-pass: V1 drives `in`, R1 bridges `in`→`mid`, C1 bridges
     /// `mid`→`0`. Signal flows V1 → R1 → C1. Invariant: strict ordering.
     #[test]
-    #[ignore = "T3: nondeterministic HashMap iteration order in layer assignment makes this flaky; T6/T7 cost+refine pass should make it deterministic"]
     fn rc_lowpass_layers_strict_left_to_right() {
         let m = layer_str("test\nV1 in 0 AC 1\nR1 in mid 1k\nC1 mid 0 1u\n.end\n");
         assert!(

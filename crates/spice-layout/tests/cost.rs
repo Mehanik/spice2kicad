@@ -338,16 +338,18 @@ fn total_uses_default_weights_linearly() {
     let p = place(checked.clone(), fixture_library()).expect("placement");
     let bd = breakdown(&p, &checked, fixture_library());
     let t = total(&bd, &CostWeights::DEFAULT);
-    let manual = bd.crossings * 100.0
-        + bd.constraint_violation * 1000.0
-        + bd.overlap * 50.0
-        + bd.hpwl * 1.0
-        + bd.rail_direction * 50.0
-        + bd.signal_flow * 25.0
-        + bd.band_misalignment * 10.0
-        + bd.soft_y_residual * 0.5
-        + bd.layer_order * 2.0
-        + bd.net_bbox_crossings * 0.5;
+    let w = CostWeights::DEFAULT;
+    let manual = bd.crossings * w.crossings
+        + bd.constraint_violation * w.constraint_violation
+        + bd.overlap * w.overlap
+        + bd.hpwl * w.hpwl
+        + bd.rail_direction * w.rail_direction
+        + bd.signal_flow * w.signal_flow
+        + bd.band_misalignment * w.band_misalignment
+        + bd.soft_y_residual * w.soft_y_residual
+        + bd.layer_order * w.layer_order
+        + bd.net_bbox_crossings * w.net_bbox_crossings
+        + bd.band_inversion * w.band_inversion;
     assert!((t - manual).abs() < 1e-9, "total {t} manual {manual}");
 }
 
@@ -633,16 +635,18 @@ proptest! {
         let (p, checked) = build_scenario(&scenario);
         let bd = breakdown(&p, &checked, fixture_library());
         let t = total(&bd, &CostWeights::DEFAULT);
-        let manual = bd.crossings * 100.0
-            + bd.constraint_violation * 1000.0
-            + bd.overlap * 50.0
-            + bd.hpwl * 1.0
-            + bd.rail_direction * 50.0
-            + bd.signal_flow * 25.0
-            + bd.band_misalignment * 10.0
-            + bd.soft_y_residual * 0.5
-            + bd.layer_order * 2.0
-            + bd.net_bbox_crossings * 0.5;
+        let w = CostWeights::DEFAULT;
+        let manual = bd.crossings * w.crossings
+            + bd.constraint_violation * w.constraint_violation
+            + bd.overlap * w.overlap
+            + bd.hpwl * w.hpwl
+            + bd.rail_direction * w.rail_direction
+            + bd.signal_flow * w.signal_flow
+            + bd.band_misalignment * w.band_misalignment
+            + bd.soft_y_residual * w.soft_y_residual
+            + bd.layer_order * w.layer_order
+            + bd.net_bbox_crossings * w.net_bbox_crossings
+        + bd.band_inversion * w.band_inversion;
         prop_assert!((t - manual).abs() < 1e-9);
     }
 

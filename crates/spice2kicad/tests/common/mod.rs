@@ -461,6 +461,8 @@ pub fn spice_to_kicad(fixture: &Path, out_dir: &Path) -> Result<std::path::PathB
         .arg(lib_dir.join("Device.kicad_sym"))
         .arg("-l")
         .arg(lib_dir.join("Simulation_SPICE.kicad_sym"))
+        .arg("-l")
+        .arg(lib_dir.join("Amplifier_Operational.kicad_sym"))
         .status()
         .map_err(|e| format!("failed to invoke spice2kicad: {e}"))?;
     if !status.success() {

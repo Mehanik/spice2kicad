@@ -65,8 +65,11 @@ pub(super) fn refine(
 
     // Bucket movable elements by layer so the swap-Y-rank move can pick
     // a peer cheaply. Layer index → indices of movable elements in it.
-    let mut layer_buckets: std::collections::HashMap<u32, Vec<usize>> =
-        std::collections::HashMap::new();
+    // BTreeMap for deterministic iteration order across runs (the
+    // annealer's RNG is seeded but a HashMap-iteration nondetermism
+    // here breaks reproducibility — see T8 calibration notes).
+    let mut layer_buckets: std::collections::BTreeMap<u32, Vec<usize>> =
+        std::collections::BTreeMap::new();
     for &i in &movable {
         if let Some(&layer) = layers.layers.get(i) {
             layer_buckets.entry(layer).or_default().push(i);
@@ -198,7 +201,7 @@ enum Saved {
 fn propose_move(
     placement: &Placement,
     movable: &[usize],
-    layer_buckets: &std::collections::HashMap<u32, Vec<usize>>,
+    layer_buckets: &std::collections::BTreeMap<u32, Vec<usize>>,
     swap_layers: &[u32],
     rng: &mut Rng,
 ) -> Proposal {
@@ -338,8 +341,8 @@ mod tests {
         };
         // Both elements are movable and on the same layer.
         let movable = vec![0, 1];
-        let mut buckets: std::collections::HashMap<u32, Vec<usize>> =
-            std::collections::HashMap::new();
+        let mut buckets: std::collections::BTreeMap<u32, Vec<usize>> =
+            std::collections::BTreeMap::new();
         buckets.insert(0, vec![0, 1]);
         let swap_layers = vec![0_u32];
         let mut rng = Rng::new(0xDEAD_BEEF);

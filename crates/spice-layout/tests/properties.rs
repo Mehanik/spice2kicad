@@ -169,7 +169,6 @@ proptest! {
     }
 
     #[test]
-    #[ignore = "T4: place directives can move pinned elements onto unconstrained seeds; T7 refiner will resolve"]
     fn no_overlapping_origins(scenario in arb_scenario()) {
         let p = build(&scenario);
         let mut origins: Vec<_> = p.elements.iter().map(|e| e.origin).collect();

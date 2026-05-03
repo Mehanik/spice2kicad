@@ -47,8 +47,13 @@ impl Default for LayoutOptions {
         Self {
             refine: true,
             seed: 0xC0FF_EE42,
-            fr_iters: 100,
-            refine_iterations: 200,
+            // FR is disabled by default: the structural-layered seed
+            // (bands + layers) already places elements purposefully.
+            // Running FR on top scrambles the band assignment because
+            // FR has no knowledge of Power/Ground rails. Keep FR
+            // available for callers who pass an unstructured seed.
+            fr_iters: 0,
+            refine_iterations: 2000,
         }
     }
 }

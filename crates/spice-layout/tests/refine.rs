@@ -113,7 +113,13 @@ fn refined_cost_no_worse_than_stage1_on_connected_chain() {
     };
     let (checked, _) = check(resolved).expect("policy check");
 
-    let stage1 = place(checked.clone(), fixture_library()).expect("stage1");
+    // `stage1` here is the deterministic seed *without* refinement,
+    // so the SA-refined cost is meaningfully comparable.
+    let stage1_opts = LayoutOptions {
+        refine: false,
+        ..LayoutOptions::default()
+    };
+    let stage1 = place_with(checked.clone(), fixture_library(), &stage1_opts).expect("stage1");
     let refined =
         place_with(checked.clone(), fixture_library(), &refine_opts(123)).expect("stage3");
 
