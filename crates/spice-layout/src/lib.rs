@@ -26,6 +26,7 @@
 mod archetype;
 pub mod bands;
 pub mod cost;
+pub mod layers;
 pub mod net_class;
 mod solver;
 mod symmetry;
