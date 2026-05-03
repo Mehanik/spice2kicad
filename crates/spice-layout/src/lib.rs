@@ -484,10 +484,16 @@ fn place_seed(checked: &CheckedNetlist) -> Result<(Placement, Vec<bool>), Vec<Di
     use crate::layers::assign_x_layers;
     use crate::net_class::classify_nets;
 
-    // Geometry constants in grid cells (1.27 mm each).
-    const X_STRIDE: i32 = 6; // grid cells per layer column
+    // Geometry constants in grid cells (1.27 mm each). Strides are
+    // chosen so two adjacent columns/rows cannot horizontally clip
+    // each other given typical KiCad symbol body half-extents
+    // (~2.54 mm = 2 cells) plus ~1 cell of padding for label glyphs
+    // and refdes/value text. A 12-cell stride leaves ~7.6 mm of
+    // clear space between symbol bodies on the same row, comfortably
+    // wider than any symbol body in the fixtures.
+    const X_STRIDE: i32 = 12; // grid cells per layer column
     const Y_BAND_GAP: i32 = 6; // gap from rail edge into Mid band
-    const Y_RANK_STRIDE: i32 = 6; // vertical step per rank within layer
+    const Y_RANK_STRIDE: i32 = 5; // vertical step per rank within layer
 
     let n = checked.elements.len();
     let classes = classify_nets(checked);
@@ -543,13 +549,17 @@ fn place_seed(checked: &CheckedNetlist) -> Result<(Placement, Vec<bool>), Vec<Di
         let rank = *rank;
         // Within a (layer, slot) bucket, alternate elements left/
         // right of the layer column so multiple elements at the
-        // same Y target don't pile on the same X.
-        let x_jitter = if rank % 2 == 0 {
+        // same Y target don't pile on the same X. The jitter is
+        // bounded to ±2 cells (well under X_STRIDE/2) to keep
+        // adjacent columns from clipping into each other.
+        let max_jitter = (X_STRIDE / 4).max(1);
+        let raw_jitter = if rank % 2 == 0 {
             -(rank / 2)
         } else {
             (rank + 1) / 2
         };
-        let x = layer * X_STRIDE + x_jitter * 2;
+        let x_jitter = raw_jitter.clamp(-max_jitter, max_jitter);
+        let x = layer * X_STRIDE + x_jitter;
 
         // Reserve three sub-rows in Mid: upper / centre / lower.
         let mid_span = (y_mid_bot - y_mid_top).max(1);

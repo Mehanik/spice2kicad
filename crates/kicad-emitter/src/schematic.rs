@@ -761,10 +761,21 @@ fn route_nets(
     // exactly two pins whose Manhattan distance is at most this
     // many millimetres skip the channel-and-trunk router and emit
     // a single segment (collinear) or a 2-segment L (otherwise).
-    // 10 mm comfortably covers adjacent grid-stride placements
-    // (typical default stride is ~7.62 mm) without competing
-    // with the channel router for longer cross-board hauls.
-    const FAST_PATH_MAX_MM: f64 = 10.0;
+    // The seed placer's X stride is ~15.24 mm (12 cells); two-pin
+    // nets between adjacent layers commonly span up to ~25 mm
+    // including a small layer offset, so the 2-pin fast path
+    // covers the bulk of inter-element shorts.
+    const FAST_PATH_MAX_MM: f64 = 30.0;
+    // Bounding-box Manhattan-extent threshold for the 3-pin
+    // T-junction fast path. Nets with exactly three pins whose
+    // bounding box fits inside this budget are routed as two
+    // L-shapes from the central pin, skipping the channel
+    // router. Larger / more-populous nets still flow through
+    // the channel router because that path's per-net trunk_x
+    // and per-pin escape_y guarantee no inter-net collinear
+    // merges (a risk for arbitrary L-shapes; see the round-trip
+    // tests).
+    const SMALL_NET_BBOX_MM: f64 = 60.0;
 
     let mut out: Vec<Sexpr> = Vec::new();
     let mut endpoint_counts: std::collections::HashMap<(i64, i64), usize> =
@@ -849,40 +860,70 @@ fn route_nets(
             let (x1, y1, _) = pins[1];
             let manhattan = (x1 - x0).abs() + (y1 - y0).abs();
             if manhattan <= FAST_PATH_MAX_MM {
-                if approx_eq(x0, x1) || approx_eq(y0, y1) {
-                    // Collinear: single straight segment.
-                    push_segment(
+                emit_l_or_segment(
+                    &mut out,
+                    &mut endpoint_counts,
+                    &mut wire_seq,
+                    (x0, y0),
+                    (x1, y1),
+                    scope,
+                    net,
+                );
+                continue;
+            }
+        }
+
+        // 3-pin T-junction fast-path: when one pin lies on the
+        // bounding-box rectangle's edge between the other two
+        // (collinear T or near-collinear), emit two L-shapes from
+        // the central pin to each neighbour. Avoids long channel
+        // trunks for tightly-clustered 3-pin nets but keeps each
+        // net's wires self-contained (no shared trunk_x with
+        // other nets, no global escape rows). The cross-net
+        // collision risk is the same as the 2-pin L-shape: real
+        // but bounded, and the fixture-wide
+        // [`no_symbol_label_overlap_across_fixtures`] /
+        // round-trip tests catch any misroute.
+        if pins.len() == 3 {
+            let xs: Vec<f64> = pins.iter().map(|p| p.0).collect();
+            let ys: Vec<f64> = pins.iter().map(|p| p.1).collect();
+            let (xmin, xmax) = (
+                xs.iter().copied().fold(f64::INFINITY, f64::min),
+                xs.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            );
+            let (ymin, ymax) = (
+                ys.iter().copied().fold(f64::INFINITY, f64::min),
+                ys.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            );
+            let bbox = (xmax - xmin) + (ymax - ymin);
+            if bbox <= SMALL_NET_BBOX_MM {
+                // Pick the pin whose Manhattan distance to the
+                // other two is smallest as the centre of the T.
+                let pts: Vec<(f64, f64)> = pins.iter().map(|&(x, y, _)| (x, y)).collect();
+                let centre = (0..3)
+                    .min_by(|&i, &j| {
+                        let di: f64 = (0..3)
+                            .filter(|&k| k != i)
+                            .map(|k| (pts[i].0 - pts[k].0).abs() + (pts[i].1 - pts[k].1).abs())
+                            .sum();
+                        let dj: f64 = (0..3)
+                            .filter(|&k| k != j)
+                            .map(|k| (pts[j].0 - pts[k].0).abs() + (pts[j].1 - pts[k].1).abs())
+                            .sum();
+                        di.partial_cmp(&dj).unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .expect("3 pins");
+                let c = pts[centre];
+                for (i, &p) in pts.iter().enumerate() {
+                    if i == centre {
+                        continue;
+                    }
+                    emit_l_or_segment(
                         &mut out,
                         &mut endpoint_counts,
                         &mut wire_seq,
-                        x0,
-                        y0,
-                        x1,
-                        y1,
-                        scope,
-                        net,
-                    );
-                } else {
-                    // L-shape via (x1, y0) elbow.
-                    push_segment(
-                        &mut out,
-                        &mut endpoint_counts,
-                        &mut wire_seq,
-                        x0,
-                        y0,
-                        x1,
-                        y0,
-                        scope,
-                        net,
-                    );
-                    push_segment(
-                        &mut out,
-                        &mut endpoint_counts,
-                        &mut wire_seq,
-                        x1,
-                        y0,
-                        x1,
-                        y1,
+                        c,
+                        p,
                         scope,
                         net,
                     );
@@ -980,6 +1021,56 @@ fn route_nets(
         out.push(junction(x, y, scope));
     }
     out
+}
+
+/// Emit either a single straight wire (collinear endpoints) or a
+/// 2-segment L through an axis-aligned elbow at `(b.x, a.y)`.
+fn emit_l_or_segment(
+    out: &mut Vec<Sexpr>,
+    endpoint_counts: &mut std::collections::HashMap<(i64, i64), usize>,
+    wire_seq: &mut usize,
+    a: (f64, f64),
+    b: (f64, f64),
+    scope: &str,
+    net: &str,
+) {
+    if approx_eq(a.0, b.0) || approx_eq(a.1, b.1) {
+        push_segment(
+            out,
+            endpoint_counts,
+            wire_seq,
+            a.0,
+            a.1,
+            b.0,
+            b.1,
+            scope,
+            net,
+        );
+    } else {
+        // L-shape via (b.x, a.y) elbow.
+        push_segment(
+            out,
+            endpoint_counts,
+            wire_seq,
+            a.0,
+            a.1,
+            b.0,
+            a.1,
+            scope,
+            net,
+        );
+        push_segment(
+            out,
+            endpoint_counts,
+            wire_seq,
+            b.0,
+            a.1,
+            b.0,
+            b.1,
+            scope,
+            net,
+        );
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

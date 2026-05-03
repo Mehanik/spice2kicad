@@ -863,12 +863,19 @@ fn wire_length_within_budget_across_fixtures() {
     // trunk inflation pushes ratios well above 1.0 even on small
     // fixtures; rc_lowpass is exempt from channel-routing because
     // its `out` net is fast-pathed (2 pins, < 10 mm Manhattan).
+    // Tightened wire-length budgets after the T8 cosmetic fix.
+    // The 2-pin / 3-pin fast-path routes emit ~Manhattan distance
+    // directly; the channel router contributes the remaining
+    // multiplier on multi-pin nets. The numbers below comfortably
+    // bound today's emitter while leaving the plan target of 2.5
+    // (and 1.5 for fast-path 2-pin nets) within reach for the
+    // simplest fixtures.
     let budgets: &[(&str, f64)] = &[
-        ("rc_lowpass", 6.0),
-        ("common_emitter", 12.0),
-        ("multivibrator", 8.0),
-        ("diff_pair", 8.0),
-        ("opamp_inverting_real", 12.0),
+        ("rc_lowpass", 2.5),
+        ("common_emitter", 5.0),
+        ("multivibrator", 4.0),
+        ("diff_pair", 4.0),
+        ("opamp_inverting_real", 4.0),
     ];
     for (name, path) in fixtures() {
         let tmp = tempdir(name);
@@ -928,12 +935,19 @@ fn crossing_count_within_budget_across_fixtures() {
     // crossings — that is *router* behaviour, not a placer
     // failure. Budgets here reflect what is achievable today on
     // each fixture; tighten when a smarter router lands.
+    // Tightened budgets (post wider-stride + 3-pin T-junction
+    // fast path). Plan numbers were 0/2/4/2/2; the channel router
+    // still produces a handful of cross-net crossings on multi-
+    // pin nets where the per-pin escape rows interleave through
+    // unrelated trunks. The numbers below sit at roughly 1.5 times
+    // the measured count and tighten by 3-40x relative to T8's
+    // pre-tightening values.
     let budgets: &[(&str, u32)] = &[
         ("rc_lowpass", 0),
-        ("common_emitter", 60),
-        ("multivibrator", 80),
-        ("diff_pair", 40),
-        ("opamp_inverting_real", 40),
+        ("common_emitter", 25),
+        ("multivibrator", 18),
+        ("diff_pair", 8),
+        ("opamp_inverting_real", 3),
     ];
     for (name, path) in fixtures() {
         let tmp = tempdir(name);
@@ -953,21 +967,25 @@ fn crossing_count_within_budget_across_fixtures() {
 
 #[test]
 fn common_emitter_signal_flows_left_to_right() {
-    // Regression guard: the input AC-coupling cap (CIN) sits left
-    // of the output AC-coupling cap (COUT). CIN belongs to the
-    // input side of Q1, COUT to the output side; left-to-right
-    // signal flow places them in that order. Q1's relationship
-    // to either is layer-dependent (BFS from power roots can put
-    // Q1 in CIN's layer when no ;@-tagged signal source exists),
-    // so we don't pin Q1 between them — only the CIN < COUT
-    // boundary, which is the canonical signal-chain endpoint
-    // ordering.
+    // Regression guard: the canonical signal chain is
+    // CIN → Q1 → COUT, so left-to-right placement must respect
+    // `CIN.x < Q1.x < COUT.x`. (VIN is `;@ ignore`d in the
+    // fixture so it never reaches the placer; the ordering
+    // anchor is the BJT's collector cap COUT and the input
+    // AC-coupling cap CIN, with Q1 between them.) This is the
+    // strong signal-flow assertion the original V6 archetype
+    // check encoded; T8's "CIN.x < COUT.x" weakening was
+    // unauthorized — restored here now that the wider seed
+    // stride keeps Q1 from drifting outside the [CIN, COUT]
+    // X interval.
     let sch = emit("common_emitter");
     let root = parse_sch(&sch);
     let cin_x = element_x(&root, "CIN").expect("CIN placed");
+    let q1_x = element_x(&root, "Q1").expect("Q1 placed");
     let cout_x = element_x(&root, "COUT").expect("COUT placed");
     assert!(
-        cin_x < cout_x,
-        "common_emitter: CIN.x ({cin_x:.2}) must be left of COUT.x ({cout_x:.2})",
+        cin_x < q1_x && q1_x < cout_x,
+        "common_emitter: signal flow not left-to-right: \
+         CIN.x={cin_x:.2}, Q1.x={q1_x:.2}, COUT.x={cout_x:.2}",
     );
 }
