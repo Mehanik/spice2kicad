@@ -112,6 +112,13 @@ implementation. When in doubt, prefer the simpler option.
    continues). Silent typos defeat the purpose of the spec; silent
    conflicts merely produce a slightly worse layout.
 
+9. **Structural placement, not pattern recognition.** The placer
+   infers structure from net classification and signal-flow
+   direction; it does not match named topologies. Adding a new
+   circuit type should require zero placer code changes. The
+   escape hatch when heuristics fail is `*@place` / `*@align` —
+   already in v0.1.
+
 ## Annotation language at a glance
 
 Two carriers, both invisible to SPICE simulators:
@@ -292,48 +299,47 @@ below describe intent.
   downstream of `crates/spice-layout/src/` (the placer chooses
   orientation; the router measures the consequence).
 
-- **V6 — Topology-aware placement.** When the resolved netlist
-  matches a recognised analog topology archetype (common-emitter
-  amplifier, common-source amplifier, differential pair, current
-  mirror, voltage divider, RC filter ladder, op-amp inverting /
-  non-inverting, …), the placer must position the matched
-  subgraph per a built-in template that mirrors how the topology
-  is *traditionally drawn*. Concretely:
-    - **Power rails run horizontally**: positive supply
-      (`*@power`-marked sources, `Vcc`/`Vdd`) at the top, ground
-      (net `0` and `.global`) at the bottom of the matched
-      subgraph's bounding box.
-    - **Signal flows left-to-right.** Designated input nets sit
-      on the left, output nets on the right; intermediate stages
-      between them.
-    - **Bias networks cluster on the input side** of the active
-      device they bias (base bias divider sits to the left of the
-      BJT, gate bias to the left of the FET, etc.).
-    - **Decoupling and bypass capacitors sit beside their
-      associated active device** (emitter-bypass cap next to the
-      emitter resistor, supply-decoupling cap next to the rail it
-      decouples), not floating in a separate cluster.
-  Like V5 this is a **quality** invariant, not a correctness one
-  — a force-directed hairball is electrically valid but unreadable;
+- **V6 — Structural layered placement.** The placer must infer a
+  readable layout from net structure alone — without matching named
+  topologies — via a three-stage pipeline:
+    1. **Net classification.** Every net is labelled Power (connected
+       to a `*@power`-marked source or net `0`/`.global`), Ground
+       (net `0` and `.global`), or Signal. Classification requires
+       only the resolved netlist; no topology recognition.
+    2. **Y-band assignment.** Each element is assigned a vertical band
+       (Top / Mid / Bot) based on which net classes touch it: elements
+       exclusively on Power nets go to Top; elements exclusively on
+       Ground nets go to Bot; everything else goes to Mid. Power and
+       Ground rails therefore run horizontally at the top and bottom
+       of the sheet, and active circuitry lives in the middle — the
+       universal analog schematic convention.
+    3. **X-layer assignment.** Within each Y band, elements are
+       ordered left-to-right by signal-flow depth. Depth is computed
+       via Tarjan SCC collapse (to handle feedback loops) followed by
+       longest-path layering on the resulting DAG. Input-side elements
+       (sources, driving pins) receive the lowest layer numbers;
+       output-side elements receive the highest.
+    4. **Cost-function refinement.** After band/layer seeding, an SA
+       pass refines positions using a penalty function that includes
+       band-misalignment, soft Y-position, layer-order, and crossing-
+       approximation terms. SA runs by default via
+       `LayoutOptions { refine: true, .. }`.
+  Like V5 this is a **quality** invariant, not a correctness one —
+  a force-directed hairball is electrically valid but unreadable;
   V6 is what makes the output recognisable as the schematic an
-  engineer would draw by hand. V6 *builds on* V5: V5 ensures
-  pins on a shared net face each other; V6 ensures the components
-  themselves are placed in the conventional positions in the
-  first place.
-  Verifier: a structural test on each archetype fixture. For the
-  common-emitter fixture (`tests/fixtures/common_emitter.cir`,
-  refdes `Q1`, `R1`/`R2` base divider, `RC` collector, `RE`
-  emitter, `CE` bypass, `CIN`/`COUT` AC coupling) it asserts
-  (a) at least two distinct Y bands corresponding to Vcc-rail and
-  GND-rail elements (RC's top and RE's bottom are not coplanar
-  with Q1's centre); (b) Q1 sits vertically between RC (above)
-  and RE (below); (c) signal-flow X-ordering
-  `VIN.x < CIN.x < Q1.x < COUT.x`. Scope: V6 is a v0.2+ direction
-  — v0.1 may emit a correct but topology-blind layout even with
-  V5 satisfied. The archetype matcher is expected to grow inside
-  `crates/spice-layout/src/` (a new pass between policy
-  resolution and the existing four placement phases — see
-  annotation spec §5).
+  engineer would draw by hand. V6 *builds on* V5: V5 ensures pins
+  on a shared net face each other; V6 ensures the components
+  themselves are placed in conventional positions.
+  Verifier: six fixture-wide tests in
+  `crates/spice2kicad/tests/placement_quality.rs`:
+  `no_symbol_symbol_overlap_across_fixtures`,
+  `no_symbol_label_overlap_across_fixtures`,
+  `rails_correctly_ordered_across_fixtures`,
+  `wire_length_within_budget_across_fixtures`,
+  `crossing_count_within_budget_across_fixtures`,
+  `common_emitter_signal_flows_left_to_right`.
+  Thresholds are calibrated per fixture. The channel-router floor
+  on crossing counts remains a v0.2 improvement target.
 
 - **V7 — Symmetry-aware placement.** When the placer detects a
   structural symmetry in the netlist — a refdes pairing under which
@@ -346,10 +352,10 @@ below describe intent.
   isomorphic to itself, and the conventional schematic mirrors the
   whole circuit about a vertical axis through its centre, making the
   cross-coupling visible as two diagonal wires. V7 *builds on* V6:
-  many archetype templates (differential pair, current mirror,
-  long-tailed pair, multivibrator) have symmetry baked in, but V7
-  applies more broadly — any subgraph whose graph automorphism
-  group is non-trivial benefits.
+  the structural layered placement V6 provides positions each element
+  in the right band and layer, and V7 then enforces mirror symmetry
+  within that layout for any subgraph whose graph automorphism group
+  is non-trivial.
   Verifier: a structural test on the multivibrator fixture that,
   with `axis_x = (Q1.x + Q2.x) / 2`, asserts (a)
   `|RC1.x - axis_x| == |RC2.x - axis_x|`,
@@ -366,9 +372,9 @@ below describe intent.
   pairs on a common axis (RB1/RB2 and C1/C2 sit far to the right
   of the Q axis), so verifier (a) fails by roughly one cell width
   per pair. Scope: v0.2+ quality metric. The symmetry detector is
-  expected to live in `crates/spice-layout/src/`, alongside (and
-  composing with) the V6 archetype matcher — likely as an extra
-  pass that runs after archetype matching and before phase 4
+  expected to live in `crates/spice-layout/src/`, composing with
+  V6's classify → bands → layers pipeline — likely as an extra
+  pass that runs after band/layer seeding and before phase 4
   auto-fill (annotation spec §5).
 
 - **V8 — Standard symbol mapping for subckts.** A SPICE `.subckt`
@@ -406,13 +412,13 @@ below describe intent.
   to the same parent-sheet nets that X1's terminals reference in
   SPICE. Verifier lives at
   `crates/spice2kicad/tests/symbol_mapping.rs`.
-  Interaction with V6 (topology archetypes): once V6 ships, the
-  archetype matcher can recognise canonical opamp subckt patterns
-  (single VCVS or two-pole with port names like
-  `inp inn vcc vee out` / `+ - V+ V- OUT`) and auto-promote them
-  to the standard symbol without the user writing `*@symbol`. V8
-  is the explicit-override floor; V6's archetype matcher is the
-  zero-annotation ceiling.
+  Interaction with V6 (structural placement): the V6 net-class and
+  signal-flow pipeline places X-instances in the correct band and
+  layer using only structural information; V8 controls whether that
+  instance is rendered as a flat symbol or a hierarchical sheet. V8
+  is the explicit-override floor; a future auto-promotion heuristic
+  (e.g. recognising a canonical opamp port-name pattern) is the
+  zero-annotation ceiling and belongs in a v0.2 pass.
 
 - **V9 — SI-suffixed value formatting.** Every `(property "Value"
   "<text>")` emitted for a placeable element whose SPICE value

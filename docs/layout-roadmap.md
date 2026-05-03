@@ -199,11 +199,14 @@ force-directed for that cluster.
   4-rotation; mirror moves and signal-flow / rail-direction cost
   terms still deferred. Per-component cost logging via `log` at
   `debug` level.
-- **Next:** tune SA weights and budgets against `examples/`; add
-  mirror-Y to the move set; pull signal-flow / rail-direction
-  cost terms in (roadmap §5).
-- **After:** orthogonal router as a separate crate.
-- **v0.2:** idiom detectors feeding the constraint pipeline.
+- **Done (structural layered placement):** classify nets →
+  Y-band assignment (Top/Mid/Bot) → X-layer via Tarjan SCC +
+  longest-path DAG → seed positions from band/layer grid →
+  SA refinement with band-misalignment, soft-Y, layer-order,
+  and crossing-approximation cost terms.
+- **Next:** channel router as a separate crate; mirror-Y move in SA.
+- **v0.2:** symmetry detector (V7) composing with the
+  classify → bands → layers pipeline.
 
 ## 8. Open questions
 
