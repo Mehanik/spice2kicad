@@ -24,6 +24,7 @@
 #![forbid(unsafe_code)]
 
 mod archetype;
+pub mod bands;
 pub mod cost;
 pub mod net_class;
 mod solver;
