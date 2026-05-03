@@ -343,7 +343,11 @@ fn total_uses_default_weights_linearly() {
         + bd.overlap * 50.0
         + bd.hpwl * 1.0
         + bd.rail_direction * 50.0
-        + bd.signal_flow * 25.0;
+        + bd.signal_flow * 25.0
+        + bd.band_misalignment * 10.0
+        + bd.soft_y_residual * 0.5
+        + bd.layer_order * 2.0
+        + bd.net_bbox_crossings * 0.5;
     assert!((t - manual).abs() < 1e-9, "total {t} manual {manual}");
 }
 
@@ -634,7 +638,11 @@ proptest! {
             + bd.overlap * 50.0
             + bd.hpwl * 1.0
             + bd.rail_direction * 50.0
-            + bd.signal_flow * 25.0;
+            + bd.signal_flow * 25.0
+            + bd.band_misalignment * 10.0
+            + bd.soft_y_residual * 0.5
+            + bd.layer_order * 2.0
+            + bd.net_bbox_crossings * 0.5;
         prop_assert!((t - manual).abs() < 1e-9);
     }
 

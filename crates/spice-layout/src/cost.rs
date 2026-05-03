@@ -51,6 +51,9 @@ use kicad_symbols::Library;
 use spice_policy::CheckedNetlist;
 use spice_resolve::{Axis, ElementRole, Relation, ResolvedElement};
 
+use crate::bands::{Band, BandAssignment, assign_y_bands};
+use crate::layers::assign_x_layers;
+use crate::net_class::{NetClass, classify_nets};
 use crate::{CELL_H, CELL_W, GridPoint, PlacedElement, Placement};
 
 // ---------------------------------------------------------------------------
@@ -76,6 +79,14 @@ pub struct CostBreakdown {
     /// Hinged squared distance of subckt input pins right of the left
     /// edge and of subckt output pins left of the right edge, in mm².
     pub signal_flow: f64,
+    /// Clamp-distance² of elements outside their assigned band (Top/Mid/Bot).
+    pub band_misalignment: f64,
+    /// Squared distance of Mid-band elements from soft Y target frac.
+    pub soft_y_residual: f64,
+    /// Sum of (x_pred - x_self)² for layer-order violations on the signal DAG.
+    pub layer_order: f64,
+    /// Cheap proxy for wire crossings: count of net-bbox cross-pairs across distinct nets.
+    pub net_bbox_crossings: f64,
 }
 
 /// Linear-combination weights for [`total`].
@@ -87,6 +98,10 @@ pub struct CostWeights {
     pub constraint_violation: f64,
     pub rail_direction: f64,
     pub signal_flow: f64,
+    pub band_misalignment: f64,
+    pub soft_y_residual: f64,
+    pub layer_order: f64,
+    pub net_bbox_crossings: f64,
 }
 
 impl CostWeights {
@@ -104,6 +119,11 @@ impl CostWeights {
         rail_direction: 50.0,
         // not yet tuned — see docs/layout-roadmap.md §7
         signal_flow: 25.0,
+        // Stage-3 structural-layered terms (T6).
+        band_misalignment: 10.0,
+        soft_y_residual: 0.5,
+        layer_order: 2.0,
+        net_bbox_crossings: 0.5,
     };
 }
 
@@ -128,6 +148,10 @@ pub fn breakdown(
         constraint_violation: constraint_violation(placement, checked, library),
         rail_direction: rail_direction(&checked.elements, &pin_world),
         signal_flow: signal_flow(&checked.elements, &pin_world, &checked.subckts),
+        band_misalignment: band_misalignment(placement, checked, None),
+        soft_y_residual: soft_y_residual(placement, checked),
+        layer_order: layer_order(placement, checked),
+        net_bbox_crossings: net_bbox_crossings(&nets),
     }
 }
 
@@ -140,6 +164,10 @@ pub fn total(breakdown: &CostBreakdown, weights: &CostWeights) -> f64 {
         + weights.constraint_violation * breakdown.constraint_violation
         + weights.rail_direction * breakdown.rail_direction
         + weights.signal_flow * breakdown.signal_flow
+        + weights.band_misalignment * breakdown.band_misalignment
+        + weights.soft_y_residual * breakdown.soft_y_residual
+        + weights.layer_order * breakdown.layer_order
+        + weights.net_bbox_crossings * breakdown.net_bbox_crossings
 }
 
 // ---------------------------------------------------------------------------
@@ -711,4 +739,522 @@ fn signal_flow(
         }
     }
     total
+}
+
+// ---------------------------------------------------------------------------
+// Band misalignment
+// ---------------------------------------------------------------------------
+
+/// One grid-cell tolerance for Top/Bot bands (mm).
+const BAND_TOL_MM: f64 = GridPoint::STEP_MM;
+
+/// Penalise elements outside their assigned band.
+///
+/// `Top` elements are pulled toward `y_top` (the smallest Y origin
+/// among Top-band elements, in mm); `Bot` elements toward `y_bot`
+/// (the largest Y origin among Bot-band elements). The penalty is the
+/// hinged squared deviation from those targets, with a one grid-cell
+/// tolerance — matching what the seed placer (`place_seed`) emits when
+/// no better information is available.
+///
+/// `Mid` elements are constrained to lie inside the open `(y_top,
+/// y_bot)` interval; their soft Y target inside that interval is the
+/// concern of [`soft_y_residual`], not this term.
+///
+/// If `bands` is `None`, the function recomputes net classes and band
+/// assignments from `checked`.
+#[must_use]
+pub fn band_misalignment(
+    placement: &Placement,
+    checked: &CheckedNetlist,
+    bands: Option<&[BandAssignment]>,
+) -> f64 {
+    let owned: Vec<BandAssignment>;
+    let band_asg: &[BandAssignment] = if let Some(b) = bands {
+        b
+    } else {
+        let classes = classify_nets(checked);
+        owned = assign_y_bands(checked, &classes);
+        &owned
+    };
+
+    if placement.elements.is_empty() {
+        return 0.0;
+    }
+
+    // Reference Y for each rail. Defaults: if no Top elements, use the
+    // smallest origin Y across all elements (i.e. nothing to violate).
+    // Symmetric for Bot.
+    let mut y_top = f64::INFINITY;
+    let mut y_bot = f64::NEG_INFINITY;
+    for (pe, ba) in placement.elements.iter().zip(band_asg) {
+        let (_, y_mm) = pe.origin.to_mm();
+        match ba.band {
+            Band::Top => {
+                if y_mm < y_top {
+                    y_top = y_mm;
+                }
+            }
+            Band::Bot => {
+                if y_mm > y_bot {
+                    y_bot = y_mm;
+                }
+            }
+            Band::Mid => {}
+        }
+    }
+    if !y_top.is_finite() {
+        // No Top elements — fall back to the placement's overall min Y
+        // so Mid elements above it are not penalised.
+        y_top = placement
+            .elements
+            .iter()
+            .map(|p| p.origin.to_mm().1)
+            .fold(f64::INFINITY, f64::min);
+    }
+    if !y_bot.is_finite() {
+        y_bot = placement
+            .elements
+            .iter()
+            .map(|p| p.origin.to_mm().1)
+            .fold(f64::NEG_INFINITY, f64::max);
+    }
+
+    let mut total = 0.0;
+    for (pe, ba) in placement.elements.iter().zip(band_asg) {
+        let (_, y_mm) = pe.origin.to_mm();
+        match ba.band {
+            Band::Top => {
+                // Penalise being below y_top (i.e. y > y_top + tol).
+                let excess = (y_mm - (y_top + BAND_TOL_MM)).max(0.0);
+                total += excess * excess;
+            }
+            Band::Bot => {
+                // Penalise being above y_bot (y < y_bot - tol).
+                let excess = ((y_bot - BAND_TOL_MM) - y_mm).max(0.0);
+                total += excess * excess;
+            }
+            Band::Mid => {
+                // Wider window: only penalise leaving the (y_top, y_bot)
+                // interval entirely (no tolerance — Mid is permissive).
+                if y_mm < y_top {
+                    let d = y_top - y_mm;
+                    total += d * d;
+                } else if y_mm > y_bot {
+                    let d = y_mm - y_bot;
+                    total += d * d;
+                }
+            }
+        }
+    }
+    total
+}
+
+// ---------------------------------------------------------------------------
+// Soft-Y residual
+// ---------------------------------------------------------------------------
+
+/// Squared distance of every Mid-band element from the soft-Y target
+/// implied by its `soft_y_target_frac`.
+///
+/// The target is `y_mid_top + frac * (y_mid_bot - y_mid_top)`, where
+/// `y_mid_top` and `y_mid_bot` are the smallest and largest origin Y
+/// across *Mid-band* elements (not the rails — the soft target lives
+/// inside the Mid window). When fewer than two Mid elements exist the
+/// term is 0 (no span to measure against).
+#[must_use]
+pub fn soft_y_residual(placement: &Placement, checked: &CheckedNetlist) -> f64 {
+    let classes = classify_nets(checked);
+    let band_asg = assign_y_bands(checked, &classes);
+
+    if placement.elements.len() != band_asg.len() {
+        return 0.0;
+    }
+
+    let mut y_min = f64::INFINITY;
+    let mut y_max = f64::NEG_INFINITY;
+    let mut mid_count = 0_usize;
+    for (pe, ba) in placement.elements.iter().zip(&band_asg) {
+        if ba.band == Band::Mid {
+            let (_, y) = pe.origin.to_mm();
+            if y < y_min {
+                y_min = y;
+            }
+            if y > y_max {
+                y_max = y;
+            }
+            mid_count += 1;
+        }
+    }
+    if mid_count < 2 || !y_min.is_finite() || !y_max.is_finite() {
+        return 0.0;
+    }
+    let span = y_max - y_min;
+    if span.abs() < f64::EPSILON {
+        return 0.0;
+    }
+
+    let mut total = 0.0;
+    for (pe, ba) in placement.elements.iter().zip(&band_asg) {
+        if ba.band != Band::Mid {
+            continue;
+        }
+        let (_, y) = pe.origin.to_mm();
+        let target = y_min + ba.soft_y_target_frac * span;
+        let d = y - target;
+        total += d * d;
+    }
+    total
+}
+
+// ---------------------------------------------------------------------------
+// Layer order
+// ---------------------------------------------------------------------------
+
+/// Penalise X-coordinate inversions on the signal-flow DAG.
+///
+/// For each pair of elements `(u, v)` such that:
+///   * `layer(u) < layer(v)` per [`assign_x_layers`]; and
+///   * `u` and `v` share at least one Signal-class net,
+///
+/// add `(x_u - x_v)²` whenever `x_u > x_v` (u is supposed to feed v
+/// from the left, so its X must be ≤ v's X). Within-layer pairs and
+/// pairs not sharing a Signal net contribute zero.
+#[must_use]
+pub fn layer_order(placement: &Placement, checked: &CheckedNetlist) -> f64 {
+    let classes = classify_nets(checked);
+    let layer_asg = assign_x_layers(checked, &classes);
+
+    if layer_asg.no_source_fallback {
+        return 0.0;
+    }
+    let layers = &layer_asg.layers;
+    if layers.len() != placement.elements.len() {
+        return 0.0;
+    }
+
+    // Build adjacency on Signal nets.
+    let n = checked.elements.len();
+    let mut net_to_elements: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (i, el) in checked.elements.iter().enumerate() {
+        for net in &el.nodes {
+            if classes
+                .get(net.as_str())
+                .copied()
+                .unwrap_or(NetClass::Signal)
+                == NetClass::Signal
+            {
+                net_to_elements.entry(net.as_str()).or_default().push(i);
+            }
+        }
+    }
+
+    // For each Signal net's element set, sum penalty across each
+    // ordered pair (u, v) with layer(u) < layer(v) and x_u > x_v.
+    // A `HashSet` keeps each pair counted once even if two distinct
+    // nets connect the same two elements.
+    let mut counted: HashSet<(usize, usize)> = HashSet::new();
+    let mut total = 0.0;
+    for members in net_to_elements.values() {
+        for &u in members {
+            for &v in members {
+                if u >= n || v >= n || u == v {
+                    continue;
+                }
+                if layers[u] >= layers[v] {
+                    continue;
+                }
+                if !counted.insert((u, v)) {
+                    continue;
+                }
+                let (xu, _) = placement.elements[u].origin.to_mm();
+                let (xv, _) = placement.elements[v].origin.to_mm();
+                if xu > xv {
+                    let d = xu - xv;
+                    total += d * d;
+                }
+            }
+        }
+    }
+    total
+}
+
+// ---------------------------------------------------------------------------
+// Net-bbox crossings (cheap proxy)
+// ---------------------------------------------------------------------------
+
+/// Count pairs of distinct nets whose pin bounding boxes overlap (in mm).
+///
+/// Two nets whose pin-bounding rectangles intersect are likely to
+/// produce wires that cross. This proxy is O(N²) over net pairs but
+/// orders of magnitude cheaper than the segment-cross product used by
+/// [`crossings`], and is robust to MST-tie wobble. Single-pin and
+/// zero-pin nets are skipped (they have no rectangle).
+/// Public entry: build nets from `placement` + `checked` (+ `library`)
+/// and compute the bbox-crossing proxy.
+#[must_use]
+pub fn net_bbox_crossings_for(
+    placement: &Placement,
+    checked: &CheckedNetlist,
+    library: &Library,
+) -> f64 {
+    let pin_world = collect_pin_world(placement, &checked.elements, library);
+    let nets = build_nets(&checked.elements, &pin_world);
+    net_bbox_crossings(&nets)
+}
+
+fn net_bbox_crossings(nets: &[Net]) -> f64 {
+    let boxes: Vec<(f64, f64, f64, f64)> = nets
+        .iter()
+        .filter(|n| n.pins.len() >= 2)
+        .map(|n| {
+            let (mut min_x, mut max_x) = (f64::INFINITY, f64::NEG_INFINITY);
+            let (mut min_y, mut max_y) = (f64::INFINITY, f64::NEG_INFINITY);
+            for &(x, y) in &n.pins {
+                if x < min_x {
+                    min_x = x;
+                }
+                if x > max_x {
+                    max_x = x;
+                }
+                if y < min_y {
+                    min_y = y;
+                }
+                if y > max_y {
+                    max_y = y;
+                }
+            }
+            (min_x, min_y, max_x, max_y)
+        })
+        .collect();
+
+    let mut count = 0_u64;
+    for i in 0..boxes.len() {
+        for j in (i + 1)..boxes.len() {
+            let (a_min_x, a_min_y, a_max_x, a_max_y) = boxes[i];
+            let (b_min_x, b_min_y, b_max_x, b_max_y) = boxes[j];
+            // Strict overlap (touching edges do not count).
+            let eps = 1e-9;
+            if a_min_x < b_max_x - eps
+                && b_min_x < a_max_x - eps
+                && a_min_y < b_max_y - eps
+                && b_min_y < a_max_y - eps
+            {
+                count += 1;
+            }
+        }
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let out = count as f64;
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kicad_symbols::{Library, Orientation};
+    use spice_diagnostics::FileId;
+    use spice_policy::check;
+    use std::path::PathBuf;
+    use std::sync::OnceLock;
+
+    fn fixture_library() -> &'static Library {
+        static LIB: OnceLock<Library> = OnceLock::new();
+        LIB.get_or_init(|| {
+            let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            let fixture_dir = manifest
+                .parent()
+                .and_then(std::path::Path::parent)
+                .expect("workspace root")
+                .join("crates/kicad-symbols/tests/fixtures");
+            let device = Library::from_file(fixture_dir.join("Device.kicad_sym"))
+                .expect("load Device fixture library");
+            let spice = Library::from_file(fixture_dir.join("Simulation_SPICE.kicad_sym"))
+                .expect("load Simulation_SPICE fixture library");
+            device.merge(spice)
+        })
+    }
+
+    /// Parse SPICE source, resolve, check.
+    fn checked_str(src: &str) -> CheckedNetlist {
+        let file_id = FileId(0);
+        let parsed = spice_parser::parse(src, file_id)
+            .expect("parse failed")
+            .netlist;
+        let resolved = spice_resolve::resolve(&parsed, fixture_library()).expect("resolve failed");
+        let (checked, _w) = check(resolved).expect("policy check failed");
+        checked
+    }
+
+    /// Build a manual placement matching `checked.elements` index order.
+    fn manual_placement(checked: &CheckedNetlist, origins: &[(i32, i32)]) -> Placement {
+        let elements = checked
+            .elements
+            .iter()
+            .zip(origins)
+            .map(|(e, &(x, y))| PlacedElement {
+                refdes: e.refdes.clone(),
+                lib_id: e.lib_id.clone(),
+                origin: GridPoint::new(x, y),
+                orientation: Orientation::IDENTITY,
+                nodes: e.nodes.clone(),
+                pin_mapping: e.pin_mapping.clone(),
+                value: None,
+            })
+            .collect();
+        Placement { elements }
+    }
+
+    // -- band_misalignment -------------------------------------------------
+
+    /// Two elements: V1 (Power-tagged, Top band) and R1 (Mid band).
+    /// Place them at the seed-placer-style coordinates: V1 at y=0 (top),
+    /// R1 below. R1 sits inside `(y_top, y_bot)` so band_misalignment is 0.
+    #[test]
+    fn band_misalignment_zero_when_aligned() {
+        let checked =
+            checked_str("test\nV1 vcc 0 12 ;@ power=vcc\nR1 vcc out 1k\nR2 out 0 1k\n.end\n");
+        // V1 → Top, R1/R2 connect to ground → Bot or Mid depending on classes.
+        // Place V1 at y=0, R1 in middle, R2 at y=10.
+        let placement = manual_placement(&checked, &[(0, 0), (5, 5), (10, 10)]);
+        let cost = band_misalignment(&placement, &checked, None);
+        assert!(
+            cost.abs() < 1e-9,
+            "expected 0 for aligned placement, got {cost}"
+        );
+    }
+
+    /// Two resistors that touch only the power rail (no ground) → both
+    /// classified Top. Place them far apart vertically → the second one
+    /// is well below `y_top` and incurs a positive band penalty.
+    #[test]
+    fn band_misalignment_nonzero_when_offset() {
+        // R1 and R2 both connect only to vcc-class nets — no ground —
+        // so the Power-only rule lands them in the Top band.
+        let checked = checked_str(
+            "test\n\
+             V1 vcc 0 12 ;@ power=vcc\n\
+             R1 vcc vdd 1k\n\
+             R2 vcc vdd 1k\n\
+             R3 vdd 0 1k\n.end\n",
+        );
+        // R1 sits at y=0 (sets y_top); R2 (also Top) shoved down to y=30.
+        let placement = manual_placement(&checked, &[(0, 0), (5, 0), (10, 30), (15, 10)]);
+        let cost = band_misalignment(&placement, &checked, None);
+        assert!(
+            cost > 0.0,
+            "expected positive cost when R2 (Top band) is far below y_top, got {cost}"
+        );
+    }
+
+    // -- soft_y_residual ---------------------------------------------------
+
+    /// Two Mid-band elements (signal-only resistors, both frac=0.5)
+    /// placed at the same Y → both sit at their soft target → residual 0.
+    #[test]
+    fn soft_y_residual_zero_at_target() {
+        // V1 in 0 AC 1 → V1 is Mid frac=0.5 (Ground+Signal). R1 (Signal
+        // only) and R2 (Signal only) are Mid frac=0.5 as well.
+        let checked = checked_str("test\nV1 in 0 AC 1\nR1 in mid 1k\nR2 mid out 1k\n.end\n");
+        // All Mid elements at the same Y → mid span collapses to 0,
+        // function returns 0 by definition; that *is* "every element
+        // at its target" when all targets coincide.
+        let placement = manual_placement(&checked, &[(0, 5), (5, 5), (10, 5)]);
+        let cost = soft_y_residual(&placement, &checked);
+        assert!(
+            cost.abs() < 1e-9,
+            "expected 0 residual when Mid Y span is collapsed, got {cost}"
+        );
+    }
+
+    // -- layer_order -------------------------------------------------------
+
+    /// All elements at the same X coordinate → no pair has `x_u > x_v`,
+    /// so the layer-order cost is 0 regardless of the (nondeterministic
+    /// in v0.1) layering returned by `assign_x_layers`.
+    #[test]
+    fn layer_order_zero_when_left_to_right() {
+        let checked = checked_str("test\nV1 in 0 AC 1\nR1 in mid 1k\nR2 mid out 1k\n.end\n");
+        // Every element at X=0 → no inversions possible.
+        let placement = manual_placement(&checked, &[(0, 0), (0, 5), (0, 10)]);
+        let cost = layer_order(&placement, &checked);
+        assert!(
+            cost.abs() < 1e-9,
+            "expected 0 when all X coordinates coincide, got {cost}"
+        );
+    }
+
+    /// V1 is forced to layer 0 by `assign_x_layers` (it is the sole
+    /// signal source). Place V1 at X=20 — well to the right of R1 (X=5)
+    /// and R2 (X=10). V1 shares net "in" with R1, so `(V1, R1)` is a
+    /// signal-DAG edge with `layer(V1) < layer(R1)` and `x(V1) > x(R1)`
+    /// → at least one inversion → strictly positive cost.
+    #[test]
+    fn layer_order_positive_when_inverted() {
+        let checked = checked_str("test\nV1 in 0 AC 1\nR1 in mid 1k\nR2 mid out 1k\n.end\n");
+        let placement = manual_placement(&checked, &[(20, 0), (5, 0), (10, 0)]);
+        let cost = layer_order(&placement, &checked);
+        assert!(
+            cost > 0.0,
+            "expected positive cost when V1 is right of R1, got {cost}"
+        );
+    }
+
+    // -- net_bbox_crossings ------------------------------------------------
+
+    /// Two single-net pairs placed far apart — bboxes don't overlap.
+    #[test]
+    fn net_bbox_crossings_zero_for_isolated_nets() {
+        // R1 on net "a"-"b"; R2 on net "c"-"d"; no shared nets at all
+        // (we use an extra resistor on each so the nets actually have
+        // ≥ 2 pins each). Still — the two clusters are separated.
+        let checked = checked_str(
+            "test\n\
+             R1 a b 1k\n\
+             R2 a b 1k\n\
+             R3 c d 1k\n\
+             R4 c d 1k\n.end\n",
+        );
+        // Cluster (R1,R2) at far left; (R3,R4) at far right.
+        let placement = manual_placement(&checked, &[(0, 0), (0, 5), (100, 0), (100, 5)]);
+        let nets = build_nets(
+            &checked.elements,
+            &collect_pin_world(&placement, &checked.elements, fixture_library()),
+        );
+        let count = net_bbox_crossings(&nets);
+        assert!(
+            count.abs() < 1e-9,
+            "expected 0 crossings for isolated clusters, got {count}"
+        );
+    }
+
+    /// Two distinct nets whose pin bboxes overlap → at least one crossing.
+    #[test]
+    fn net_bbox_crossings_positive_when_overlap() {
+        // R1/R2 share net "a"; R3/R4 share net "b". Place R1 and R2 at
+        // diagonal corners (0,0) and (10,10); R3 and R4 at the other
+        // diagonal (0,10) and (10,0). Both nets' pin bboxes cover the
+        // same rectangle → guaranteed overlap.
+        let checked = checked_str(
+            "test\n\
+             R1 a x 1k\n\
+             R2 a y 1k\n\
+             R3 b p 1k\n\
+             R4 b q 1k\n.end\n",
+        );
+        let placement = manual_placement(&checked, &[(0, 0), (10, 10), (0, 10), (10, 0)]);
+        let nets = build_nets(
+            &checked.elements,
+            &collect_pin_world(&placement, &checked.elements, fixture_library()),
+        );
+        let count = net_bbox_crossings(&nets);
+        assert!(
+            count > 0.0,
+            "expected ≥ 1 net-bbox crossing when nets are interleaved, got {count}"
+        );
+    }
 }
