@@ -19,3 +19,5 @@ log.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+spice-parser.workspace = true
+spice-resolve.workspace = true

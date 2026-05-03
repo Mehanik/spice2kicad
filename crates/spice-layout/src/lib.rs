@@ -25,6 +25,7 @@
 
 mod archetype;
 pub mod cost;
+pub mod net_class;
 mod solver;
 mod symmetry;
 
