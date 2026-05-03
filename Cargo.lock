@@ -808,6 +808,7 @@ dependencies = [
  "log",
  "proptest",
  "spice-diagnostics",
+ "spice-parser",
  "spice-policy",
  "spice-resolve",
 ]

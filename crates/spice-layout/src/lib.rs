@@ -473,12 +473,85 @@ fn pick_orientations(placement: &mut Placement, pinned: &[bool], checked: &Check
 /// Stage-1 placer body: returns the seed placement plus a per-element
 /// `pinned` mask (`true` for elements whose position is fixed by an
 /// `align` or `place` directive).
-// Placer is a four-phase pipeline (init / align / place / auto-fill).
-// Splitting it into helpers per phase obscures the shared state
-// (`placed`, `fixed`) and the careful ordering between phases. Allow
-// the long body here.
-#[allow(clippy::too_many_lines)]
+///
+/// Pipeline: classify nets → assign Y bands → assign X layers → emit
+/// initial grid coordinates from `(band, layer, rank_in_layer)`. User
+/// `align`/`place`/`power` directives then override the heuristic seed
+/// via [`apply_user_constraints`], which pins the affected elements.
 fn place_seed(checked: &CheckedNetlist) -> Result<(Placement, Vec<bool>), Vec<Diagnostic>> {
+    use crate::bands::{Band, assign_y_bands};
+    use crate::layers::assign_x_layers;
+    use crate::net_class::classify_nets;
+
+    // Geometry constants in grid cells (1.27 mm each).
+    const X_STRIDE: i32 = 5; // grid cells per layer column
+    const Y_BAND_GAP: i32 = 4; // gap from rail edge into Mid band
+    const Y_RANK_STRIDE: i32 = 2; // vertical step per rank within layer
+
+    let n = checked.elements.len();
+    let classes = classify_nets(checked);
+    let band_asg = assign_y_bands(checked, &classes);
+    let layer_asg = assign_x_layers(checked, &classes);
+
+    // Total Y span sized to fit n elements with rail headroom.
+    let y_top: i32 = 0;
+    let y_bot: i32 = (i32::try_from(n).unwrap_or(i32::MAX) + 2) * Y_RANK_STRIDE;
+    let y_mid_top = y_top + Y_BAND_GAP;
+    let y_mid_bot = y_bot - Y_BAND_GAP;
+    let y_mid_span = (y_mid_bot - y_mid_top).max(1);
+
+    let mut placed: Vec<PlacedElement> = Vec::with_capacity(n);
+    for (i, e) in checked.elements.iter().enumerate() {
+        let layer = i32::try_from(layer_asg.layers[i]).unwrap_or(i32::MAX);
+        let rank = i32::try_from(layer_asg.rank_in_layer[i]).unwrap_or(i32::MAX);
+        let x = layer * X_STRIDE;
+        let y = match band_asg[i].band {
+            Band::Top => y_top,
+            Band::Bot => y_bot,
+            Band::Mid => {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let offset =
+                    (f64::from(y_mid_span) * band_asg[i].soft_y_target_frac).round() as i32;
+                y_mid_top + offset + rank * Y_RANK_STRIDE
+            }
+        };
+        placed.push(PlacedElement {
+            refdes: e.refdes.clone(),
+            lib_id: e.lib_id.clone(),
+            origin: GridPoint::new(x, y),
+            orientation: Orientation::IDENTITY,
+            nodes: e.nodes.clone(),
+            pin_mapping: e.pin_mapping.clone(),
+            value: e.value.as_ref().map(format_value),
+        });
+    }
+
+    let mut placement = Placement { elements: placed };
+    let mut pinned = vec![false; n];
+
+    apply_user_constraints(&mut placement, &mut pinned, checked)?;
+
+    Ok((placement, pinned))
+}
+
+/// Apply user `align` / `place` directives over an existing seed
+/// placement, overriding heuristic coordinates and marking each
+/// affected element as pinned.
+///
+/// This is the second half of the previous four-phase placer (phases
+/// 2/3/4): align-cluster anchors, place-relation worklist, and a final
+/// auto-fill row for elements untouched by either directive but whose
+/// anchor was implicitly defaulted. The first half (initial coords)
+/// has been replaced by the bands+layers seed in [`place_seed`].
+// Long body retained: align/place/auto-fill share state (`placed`,
+// `fixed`, `free_anchor_col`) and ordering between sub-phases that
+// helper splitting would obscure.
+#[allow(clippy::too_many_lines)]
+fn apply_user_constraints(
+    placement: &mut Placement,
+    pinned: &mut [bool],
+    checked: &CheckedNetlist,
+) -> Result<(), Vec<Diagnostic>> {
     let CheckedNetlist {
         elements,
         align,
@@ -494,23 +567,8 @@ fn place_seed(checked: &CheckedNetlist) -> Result<(Placement, Vec<bool>), Vec<Di
         .map(|(i, e)| (e.refdes.clone(), i))
         .collect();
 
-    // Initial state: every element at the origin, identity orientation.
-    let mut placed: Vec<PlacedElement> = elements
-        .iter()
-        .map(|e| PlacedElement {
-            refdes: e.refdes.clone(),
-            lib_id: e.lib_id.clone(),
-            origin: GridPoint::new(0, 0),
-            orientation: Orientation::IDENTITY,
-            nodes: e.nodes.clone(),
-            pin_mapping: e.pin_mapping.clone(),
-            value: e.value.as_ref().map(format_value),
-        })
-        .collect();
-
-    // `fixed[i] == true` once element `i`'s origin has been finalised
-    // by an `align` or `place` directive (or auto-fill).
-    let mut fixed: Vec<bool> = vec![false; elements.len()];
+    let placed = &mut placement.elements;
+    let fixed = pinned;
 
     // ---- Phase 2: align ---------------------------------------------------
     // Each cluster gets its own anchor on the diagonal so clusters do
@@ -629,26 +687,10 @@ fn place_seed(checked: &CheckedNetlist) -> Result<(Placement, Vec<bool>), Vec<Di
         }
     }
 
-    // ---- Phase 4: auto-fill ----------------------------------------------
-    // Any element not touched by phases 2 or 3 lands in a "default
-    // row" below the constrained content.
-    let max_y = placed
-        .iter()
-        .zip(fixed.iter())
-        .filter_map(|(p, f)| if *f { Some(p.origin.y) } else { None })
-        .max()
-        .unwrap_or(0);
-    let fill_y = max_y + (CELL_H + CLUSTER_GAP) * 2;
-    let mut fill_col: i32 = 0;
-    for (i, is_fixed) in fixed.iter().enumerate() {
-        if *is_fixed {
-            continue;
-        }
-        placed[i].origin = GridPoint::new(fill_col * (CELL_W + CLUSTER_GAP), fill_y);
-        fill_col += 1;
-    }
+    // No phase-4 auto-fill: elements untouched by `align`/`place`
+    // keep their bands+layers seed coordinates from `place_seed`.
 
-    Ok((Placement { elements: placed }, fixed))
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

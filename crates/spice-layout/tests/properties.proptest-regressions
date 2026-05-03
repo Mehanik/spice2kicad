@@ -7,3 +7,4 @@
 cc bd1a0a7998cd60536248d269ec2e96f0c724c99295e05c51e09fe29050cc1603 # shrinks to scenario = Scenario { n: 2, align: [(Vertical, [0, 1]), (Horizontal, [0, 1])], place: [] }
 cc 29ab2c24863f79f0e3d5f1426090a0fb5d453e4fb76d1f9b125e9b85ba753d98 # shrinks to scenario = Scenario { n: 3, align: [(Horizontal, [2, 0]), (Horizontal, [1, 0])], place: [] }
 cc e343d56cdbc16bad279bee3c766dc6becbb3d4be1e5e7b8f89237e6e2b58cde1 # shrinks to scenario = Scenario { n: 3, align: [], place: [(2, LeftOf, 0), (1, LeftOf, 0)] }
+cc 71dc006060269a70f2a77009d537580561fc112e738d026aadb31b342eb0f791 # shrinks to scenario = Scenario { n: 6, align: [], place: [(1, Above, 0)] }
