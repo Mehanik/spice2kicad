@@ -153,6 +153,7 @@ pub fn resolve(netlist: &Netlist, library: &Library) -> Result<ResolvedNetlist, 
         // which will emit `E003` for the missing symbol mapping.
         if element.kind == ElementKind::Subckt
             && !has_explicit_symbol_tag(element)
+            && !has_block_symbol_override(element, &block_symbols)
             && let Some(name) = subckt_name(element)
             && defined_subckts.contains(name.as_str())
         {
@@ -217,6 +218,16 @@ pub fn resolve(netlist: &Netlist, library: &Library) -> Result<ResolvedNetlist, 
 
 fn has_explicit_symbol_tag(element: &Element) -> bool {
     element.tags.iter().any(|t| matches!(t.tag, Tag::Symbol(_)))
+}
+
+/// True if any block-form `*@symbol … for=<glob>` matches this element's
+/// refdes. Used to suppress the default `X<n>` → hierarchical-sheet
+/// routing when the user has opted into a flat-symbol mapping for that
+/// instance (CLAUDE.md V8).
+fn has_block_symbol_override(element: &Element, block_symbols: &[BlockSymbol<'_>]) -> bool {
+    block_symbols
+        .iter()
+        .any(|bs| glob_matches(bs.glob, &element.designator))
 }
 
 /// For an `X…` instance, the subckt name is the last positional token,
@@ -356,9 +367,9 @@ fn resolve_element(
         return;
     }
 
-    // 1. Determine lib_id.
-    let lib_id = match resolve_lib_id(element, &tags, block_symbols) {
-        Ok(id) => id,
+    // 1. Determine lib_id (and any block-form pinmap that came with it).
+    let (lib_id, block_pinmap) = match resolve_lib_id(element, &tags, block_symbols) {
+        Ok(r) => r,
         Err(reason) => {
             push_err(
                 diags,
@@ -388,7 +399,8 @@ fn resolve_element(
     let arity = element.nodes.len();
     let pin_count = symbol.pin_count();
 
-    let pin_mapping = if let Some(entries) = tags.pinmap {
+    let effective_pinmap = tags.pinmap.or(block_pinmap);
+    let pin_mapping = if let Some(entries) = effective_pinmap {
         match build_pinmap(
             &element.designator,
             arity,
@@ -550,15 +562,21 @@ fn build_pinmap(
 struct BlockSymbol<'a> {
     lib_id: &'a str,
     glob: &'a str,
+    pinmap: Option<&'a [PinmapEntry]>,
 }
 
 fn collect_symbol_defaults(annotations: &[SpannedAnnotation]) -> Vec<BlockSymbol<'_>> {
     annotations
         .iter()
         .filter_map(|a| match &a.annotation {
-            Annotation::SymbolDefault { lib_id, for_glob } => Some(BlockSymbol {
+            Annotation::SymbolDefault {
+                lib_id,
+                for_glob,
+                pinmap,
+            } => Some(BlockSymbol {
                 lib_id: lib_id.as_str(),
                 glob: for_glob.as_str(),
+                pinmap: pinmap.as_deref(),
             }),
             Annotation::Align { .. } => None,
         })
@@ -579,13 +597,13 @@ fn collect_align(annotations: &[SpannedAnnotation]) -> Vec<AlignSpec> {
         .collect()
 }
 
-fn resolve_lib_id(
+fn resolve_lib_id<'a>(
     element: &Element,
     tags: &ElementTags<'_>,
-    block_symbols: &[BlockSymbol<'_>],
-) -> Result<String, String> {
+    block_symbols: &'a [BlockSymbol<'a>],
+) -> Result<(String, Option<&'a [PinmapEntry]>), String> {
     if let Some(s) = tags.symbol {
-        return Ok(s.to_owned());
+        return Ok((s.to_owned(), None));
     }
     // Latest matching block annotation wins. Spec §4.1: "If two
     // [block] directives match the same element, the more specific
@@ -597,10 +615,10 @@ fn resolve_lib_id(
         .rev()
         .find(|bs| glob_matches(bs.glob, &element.designator))
     {
-        return Ok(matched.lib_id.to_owned());
+        return Ok((matched.lib_id.to_owned(), matched.pinmap));
     }
     if let Some(default) = default_lib_id(element.kind) {
-        return Ok(default.to_owned());
+        return Ok((default.to_owned(), None));
     }
     Err(match element.kind {
         ElementKind::Subckt => {

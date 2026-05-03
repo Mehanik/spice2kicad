@@ -156,8 +156,6 @@ fn v8_driver_smoke_emits_parent_schematic() {
 // --- V8 contract tests (ignored until the resolver/emitter ships) -------
 
 #[test]
-#[ignore = "V8: see CLAUDE.md § Visual quality invariants V8 — \
-            block `*@symbol … for=X1` must override SheetInstance routing"]
 fn v8_opamp_inverting_real_emits_symbol_not_sheet() {
     let (sch, tmp) = emit("opamp_inverting_real");
     let root = parse_sch(&sch);
@@ -202,8 +200,6 @@ fn v8_opamp_inverting_real_emits_symbol_not_sheet() {
 }
 
 #[test]
-#[ignore = "V8: see CLAUDE.md § Visual quality invariants V8 — \
-            opamp symbol pins must wire to the same parent-sheet nets X1 references"]
 fn v8_opamp_inverting_real_pin_connectivity() {
     let (sch, _tmp) = emit("opamp_inverting_real");
     let root = parse_sch(&sch);

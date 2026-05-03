@@ -126,6 +126,7 @@ fn block_symbol_default_with_glob() {
         annotations: vec![SpannedAnnotation::bare(Annotation::SymbolDefault {
             lib_id: "Device:R".to_owned(),
             for_glob: "R*".to_owned(),
+            pinmap: None,
         })],
         ..Netlist::default()
     };
@@ -153,10 +154,12 @@ fn later_block_annotation_wins_for_matches() {
             SpannedAnnotation::bare(Annotation::SymbolDefault {
                 lib_id: "Device:R".to_owned(),
                 for_glob: "R*".to_owned(),
+                pinmap: None,
             }),
             SpannedAnnotation::bare(Annotation::SymbolDefault {
                 lib_id: "Device:C".to_owned(),
                 for_glob: "R10".to_owned(),
+                pinmap: None,
             }),
         ],
         ..Netlist::default()
@@ -181,6 +184,7 @@ fn trailing_tag_beats_block_annotation() {
         annotations: vec![SpannedAnnotation::bare(Annotation::SymbolDefault {
             lib_id: "Device:R".to_owned(),
             for_glob: "R*".to_owned(),
+            pinmap: None,
         })],
         ..Netlist::default()
     };

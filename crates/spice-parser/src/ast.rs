@@ -184,8 +184,14 @@ pub enum Relation {
 #[derive(Debug, Clone)]
 pub enum Annotation {
     /// `*@symbol Lib:Name for=<glob>` — default symbol mapping for any
-    /// element whose refdes matches the glob.
-    SymbolDefault { lib_id: String, for_glob: String },
+    /// element whose refdes matches the glob. May carry an optional
+    /// `pinmap=…` clause that flows through to matched elements that
+    /// don't supply their own trailing `;@ pinmap=` tag.
+    SymbolDefault {
+        lib_id: String,
+        for_glob: String,
+        pinmap: Option<Vec<PinmapEntry>>,
+    },
     /// `*@align <axis> R1 R2 …`
     Align { axis: Axis, refdes: Vec<String> },
 }

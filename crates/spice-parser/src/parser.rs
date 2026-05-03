@@ -584,6 +584,15 @@ fn parse_place(s: &str) -> Option<Tag> {
 }
 
 fn parse_pinmap(s: &str, raw: &RawTag, diags: &mut Vec<Diagnostic>) -> Option<Tag> {
+    parse_pinmap_entries(s, raw.body_span, raw.outer_span, diags).map(Tag::Pinmap)
+}
+
+fn parse_pinmap_entries(
+    s: &str,
+    body_span: Span,
+    outer_span: Span,
+    diags: &mut Vec<Diagnostic>,
+) -> Option<Vec<PinmapEntry>> {
     let mut entries = Vec::new();
     let mut seen_spice: HashSet<usize> = HashSet::new();
     let mut seen_kicad: HashSet<String> = HashSet::new();
@@ -606,7 +615,7 @@ fn parse_pinmap(s: &str, raw: &RawTag, diags: &mut Vec<Diagnostic>) -> Option<Ta
             diags.push(error(
                 "E005",
                 format!("pinmap repeats SPICE terminal index {spice_index}"),
-                Label::new(raw.body_span, ""),
+                Label::new(body_span, ""),
             ));
             return None;
         }
@@ -615,7 +624,7 @@ fn parse_pinmap(s: &str, raw: &RawTag, diags: &mut Vec<Diagnostic>) -> Option<Ta
             diags.push(error(
                 "E005",
                 format!("pinmap repeats KiCad pin `{rhs}`"),
-                Label::new(raw.body_span, ""),
+                Label::new(body_span, ""),
             ));
             return None;
         }
@@ -633,11 +642,11 @@ fn parse_pinmap(s: &str, raw: &RawTag, diags: &mut Vec<Diagnostic>) -> Option<Ta
         diags.push(error(
             "E005",
             format!("invalid pinmap: `{s}`"),
-            Label::new(raw.outer_span, ""),
+            Label::new(outer_span, ""),
         ));
         return None;
     }
-    Some(Tag::Pinmap(entries))
+    Some(entries)
 }
 
 fn parse_block_annotation(line: &LogicalLine, diags: &mut Vec<Diagnostic>) -> Option<Annotation> {
@@ -671,7 +680,22 @@ fn parse_block_annotation(line: &LogicalLine, diags: &mut Vec<Diagnostic>) -> Op
                 Value::Number(n) => format!("{n}"),
                 Value::Expr(e) => e.clone(),
             };
-            Some(Annotation::SymbolDefault { lib_id, for_glob })
+            let pinmap = params
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("pinmap"))
+                .and_then(|(_, v)| {
+                    let s = match v {
+                        Value::String(s) => s.clone(),
+                        Value::Number(n) => format!("{n}"),
+                        Value::Expr(e) => e.clone(),
+                    };
+                    parse_pinmap_entries(&s, line.span, line.span, diags)
+                });
+            Some(Annotation::SymbolDefault {
+                lib_id,
+                for_glob,
+                pinmap,
+            })
         }
         "align" => {
             // `*@align <axis> ref ref ref ...`

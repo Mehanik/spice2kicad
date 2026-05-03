@@ -322,7 +322,7 @@ fn block_annotation_symbol_default() {
     assert!(
         has_annotation(&nl, |a| matches!(
             a,
-            Annotation::SymbolDefault { lib_id, for_glob }
+            Annotation::SymbolDefault { lib_id, for_glob, .. }
             if lib_id == "Device:R_US" && for_glob == "R*"
         )),
         "SymbolDefault not found"
