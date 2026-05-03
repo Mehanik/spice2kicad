@@ -123,18 +123,138 @@ pub struct Placement {
 /// Render a parsed SPICE [`Value`] back to its source-equivalent token.
 ///
 /// The schematic emitter uses this to populate the symbol's `Value`
-/// property so the round-trip through kicad-cli preserves component
-/// values. This is a coarse one-way formatter — it does not attempt
-/// to reconstruct engineering-suffixed forms (`1k`, `100n`); a numeric
-/// `1000` and the original `1k` both come out as decimal here. The
-/// canonicaliser in the round-trip tests collapses these to the same
-/// equivalence class, so topology-level checks still pass.
+/// property. Numeric values are rendered with an SI prefix that brings
+/// the mantissa into `[1, 1000)` per CLAUDE.md "Visual quality
+/// invariants V9". Non-numeric values (`Value::String`,
+/// `Value::Expr`) pass through verbatim.
 fn format_value(v: &Value) -> String {
     match v {
-        Value::Number(n) => format!("{n}"),
+        Value::Number(n) => format_si(*n),
         Value::String(s) => s.clone(),
         Value::Expr(e) => e.clone(),
     }
+}
+
+/// SI-prefix table: `(exponent, suffix)` where the multiplier is
+/// `10^exponent`. Picked so the mantissa lands in `[1, 1000)`.
+/// `Meg` (not `M`) for mega — matches SPICE convention where a bare
+/// `M` means milli.
+const SI_TABLE: &[(i32, &str)] = &[
+    (-15, "f"),
+    (-12, "p"),
+    (-9, "n"),
+    (-6, "u"),
+    (-3, "m"),
+    (0, ""),
+    (3, "k"),
+    (6, "Meg"),
+    (9, "G"),
+    (12, "T"),
+];
+
+/// Render an `f64` with an SI prefix per V9.
+///
+/// - `0.0` → `"0"`.
+/// - Negatives carry the sign through: `-0.015` → `"-15m"`.
+/// - `NaN` / `±Inf` fall back to `format!("{n}")`.
+/// - Values outside `[1e-15, 1e15)` fall back to `format!("{n:e}")`.
+/// - Mantissa: up to 3 significant digits, trailing zeros (and a
+///   trailing `.`) trimmed.
+fn format_si(n: f64) -> String {
+    if !n.is_finite() {
+        return format!("{n}");
+    }
+    if n == 0.0 {
+        return "0".to_string();
+    }
+    let negative = n < 0.0;
+    let abs = n.abs();
+
+    // Out-of-range fallback. Use a strict bracket: ≥ 1e-15 (so 1f
+    // formats) and < 1e15 (so 999T at 9.99e14 fits, but 1e15 does not).
+    if !(1e-15..1e15).contains(&abs) {
+        return format!("{n:e}");
+    }
+
+    // Pick the largest table exponent `e` such that `abs / 10^e >= 1.0`,
+    // i.e. the suffix that brings the mantissa into `[1, 1000)`.
+    // Use multiplication by `10^(-e)` (a small integer power) rather
+    // than `log10` to avoid floating-point boundary issues at e.g.
+    // `999.9999999` vs `1000`.
+    let mut chosen: (i32, &str) = SI_TABLE[0];
+    for &(exp, suffix) in SI_TABLE {
+        // mantissa = abs * 10^(-exp)
+        let mantissa = abs * pow10(-exp);
+        if mantissa >= 1.0 {
+            chosen = (exp, suffix);
+        } else {
+            break;
+        }
+    }
+
+    let (exp, suffix) = chosen;
+    let mantissa = abs * pow10(-exp);
+
+    // Round mantissa to up to 3 significant digits. Mantissa is in
+    // `[1, ~1000)`. If the rounded mantissa lands at exactly 1000, we
+    // bump to the next suffix (so e.g. 999.95 -> "1k", not "1000").
+    let rounded = round_3sf(mantissa);
+    let (mantissa_final, exp_final, suffix_final) = if rounded >= 1000.0 {
+        // Find next-higher suffix; if none, fall back to scientific.
+        let next = SI_TABLE.iter().find(|(e, _)| *e > exp).copied();
+        if let Some((e2, s2)) = next {
+            // mantissa was ≈1000 at exp `exp`; in the next suffix it's
+            // mantissa * 10^(exp - e2). For our 3-decade table that's
+            // exactly 1.0.
+            let m2 = rounded * pow10(exp - e2);
+            (round_3sf(m2), e2, s2)
+        } else {
+            return format!("{n:e}");
+        }
+    } else {
+        (rounded, exp, suffix)
+    };
+    let _ = exp_final; // exp value itself unused after suffix selected
+
+    let mantissa_str = format_mantissa(mantissa_final);
+    let sign = if negative { "-" } else { "" };
+    format!("{sign}{mantissa_str}{suffix_final}")
+}
+
+/// `10^e` for small integer `e` in our table range. Uses
+/// `f64::powi` — exact for the powers in `SI_TABLE`.
+fn pow10(e: i32) -> f64 {
+    10f64.powi(e)
+}
+
+/// Round a mantissa in `[1, 1000)` to at most three significant
+/// digits. Picks the decimal precision based on the integer-part
+/// width: 1.xy, 12.x, 123.
+fn round_3sf(m: f64) -> f64 {
+    let int_part = m.trunc().abs();
+    let scale = if int_part < 10.0 {
+        100.0 // two fractional digits
+    } else if int_part < 100.0 {
+        10.0 // one fractional digit
+    } else {
+        1.0 // none
+    };
+    (m * scale).round() / scale
+}
+
+/// Format a mantissa value with up to two fractional digits, trimming
+/// trailing zeros and a trailing `.`.
+fn format_mantissa(m: f64) -> String {
+    let mut s = format!("{m:.2}");
+    if s.contains('.') {
+        while s.ends_with('0') {
+            s.pop();
+        }
+        if s.ends_with('.') {
+            s.pop();
+        }
+    }
+    s
 }
 
 // ---------------------------------------------------------------------------
@@ -623,4 +743,89 @@ fn push_err(diags: &mut Vec<Diagnostic>, code: &'static str, message: String, sp
         d = d.with_help("source span unavailable for this diagnostic");
     }
     diags.push(d);
+}
+
+#[cfg(test)]
+mod si_format_tests {
+    use super::format_si;
+
+    #[test]
+    fn zero() {
+        assert_eq!(format_si(0.0), "0");
+    }
+
+    #[test]
+    fn basic_suffixes() {
+        assert_eq!(format_si(1e-6), "1u");
+        assert_eq!(format_si(4.7e3), "4.7k");
+        assert_eq!(format_si(1.5e6), "1.5Meg");
+        assert_eq!(format_si(1e3), "1k");
+        assert_eq!(format_si(1e-3), "1m");
+        assert_eq!(format_si(1e-9), "1n");
+        assert_eq!(format_si(1e-12), "1p");
+        assert_eq!(format_si(1e-15), "1f");
+        assert_eq!(format_si(1e9), "1G");
+        assert_eq!(format_si(1e12), "1T");
+    }
+
+    #[test]
+    fn fractional_prefers_smaller_suffix() {
+        // 1e-4 = 0.0001 -> "100u", not "0.1m"
+        assert_eq!(format_si(1e-4), "100u");
+        // 0.015 -> "15m"
+        assert_eq!(format_si(0.015), "15m");
+    }
+
+    #[test]
+    fn negatives() {
+        assert_eq!(format_si(-1e-3), "-1m");
+        assert_eq!(format_si(-0.015), "-15m");
+        assert_eq!(format_si(-1000.0), "-1k");
+    }
+
+    #[test]
+    fn boundary_values() {
+        assert_eq!(format_si(999.0), "999");
+        assert_eq!(format_si(1000.0), "1k");
+        // 999.5 rounds to 1000 -> "1k"
+        assert_eq!(format_si(999.5), "1k");
+        assert_eq!(format_si(0.999), "999m");
+        // 0.0009999 -> 1m (rounded)
+        assert_eq!(format_si(0.000_999_9), "1m");
+    }
+
+    #[test]
+    fn rc_lowpass_capacitor() {
+        // 100n stored as 1e-7
+        assert_eq!(format_si(100e-9), "100n");
+        // 1k
+        assert_eq!(format_si(1000.0), "1k");
+    }
+
+    #[test]
+    fn common_emitter_capacitor() {
+        // 100u stored after parser may be 9.999...e-5 or 1e-4.
+        // Both must format to "100u".
+        assert_eq!(format_si(100e-6), "100u");
+        assert_eq!(format_si(0.000_099_999_999_999_999_99), "100u");
+    }
+
+    #[test]
+    fn nan_and_inf_passthrough() {
+        assert_eq!(format_si(f64::NAN), format!("{}", f64::NAN));
+        assert_eq!(format_si(f64::INFINITY), format!("{}", f64::INFINITY));
+    }
+
+    #[test]
+    fn out_of_range_uses_scientific() {
+        let s = format_si(1e16);
+        assert!(s.contains('e'), "expected scientific, got {s}");
+    }
+
+    #[test]
+    fn no_trailing_zeros_in_mantissa() {
+        assert_eq!(format_si(1.0e-6), "1u");
+        assert_eq!(format_si(1.10e3), "1.1k");
+        assert_eq!(format_si(10.0e3), "10k");
+    }
 }

@@ -161,9 +161,6 @@ fn is_si_value(s: &str) -> bool {
 // --- per-fixture tests ---------------------------------------------------
 
 #[test]
-#[ignore = "V9: see CLAUDE.md § Visual quality invariants V9. \
-            format_value in spice-layout currently emits raw f64 to_string; \
-            needs SI suffix logic. Today: C1='0.00000010000000000000001', expected '100n'."]
 fn v9_capacitor_value_uses_si_suffix() {
     let sch = emit_fixture("rc_lowpass");
     let root = parse_sch(&sch);
@@ -176,9 +173,6 @@ fn v9_capacitor_value_uses_si_suffix() {
 }
 
 #[test]
-#[ignore = "V9: see CLAUDE.md § Visual quality invariants V9. \
-            format_value in spice-layout currently emits raw f64 to_string; \
-            needs SI suffix logic. Today: R1='1000', expected '1k'."]
 fn v9_resistor_value_uses_si_suffix() {
     // rc_lowpass R1 = 1k.
     let sch = emit_fixture("rc_lowpass");
@@ -199,9 +193,6 @@ fn v9_resistor_value_uses_si_suffix() {
 }
 
 #[test]
-#[ignore = "V9: see CLAUDE.md § Visual quality invariants V9. \
-            format_value in spice-layout currently emits raw f64 to_string; \
-            needs SI suffix logic. Inline fixture writes L1 1m; expected '1m'."]
 fn v9_inductor_value_uses_si_suffix() {
     // No tree fixture has an inductor today; ship a minimal one inline
     // so the V9 contract covers L as well as R/C.
@@ -220,8 +211,6 @@ fn v9_inductor_value_uses_si_suffix() {
 }
 
 #[test]
-#[ignore = "V9: see CLAUDE.md § Visual quality invariants V9. \
-            format_value must pass non-numeric Value::Expr / Value::String through verbatim."]
 fn v9_value_passthrough_for_non_numeric() {
     // Brace expressions stay literal — the formatter only touches numeric f64.
     let sch = emit_inline(
@@ -242,9 +231,6 @@ fn v9_value_passthrough_for_non_numeric() {
 }
 
 #[test]
-#[ignore = "V9: see CLAUDE.md § Visual quality invariants V9. \
-            Negative numerics must keep their sign through the SI formatter \
-            (-0.015 -> '-15m')."]
 fn v9_negative_value_preserved() {
     // Use a current source with a bare negative numeric value so the
     // parser produces Value::Number(-1e-3) rather than Value::String("DC -15").
