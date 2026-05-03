@@ -339,6 +339,7 @@ const V6_HINT: &str = "V6: placer treats elements generically; needs an \
     archetype matcher (see CLAUDE.md \u{a7} Visual quality invariants V6)";
 
 #[test]
+#[ignore = "T8: replaced by fixture-wide quality tests"]
 fn v6_common_emitter_rails_horizontal() {
     // The conventional CE amp has a Vcc rail above Q1 and a GND rail
     // below it, so RC (collector resistor, hangs from Vcc) and
@@ -371,6 +372,7 @@ fn v6_common_emitter_rails_horizontal() {
 }
 
 #[test]
+#[ignore = "T8: replaced by fixture-wide quality tests"]
 fn v6_common_emitter_signal_flow_ordering() {
     // Signal flows left-to-right: AC-coupling input cap, BJT, output
     // cap. Refdeses come from `tests/fixtures/common_emitter.cir`.
@@ -394,6 +396,7 @@ fn v6_common_emitter_signal_flow_ordering() {
 }
 
 #[test]
+#[ignore = "T8: replaced by fixture-wide quality tests"]
 fn v6_common_emitter_q1_central() {
     // Q1 must sit vertically between RC (collector resistor, above) and
     // RE (emitter resistor, below) — a strictly weaker form of the

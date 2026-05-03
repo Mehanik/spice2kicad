@@ -23,7 +23,6 @@
 
 #![forbid(unsafe_code)]
 
-mod archetype;
 pub mod bands;
 pub mod cost;
 pub mod layers;
@@ -300,14 +299,6 @@ pub fn place_with(
     opts: &LayoutOptions,
 ) -> Result<Placement, Vec<Diagnostic>> {
     let (mut placement, mut pinned) = place_seed(&checked)?;
-    // V6: overlay topology archetype seeds (if any matched) on top of
-    // the stage-1 placement before the V5 orientation pass runs. The
-    // archetype owns the *origins* of its matched elements; V5 still
-    // chooses orientations against neighbours that aren't pinned.
-    let seeds = archetype::detect_and_seed(&checked);
-    if !seeds.is_empty() {
-        archetype::apply_seeds(&mut placement, &mut pinned, &seeds);
-    }
     // V7: detect structural symmetry in the netlist and mirror paired
     // elements about a common vertical axis. Runs after V6 archetype
     // seeding so the axis is computed from a topology-aware base
