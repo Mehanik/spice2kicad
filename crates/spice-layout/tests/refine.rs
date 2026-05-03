@@ -36,7 +36,7 @@ fn refine_opts(seed: u64) -> LayoutOptions {
         // Small budgets keep tests fast; the algorithms are exercised,
         // tuning happens against `examples/` separately.
         fr_iters: 30,
-        sa_iters: 500,
+        refine_iterations: 500,
     }
 }
 
@@ -129,13 +129,17 @@ fn refined_cost_no_worse_than_stage1_on_connected_chain() {
 
 #[test]
 fn refine_disabled_matches_stage1_exactly() {
-    // The default `LayoutOptions` has refine=false; the result must
-    // match `place()` to the byte (no RNG, no SA).
+    // Two `place_with` calls with refine disabled must produce
+    // byte-identical output — no RNG, no SA, just the deterministic
+    // stage-1 placer.
     let resolved = mk_resolved(&["R1", "R2", "R3"], &[], &[]);
     let (checked, _) = check(resolved).expect("policy check");
-    let s1 = place(checked.clone(), fixture_library()).expect("stage1");
-    let s1_via_with =
-        place_with(checked, fixture_library(), &LayoutOptions::default()).expect("place_with");
+    let opts = LayoutOptions {
+        refine: false,
+        ..LayoutOptions::default()
+    };
+    let s1 = place_with(checked.clone(), fixture_library(), &opts).expect("place_with #1");
+    let s1_via_with = place_with(checked, fixture_library(), &opts).expect("place_with #2");
     assert_eq!(s1.elements.len(), s1_via_with.elements.len());
     for (a, b) in s1.elements.iter().zip(s1_via_with.elements.iter()) {
         assert_eq!(a.refdes, b.refdes);

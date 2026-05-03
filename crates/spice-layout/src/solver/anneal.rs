@@ -32,10 +32,11 @@ use super::{LayoutOptions, rng::Rng};
 use crate::{
     GridPoint, PlacedElement, Placement,
     cost::{self, CostBreakdown, CostWeights},
+    layers::LayerAssignment,
 };
 
 /// SA proposals between two cost-breakdown log lines.
-const LOG_EVERY: usize = 1000;
+const LOG_EVERY: u32 = 1000;
 
 /// Run SA on top of `seed`, mutating only unpinned elements.
 ///
@@ -49,6 +50,7 @@ pub(super) fn refine(
     checked: &CheckedNetlist,
     library: &Library,
     opts: &LayoutOptions,
+    layers: &LayerAssignment,
 ) -> Placement {
     // Origins are `GridPoint` (i32) by construction, so the FR-to-SA
     // boundary is implicitly grid-snapped: FR writes back through
@@ -57,9 +59,23 @@ pub(super) fn refine(
 
     let n = seed.elements.len();
     let movable: Vec<usize> = (0..n).filter(|i| !pinned[*i]).collect();
-    if movable.is_empty() || opts.sa_iters == 0 {
+    if movable.is_empty() || opts.refine_iterations == 0 {
         return seed;
     }
+
+    // Bucket movable elements by layer so the swap-Y-rank move can pick
+    // a peer cheaply. Layer index → indices of movable elements in it.
+    let mut layer_buckets: std::collections::HashMap<u32, Vec<usize>> =
+        std::collections::HashMap::new();
+    for &i in &movable {
+        if let Some(&layer) = layers.layers.get(i) {
+            layer_buckets.entry(layer).or_default().push(i);
+        }
+    }
+    let swap_layers: Vec<u32> = layer_buckets
+        .iter()
+        .filter_map(|(k, v)| if v.len() >= 2 { Some(*k) } else { None })
+        .collect();
 
     let weights = CostWeights::DEFAULT;
     let mut current_breakdown = cost::breakdown(&seed, checked, library);
@@ -72,8 +88,7 @@ pub(super) fn refine(
 
     // Cooling: exponential, factor 1000 over the iteration count.
     // f64 widening only; iteration count fits comfortably.
-    #[allow(clippy::cast_precision_loss)]
-    let total_iters = opts.sa_iters as f64;
+    let total_iters = f64::from(opts.refine_iterations);
     let t0 = initial_temperature(&current_breakdown, &weights);
     let t_final = t0 / 1000.0;
     let alpha = (t_final / t0).powf(1.0 / total_iters.max(1.0));
@@ -84,17 +99,13 @@ pub(super) fn refine(
         n,
         t0,
         alpha,
-        opts.sa_iters
+        opts.refine_iterations
     );
 
     let mut temperature = t0;
-    for it in 0..opts.sa_iters {
-        let move_idx = movable[rng.next_below(movable.len())];
-        let (saved_origin, saved_orient) = (
-            seed.elements[move_idx].origin,
-            seed.elements[move_idx].orientation,
-        );
-        propose(&mut seed.elements[move_idx], &mut rng);
+    for it in 0..opts.refine_iterations {
+        let proposal = propose_move(&seed, &movable, &layer_buckets, &swap_layers, &mut rng);
+        let saved = apply_move(&mut seed, &proposal);
 
         let trial_breakdown = cost::breakdown(&seed, checked, library);
         let trial_cost = cost::total(&trial_breakdown, &weights);
@@ -109,9 +120,7 @@ pub(super) fn refine(
                 best_cost = current_cost;
             }
         } else {
-            // Revert.
-            seed.elements[move_idx].origin = saved_origin;
-            seed.elements[move_idx].orientation = saved_orient;
+            revert_move(&mut seed, &saved);
         }
 
         temperature *= alpha;
@@ -152,18 +161,128 @@ fn initial_temperature(breakdown: &CostBreakdown, weights: &CostWeights) -> f64 
     (c * 0.05).max(1.0)
 }
 
-/// Apply one random move to `el`.
-fn propose(el: &mut PlacedElement, rng: &mut Rng) {
-    // 7-in-8: position jitter; 1-in-8: rotate.
-    let r = rng.next_below(8);
-    if r == 0 {
-        rotate_once(el);
+/// Concrete proposal returned by `propose_move`. The annealer applies
+/// it, evaluates cost, and either keeps or reverts via the matching
+/// `Saved` snapshot.
+#[derive(Debug, Clone, Copy)]
+enum Proposal {
+    /// Jitter element `idx` by `(dx, dy)` grid cells.
+    Jitter { idx: usize, dx: i32, dy: i32 },
+    /// Rotate element `idx` 90° CCW.
+    Rotate { idx: usize },
+    /// Swap the Y rank (origin.y) of two same-layer movable elements.
+    SwapY { a: usize, b: usize },
+}
+
+/// Snapshot of just enough state to revert a proposal that was rejected.
+#[derive(Debug, Clone, Copy)]
+enum Saved {
+    Pose {
+        idx: usize,
+        origin: GridPoint,
+        orientation: Orientation,
+    },
+    SwapY {
+        a: usize,
+        a_y: i32,
+        b: usize,
+        b_y: i32,
+    },
+}
+
+/// Pick the next move. Distribution (per-call):
+///
+/// * 0.7 jitter, 0.1 rotate, 0.2 same-layer Y-rank swap (when at
+///   least one layer has two or more movable elements; otherwise
+///   the swap weight collapses into jitter).
+fn propose_move(
+    placement: &Placement,
+    movable: &[usize],
+    layer_buckets: &std::collections::HashMap<u32, Vec<usize>>,
+    swap_layers: &[u32],
+    rng: &mut Rng,
+) -> Proposal {
+    // Resolve a proposal in {jitter, rotate, swap}. We bias to jitter:
+    // the bulk of SA work is local position search.
+    let bucket = rng.next_below(10);
+    let want_swap = !swap_layers.is_empty() && bucket < 2; // 0.2
+    let want_rotate = bucket == 2; // 0.1
+
+    if want_swap {
+        let layer = swap_layers[rng.next_below(swap_layers.len())];
+        let elems = &layer_buckets[&layer];
+        let i = rng.next_below(elems.len());
+        let mut j = rng.next_below(elems.len());
+        while j == i {
+            j = rng.next_below(elems.len());
+        }
+        let (a, b) = (elems[i], elems[j]);
+        // Skip degenerate swaps (both already at the same Y) — fall
+        // through to a jitter so the iteration is not wasted.
+        if placement.elements[a].origin.y != placement.elements[b].origin.y {
+            return Proposal::SwapY { a, b };
+        }
+    }
+
+    let idx = movable[rng.next_below(movable.len())];
+    if want_rotate {
+        Proposal::Rotate { idx }
     } else {
-        jitter(el, rng);
+        let (dx, dy) = jitter_delta(rng);
+        Proposal::Jitter { idx, dx, dy }
     }
 }
 
-fn jitter(el: &mut PlacedElement, rng: &mut Rng) {
+fn apply_move(seed: &mut Placement, p: &Proposal) -> Saved {
+    match *p {
+        Proposal::Jitter { idx, dx, dy } => {
+            let el = &mut seed.elements[idx];
+            let saved = Saved::Pose {
+                idx,
+                origin: el.origin,
+                orientation: el.orientation,
+            };
+            el.origin = GridPoint::new(el.origin.x + dx, el.origin.y + dy);
+            saved
+        }
+        Proposal::Rotate { idx } => {
+            let el = &mut seed.elements[idx];
+            let saved = Saved::Pose {
+                idx,
+                origin: el.origin,
+                orientation: el.orientation,
+            };
+            rotate_once(el);
+            saved
+        }
+        Proposal::SwapY { a, b } => {
+            let a_y = seed.elements[a].origin.y;
+            let b_y = seed.elements[b].origin.y;
+            seed.elements[a].origin = GridPoint::new(seed.elements[a].origin.x, b_y);
+            seed.elements[b].origin = GridPoint::new(seed.elements[b].origin.x, a_y);
+            Saved::SwapY { a, a_y, b, b_y }
+        }
+    }
+}
+
+fn revert_move(seed: &mut Placement, saved: &Saved) {
+    match *saved {
+        Saved::Pose {
+            idx,
+            origin,
+            orientation,
+        } => {
+            seed.elements[idx].origin = origin;
+            seed.elements[idx].orientation = orientation;
+        }
+        Saved::SwapY { a, a_y, b, b_y } => {
+            seed.elements[a].origin = GridPoint::new(seed.elements[a].origin.x, a_y);
+            seed.elements[b].origin = GridPoint::new(seed.elements[b].origin.x, b_y);
+        }
+    }
+}
+
+fn jitter_delta(rng: &mut Rng) -> (i32, i32) {
     // Offset uniform in {-2, -1, 0, 1, 2} per axis, excluding (0, 0).
     loop {
         // i32 widening from u8.
@@ -174,8 +293,7 @@ fn jitter(el: &mut PlacedElement, rng: &mut Rng) {
         if dx == 0 && dy == 0 {
             continue;
         }
-        el.origin = GridPoint::new(el.origin.x + dx, el.origin.y + dy);
-        return;
+        return (dx, dy);
     }
 }
 
@@ -191,4 +309,66 @@ fn rotate_once(el: &mut PlacedElement) {
         rotation: new_rotation,
         mirror_y: el.orientation.mirror_y,
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::PlacedElement;
+    use kicad_symbols::Orientation;
+
+    fn placed(refdes: &str, x: i32, y: i32) -> PlacedElement {
+        PlacedElement {
+            refdes: refdes.to_string(),
+            lib_id: "Device:R".to_string(),
+            origin: GridPoint::new(x, y),
+            orientation: Orientation::IDENTITY,
+            nodes: Vec::new(),
+            pin_mapping: Vec::new(),
+            value: None,
+        }
+    }
+
+    /// Two same-layer elements should be eligible for a Y-rank swap;
+    /// after applying the proposal their Y coordinates are exchanged.
+    #[test]
+    fn swap_y_rank_move_swaps_origins() {
+        let mut placement = Placement {
+            elements: vec![placed("R1", 0, 5), placed("R2", 10, 12)],
+        };
+        // Both elements are movable and on the same layer.
+        let movable = vec![0, 1];
+        let mut buckets: std::collections::HashMap<u32, Vec<usize>> =
+            std::collections::HashMap::new();
+        buckets.insert(0, vec![0, 1]);
+        let swap_layers = vec![0_u32];
+        let mut rng = Rng::new(0xDEAD_BEEF);
+
+        // Loop until propose_move returns a SwapY (0.2 probability per
+        // call — capped iteration count keeps the test bounded).
+        let mut maybe_swap: Option<Proposal> = None;
+        for _ in 0..1000 {
+            let p = propose_move(&placement, &movable, &buckets, &swap_layers, &mut rng);
+            if matches!(p, Proposal::SwapY { .. }) {
+                maybe_swap = Some(p);
+                break;
+            }
+        }
+        let proposal = maybe_swap.expect("propose_move never produced SwapY in 1000 tries");
+
+        let first_y = placement.elements[0].origin.y;
+        let second_y = placement.elements[1].origin.y;
+        let saved = apply_move(&mut placement, &proposal);
+        assert_eq!(placement.elements[0].origin.y, second_y);
+        assert_eq!(placement.elements[1].origin.y, first_y);
+
+        // X stays put — only Y rank swaps.
+        assert_eq!(placement.elements[0].origin.x, 0);
+        assert_eq!(placement.elements[1].origin.x, 10);
+
+        // Revert restores the original Y rank.
+        revert_move(&mut placement, &saved);
+        assert_eq!(placement.elements[0].origin.y, first_y);
+        assert_eq!(placement.elements[1].origin.y, second_y);
+    }
 }

@@ -45,10 +45,15 @@ struct Cli {
     #[arg(short = 'l', long = "lib")]
     libs: Vec<PathBuf>,
 
-    /// Run the stage-3 force-directed + simulated-annealing refinement
-    /// after the deterministic seed placer. Schematic target only.
+    /// Skip the stage-3 force-directed + simulated-annealing
+    /// refinement after the deterministic seed placer (default is to
+    /// run it). Schematic target only.
     #[arg(long)]
-    refine: bool,
+    no_refine: bool,
+
+    /// Iteration cap for the SA refiner (default 200).
+    #[arg(long)]
+    refine_iterations: Option<u32>,
 }
 
 fn load_library(paths: &[PathBuf]) -> Result<Library> {
@@ -165,7 +170,8 @@ fn emit_schematic_target(
     }
 
     let opts = LayoutOptions {
-        refine: cli.refine,
+        refine: !cli.no_refine,
+        refine_iterations: cli.refine_iterations.unwrap_or(200),
         ..LayoutOptions::default()
     };
     let placement = match spice_layout::place_with(checked, &library, &opts) {

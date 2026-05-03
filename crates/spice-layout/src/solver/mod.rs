@@ -26,8 +26,9 @@ mod rng;
 #[derive(Debug, Clone, Copy)]
 pub struct LayoutOptions {
     /// Run FR seeding + SA refinement after stage-1 placement. When
-    /// `false` (default), only stage-1 runs and the result is
-    /// deterministic.
+    /// `false`, only stage-1 runs and the result is deterministic.
+    /// Defaults to `true`: the layered seed placer benefits from a
+    /// short SA polish before emission.
     pub refine: bool,
     /// PRNG seed for the SA pass. Same seed → same placement.
     pub seed: u64,
@@ -35,18 +36,19 @@ pub struct LayoutOptions {
     /// `examples/`; bump for larger circuits if seeds look bad.
     pub fr_iters: usize,
     /// SA iteration budget. Higher = better quality, longer runtime.
-    /// 5000 hits the ADR-8 wall-clock target on circuits up to a few
-    /// hundred elements.
-    pub sa_iters: usize,
+    /// The default (200) is a cheap polish on top of the stage-1
+    /// layered seed; raise for larger circuits where the cost
+    /// surface has more local minima.
+    pub refine_iterations: u32,
 }
 
 impl Default for LayoutOptions {
     fn default() -> Self {
         Self {
-            refine: false,
+            refine: true,
             seed: 0xC0FF_EE42,
             fr_iters: 100,
-            sa_iters: 5_000,
+            refine_iterations: 200,
         }
     }
 }
@@ -65,5 +67,10 @@ pub(crate) fn refine(
     opts: &LayoutOptions,
 ) -> Placement {
     let after_fr = force::seed(seed, pinned, checked, opts);
-    anneal::refine(after_fr, pinned, checked, library, opts)
+    // Compute layer assignment once so the annealer can propose
+    // structure-aware moves (e.g. swapping two same-layer elements'
+    // Y rank). Cheap relative to the SA loop itself.
+    let classes = crate::net_class::classify_nets(checked);
+    let layers = crate::layers::assign_x_layers(checked, &classes);
+    anneal::refine(after_fr, pinned, checked, library, opts, &layers)
 }
