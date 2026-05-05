@@ -51,6 +51,12 @@ pub struct RouteRequest<'a> {
     /// resolves before emitting an instance. `None` skips the check
     /// (every requested `power:*` symbol is assumed to exist).
     pub library: Option<&'a Library>,
+    /// Sheet UUID — used to populate the per-symbol `(instances …)`
+    /// block kicad-cli requires for netlist export.
+    pub sheet_uuid: &'a str,
+    /// Project name — written into the `(instances (project "<name>" …))`
+    /// block of every emitted symbol.
+    pub project_name: &'a str,
 }
 
 /// Output of [`crate::route`].

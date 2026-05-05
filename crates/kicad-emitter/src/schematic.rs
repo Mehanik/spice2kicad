@@ -846,10 +846,13 @@ fn route_nets(
         });
     }
 
+    let suuid = sheet_uuid();
     let result = spice_route::route(RouteRequest {
         nets: &specs,
         scope,
         library: Some(library),
+        sheet_uuid: &suuid,
+        project_name: GENERATOR,
     });
     for w in &result.warnings {
         eprintln!("spice2kicad route: {w}");

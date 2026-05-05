@@ -53,31 +53,31 @@ fn tempdir(name: &str) -> PathBuf {
 }
 
 #[test]
-#[ignore = "R5: power-symbol instances need an `(instances …)` block (or alt connectivity carrier) for kicad-cli to recognise them in netlist export; tracked for R6"]
+
 fn rc_lowpass() {
     run_roundtrip("rc_lowpass");
 }
 
 #[test]
-#[ignore = "R5: spice-route Steiner trees can produce coincident wire endpoints across distinct nets; rip-up & retry lands in R6/R7"]
+#[ignore = "R6: emitter-net global_label coincides with the base-net wire path on this fixture; full label-vs-wire conflict avoidance needs the rip-up & retry stage (deferred to R7)"]
 fn common_emitter() {
     run_roundtrip("common_emitter");
 }
 
 #[test]
-#[ignore = "R5: spice-route Steiner trees can produce coincident wire endpoints across distinct nets; rip-up & retry lands in R6/R7"]
+
 fn opamp_inverting() {
     run_roundtrip("opamp_inverting");
 }
 
 #[test]
-#[ignore = "R5: power-symbol instances need an `(instances …)` block (or alt connectivity carrier) for kicad-cli to recognise them in netlist export; tracked for R6"]
+
 fn multivibrator() {
     run_roundtrip("multivibrator");
 }
 
 #[test]
-#[ignore = "R5: power-symbol instances need an `(instances …)` block (or alt connectivity carrier) for kicad-cli to recognise them in netlist export; tracked for R6"]
+
 fn diff_pair() {
     run_roundtrip("diff_pair");
 }

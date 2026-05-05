@@ -593,7 +593,7 @@ fn placed_symbols(root: &Value) -> Vec<(String, Pt)> {
         // so they intentionally sit on top of the connected element's
         // pin and would always trigger overlap-detection asserts that
         // expect only "real" placed elements.
-        if refdes == "#PWR" {
+        if refdes.starts_with("#PWR") {
             continue;
         }
         let mut it = list_iter(at);

@@ -47,6 +47,8 @@ fn vcc_pin_emits_power_vcc_symbol() {
         nets: &[net],
         scope: "root",
         library: Some(&lib),
+        sheet_uuid: "test-uuid",
+        project_name: "test",
     });
     assert_eq!(count_substring(&r.sexprs, "power:VCC"), 1, "{:?}", r.sexprs);
     assert_eq!(count_wires(&r.sexprs), 0, "power nets emit no wires");
@@ -69,6 +71,8 @@ fn ground_pin_emits_power_gnd_symbol() {
         nets: &[net],
         scope: "root",
         library: Some(&lib),
+        sheet_uuid: "test-uuid",
+        project_name: "test",
     });
     assert_eq!(count_substring(&r.sexprs, "power:GND"), 1, "{:?}", r.sexprs);
     assert_eq!(count_wires(&r.sexprs), 0);
@@ -90,6 +94,8 @@ fn signal_net_does_not_emit_power_symbol() {
         nets: &[net],
         scope: "root",
         library: Some(&lib),
+        sheet_uuid: "test-uuid",
+        project_name: "test",
     });
     assert_eq!(count_substring(&r.sexprs, "power:"), 0);
     // Stage 2a is now live: two pins on the same Y emit a single
@@ -112,6 +118,8 @@ fn unknown_lib_id_falls_back_to_global_label() {
         nets: &[net],
         scope: "root",
         library: Some(&lib),
+        sheet_uuid: "test-uuid",
+        project_name: "test",
     });
     assert_eq!(count_substring(&r.sexprs, "power:VCC"), 0);
     assert_eq!(

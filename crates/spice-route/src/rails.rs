@@ -24,9 +24,16 @@ const GRID_MM: f64 = 1.27;
 
 /// Append power-symbol (or fallback global-label) S-exprs for every
 /// pin on a Power/Ground net. Signal nets are ignored.
+///
+/// `pwr_counter` is incremented once per emitted power symbol so each
+/// glyph carries a unique `#PWR<n>` reference designator across the
+/// whole sheet.
 pub fn emit(
     net: &NetSpec,
     library: Option<&Library>,
+    sheet_uuid: &str,
+    project_name: &str,
+    pwr_counter: &mut usize,
     out: &mut Vec<Sexpr>,
     warnings: &mut Vec<String>,
 ) {
@@ -38,7 +45,16 @@ pub fn emit(
     let resolved = library.is_none_or(|lib| lib.lookup(lib_id).is_some());
     for pin in &net.pins {
         if resolved {
-            out.push(power_symbol_sexpr(lib_id, &net.name, pin));
+            *pwr_counter += 1;
+            let refdes = format!("#PWR{pwr_counter}");
+            out.push(power_symbol_sexpr(
+                lib_id,
+                &net.name,
+                pin,
+                &refdes,
+                sheet_uuid,
+                project_name,
+            ));
         } else {
             out.push(global_label_sexpr(&net.name, pin));
         }
@@ -92,20 +108,32 @@ fn symbol_pose(pin: &PinRef) -> (f64, f64, u16) {
     (sx, sy, rot)
 }
 
-fn power_symbol_sexpr(lib_id: &str, net_name: &str, pin: &PinRef) -> Sexpr {
+fn power_symbol_sexpr(
+    lib_id: &str,
+    net_name: &str,
+    pin: &PinRef,
+    refdes: &str,
+    sheet_uuid: &str,
+    project_name: &str,
+) -> Sexpr {
     let (x, y, rot) = symbol_pose(pin);
     // Use the same pattern as the existing emitter: nested `(symbol …)`
-    // with `lib_id`, `at`, `unit`, properties. Reference is `#PWR` (no
-    // unit number — KiCad assigns one on annotation), Value is the net
-    // name (which is what wires the global power net together).
+    // with `lib_id`, `at`, `unit`, properties. Reference is a unique
+    // `#PWR<n>`, Value is the net name (which is what wires the global
+    // power net together). The sibling `(instances …)` block is
+    // mandatory: kicad-cli's netlist export skips any symbol instance
+    // that doesn't appear in such a block.
     let txt = format!(
         "(symbol \
             (lib_id \"{lib_id}\") \
             (at {x:.2} {y:.2} {rot}) \
             (unit 1) \
             (in_bom no) (on_board no) \
-            (property \"Reference\" \"#PWR\" (at {rx:.2} {ry:.2} 0)) \
-            (property \"Value\" \"{net_name}\" (at {vx:.2} {vy:.2} 0)))",
+            (property \"Reference\" \"{refdes}\" (at {rx:.2} {ry:.2} 0)) \
+            (property \"Value\" \"{net_name}\" (at {vx:.2} {vy:.2} 0)) \
+            (instances (project \"{project_name}\" \
+                (path \"/{sheet_uuid}\" \
+                    (reference \"{refdes}\") (unit 1)))))",
         rx = x,
         ry = y - 1.27,
         vx = x,

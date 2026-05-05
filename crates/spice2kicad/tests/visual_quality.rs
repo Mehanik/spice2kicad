@@ -477,28 +477,33 @@ fn v1_opamp_inverting() {
 // `power_pin_not_driven` and Steiner trees can leave dangling labels
 // at branch points without explicit junctions. R6 (cleanup) and R7
 // (visual verify) restore ERC-clean output.
+// `power_pin_not_driven` ERC errors persist after R6: the power.kicad_sym
+// fixture symbols have `power_in` pins that ERC expects to be driven by
+// a `power_out` pin somewhere on the sheet. PWR_FLAG-style driver
+// emission (or library symbol swap) is unrelated to the (instances ...)
+// fix and is deferred to R7.
 #[test]
-#[ignore = "R5: ERC fails until power-symbol instances and Steiner-tree junctions are finalised in R6/R7"]
+#[ignore = "R7: ERC reports power_pin_not_driven; needs PWR_FLAG driver or library symbol swap"]
 fn v2_rc_lowpass() {
     run_v2("rc_lowpass");
 }
 #[test]
-#[ignore = "R5: ERC fails until power-symbol instances and Steiner-tree junctions are finalised in R6/R7"]
+#[ignore = "R7: ERC reports power_pin_not_driven; needs PWR_FLAG driver or library symbol swap"]
 fn v2_common_emitter() {
     run_v2("common_emitter");
 }
 #[test]
-#[ignore = "R5: ERC fails until power-symbol instances and Steiner-tree junctions are finalised in R6/R7"]
+#[ignore = "R7: ERC reports power_pin_not_driven; needs PWR_FLAG driver or library symbol swap"]
 fn v2_multivibrator() {
     run_v2("multivibrator");
 }
 #[test]
-#[ignore = "R5: ERC fails until power-symbol instances and Steiner-tree junctions are finalised in R6/R7"]
+#[ignore = "R7: ERC reports power_pin_not_driven; needs PWR_FLAG driver or library symbol swap"]
 fn v2_diff_pair() {
     run_v2("diff_pair");
 }
 #[test]
-#[ignore = "R5: ERC fails until power-symbol instances and Steiner-tree junctions are finalised in R6/R7"]
+#[ignore = "R7: ERC reports power_pin_not_driven; needs PWR_FLAG driver or library symbol swap"]
 fn v2_opamp_inverting() {
     run_v2("opamp_inverting");
 }
