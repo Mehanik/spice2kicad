@@ -871,19 +871,19 @@ fn wire_length_within_budget_across_fixtures() {
     // trunk inflation pushes ratios well above 1.0 even on small
     // fixtures; rc_lowpass is exempt from channel-routing because
     // its `out` net is fast-pathed (2 pins, < 10 mm Manhattan).
-    // Tightened wire-length budgets after the T8 cosmetic fix.
-    // The 2-pin / 3-pin fast-path routes emit ~Manhattan distance
-    // directly; the channel router contributes the remaining
-    // multiplier on multi-pin nets. The numbers below comfortably
-    // bound today's emitter while leaving the plan target of 2.5
-    // (and 1.5 for fast-path 2-pin nets) within reach for the
-    // simplest fixtures.
+    // R7 budgets, calibrated against the spice-route Steiner-tree
+    // router. Measured ratios on master at R7:
+    // rc_lowpass=1.00, common_emitter=1.15, multivibrator=1.52,
+    // diff_pair=1.00, opamp_inverting_real=1.05. Plan target was
+    // 2.5 across the board; we keep that as the upper bound and
+    // tighten the simpler fixtures further so a regression is
+    // visible immediately.
     let budgets: &[(&str, f64)] = &[
-        ("rc_lowpass", 2.5),
-        ("common_emitter", 5.0),
-        ("multivibrator", 4.0),
-        ("diff_pair", 4.0),
-        ("opamp_inverting_real", 4.0),
+        ("rc_lowpass", 1.5),
+        ("common_emitter", 2.5),
+        ("multivibrator", 2.5),
+        ("diff_pair", 1.5),
+        ("opamp_inverting_real", 1.5),
     ];
     for (name, path) in fixtures() {
         let tmp = tempdir(name);
@@ -943,19 +943,20 @@ fn crossing_count_within_budget_across_fixtures() {
     // crossings — that is *router* behaviour, not a placer
     // failure. Budgets here reflect what is achievable today on
     // each fixture; tighten when a smarter router lands.
-    // Tightened budgets (post wider-stride + 3-pin T-junction
-    // fast path). Plan numbers were 0/2/4/2/2; the channel router
-    // still produces a handful of cross-net crossings on multi-
-    // pin nets where the per-pin escape rows interleave through
-    // unrelated trunks. The numbers below sit at roughly 1.5 times
-    // the measured count and tighten by 3-40x relative to T8's
-    // pre-tightening values.
+    // R7 budgets, calibrated against the spice-route Steiner-tree
+    // router. Measured crossings on master at R7: rc_lowpass=0,
+    // common_emitter=4, multivibrator=2, diff_pair=1,
+    // opamp_inverting_real=1. Plan target was 0/2/4/2/2;
+    // common_emitter exceeds the plan target (4 > 2) under the
+    // current placement so its budget stays at the measured floor
+    // rather than the spec target. Other fixtures are at or below
+    // spec.
     let budgets: &[(&str, u32)] = &[
         ("rc_lowpass", 0),
-        ("common_emitter", 25),
-        ("multivibrator", 18),
-        ("diff_pair", 8),
-        ("opamp_inverting_real", 3),
+        ("common_emitter", 4),
+        ("multivibrator", 4),
+        ("diff_pair", 2),
+        ("opamp_inverting_real", 2),
     ];
     for (name, path) in fixtures() {
         let tmp = tempdir(name);

@@ -121,7 +121,8 @@ crates/
         anneal.rs    # discrete refinement + legalization
       patterns/      # v0.2: idiom detectors
       lib.rs         # Placed<Element> output type
-  spice-route/       # v0.2: orthogonal wire routing
+  spice-route/       # power-symbol placement + per-net Steiner-tree routing
+                     # (Hwang exact for N≤9, RMST for N≥10); see CLAUDE.md V10
 ```
 
 `kicad-emitter` consumes `Placed<Element>`. It should not contain
@@ -204,7 +205,13 @@ force-directed for that cluster.
   longest-path DAG → seed positions from band/layer grid →
   SA refinement with band-misalignment, soft-Y, layer-order,
   and crossing-approximation cost terms.
-- **Next:** channel router as a separate crate; mirror-Y move in SA.
+- **Done (router):** `crates/spice-route/` — power-symbol glyphs
+  for Power/Ground nets, exact rectilinear Steiner trees for
+  signal nets (Hwang for N≤9 via Hanan-grid DP, RMST fallback
+  for N≥10), 1-cell-jog conflict resolution, collinear/junction
+  cleanup. Replaces the channel-and-trunk router previously
+  inlined in `kicad-emitter`. See CLAUDE.md V10.
+- **Next:** mirror-Y move in SA.
 - **v0.2:** symmetry detector (V7) composing with the
   classify → bands → layers pipeline.
 

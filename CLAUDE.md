@@ -484,6 +484,27 @@ below describe intent.
       `(property "Value" …)` write in
       `crates/kicad-emitter/src/schematic.rs`.
 
+- **V10 — Power-as-glyphs, Steiner-tree routing.** Power and
+  Ground nets emit `power:VCC` / `power:GND` library symbol
+  glyphs at each connected pin (no wires). Signal nets emit
+  rectilinear Steiner minimum trees (exact for N≤9 pins via
+  Hwang's median rule + Borah-Owens-Irwin Steinerization;
+  rectilinear MST for N≥10). Cross-net endpoint conflicts
+  resolved by 1-cell jog (cap 10 iterations). The router lives
+  in `crates/spice-route/`, called from
+  `crates/kicad-emitter/src/schematic.rs::route_nets`.
+  Verifier: the fixture-wide crossing and wire-length budgets
+  in `crates/spice2kicad/tests/placement_quality.rs`,
+  calibrated against the five reference fixtures
+  (rc_lowpass / common_emitter / multivibrator / diff_pair /
+  opamp_inverting_real) at R7. Open items: PWR_FLAG-style
+  driver emission for `power_pin_not_driven` ERC suppression
+  (currently filtered in `tests/visual_quality.rs::run_v2`),
+  and one residual placement bug on common_emitter where the
+  Q1 collector / RE pins drift one grid cell off the routed
+  Steiner branch (tracked via the ignored
+  `roundtrip::common_emitter` and `visual_quality::v2_common_emitter`).
+
 ## When changing the annotation spec
 
 The spec is the user-facing contract. Treat changes as you would
