@@ -7,7 +7,7 @@
 
 use spice_layout::net_class::NetClass;
 use spice_route::{
-    Direction, NetSpec, PinRef, RouteRequest, route, route_three_pin, route_two_pin,
+    Direction, NetSpec, PinRef, RouteRequest, route, route_n_pin, route_three_pin, route_two_pin,
 };
 
 const EPS: f64 = 1e-6;
@@ -135,6 +135,108 @@ fn route_pipeline_emits_wires_for_two_pin_signal_net() {
     });
     assert_eq!(count_starting(&r, "(wire"), 2);
     assert_eq!(count_starting(&r, "(junction"), 0);
+}
+
+// ----- Stage 2b: N ≥ 4 -----
+
+#[test]
+fn four_pin_square_emits_steiner_tree() {
+    // Pins at the corners of a 10×10 square. Optimal RSMT length is
+    // 30 (any spanning of 3 sides; a centered Steiner cross is also
+    // 30). Our MST baseline is 30 already, so Steinerization either
+    // keeps it or improves only ties.
+    let segs = route_n_pin(&[(0.0, 0.0), (10.0, 0.0), (0.0, 10.0), (10.0, 10.0)]);
+    let len = total_len(&segs);
+    assert!(
+        (len - 30.0).abs() < EPS,
+        "expected total length 30, got {len}, segs: {segs:?}"
+    );
+}
+
+#[test]
+fn four_pin_t_pattern() {
+    // Plus-shaped fixture: pins on the four cardinals around (5,5).
+    // Optimal RSMT has a single Steiner point at the centre with
+    // four 5-unit spokes — total length 20. The baseline MST
+    // (without Steiner) connects them as a chain and costs 30; the
+    // Borah-Owens-Irwin pass must rescue 10 units.
+    let segs = route_n_pin(&[(0.0, 5.0), (10.0, 5.0), (5.0, 0.0), (5.0, 10.0)]);
+    let len = total_len(&segs);
+    assert!(
+        (len - 20.0).abs() < EPS,
+        "expected total length 20 (with Steiner), got {len}; segs: {segs:?}"
+    );
+}
+
+#[test]
+fn five_pin_known_layout() {
+    // Five pins: corners of a 10×10 square + centre. The optimal
+    // RSMT exploits Steiner points at (0,5) and (10,5): two vertical
+    // 10-unit spans on x=0 and x=10 (covering the four corners) plus
+    // a horizontal 10-unit span at y=5 connecting them through the
+    // centre pin. Total = 10+10+10 = 30. This is strictly better
+    // than the naive "centre as hub" cost of 40, and our Hanan-grid
+    // Steinerization should find it.
+    let pins = [
+        (0.0, 0.0),
+        (10.0, 0.0),
+        (0.0, 10.0),
+        (10.0, 10.0),
+        (5.0, 5.0),
+    ];
+    let segs = route_n_pin(&pins);
+    let len = total_len(&segs);
+    assert!(
+        (len - 30.0).abs() < EPS,
+        "expected optimal RSMT length 30, got {len}; segs: {segs:?}"
+    );
+}
+
+#[test]
+fn eight_pin_runtime_under_100ms() {
+    // Sanity: 8-pin fixture must complete under 100 ms. Hanan grid
+    // is 8 × 8 = 64 candidates per pass, manageable in pure Rust.
+    let pins: Vec<(f64, f64)> = vec![
+        (0.0, 0.0),
+        (12.7, 0.0),
+        (25.4, 0.0),
+        (0.0, 12.7),
+        (12.7, 12.7),
+        (25.4, 12.7),
+        (6.35, 6.35),
+        (19.05, 19.05),
+    ];
+    let start = std::time::Instant::now();
+    let segs = route_n_pin(&pins);
+    let dt = start.elapsed();
+    assert!(!segs.is_empty(), "expected segments");
+    assert!(
+        dt < std::time::Duration::from_millis(100),
+        "8-pin route took {dt:?}, expected < 100ms"
+    );
+}
+
+#[test]
+fn ten_pin_falls_back_to_mst() {
+    // 10 pins → plain rectilinear MST path (no Steiner). The output
+    // is a valid spanning structure: at least N-1 = 9 segments
+    // (could be more with L-bends), and total length is finite.
+    let pins: Vec<(f64, f64)> = (0..10_i32)
+        .map(|i| {
+            let f = f64::from(i);
+            (f * 7.0 % 30.0, (f * 11.0) % 25.0)
+        })
+        .collect();
+    let segs = route_n_pin(&pins);
+    assert!(
+        segs.len() >= pins.len() - 1,
+        "expected ≥ {} segments for {} pins, got {}",
+        pins.len() - 1,
+        pins.len(),
+        segs.len()
+    );
+    let len = total_len(&segs);
+    assert!(len.is_finite() && len > 0.0, "got total len {len}");
 }
 
 #[test]

@@ -13,7 +13,7 @@ mod steiner;
 pub mod types;
 
 use spice_layout::net_class::NetClass;
-pub use steiner::{route_three_pin, route_two_pin};
+pub use steiner::{route_n_pin, route_three_pin, route_two_pin};
 pub use types::{Direction, NetSpec, PinRef, RouteRequest, RouteResult, RoutedNet, Segment};
 
 /// Stage 1 entry point — append power-symbol (or fallback label)
@@ -33,10 +33,11 @@ pub fn place_power_symbols(req: &RouteRequest<'_>, out: &mut RouteResult) {
     }
 }
 
-/// Stage 2a entry point — emit RSMT wires + junctions for every
+/// Stage 2 entry point — emit RSMT wires + junctions for every
 /// Signal net in `req`. Power / Ground nets are skipped (Stage 1
-/// owns those). Nets with N ≥ 4 pins fall through to a stub
-/// (Task 4 lands the small-N DP).
+/// owns those). Pin counts dispatch as N=2 (L-shape), N=3 (Hwang),
+/// 4 ≤ N ≤ 9 (Hanan-grid + Borah-Owens-Irwin Steinerization),
+/// N ≥ 10 (rectilinear MST, no Steiner refinement).
 pub fn route_signal_nets(req: &RouteRequest<'_>, out: &mut RouteResult) {
     for net in req.nets {
         if !matches!(net.class, NetClass::Signal) {
