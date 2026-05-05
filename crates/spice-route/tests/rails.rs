@@ -49,6 +49,7 @@ fn vcc_pin_emits_power_vcc_symbol() {
         library: Some(&lib),
         sheet_uuid: "test-uuid",
         project_name: "test",
+        obstacles: &[],
     });
     assert_eq!(count_substring(&r.sexprs, "power:VCC"), 1, "{:?}", r.sexprs);
     assert_eq!(count_wires(&r.sexprs), 0, "power nets emit no wires");
@@ -73,6 +74,7 @@ fn ground_pin_emits_power_gnd_symbol() {
         library: Some(&lib),
         sheet_uuid: "test-uuid",
         project_name: "test",
+        obstacles: &[],
     });
     assert_eq!(count_substring(&r.sexprs, "power:GND"), 1, "{:?}", r.sexprs);
     assert_eq!(count_wires(&r.sexprs), 0);
@@ -96,6 +98,7 @@ fn signal_net_does_not_emit_power_symbol() {
         library: Some(&lib),
         sheet_uuid: "test-uuid",
         project_name: "test",
+        obstacles: &[],
     });
     assert_eq!(count_substring(&r.sexprs, "power:"), 0);
     // Stage 2a is now live: two pins on the same Y emit a single
@@ -103,6 +106,54 @@ fn signal_net_does_not_emit_power_symbol() {
     // class — that's what the `power:` tally above guards.
     assert_eq!(count_wires(&r.sexprs), 1);
     assert!(r.warnings.is_empty());
+}
+
+#[test]
+fn power_symbol_rotation_extends_body_away_from_host_pin() {
+    // Verifier for Issue 1 (power:GND apex pointed AT the host pin
+    // before this commit). The chosen rotation must place the symbol
+    // body on the far side of the anchor pin from the host's outward
+    // direction. Empirical mapping (see `symbol_pose` doc):
+    //
+    //   host outward Down  → rotation 0   (body extends visually +Y)
+    //   host outward Left  → rotation 90  (body extends -X)
+    //   host outward Up    → rotation 180 (body extends -Y)
+    //   host outward Right → rotation 270 (body extends +X)
+    let lib = fixture_library();
+    let cases = [
+        (Direction::Down, "0"),
+        (Direction::Left, "90"),
+        (Direction::Up, "180"),
+        (Direction::Right, "270"),
+    ];
+    for (dir, expected_rot) in cases {
+        let net = NetSpec {
+            name: "0".into(),
+            class: NetClass::Ground,
+            pins: vec![pin(0, 1, 10.16, 20.32, dir)],
+        };
+        let r = route(RouteRequest {
+            nets: &[net],
+            scope: "root",
+            library: Some(&lib),
+            sheet_uuid: "test-uuid",
+            project_name: "test",
+            obstacles: &[],
+        });
+        let s = r
+            .sexprs
+            .iter()
+            .map(std::string::ToString::to_string)
+            .find(|s| s.contains("power:GND"))
+            .expect("power:GND present");
+        // The (at x y rot) triple sits right after lib_id; just look
+        // for the "10.16 20.32 <rot>)" pattern.
+        let needle = format!("10.16 20.32 {expected_rot})");
+        assert!(
+            s.contains(&needle),
+            "outward {dir:?} expected rotation {expected_rot}; got: {s}",
+        );
+    }
 }
 
 #[test]
@@ -120,6 +171,7 @@ fn unknown_lib_id_falls_back_to_global_label() {
         library: Some(&lib),
         sheet_uuid: "test-uuid",
         project_name: "test",
+        obstacles: &[],
     });
     assert_eq!(count_substring(&r.sexprs, "power:VCC"), 0);
     assert_eq!(

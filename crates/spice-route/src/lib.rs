@@ -16,7 +16,7 @@ pub mod types;
 
 use spice_layout::net_class::NetClass;
 pub use steiner::{route_n_pin, route_three_pin, route_two_pin};
-pub use types::{Direction, NetSpec, PinRef, RouteRequest, RouteResult, RoutedNet, Segment};
+pub use types::{Bbox, Direction, NetSpec, PinRef, RouteRequest, RouteResult, RoutedNet, Segment};
 
 /// Stage 1 entry point — append power-symbol (or fallback label)
 /// S-exprs to `out` for every pin on a Power/Ground net in `req`.
@@ -110,6 +110,11 @@ pub fn route(req: RouteRequest<'_>) -> RouteResult {
         .collect();
     let warnings = conflict::resolve_conflicts(&mut routed, &net_pin_coords);
     out.warnings.extend(warnings);
+    // Stage 3b — avoid wires crossing symbol bodies.
+    if !req.obstacles.is_empty() {
+        let warnings = conflict::avoid_obstacles(&mut routed, req.obstacles, &net_pin_coords);
+        out.warnings.extend(warnings);
+    }
     // Stage 4 — per-net coalesce of collinear segments + dedup of
     // coincident junctions across nets.
     cleanup::coalesce_collinear(&mut routed);

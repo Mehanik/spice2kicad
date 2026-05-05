@@ -85,24 +85,38 @@ fn ground_lib_id(_net_name: &str) -> &'static str {
 }
 
 /// Compute (x, y, rotation_degrees) for the symbol body so its anchor
-/// pin sits at `pin`'s coordinate. KiCad's `power:*` symbols draw their
-/// glyph along the +Y direction from the symbol origin (which is the
-/// anchor pin). The default rotation 0 puts the glyph below the pin in
-/// world coordinates (KiCad schematic Y grows downward), corresponding
-/// to a pin whose stem points Up. Rotations 90/180/270 cover the other
-/// outward directions.
+/// pin sits at `pin`'s coordinate AND the glyph body extends *away*
+/// from the host pin (not toward it).
+///
+/// Rule: power-symbol body must extend in the same world-direction the
+/// host pin is "outward" pointing. Empirically (verified by rendering
+/// `power:GND` at all four rotations under kicad-cli — see
+/// `tests/symbol_pose_orientation` in this crate):
+///
+/// * rotation 0   → glyph body extends visually DOWN (+Y in schematic).
+///   Use when host pin's outward direction is Down.
+/// * rotation 90  → body extends visually LEFT  (-X). Use for outward Left.
+/// * rotation 180 → body extends visually UP    (-Y). Use for outward Up.
+/// * rotation 270 → body extends visually RIGHT (+X). Use for outward Right.
+///
+/// Equivalently: `rot = (host_outward_angle + 180) mod 360`, where the
+/// host-outward angle in KiCad pin convention is 0=right, 90=up,
+/// 180=left, 270=down.
+///
+/// The previous mapping (Up→0, Right→90, Down→180, Left→270) was off
+/// by 180° on every axis: GND glyphs at the bottom of BJT emitters
+/// rendered with the triangle apex pointing UP toward the host instead
+/// of DOWN away from it. Fixed in the commit accompanying this comment.
 fn symbol_pose(pin: &PinRef) -> (f64, f64, u16) {
-    // The power-symbol anchor pin sits at the lib origin (0, 0), so we
-    // place the symbol *at* the connected pin's coordinate — that way
-    // the two pins coincide and KiCad sees them as electrically
-    // connected without an explicit wire. Rotation aligns the glyph's
-    // outward stem with the pin's outward direction.
+    // Anchor pin is at lib origin (0, 0); placing the symbol at the
+    // host pin's world coord makes the two pins coincide so KiCad
+    // treats them as connected without an explicit wire.
     let (sx, sy) = (pin.x_mm, pin.y_mm);
     let rot = match pin.outward {
-        Direction::Up => 0,
-        Direction::Right => 90,
-        Direction::Down => 180,
-        Direction::Left => 270,
+        Direction::Down => 0,
+        Direction::Left => 90,
+        Direction::Up => 180,
+        Direction::Right => 270,
     };
     let _ = GRID_MM;
     (sx, sy, rot)

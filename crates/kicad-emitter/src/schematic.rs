@@ -125,7 +125,8 @@ pub fn emit_root(
     }
 
     let net_pins = collect_net_pins(placement, library, &extra_pins);
-    for routed in route_nets(&net_pins, "root", library) {
+    let obstacles = placement_obstacles(placement);
+    for routed in route_nets(&net_pins, "root", library, &obstacles) {
         items.push(routed);
     }
     for label in dangling_pin_labels(&net_pins, "root") {
@@ -203,7 +204,8 @@ pub fn emit_child_sheet(child: &ChildSheet<'_>, library: &Library) -> Result<Str
     }
 
     let net_pins = collect_net_pins(child.placement, library, &extra_pins);
-    for routed in route_nets(&net_pins, &child.name, library) {
+    let obstacles = placement_obstacles(child.placement);
+    for routed in route_nets(&net_pins, &child.name, library, &obstacles) {
         items.push(routed);
     }
     for label in dangling_pin_labels(&net_pins, &child.name) {
@@ -807,6 +809,7 @@ fn route_nets(
     nets: &std::collections::BTreeMap<String, Vec<(f64, f64, u16)>>,
     scope: &str,
     library: &Library,
+    obstacles: &[spice_route::Bbox],
 ) -> Vec<Sexpr> {
     use spice_route::{NetSpec, PinRef, RouteRequest};
 
@@ -853,11 +856,38 @@ fn route_nets(
         library: Some(library),
         sheet_uuid: &suuid,
         project_name: GENERATOR,
+        obstacles,
     });
     for w in &result.warnings {
         eprintln!("spice2kicad route: {w}");
     }
     result.sexprs.iter().map(lexpr_to_sexpr).collect()
+}
+
+/// Build the set of symbol-body bounding boxes the router should
+/// avoid. Each placed element gets a square box of half-extent
+/// `SYM_HALF_MM` around its origin — the same approximation used by
+/// the placement-quality verifier (`crates/spice2kicad/tests/placement_quality.rs`).
+/// Power-rail glyphs (`#PWR*`) are emitted by the router itself at pin
+/// coordinates, so they never appear in `placement.elements` and don't
+/// need filtering here.
+fn placement_obstacles(placement: &Placement) -> Vec<spice_route::Bbox> {
+    /// Half-extent (mm) covering a typical R/C/Q body. Matches
+    /// `placement_quality::SYM_HALF_MM`.
+    const SYM_HALF_MM: f64 = 2.54;
+    placement
+        .elements
+        .iter()
+        .map(|el| {
+            let (cx, cy) = el.origin.to_mm();
+            spice_route::Bbox {
+                x0: cx - SYM_HALF_MM,
+                y0: cy - SYM_HALF_MM,
+                x1: cx + SYM_HALF_MM,
+                y1: cy + SYM_HALF_MM,
+            }
+        })
+        .collect()
 }
 
 /// Heuristic Power/Ground classification from the net name alone.
