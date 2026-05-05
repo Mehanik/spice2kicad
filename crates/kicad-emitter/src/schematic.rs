@@ -101,7 +101,9 @@ pub fn emit_root(
     items.push(list(vec![atom("generator"), qstring(GENERATOR)]));
     items.push(list(vec![atom("uuid"), qstring(&sheet_uuid())]));
     items.push(list(vec![atom("paper"), qstring("A4")]));
-    items.push(lib_symbols(placement, library));
+    let extra_power_lib_ids = power_lib_ids_for_placement(placement);
+    let extra_refs: Vec<&str> = extra_power_lib_ids.iter().map(String::as_str).collect();
+    items.push(lib_symbols_with_extra(placement, library, &extra_refs));
 
     for el in &placement.elements {
         items.push(symbol_instance(el));
@@ -123,7 +125,7 @@ pub fn emit_root(
     }
 
     let net_pins = collect_net_pins(placement, library, &extra_pins);
-    for routed in route_nets(&net_pins, "root") {
+    for routed in route_nets(&net_pins, "root", library) {
         items.push(routed);
     }
     for label in dangling_pin_labels(&net_pins, "root") {
@@ -147,13 +149,15 @@ pub fn emit_root(
 /// a body-element pin connected to the same SPICE net (so the port and
 /// the body net resolve to one connectivity class).
 pub fn emit_child_sheet(child: &ChildSheet<'_>, library: &Library) -> Result<String, EmitError> {
+    let extra_power_lib_ids = power_lib_ids_for_placement(child.placement);
+    let extra_refs: Vec<&str> = extra_power_lib_ids.iter().map(String::as_str).collect();
     let mut items: Vec<Sexpr> = vec![
         atom("kicad_sch"),
         list(vec![atom("version"), atom(SCHEMA_VERSION)]),
         list(vec![atom("generator"), qstring(GENERATOR)]),
         list(vec![atom("uuid"), qstring(&child_uuid(&child.name))]),
         list(vec![atom("paper"), qstring("A4")]),
-        lib_symbols(child.placement, library),
+        lib_symbols_with_extra(child.placement, library, &extra_refs),
     ];
 
     // Determine which subckt ports are actually consumed by a body
@@ -199,7 +203,7 @@ pub fn emit_child_sheet(child: &ChildSheet<'_>, library: &Library) -> Result<Str
     }
 
     let net_pins = collect_net_pins(child.placement, library, &extra_pins);
-    for routed in route_nets(&net_pins, &child.name) {
+    for routed in route_nets(&net_pins, &child.name, library) {
         items.push(routed);
     }
     for label in dangling_pin_labels(&net_pins, &child.name) {
@@ -500,14 +504,76 @@ fn child_symbol_instance(el: &PlacedElement, instance_refdeses: &[String]) -> Se
 /// Symbols missing from `library` are skipped silently — upstream
 /// resolution (E003) is responsible for catching that case before the
 /// emitter ever sees it.
-fn lib_symbols(placement: &Placement, library: &Library) -> Sexpr {
-    let mut seen: BTreeSet<&str> = BTreeSet::new();
+/// Walk the placement and return the set of `power:*` library
+/// identifiers needed by `spice_route::route` Stage 1 glyphs, derived
+/// from each element's net node names. Mirrors the heuristic
+/// classification in `classify_net_by_name` and the lib-id selection
+/// in `spice-route::rails`.
+fn power_lib_ids_for_placement(placement: &Placement) -> Vec<String> {
+    let mut out: BTreeSet<String> = BTreeSet::new();
+    for el in &placement.elements {
+        for node in &el.nodes {
+            if let Some(id) = power_lib_id_for_net(node) {
+                out.insert(id.to_string());
+            }
+        }
+    }
+    out.into_iter().collect()
+}
+
+fn power_lib_id_for_net(net_name: &str) -> Option<&'static str> {
+    use spice_layout::net_class::NetClass;
+    let class = match () {
+        () if net_name == "0" => NetClass::Ground,
+        () => {
+            let lower = net_name.to_ascii_lowercase();
+            match lower.as_str() {
+                "vcc" | "vdd" | "v+" | "vplus" | "+5v" | "5v" | "+12v" | "12v" | "+3v3" | "3v3" => {
+                    NetClass::Power
+                }
+                "gnd" | "vee" | "vss" | "v-" | "vminus" => NetClass::Ground,
+                _ => return None,
+            }
+        }
+    };
+    let lower = net_name.to_ascii_lowercase();
+    Some(match class {
+        NetClass::Power => match lower.as_str() {
+            "vdd" => "power:VDD",
+            "+5v" | "5v" => "power:+5V",
+            "+12v" | "12v" => "power:+12V",
+            "+3v3" | "3v3" => "power:+3V3",
+            _ => "power:VCC",
+        },
+        NetClass::Ground => "power:GND",
+        NetClass::Signal => return None,
+    })
+}
+
+/// Same as [`lib_symbols`] but additionally inlines the listed extra
+/// `lib_id`s. Used by the root and child emitters to splice in
+/// `power:*` library entries referenced by `spice_route::route` Stage 1
+/// glyphs (which are added after the placement is built).
+fn lib_symbols_with_extra(
+    placement: &Placement,
+    library: &Library,
+    extra_lib_ids: &[&str],
+) -> Sexpr {
+    let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut entries: Vec<Sexpr> = vec![atom("lib_symbols")];
     for el in &placement.elements {
-        if !seen.insert(el.lib_id.as_str()) {
+        if !seen.insert(el.lib_id.clone()) {
             continue;
         }
         if let Some(symbol) = library.lookup(&el.lib_id) {
+            entries.push(lib_symbol_inline(symbol));
+        }
+    }
+    for &lib_id in extra_lib_ids {
+        if !seen.insert(lib_id.to_string()) {
+            continue;
+        }
+        if let Some(symbol) = library.lookup(lib_id) {
             entries.push(lib_symbol_inline(symbol));
         }
     }
@@ -730,101 +796,29 @@ fn collect_net_pins(
 
 /// Route every net with ≥ 2 pin positions.
 ///
-/// Strategy: **per-pin escape + per-net trunk**. Every pin in the
-/// design is given a globally-unique escape distance `esc_p` (one
-/// grid step per pin, in scan order). From pin `(px, py)`:
-///
-///   1. Vertical escape `(px, py) → (px, py + esc_p)` — moves the
-///      route off the pin's own Y row by a per-pin amount, so two
-///      pins on different nets that share `(px, *)` (like a
-///      resistor's two terminals) emit non-overlapping verticals.
-///   2. Horizontal lead-in `(px, py + esc_p) → (trunk_x[N], py + esc_p)`
-///      at a Y unique per pin, so no two horizontals share a Y row.
-///   3. Vertical down to the trunk `(trunk_x[N], py + esc_p) → (trunk_x[N], trunk_y[N])`.
-///
-/// Trunks live in a per-net column-and-row pair `(trunk_x[N], trunk_y[N])`
-/// far below and to the right of the placement. A single horizontal
-/// trunk joins the per-pin endpoints at `trunk_y[N]`.
-///
-/// Because escape lengths are globally unique and trunk coordinates
-/// are per-net unique, no two parallel wires from different nets
-/// overlap. Perpendicular crossings are fine — KiCad only merges
-/// nets at collinear overlaps or explicit junctions.
-///
-/// `(junction …)` is emitted where ≥ 3 wire endpoints coincide.
-#[allow(clippy::too_many_lines, clippy::type_complexity)]
+/// Thin adapter over `spice_route::route`. Power/Ground nets become
+/// `power:*` symbol glyphs (no wires); Signal nets are routed as
+/// per-net rectilinear Steiner trees with junctions at branch points.
+/// `library` is consulted by Stage 1 so a missing `power:*` lib_id
+/// gracefully falls back to a `(global_label …)` instead of emitting
+/// an unresolvable instance.
+#[allow(clippy::type_complexity)]
 fn route_nets(
     nets: &std::collections::BTreeMap<String, Vec<(f64, f64, u16)>>,
     scope: &str,
+    library: &Library,
 ) -> Vec<Sexpr> {
-    // Threshold for the 2-pin direct-route fast-path. Nets with
-    // exactly two pins whose Manhattan distance is at most this
-    // many millimetres skip the channel-and-trunk router and emit
-    // a single segment (collinear) or a 2-segment L (otherwise).
-    // The seed placer's X stride is ~15.24 mm (12 cells); two-pin
-    // nets between adjacent layers commonly span up to ~25 mm
-    // including a small layer offset, so the 2-pin fast path
-    // covers the bulk of inter-element shorts.
-    const FAST_PATH_MAX_MM: f64 = 30.0;
-    // Bounding-box Manhattan-extent threshold for the 3-pin
-    // T-junction fast path. Nets with exactly three pins whose
-    // bounding box fits inside this budget are routed as two
-    // L-shapes from the central pin, skipping the channel
-    // router. Larger / more-populous nets still flow through
-    // the channel router because that path's per-net trunk_x
-    // and per-pin escape_y guarantee no inter-net collinear
-    // merges (a risk for arbitrary L-shapes; see the round-trip
-    // tests).
-    const SMALL_NET_BBOX_MM: f64 = 60.0;
+    use spice_route::{NetSpec, PinRef, RouteRequest};
 
-    let mut out: Vec<Sexpr> = Vec::new();
-    let mut endpoint_counts: std::collections::HashMap<(i64, i64), usize> =
-        std::collections::HashMap::new();
-    let mut wire_seq: usize = 0;
-
-    // Compute extents of the placement.
-    let mut max_y = 0.0_f64;
-    let mut max_x = 0.0_f64;
-    let mut min_x = f64::INFINITY;
-    for pins in nets.values() {
-        for &(x, y, _) in pins {
-            if y > max_y {
-                max_y = y;
-            }
-            if x > max_x {
-                max_x = x;
-            }
-            if x < min_x {
-                min_x = x;
-            }
-        }
-    }
-    // Compute min_y too so the upper channel sits above every pin.
-    let mut min_y = f64::INFINITY;
-    for pins in nets.values() {
-        for &(_, y, _) in pins {
-            if y < min_y {
-                min_y = y;
-            }
-        }
-    }
-    if !min_y.is_finite() {
-        min_y = 0.0;
-    }
-    // Channel base coordinates. Pins whose outward direction is
-    // *upward* (angle 270 in .kicad_sym; visually toward smaller Y
-    // in our Y-down schematic) route to the **upper** channel
-    // above the placement. All other pins route to the **lower**
-    // channel below. Two pins of one component (top + bottom)
-    // therefore escape on opposite sides and never share a vertical
-    // segment.
-    let escape_y_lower = max_y + 5.08;
-    let escape_y_upper = min_y - 5.08;
-    let trunk_x_base = max_x + 5.08;
-
-    // Filter and order multi-pin nets deterministically.
-    let mut multi_nets: Vec<(&String, Vec<(f64, f64, u16)>)> = Vec::new();
-    for (net, pins) in nets {
+    // Build the per-net pin list expected by spice_route. Net class
+    // is derived from the net name with the same heuristic
+    // `spice_layout::net_class::classify_nets` uses (rules 1 and 3 —
+    // the only ones that fire from name alone). The `*@power=`
+    // tagging path (rules 2 and 4) is not visible at this level; the
+    // common rail names cover the V0.1 fixtures.
+    let mut specs: Vec<NetSpec> = Vec::with_capacity(nets.len());
+    for (name, pins) in nets {
+        // Deduplicate coincident pins, mirroring the previous router.
         let mut uniq: Vec<(f64, f64, u16)> = Vec::new();
         for &(x, y, a) in pins {
             if !uniq
@@ -834,264 +828,72 @@ fn route_nets(
                 uniq.push((x, y, a));
             }
         }
-        if uniq.len() >= 2 {
-            uniq.sort_by(|a, b| {
-                a.0.partial_cmp(&b.0)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then(a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-            });
-            multi_nets.push((net, uniq));
-        }
+        let class = classify_net_by_name(name);
+        let pin_refs: Vec<PinRef> = uniq
+            .into_iter()
+            .map(|(x, y, angle)| PinRef {
+                element_idx: 0,
+                pin_number: 0,
+                x_mm: x,
+                y_mm: y,
+                outward: angle_to_direction(angle),
+            })
+            .collect();
+        specs.push(NetSpec {
+            name: name.clone(),
+            class,
+            pins: pin_refs,
+        });
     }
 
-    // Globally-unique escape-row counters per channel. Each routed
-    // pin gets its own horizontal escape row (`epy_row`), so no two
-    // pin lead-ins share a Y row in the same channel. Lower channel
-    // rows grow downward; upper channel rows grow upward.
-    let mut lower_idx: usize = 0;
-    let mut upper_idx: usize = 0;
-
-    for (net_idx, (net, pins)) in multi_nets.iter().enumerate() {
-        // 2-pin fast-path: short, direct route bypassing the
-        // channel router. Avoids the long lead-in + trunk overhead
-        // for adjacent components on shared nets (V5).
-        if pins.len() == 2 {
-            let (x0, y0, _) = pins[0];
-            let (x1, y1, _) = pins[1];
-            let manhattan = (x1 - x0).abs() + (y1 - y0).abs();
-            if manhattan <= FAST_PATH_MAX_MM {
-                emit_l_or_segment(
-                    &mut out,
-                    &mut endpoint_counts,
-                    &mut wire_seq,
-                    (x0, y0),
-                    (x1, y1),
-                    scope,
-                    net,
-                );
-                continue;
-            }
-        }
-
-        // 3-pin T-junction fast-path: when one pin lies on the
-        // bounding-box rectangle's edge between the other two
-        // (collinear T or near-collinear), emit two L-shapes from
-        // the central pin to each neighbour. Avoids long channel
-        // trunks for tightly-clustered 3-pin nets but keeps each
-        // net's wires self-contained (no shared trunk_x with
-        // other nets, no global escape rows). The cross-net
-        // collision risk is the same as the 2-pin L-shape: real
-        // but bounded, and the fixture-wide
-        // [`no_symbol_label_overlap_across_fixtures`] /
-        // round-trip tests catch any misroute.
-        if pins.len() == 3 {
-            let xs: Vec<f64> = pins.iter().map(|p| p.0).collect();
-            let ys: Vec<f64> = pins.iter().map(|p| p.1).collect();
-            let (xmin, xmax) = (
-                xs.iter().copied().fold(f64::INFINITY, f64::min),
-                xs.iter().copied().fold(f64::NEG_INFINITY, f64::max),
-            );
-            let (ymin, ymax) = (
-                ys.iter().copied().fold(f64::INFINITY, f64::min),
-                ys.iter().copied().fold(f64::NEG_INFINITY, f64::max),
-            );
-            let bbox = (xmax - xmin) + (ymax - ymin);
-            if bbox <= SMALL_NET_BBOX_MM {
-                // Pick the pin whose Manhattan distance to the
-                // other two is smallest as the centre of the T.
-                let pts: Vec<(f64, f64)> = pins.iter().map(|&(x, y, _)| (x, y)).collect();
-                let centre = (0..3)
-                    .min_by(|&i, &j| {
-                        let di: f64 = (0..3)
-                            .filter(|&k| k != i)
-                            .map(|k| (pts[i].0 - pts[k].0).abs() + (pts[i].1 - pts[k].1).abs())
-                            .sum();
-                        let dj: f64 = (0..3)
-                            .filter(|&k| k != j)
-                            .map(|k| (pts[j].0 - pts[k].0).abs() + (pts[j].1 - pts[k].1).abs())
-                            .sum();
-                        di.partial_cmp(&dj).unwrap_or(std::cmp::Ordering::Equal)
-                    })
-                    .expect("3 pins");
-                let c = pts[centre];
-                for (i, &p) in pts.iter().enumerate() {
-                    if i == centre {
-                        continue;
-                    }
-                    emit_l_or_segment(
-                        &mut out,
-                        &mut endpoint_counts,
-                        &mut wire_seq,
-                        c,
-                        p,
-                        scope,
-                        net,
-                    );
-                }
-                continue;
-            }
-        }
-
-        #[allow(clippy::cast_precision_loss)]
-        let trunk_x = trunk_x_base + (net_idx as f64) * 1.27;
-
-        let mut trunk_ys: Vec<f64> = Vec::with_capacity(pins.len());
-        for &(px, py, angle) in pins {
-            // Pick a channel based on the pin's outward direction.
-            // Pins pointing up in .kicad_sym (angle 270; visually
-            // upward in our Y-down schematic) route via the upper
-            // channel; everything else uses the lower channel. This
-            // splits a component's top + bottom pins onto opposite
-            // sides so their escape verticals never collide.
-            let (epy_row, going_up) = if angle == 270 {
-                upper_idx += 1;
-                #[allow(clippy::cast_precision_loss)]
-                let row = escape_y_upper - (upper_idx as f64) * 1.27;
-                (row, true)
-            } else {
-                lower_idx += 1;
-                #[allow(clippy::cast_precision_loss)]
-                let row = escape_y_lower + (lower_idx as f64) * 1.27;
-                (row, false)
-            };
-            trunk_ys.push(epy_row);
-
-            // Segment 1: vertical from the pin to the escape row.
-            // Direction follows the chosen channel.
-            let _ = going_up;
-            push_segment(
-                &mut out,
-                &mut endpoint_counts,
-                &mut wire_seq,
-                px,
-                py,
-                px,
-                epy_row,
-                scope,
-                net,
-            );
-            // Segment 2: horizontal from (px, epy_row) to
-            // (trunk_x, epy_row). Y is unique per pin so no two
-            // horizontals share a row.
-            push_segment(
-                &mut out,
-                &mut endpoint_counts,
-                &mut wire_seq,
-                px,
-                epy_row,
-                trunk_x,
-                epy_row,
-                scope,
-                net,
-            );
-        }
-        // Trunk: vertical segments at trunk_x between consecutive
-        // (sorted) lead-in row endpoints. All lead-ins for this net
-        // sit at (trunk_x, epy_row) and get tied together into one
-        // connectivity class. Interior endpoints become
-        // T-junctions (1 lead-in + 2 trunk halves = 3 endpoints)
-        // and get a (junction …) emitted below.
-        trunk_ys.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        for pair in trunk_ys.windows(2) {
-            push_segment(
-                &mut out,
-                &mut endpoint_counts,
-                &mut wire_seq,
-                trunk_x,
-                pair[0],
-                trunk_x,
-                pair[1],
-                scope,
-                net,
-            );
-        }
+    let result = spice_route::route(RouteRequest {
+        nets: &specs,
+        scope,
+        library: Some(library),
+    });
+    for w in &result.warnings {
+        eprintln!("spice2kicad route: {w}");
     }
-    let _ = min_x;
-
-    // Emit junctions at any point where 3+ wire endpoints coincide.
-    let mut junction_pts: Vec<(i64, i64)> = endpoint_counts
-        .iter()
-        .filter(|&(_, &n)| n >= 3)
-        .map(|(&k, _)| k)
-        .collect();
-    junction_pts.sort_unstable();
-    for (kx, ky) in junction_pts {
-        let x = key_to_coord(kx);
-        let y = key_to_coord(ky);
-        out.push(junction(x, y, scope));
-    }
-    out
+    result.sexprs.iter().map(lexpr_to_sexpr).collect()
 }
 
-/// Emit either a single straight wire (collinear endpoints) or a
-/// 2-segment L through an axis-aligned elbow at `(b.x, a.y)`.
-fn emit_l_or_segment(
-    out: &mut Vec<Sexpr>,
-    endpoint_counts: &mut std::collections::HashMap<(i64, i64), usize>,
-    wire_seq: &mut usize,
-    a: (f64, f64),
-    b: (f64, f64),
-    scope: &str,
-    net: &str,
-) {
-    if approx_eq(a.0, b.0) || approx_eq(a.1, b.1) {
-        push_segment(
-            out,
-            endpoint_counts,
-            wire_seq,
-            a.0,
-            a.1,
-            b.0,
-            b.1,
-            scope,
-            net,
-        );
-    } else {
-        // L-shape via (b.x, a.y) elbow.
-        push_segment(
-            out,
-            endpoint_counts,
-            wire_seq,
-            a.0,
-            a.1,
-            b.0,
-            a.1,
-            scope,
-            net,
-        );
-        push_segment(
-            out,
-            endpoint_counts,
-            wire_seq,
-            b.0,
-            a.1,
-            b.0,
-            b.1,
-            scope,
-            net,
-        );
+/// Heuristic Power/Ground classification from the net name alone.
+/// Mirrors rules 1 and 3 of `spice_layout::net_class::classify_nets`.
+fn classify_net_by_name(name: &str) -> spice_layout::net_class::NetClass {
+    use spice_layout::net_class::NetClass;
+    if name == "0" {
+        return NetClass::Ground;
+    }
+    let lower = name.to_ascii_lowercase();
+    match lower.as_str() {
+        "vcc" | "vdd" | "v+" | "vplus" | "+5v" | "5v" | "+12v" | "12v" | "+3v3" | "3v3" => {
+            NetClass::Power
+        }
+        "gnd" | "vee" | "vss" | "v-" | "vminus" => NetClass::Ground,
+        _ => NetClass::Signal,
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn push_segment(
-    out: &mut Vec<Sexpr>,
-    endpoint_counts: &mut std::collections::HashMap<(i64, i64), usize>,
-    wire_seq: &mut usize,
-    sx: f64,
-    sy: f64,
-    ex: f64,
-    ey: f64,
-    scope: &str,
-    net: &str,
-) {
-    if approx_eq(sx, ex) && approx_eq(sy, ey) {
-        return;
+/// Convert a KiCad pin angle (in `.kicad_sym` library frame) to the
+/// outward direction in the world (Y-down schematic) frame. Matches
+/// the convention in the previous router: angle 270 → visually upward.
+fn angle_to_direction(angle: u16) -> spice_route::Direction {
+    use spice_route::Direction;
+    match angle % 360 {
+        90 => Direction::Down,
+        180 => Direction::Left,
+        270 => Direction::Up,
+        // 0 and any non-cardinal fall back to Right.
+        _ => Direction::Right,
     }
-    out.push(wire_segment(sx, sy, ex, ey, scope, net, *wire_seq));
-    *wire_seq += 1;
-    *endpoint_counts.entry(coord_key(sx, sy)).or_default() += 1;
-    *endpoint_counts.entry(coord_key(ex, ey)).or_default() += 1;
+}
+
+/// Convert a parsed `lexpr::Value` (the s-expr shape used by
+/// `spice-route`) into the emitter's local `Sexpr`. Reuses the
+/// existing `RawSexpr::from_lexpr` walker — `RawSexpr` and
+/// `Sexpr` already share a `From` bridge.
+fn lexpr_to_sexpr(v: &lexpr::Value) -> Sexpr {
+    Sexpr::from(RawSexpr::from_lexpr(v))
 }
 
 /// Emit `(global_label "<net>" …)` markers at the pin positions of
@@ -1112,6 +914,16 @@ fn dangling_pin_labels(
 ) -> Vec<Sexpr> {
     let mut out = Vec::new();
     for (idx, (net, pins)) in nets.iter().enumerate() {
+        // Skip Power/Ground nets: those pins already carry a `power:*`
+        // glyph from `spice_route::route` Stage 1, which is the
+        // connectivity carrier. Adding a global_label on top would
+        // double-encode the net and trip V4 ("≤ 2 labels per net").
+        if !matches!(
+            classify_net_by_name(net),
+            spice_layout::net_class::NetClass::Signal
+        ) {
+            continue;
+        }
         // Deduplicate coincident pins.
         let mut uniq: Vec<(f64, f64)> = Vec::new();
         for &(x, y, _) in pins {
@@ -1142,74 +954,6 @@ fn dangling_pin_labels(
 
 fn approx_eq(a: f64, b: f64) -> bool {
     (a - b).abs() < 1e-6
-}
-
-#[allow(clippy::cast_possible_truncation)]
-fn coord_key(x: f64, y: f64) -> (i64, i64) {
-    (
-        (x * 1_000_000.0).round() as i64,
-        (y * 1_000_000.0).round() as i64,
-    )
-}
-
-#[allow(clippy::cast_precision_loss)]
-fn key_to_coord(k: i64) -> f64 {
-    (k as f64) / 1_000_000.0
-}
-
-fn wire_segment(x1: f64, y1: f64, x2: f64, y2: f64, scope: &str, net: &str, seq: usize) -> Sexpr {
-    let uuid = Uuid::new_v5(
-        &UUID_NAMESPACE,
-        format!("wire:{scope}:{net}:{seq}").as_bytes(),
-    )
-    .to_string();
-    list(vec![
-        atom("wire"),
-        list(vec![
-            atom("pts"),
-            list(vec![
-                atom("xy"),
-                atom(&format_coord(x1)),
-                atom(&format_coord(y1)),
-            ]),
-            list(vec![
-                atom("xy"),
-                atom(&format_coord(x2)),
-                atom(&format_coord(y2)),
-            ]),
-        ]),
-        list(vec![
-            atom("stroke"),
-            list(vec![atom("width"), atom("0")]),
-            list(vec![atom("type"), atom("default")]),
-        ]),
-        list(vec![atom("uuid"), qstring(&uuid)]),
-    ])
-}
-
-fn junction(x: f64, y: f64, scope: &str) -> Sexpr {
-    let uuid = Uuid::new_v5(
-        &UUID_NAMESPACE,
-        format!("junction:{scope}:{x}:{y}").as_bytes(),
-    )
-    .to_string();
-    list(vec![
-        atom("junction"),
-        list(vec![
-            atom("at"),
-            atom(&format_coord(x)),
-            atom(&format_coord(y)),
-        ]),
-        list(vec![atom("diameter"), atom("0")]),
-        list(vec![
-            atom("color"),
-            atom("0"),
-            atom("0"),
-            atom("0"),
-            atom("0"),
-        ]),
-        list(vec![atom("uuid"), qstring(&uuid)]),
-    ])
 }
 
 fn rotation_degrees(orient: Orientation) -> u16 {

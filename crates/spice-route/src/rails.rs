@@ -76,21 +76,19 @@ fn ground_lib_id(_net_name: &str) -> &'static str {
 /// to a pin whose stem points Up. Rotations 90/180/270 cover the other
 /// outward directions.
 fn symbol_pose(pin: &PinRef) -> (f64, f64, u16) {
-    // The anchor pin sits at the pin coordinate; the body extends one
-    // grid cell along the outward direction.
-    let (x, y) = (pin.x_mm, pin.y_mm);
+    // The power-symbol anchor pin sits at the lib origin (0, 0), so we
+    // place the symbol *at* the connected pin's coordinate — that way
+    // the two pins coincide and KiCad sees them as electrically
+    // connected without an explicit wire. Rotation aligns the glyph's
+    // outward stem with the pin's outward direction.
+    let (sx, sy) = (pin.x_mm, pin.y_mm);
     let rot = match pin.outward {
         Direction::Up => 0,
         Direction::Right => 90,
         Direction::Down => 180,
         Direction::Left => 270,
     };
-    let (sx, sy) = match pin.outward {
-        Direction::Up => (x, y - GRID_MM),
-        Direction::Down => (x, y + GRID_MM),
-        Direction::Right => (x + GRID_MM, y),
-        Direction::Left => (x - GRID_MM, y),
-    };
+    let _ = GRID_MM;
     (sx, sy, rot)
 }
 

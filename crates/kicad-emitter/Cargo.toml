@@ -13,7 +13,9 @@ workspace = true
 [dependencies]
 spice-parser.workspace = true
 spice-layout.workspace = true
+spice-route.workspace = true
 kicad-symbols.workspace = true
+lexpr.workspace = true
 thiserror.workspace = true
 log.workspace = true
 uuid.workspace = true

@@ -407,9 +407,11 @@ name = "kicad-emitter"
 version = "0.1.0"
 dependencies = [
  "kicad-symbols",
+ "lexpr",
  "log",
  "spice-layout",
  "spice-parser",
+ "spice-route",
  "thiserror",
  "uuid",
 ]

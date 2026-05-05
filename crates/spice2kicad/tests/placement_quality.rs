@@ -588,6 +588,14 @@ fn placed_symbols(root: &Value) -> Vec<(String, Pt)> {
         let Some(refdes) = found_ref else {
             continue;
         };
+        // Skip power-symbol glyphs (Reference == "#PWR"). They are
+        // emitted by `spice_route::route` Stage 1 at pin coordinates,
+        // so they intentionally sit on top of the connected element's
+        // pin and would always trigger overlap-detection asserts that
+        // expect only "real" placed elements.
+        if refdes == "#PWR" {
+            continue;
+        }
         let mut it = list_iter(at);
         it.next();
         let Some(x) = it.next().and_then(as_f64) else {
