@@ -8,6 +8,7 @@ members = [
     "crates/spice-resolve",
     "crates/spice-policy",
     "crates/spice-layout",
+    "crates/spice-route",
     "crates/spice2kicad",
 ]
 
@@ -25,6 +26,7 @@ kicad-symbols = { path = "crates/kicad-symbols" }
 spice-resolve = { path = "crates/spice-resolve" }
 spice-policy = { path = "crates/spice-policy" }
 spice-layout = { path = "crates/spice-layout" }
+spice-route = { path = "crates/spice-route" }
 
 anyhow = "1"
 proptest = "1"

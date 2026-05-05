@@ -1,0 +1,18 @@
+[package]
+name = "spice-route"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Per-net router for spice2kicad: power-symbol placement + RSMT signal routing"
+
+[lints]
+workspace = true
+
+[dependencies]
+spice-policy.workspace = true
+spice-resolve.workspace = true
+spice-layout.workspace = true
+kicad-symbols.workspace = true
+lexpr.workspace = true

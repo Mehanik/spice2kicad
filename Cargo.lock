@@ -843,6 +843,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "spice-route"
+version = "0.1.0"
+dependencies = [
+ "kicad-symbols",
+ "lexpr",
+ "spice-layout",
+ "spice-policy",
+ "spice-resolve",
+]
+
+[[package]]
 name = "spice2kicad"
 version = "0.1.0"
 dependencies = [
