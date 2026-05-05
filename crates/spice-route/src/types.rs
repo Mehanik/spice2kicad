@@ -5,6 +5,7 @@
 //! (`rails`, `steiner`, `cleanup`) consume these but layer their own
 //! private types on top.
 
+use kicad_symbols::Library;
 use lexpr::Value as Sexpr;
 
 /// One pin on a routed net.
@@ -46,6 +47,10 @@ pub struct RouteRequest<'a> {
     /// Sheet scope (root or hierarchical sheet name) — used for
     /// scoping junctions and labels in future stages.
     pub scope: &'a str,
+    /// Symbol library, used by Stage 1 to verify a `power:*` lib_id
+    /// resolves before emitting an instance. `None` skips the check
+    /// (every requested `power:*` symbol is assumed to exist).
+    pub library: Option<&'a Library>,
 }
 
 /// Output of [`crate::route`].
