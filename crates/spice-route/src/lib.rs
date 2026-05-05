@@ -9,9 +9,11 @@
 //! Stages 2 / 3 / 4 land in subsequent tasks.
 
 pub mod rails;
+mod steiner;
 pub mod types;
 
 use spice_layout::net_class::NetClass;
+pub use steiner::{route_three_pin, route_two_pin};
 pub use types::{Direction, NetSpec, PinRef, RouteRequest, RouteResult, RoutedNet, Segment};
 
 /// Stage 1 entry point — append power-symbol (or fallback label)
@@ -31,6 +33,23 @@ pub fn place_power_symbols(req: &RouteRequest<'_>, out: &mut RouteResult) {
     }
 }
 
+/// Stage 2a entry point — emit RSMT wires + junctions for every
+/// Signal net in `req`. Power / Ground nets are skipped (Stage 1
+/// owns those). Nets with N ≥ 4 pins fall through to a stub
+/// (Task 4 lands the small-N DP).
+pub fn route_signal_nets(req: &RouteRequest<'_>, out: &mut RouteResult) {
+    for net in req.nets {
+        if !matches!(net.class, NetClass::Signal) {
+            continue;
+        }
+        let (segs, junctions) = steiner::route_signal(net);
+        out.sexprs
+            .extend(segs.iter().map(steiner::segment_to_sexpr));
+        out.sexprs
+            .extend(junctions.into_iter().map(steiner::junction_sexpr));
+    }
+}
+
 /// Route the supplied nets and return their wire / junction / symbol
 /// S-expressions for splicing into the emitted schematic.
 ///
@@ -44,6 +63,7 @@ pub fn place_power_symbols(req: &RouteRequest<'_>, out: &mut RouteResult) {
 pub fn route(req: RouteRequest<'_>) -> RouteResult {
     let mut out = RouteResult::default();
     place_power_symbols(&req, &mut out);
-    // Stages 2–4 land in follow-up tasks.
+    route_signal_nets(&req, &mut out);
+    // Stages 3–4 land in follow-up tasks.
     out
 }

@@ -92,7 +92,10 @@ fn signal_net_does_not_emit_power_symbol() {
         library: Some(&lib),
     });
     assert_eq!(count_substring(&r.sexprs, "power:"), 0);
-    assert_eq!(count_wires(&r.sexprs), 0, "Stage 2 handles signal wires");
+    // Stage 2a is now live: two pins on the same Y emit a single
+    // (wire …) segment. Power-rail logic must still ignore Signal
+    // class — that's what the `power:` tally above guards.
+    assert_eq!(count_wires(&r.sexprs), 1);
     assert!(r.warnings.is_empty());
 }
 
