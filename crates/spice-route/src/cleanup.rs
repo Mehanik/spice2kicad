@@ -13,6 +13,22 @@ use crate::types::{RoutedNet, Segment};
 
 const EPS: f64 = 1e-6;
 
+/// Drop zero-length segments from every routed net, in place.
+///
+/// Earlier router stages (jog, obstacle detour, foreign-pin detour)
+/// can produce degenerate segments when the original path's far
+/// endpoint already coincides with the new corner. Serialising those
+/// produces `(wire (pts (xy X Y) (xy X Y)))` which renders nothing
+/// in eeschema but trips downstream invariants. Always strip them
+/// before [`coalesce_collinear`] runs so the merge logic doesn't
+/// have to tolerate them.
+pub fn drop_zero_length(routed: &mut [RoutedNet]) {
+    for net in routed.iter_mut() {
+        net.segments
+            .retain(|s| !((s.x1 - s.x2).abs() < EPS && (s.y1 - s.y2).abs() < EPS));
+    }
+}
+
 /// Coalesce collinear adjacent segments per net, in place.
 ///
 /// Two segments are merged when:

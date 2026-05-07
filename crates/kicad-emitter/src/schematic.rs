@@ -945,6 +945,23 @@ fn dangling_pin_labels(
     nets: &std::collections::BTreeMap<String, Vec<(f64, f64, u16)>>,
     scope: &str,
 ) -> Vec<Sexpr> {
+    // V11 — a `(global_label …)` for net N planted at the coordinate
+    // of a pin that belongs to a different net silently merges the
+    // two nets in KiCad. Build the foreign-coord set per net (every
+    // pin coord of every other net not also a pin of this net) so
+    // we can filter such coordinates out before picking label
+    // anchors.
+    #[allow(clippy::cast_possible_truncation)]
+    let key_of = |x: f64, y: f64| -> (i64, i64) {
+        ((x * 1000.0).round() as i64, (y * 1000.0).round() as i64)
+    };
+    let net_coords: std::collections::BTreeMap<&String, std::collections::HashSet<(i64, i64)>> =
+        nets.iter()
+            .map(|(n, pins)| {
+                let s = pins.iter().map(|&(x, y, _)| key_of(x, y)).collect();
+                (n, s)
+            })
+            .collect();
     let mut out = Vec::new();
     for (idx, (net, pins)) in nets.iter().enumerate() {
         // Skip Power/Ground nets: those pins already carry a `power:*`
@@ -957,9 +974,26 @@ fn dangling_pin_labels(
         ) {
             continue;
         }
-        // Deduplicate coincident pins.
+        // Foreign-pin coord set for this net.
+        let own = net_coords.get(net);
+        let mut foreign: std::collections::HashSet<(i64, i64)> = std::collections::HashSet::new();
+        for (other, set) in &net_coords {
+            if *other == net {
+                continue;
+            }
+            for k in set {
+                if !own.is_some_and(|s| s.contains(k)) {
+                    foreign.insert(*k);
+                }
+            }
+        }
+        // Deduplicate coincident pins; drop any coord that belongs to
+        // another net (V11 would silently short the two).
         let mut uniq: Vec<(f64, f64)> = Vec::new();
         for &(x, y, _) in pins {
+            if foreign.contains(&key_of(x, y)) {
+                continue;
+            }
             if !uniq
                 .iter()
                 .any(|&(ux, uy)| approx_eq(ux, x) && approx_eq(uy, y))

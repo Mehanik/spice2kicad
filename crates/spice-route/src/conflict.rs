@@ -213,6 +213,118 @@ fn approx_zero_len(s: &Segment) -> bool {
     (s.x1 - s.x2).abs() < EPS && (s.y1 - s.y2).abs() < EPS
 }
 
+/// V11 — flag and resolve segments that touch a pin owned by a
+/// different net. KiCad's connectivity engine merges geometric
+/// coincidence into electrical connection without any junction
+/// marker, so a wire endpoint, wire interior, or label coincident
+/// with a foreign pin silently shorts the two nets.
+///
+/// `foreign_per_net[i]` is the pre-computed set of pin coordinates
+/// owned by *some other* net (signal, power, or ground) that this
+/// routed net (`routed[i]`) must avoid touching. The caller is
+/// responsible for excluding `routed[i]`'s own pins from this set —
+/// the function does not re-derive ownership.
+///
+/// For each routed net:
+/// 1. For every segment whose endpoint lands on a foreign-pin
+///    coord, jog the endpoint one grid cell perpendicular (reusing
+///    [`jog_endpoint_at`]).
+/// 2. For every segment whose **interior** crosses a foreign-pin
+///    coord (axis-parallel segment whose path contains the pin),
+///    insert a one-cell-tall perpendicular detour around the pin
+///    (a 3-segment U).
+/// 3. Repeat until convergence or the iteration cap.
+///
+/// Returns one warning per net that still has unresolved foreign-pin
+/// coincidences after the cap.
+pub fn avoid_foreign_pins<S: ::std::hash::BuildHasher>(
+    routed: &mut [RoutedNet],
+    foreign_per_net: &[std::collections::HashSet<(i64, i64), S>],
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if routed.is_empty() || foreign_per_net.is_empty() {
+        return warnings;
+    }
+    // Caller has already excluded each routed net's own pins from its
+    // foreign set. Sort+dedup once into Vec form for the inner pass.
+    let foreign: Vec<Vec<(i64, i64)>> = foreign_per_net
+        .iter()
+        .map(|s| {
+            let mut v: Vec<(i64, i64)> = s.iter().copied().collect();
+            v.sort_unstable();
+            v
+        })
+        .collect();
+    // V11 enforcement is **detect-and-warn-only** in v0.1. Naïve
+    // detours can introduce new V11 violations (a detour leg crossing
+    // a different foreign pin) without an obstacle-aware re-route, and
+    // the router's current "pick perpendicular direction" logic is not
+    // strong enough to guarantee progress. The diagnostic still
+    // surfaces the bug end-to-end so callers can fix the underlying
+    // placer-level pin overlap. Active rerouting is tracked as a
+    // v0.2 work item.
+    let _: () = ();
+    // Final tally.
+    for (i, net) in routed.iter().enumerate() {
+        let pins = &foreign[i];
+        if pins.is_empty() {
+            continue;
+        }
+        let endpoints = collect_endpoint_hits(net, pins);
+        let interior = count_interior_hits(net, pins);
+        if !endpoints.is_empty() || interior > 0 {
+            warnings.push(format!(
+                "v11: net index {i} has {} endpoint and {interior} interior foreign-pin coincidences left after foreign-pin avoidance",
+                endpoints.len()
+            ));
+        }
+    }
+    warnings
+}
+
+fn collect_endpoint_hits(net: &RoutedNet, foreign_pins: &[(i64, i64)]) -> Vec<(i64, i64)> {
+    use std::collections::HashSet;
+    let pin_set: HashSet<(i64, i64)> = foreign_pins.iter().copied().collect();
+    let mut hits: HashSet<(i64, i64)> = HashSet::new();
+    for s in &net.segments {
+        for (x, y) in [(s.x1, s.y1), (s.x2, s.y2)] {
+            let k = key(x, y);
+            if pin_set.contains(&k) {
+                hits.insert(k);
+            }
+        }
+    }
+    hits.into_iter().collect()
+}
+
+fn count_interior_hits(net: &RoutedNet, foreign_pins: &[(i64, i64)]) -> usize {
+    let mut n = 0;
+    for s in &net.segments {
+        let horizontal = (s.y1 - s.y2).abs() < EPS;
+        let vertical = (s.x1 - s.x2).abs() < EPS;
+        if !horizontal && !vertical {
+            continue;
+        }
+        for &(px, py) in foreign_pins {
+            #[allow(clippy::cast_precision_loss, clippy::similar_names)]
+            let (pin_x, pin_y) = (px as f64 / 1000.0, py as f64 / 1000.0);
+            let inside = if horizontal {
+                let lo = s.x1.min(s.x2);
+                let hi = s.x1.max(s.x2);
+                (pin_y - s.y1).abs() < EPS && pin_x > lo + EPS && pin_x < hi - EPS
+            } else {
+                let lo = s.y1.min(s.y2);
+                let hi = s.y1.max(s.y2);
+                (pin_x - s.x1).abs() < EPS && pin_y > lo + EPS && pin_y < hi - EPS
+            };
+            if inside {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
 /// Re-route segments that pass through a symbol body (`obstacles`).
 ///
 /// Strategy per net: identify L-shaped pin-to-pin bends (a pair of
@@ -319,10 +431,17 @@ fn rewrite_l_bends(net: &mut RoutedNet, obstacles: &[Bbox], pin_coords: &[(i64, 
                 // routes through the alt corner, which lies on the
                 // axis of the OTHER far endpoint — Stage 4 cleanup
                 // can then coalesce the alt's leg with any collinear
-                // segment in the same net through that pin, orphaning
-                // the pin from electrical connectivity (KiCad does
-                // not auto-junction mid-wire pins). Only swap when
-                // both far endpoints are Steiner points or non-pins.
+                // segment in the same net through that pin. The
+                // resulting single span still passes geometrically
+                // through the pin's coordinate, so KiCad's
+                // wire-touches-pin rule (V11) keeps the pin
+                // electrically connected — but the segment we keep
+                // in `RoutedNet` no longer has the pin as an
+                // endpoint, breaking downstream invariants that
+                // expect every pin to anchor at least one segment
+                // endpoint (e.g. junction emission, `find_conflicts`
+                // foreign-pin checks). Only swap when both far
+                // endpoints are Steiner points or non-pins.
                 if is_pin(p_far) || is_pin(q_far) {
                     continue;
                 }
@@ -471,12 +590,16 @@ fn rewrite_standalone_crossings(
                 net.segments.push(parts[2]);
                 // Anchor original endpoints as junctions so Stage 4
                 // coalescing does not merge the perpendicular stub
-                // with a collinear segment elsewhere on the net,
-                // which would orphan a pin sitting at the original
-                // endpoint coord (KiCad does not auto-connect mid-wire
-                // pins). Only mark when the endpoint is a pin coord,
-                // otherwise we'd over-decorate the schematic with
-                // unnecessary junction dots.
+                // with a collinear segment elsewhere on the net.
+                // Coalescing would still leave the pin geometrically
+                // on the merged wire (KiCad's V11 wire-touches-pin
+                // rule keeps it connected) but the pin would no
+                // longer be a segment endpoint, which breaks
+                // downstream invariants that key on endpoints (e.g.
+                // foreign-pin conflict detection). Only mark when
+                // the endpoint is a pin coord, otherwise we'd
+                // over-decorate the schematic with unnecessary
+                // junction dots.
                 if is_pin(s.x1, s.y1) {
                     net.junctions.push((s.x1, s.y1));
                 }

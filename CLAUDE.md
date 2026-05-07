@@ -505,6 +505,52 @@ below describe intent.
   Steiner branch (tracked via the ignored
   `roundtrip::common_emitter` and `visual_quality::v2_common_emitter`).
 
+- **V11 — Wire/label–pin coincidence is electrical.** KiCad's
+  connectivity engine treats geometric coincidence as electrical
+  connection, with no `(junction …)` marker required. Concretely:
+    1. A wire endpoint coincident with a pin → that pin joins the
+       wire's net.
+    2. A wire's *interior* passing through a pin (axis-aligned
+       segment whose path contains the pin coordinate) → same: the
+       pin joins the wire's net. Mid-wire pins are connected, not
+       ignored.
+    3. A `(label …)` / `(global_label …)` coincident with a pin →
+       that pin joins the label's net.
+    4. A wire endpoint coincident with another wire's interior
+       (T-junction) → connected; KiCad draws an automatic junction
+       dot and merges the nets.
+  The corollary the router must enforce: **for every signal-net
+  segment, neither its endpoints nor its interior may land on a
+  pin owned by a different net, and a `(global_label …)` for a
+  net may only sit on a pin of that same net.** Violating any of
+  these silently shorts two nets — there is no ERC error, just a
+  wrong netlist on export.
+  This invariant binds **all** geometry the router emits: Stage 2
+  RSMT segments, Stage 3 jogs, Stage 3b obstacle detours,
+  Stage 4 cleanup output, and the `dangling_pin_labels` pass in
+  `kicad-emitter/src/schematic.rs`.
+  Verifier: a per-fixture test that loads the emitted
+  `.kicad_sch`, builds a `(coord → net_name)` map from the
+  resolved netlist, and asserts that every emitted `(wire …)`
+  endpoint, every interior pin coincidence, and every
+  `(global_label …)` position belongs to the same net as
+  whichever pin (if any) sits at that coordinate. Lives at
+  `crates/spice2kicad/tests/electrical_safety.rs` (new file).
+  Implementation hooks: `find_conflicts` in
+  `crates/spice-route/src/conflict.rs` flags only
+  endpoint-on-endpoint coincidence between routed nets — extend
+  it (and add an interior-pin-on-segment pass) so the same
+  jog/L-swap machinery resolves foreign-pin coincidences. Stage 4
+  cleanup must drop zero-length segments before serialisation
+  (a previously observed defect produced
+  `(wire (pts (xy 7.62 49.53) (xy 7.62 49.53)))` on
+  `common_emitter`).
+  This is a **correctness** invariant, not a quality one — a
+  V11-violating schematic is electrically wrong, not just ugly.
+  Recall the contrast with V5/V6/V7 (quality) and V10 (routing
+  surface): V10 says *what* the router emits; V11 says *what it
+  is forbidden to emit*.
+
 ## When changing the annotation spec
 
 The spec is the user-facing contract. Treat changes as you would

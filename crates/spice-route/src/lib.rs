@@ -115,9 +115,42 @@ pub fn route(req: RouteRequest<'_>) -> RouteResult {
         let warnings = conflict::avoid_obstacles(&mut routed, req.obstacles, &net_pin_coords);
         out.warnings.extend(warnings);
     }
+    // Stage 3c — V11 enforcement. Reroute / warn for any segment whose
+    // endpoint or interior touches a pin owned by another net (KiCad's
+    // wire-touches-pin rule silently merges those nets). Foreign-pin
+    // sets here include Power/Ground pins too: routing through a
+    // ground pin would silently merge the signal net into ground just
+    // as routing through a foreign signal pin would (regression seen
+    // on diff_pair when Q.E coords coincided with V.- pins).
+    #[allow(clippy::cast_possible_truncation)]
+    let foreign_per_routed: Vec<std::collections::HashSet<(i64, i64)>> = signal_nets
+        .iter()
+        .enumerate()
+        .map(|(i, _)| {
+            let own = &net_pin_coords[i];
+            let mut acc: std::collections::HashSet<(i64, i64)> = std::collections::HashSet::new();
+            for net in req.nets {
+                for p in &net.pins {
+                    let k = (
+                        (p.x_mm * 1000.0).round() as i64,
+                        (p.y_mm * 1000.0).round() as i64,
+                    );
+                    if own.contains(&k) {
+                        continue;
+                    }
+                    acc.insert(k);
+                }
+            }
+            acc
+        })
+        .collect();
+    let warnings = conflict::avoid_foreign_pins(&mut routed, &foreign_per_routed);
+    out.warnings.extend(warnings);
     // Stage 4 — per-net coalesce of collinear segments + dedup of
     // coincident junctions across nets.
+    cleanup::drop_zero_length(&mut routed);
     cleanup::coalesce_collinear(&mut routed);
+    cleanup::drop_zero_length(&mut routed);
     let junctions = cleanup::dedup_junctions(&routed);
     // Serialise routed nets to s-exprs.
     for net in &routed {
