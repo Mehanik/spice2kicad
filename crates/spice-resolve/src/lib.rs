@@ -14,6 +14,9 @@
 //! - **E003** — unknown library symbol
 //! - **E005** — invalid `pinmap` (unknown pin, out-of-range
 //!   spice index, duplicate spice index, duplicate kicad pin)
+//! - **E008** — default pin mapping cannot synthesize because the
+//!   symbol is missing a canonical pin name for the element's kind
+//!   (e.g. a 3-pin BJT-target symbol with no pin named `B`)
 //! - **W103** — multiple conflicting tags on one element (e.g. two
 //!   `;@ symbol=` tags); the first is kept
 //!
@@ -22,7 +25,11 @@
 
 #![forbid(unsafe_code)]
 
+mod default_pinmap;
+
 use std::collections::{HashMap, HashSet};
+
+use crate::default_pinmap::{DefaultPinmapError, synthesize as synthesize_default_pinmap};
 
 use kicad_symbols::{Library, Pin, Symbol};
 use spice_diagnostics::{Diagnostic, Label, Severity, Span};
@@ -340,6 +347,7 @@ fn collect_tags<'a>(
     out
 }
 
+#[allow(clippy::too_many_lines)]
 fn resolve_element(
     element: &Element,
     block_symbols: &[BlockSymbol<'_>],
@@ -413,19 +421,46 @@ fn resolve_element(
             None => return,
         }
     } else {
-        if arity != pin_count {
-            push_err(
-                diags,
-                "E002",
-                format!(
-                    "element `{}` has {arity} terminal(s) but symbol `{lib_id}` has {pin_count} pin(s); add `;@ pinmap=…`",
-                    element.designator
-                ),
-                None,
-            );
-            return;
+        // No user-supplied pinmap. Synthesize one from the kind's
+        // canonical pin-name table so we map by name (V11) rather than
+        // by parsed declaration order. Any failure here is fatal in
+        // the same way an explicit-but-broken pinmap would be.
+        match synthesize_default_pinmap(element.kind, symbol, arity) {
+            Ok(entries) => {
+                match build_pinmap(&element.designator, arity, symbol, &entries, None, diags) {
+                    Some(m) => m,
+                    None => return,
+                }
+            }
+            Err(DefaultPinmapError::ArityMismatch { .. }) => {
+                push_err(
+                    diags,
+                    "E002",
+                    format!(
+                        "element `{}` has {arity} terminal(s) but symbol `{lib_id}` has {pin_count} pin(s); add `;@ pinmap=…`",
+                        element.designator
+                    ),
+                    None,
+                );
+                return;
+            }
+            Err(DefaultPinmapError::MissingNamedPin {
+                expected,
+                lib_id: bad_lib,
+            }) => {
+                push_err(
+                    diags,
+                    "E008",
+                    format!(
+                        "default pin mapping for {kind:?} element `{refdes}` expected pin name `{expected}` on symbol `{bad_lib}`; supply `;@ pinmap=…` to override",
+                        kind = element.kind,
+                        refdes = element.designator,
+                    ),
+                    None,
+                );
+                return;
+            }
         }
-        symbol.pins.iter().map(|p| p.number.clone()).collect()
     };
 
     // 4. Role.

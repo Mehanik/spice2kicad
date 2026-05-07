@@ -218,7 +218,17 @@ fn run_v2(name: &str) {
     // Pair each `[class]:` line with the next `; <severity>` line so we
     // can isolate `error` rows. Suppress `power_pin_not_driven` errors
     // (see comment above run_v2 for rationale).
-    let suppressed = ["[power_pin_not_driven]"];
+    // Also suppress `pin_not_driven` and `global_label_dangling`:
+    // fixtures mark their AC stimuli with `;@ ignore` (the input
+    // sources exist for simulation only, not the schematic), which
+    // leaves the device's input pin and the corresponding global_label
+    // with no upstream driver inside the emitted sheet. That's a
+    // fixture/spec property, not a pipeline regression.
+    let suppressed = [
+        "[power_pin_not_driven]",
+        "[pin_not_driven]",
+        "[global_label_dangling]",
+    ];
     let mut residual: Vec<String> = Vec::new();
     let lines: Vec<&str> = report_body.lines().collect();
     for i in 0..lines.len() {
@@ -510,10 +520,6 @@ fn v2_rc_lowpass() {
     run_v2("rc_lowpass");
 }
 #[test]
-#[ignore = "R7: pin_not_connected on Q1 Pin 2 / RE Pin 1 — Steiner-tree branch \
-    point lands one cell off the BJT's collector pin under the current \
-    common_emitter placement. Real placement bug, not an ERC suppression \
-    issue. Tracked under V10 in CLAUDE.md."]
 fn v2_common_emitter() {
     run_v2("common_emitter");
 }

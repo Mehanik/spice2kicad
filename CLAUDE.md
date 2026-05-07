@@ -499,11 +499,7 @@ below describe intent.
   (rc_lowpass / common_emitter / multivibrator / diff_pair /
   opamp_inverting_real) at R7. Open items: PWR_FLAG-style
   driver emission for `power_pin_not_driven` ERC suppression
-  (currently filtered in `tests/visual_quality.rs::run_v2`),
-  and one residual placement bug on common_emitter where the
-  Q1 collector / RE pins drift one grid cell off the routed
-  Steiner branch (tracked via the ignored
-  `roundtrip::common_emitter` and `visual_quality::v2_common_emitter`).
+  (currently filtered in `tests/visual_quality.rs::run_v2`).
 
 - **V11 — Wire/label–pin coincidence is electrical.** KiCad's
   connectivity engine treats geometric coincidence as electrical
@@ -597,3 +593,33 @@ just test
 just hooks         # install git pre-commit hooks
 cargo install --path crates/spice2kicad
 ```
+
+## Memory limits when running tests / conversion jobs
+
+A regression in the router (or placer) can produce unbounded segment
+growth and OOM-kill the host before any single test fails. To keep
+that contained, **always run tests and one-off conversions under a
+virtual-memory cap** — never `cargo test --workspace` bare.
+
+`just test` already does the right thing: `ulimit -v
+${RUST_TEST_MAX_VSZ_KB:-4194304}` and `--test-threads
+${RUST_TEST_THREADS:-2}`. A runaway test process then hits its own
+4 GiB cap and fails (with a Rust allocation error or SIGABRT) instead
+of taking the whole machine down.
+
+When invoking `cargo` directly, wrap the same way:
+
+```sh
+bash -c 'ulimit -v 4194304 && cargo test -p <crate> -- --test-threads=2'
+bash -c 'ulimit -v 4194304 && cargo run -q -p spice2kicad -- …'
+```
+
+Tighten the cap (e.g. `RUST_TEST_MAX_VSZ_KB=1048576`, 1 GiB) when
+fuzzing the router or running large fixtures: a quicker abort gives
+faster feedback than a slow death-march. Loosen only when you have
+positively diagnosed a test that legitimately needs more (large
+roundtrips against full KiCad libraries occasionally do).
+
+If a test does hit the cap, that is a defect — diagnose root cause
+(a counted iteration limit, a stale segment-set growth invariant, an
+unbounded recursion) instead of just raising the ceiling.

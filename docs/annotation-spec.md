@@ -258,6 +258,18 @@ M1 d g s b NMOS L=…  ;@ symbol=Foo:Q_NMOS_GDS pinmap=1:2,2:1,3:3,4:4
 D1 a k DMOD          ;@ symbol=Device:D pinmap=1:A,2:K
 ```
 
+When `pinmap` is **omitted**, the converter synthesizes a default
+mapping from the element's kind. For kinds with canonical pin names
+(D = `A`/`K`; Q = `C`/`B`/`E`/`S`; M = `D`/`G`/`S`/`B`; J =
+`D`/`G`/`S`) the synthesizer maps SPICE terminals to KiCad pins by
+*name*, so a 3-terminal Q1 always finds the symbol's `C`/`B`/`E`
+pins regardless of the order they're declared in the `.kicad_sym`
+file. For kinds with no canonical name table (R/C/L/V/I/E/G/…) the
+synthesizer falls back to positional mapping (SPICE term *i* →
+*i*-th declared pin). If a kind has a canonical table but the
+chosen symbol lacks one of the expected names, the converter emits
+**E008** and asks for an explicit `pinmap`.
+
 For `.subckt` instances (§4.1, "Targeting `.subckt` instances"),
 the SPICE indices refer to the *port positions* in the matching
 `.subckt PORTNAME …` declaration rather than to terminals on a
@@ -503,6 +515,10 @@ The converter reports, in this order:
 - **E007** internal: layout could not resolve a `place` directive
   after the policy pass (worklist stalled). Should not normally
   fire on inputs that pass the policy pass; treat as a bug.
+- **E008** default pin mapping cannot be synthesized because the
+  chosen library symbol is missing a canonical pin name for the
+  element's kind (e.g. a 3-pin BJT-target symbol with no pin
+  named `B`). Supply an explicit `;@ pinmap=…` to override.
 - **W101** conflicting `place` constraints (which one was kept)
 - **W102** `align` cluster has fewer than two members
 - **W103** annotation on a line the parser did not recognize as an

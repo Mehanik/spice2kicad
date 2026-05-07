@@ -245,3 +245,47 @@ fn v8_opamp_inverting_real_pin_connectivity() {
     // symbol picks up `Amplifier_Operational:OPAMP` by accident.
     assert_eq!(property_value(opamp, "Reference"), Some("X1"));
 }
+
+// --- default pinmap regression (V11) -----------------------------------
+
+#[test]
+fn bjt_default_pinmap_uses_pin_names() {
+    // Regression for the V11-violating positional zip: SPICE BJT order
+    // is (C, B, E) and Device:Q_NPN_BCE numbers pins B=1, C=2, E=3.
+    // Without an explicit pinmap, the resolver must still map
+    // SPICE term 1 (collector) → KiCad pin "2", term 2 → "1", term 3
+    // → "3".
+    use kicad_symbols::Library;
+    use spice_diagnostics::FileId;
+    use spice_resolve::resolve;
+
+    let libs_dir = lib_dir();
+    let library = {
+        let device =
+            Library::from_file(libs_dir.join("Device.kicad_sym")).expect("parse Device.kicad_sym");
+        let sim = Library::from_file(libs_dir.join("Simulation_SPICE.kicad_sym"))
+            .expect("parse Simulation_SPICE.kicad_sym");
+        device.merge(sim)
+    };
+
+    let source = "* default pinmap regression\n\
+                  *@symbol Device:Q_NPN_BCE for=Q*\n\
+                  Q1 c b e QGENERIC\n\
+                  V1 c 0 5\n\
+                  V2 b 0 1\n\
+                  V3 e 0 0\n\
+                  .end\n";
+
+    let parsed = spice_parser::parse(source, FileId(0)).expect("parse ok");
+    let resolved = resolve(&parsed.netlist, &library).expect("resolve ok");
+    let q1 = resolved
+        .elements
+        .iter()
+        .find(|e| e.refdes == "Q1")
+        .expect("Q1 in resolved netlist");
+    assert_eq!(
+        q1.pin_mapping,
+        vec!["2".to_owned(), "1".to_owned(), "3".to_owned()],
+        "SPICE (C, B, E) must map to KiCad pin numbers (2, 1, 3) by name"
+    );
+}

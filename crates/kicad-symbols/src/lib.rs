@@ -245,6 +245,16 @@ impl Symbol {
         self.pins.len()
     }
 
+    #[must_use]
+    pub fn pin_by_name(&self, name: &str) -> Option<&Pin> {
+        self.pins.iter().find(|p| p.name == name)
+    }
+
+    #[must_use]
+    pub fn pin_by_number(&self, number: &str) -> Option<&Pin> {
+        self.pins.iter().find(|p| p.number == number)
+    }
+
     /// Pins in the given orientation, with positions and angles transformed.
     pub fn pins_in(&self, orient: Orientation) -> Vec<TransformedPin> {
         self.pins

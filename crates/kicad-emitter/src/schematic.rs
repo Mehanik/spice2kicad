@@ -485,7 +485,7 @@ fn child_symbol_instance(el: &PlacedElement, instance_refdeses: &[String]) -> Se
     fields.push(reference_property(&el.refdes, x_mm, y_mm));
     let value_text = el.value.as_deref().unwrap_or(&el.refdes);
     fields.push(value_property(value_text, x_mm, y_mm));
-    for prop in sim_properties(&el.lib_id, value_text) {
+    for prop in sim_properties(&el.lib_id, value_text, &el.pin_mapping) {
         fields.push(prop);
     }
     fields.push(child_instances_block(&el.refdes, instance_refdeses));
@@ -638,7 +638,7 @@ fn symbol_instance(el: &PlacedElement) -> Sexpr {
     fields.push(reference_property(&el.refdes, x_mm, y_mm));
     let value_text = el.value.as_deref().unwrap_or(&el.refdes);
     fields.push(value_property(value_text, x_mm, y_mm));
-    for prop in sim_properties(&el.lib_id, value_text) {
+    for prop in sim_properties(&el.lib_id, value_text, &el.pin_mapping) {
         fields.push(prop);
     }
     fields.push(instances_block(&el.refdes));
@@ -652,14 +652,30 @@ fn symbol_instance(el: &PlacedElement) -> Sexpr {
 /// as `__Q1`-style placeholders unless `Sim.Device` and `Sim.Type`
 /// are set, so we add minimal stubs derived from the symbol family.
 ///
-/// `Sim.Pins` is intentionally omitted: the default model-pin ↔
-/// symbol-pin mapping treats `model_pin[i] = symbol_pin[i]` (see
-/// `SIM_MODEL::createPins` in the KiCad source), which combined with
-/// the SPICE-order pin numbering used by `spice-resolve` produces
-/// the right SPICE terminal order on the round-trip.
-fn sim_properties(lib_id: &str, value: &str) -> Vec<Sexpr> {
+/// `Sim.Pins` IS emitted for active devices because `spice-resolve`
+/// maps SPICE terminals to KiCad pins by canonical pin name (V11) —
+/// so symbol pin order is decoupled from SPICE terminal order, and
+/// kicad-cli's default `model_pin[i] = symbol_pin[i]` rule would
+/// otherwise scramble nodes on `kicad-cli sch export netlist`.
+/// Format: `<symbol-pin-num>=<model-pin-name>` pairs (cf.
+/// `SIM_MODEL_SERIALIZER::GeneratePins` in KiCad). For a BJT
+/// (model pins C,B,E,S), `pin_mapping[0]` is the symbol pin number
+/// for the C terminal, etc.
+fn sim_properties(lib_id: &str, value: &str, pin_mapping: &[String]) -> Vec<Sexpr> {
     // Strip the `Lib:` prefix.
     let bare = lib_id.split_once(':').map_or(lib_id, |(_, name)| name);
+    // Model-pin name table per device family, in SPICE-terminal order.
+    // pin_mapping[i] = symbol pin number for SPICE term (i+1) = model
+    // pin model_pins[i].
+    let model_pins: &[&str] = if bare.starts_with("Q_NPN") || bare.starts_with("Q_PNP") {
+        &["C", "B", "E", "S"]
+    } else if bare.starts_with("Q_NMOS") || bare.starts_with("Q_PMOS") {
+        &["D", "G", "S", "B"]
+    } else if bare.starts_with("Q_NJFET") || bare.starts_with("Q_PJFET") {
+        &["D", "G", "S"]
+    } else {
+        &[]
+    };
     let (device, sim_type) = if bare.starts_with("Q_NPN") {
         ("NPN", "GUMMELPOON")
     } else if bare.starts_with("Q_PNP") {
@@ -705,11 +721,30 @@ fn sim_properties(lib_id: &str, value: &str) -> Vec<Sexpr> {
     } else {
         return Vec::new();
     };
-    vec![
+    let mut props = vec![
         sim_property("Sim.Device", device),
         sim_property("Sim.Type", sim_type),
         sim_property("Sim.Name", value),
-    ]
+    ];
+    // Sim.Pins: "<symbol-pin-number>=<model-pin-name>" pairs sorted by
+    // symbol pin number (matches KiCad's GeneratePins output). Only
+    // emitted when we have a non-empty mapping; tests construct
+    // PlacedElements with an empty pin_mapping for fixtures that
+    // don't exercise the netlister.
+    if !model_pins.is_empty() && !pin_mapping.is_empty() {
+        let take = pin_mapping.len().min(model_pins.len());
+        let mut pairs: Vec<(String, &str)> = (0..take)
+            .map(|i| (pin_mapping[i].clone(), model_pins[i]))
+            .collect();
+        pairs.sort_by(|a, b| a.0.cmp(&b.0));
+        let pins_text = pairs
+            .iter()
+            .map(|(num, name)| format!("{num}={name}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        props.push(sim_property("Sim.Pins", &pins_text));
+    }
+    props
 }
 
 fn sim_property(name: &str, value: &str) -> Sexpr {

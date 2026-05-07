@@ -59,7 +59,6 @@ fn rc_lowpass() {
 }
 
 #[test]
-#[ignore = "R7: same defect as v2_common_emitter — Steiner-tree branch lands one grid cell off Q1's collector pin and RE's top pin under the current placement, leaving them un-routed (`unconnected-_…_` nets after KiCad netlist export). Real placement bug; tracked under V10 in CLAUDE.md."]
 fn common_emitter() {
     run_roundtrip("common_emitter");
 }
