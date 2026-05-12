@@ -261,20 +261,51 @@ below describe intent.
   symbol in the emitted file's `(lib_symbols)`, and asserts byte
   equality of the body sub-tree.
 
-- **V4 — Wires for connectivity, ≤ 2 labels per net.** Pins on the
-  same net are connected by `(wire …)` segments emitted by the
-  placer / router. `(global_label …)` and `(label …)` are reserved
-  for: (a) `*@power` rails; (b) hierarchical-sheet ports
-  (cross-sheet); (c) named nets the user explicitly tagged or that
-  span otherwise unreachable regions. **Hard rule:** at most two
-  labels carry the same net name on a single sheet — one at each
-  terminal of a "label jump" (typical KiCad practice for
-  un-routable connections). Three or more coincident labels for one
-  net is a defect, not a style preference (cf. commit `22cb630`).
-  Hierarchical-sheet pins are exempt — they're the cross-sheet
-  boundary. Verified by a per-sheet label-tally test that scans
-  emitted `(label …)` / `(global_label …)` nodes and asserts no
-  net name occurs more than twice on the same sheet.
+- **V4 — Plain labels for in-sheet annotation; global labels for
+  cross-sheet or one-pin interfaces; ≤ 2 labels per net per sheet.**
+  Pins on the same net are connected by `(wire …)` segments emitted
+  by the placer / router. Labels are *optional human-readable net
+  names*, not the connectivity carrier. Three label flavours mean
+  different things:
+
+  - `(label …)` — plain net name, sheet-local. Render is a small
+    text tag with no border. Use to name an in-sheet net so a reader
+    can identify it.
+  - `(global_label …)` — net spans every sheet by name. Render is a
+    chevron-bordered tag. Use *only* for nets that genuinely cross
+    sheet boundaries (a v0.2 concern) **or** for one-pin "interface"
+    nets where no wire exists to anchor a plain label (ERC
+    `label_dangling` fires on a wireless plain label).
+  - `(hierarchical_label …)` — port on a hierarchical-sheet
+    boundary. Used only by the hierarchical-sheet emitter for the
+    sheet's port pins.
+
+  Hard rules:
+
+  1. ≤ 1 plain `(label …)` per signal net per sheet when the net has
+     no hierarchical-port marker. When the net *also* touches a
+     hierarchical-sheet port (`extra_pins`), a *second* plain label
+     is emitted at the rightmost body pin as a name-jump pair —
+     KiCad's in-sheet plain-label name-matching then binds the
+     body-side wire fragment to the port-side fragment even when
+     the router's Steiner tree is split by an obstacle detour.
+  2. `(global_label …)` is emitted only for (a) one-pin signal nets
+     (where no plain label could anchor), or (b) a future
+     cross-sheet topology. For v0.1's five single-sheet fixtures the
+     only legitimate global labels are the schematic's external
+     ports — typically `in` and `out`.
+  3. Power / Ground nets emit zero labels — `power:*` glyphs (V10)
+     carry the connectivity.
+  4. A label's anchor must not coincide with a foreign-net pin
+     coordinate (V11) or with a port marker that already names the
+     net at that coord (the `extra_pins` exclusion in
+     `dangling_pin_labels`).
+
+  Verifier: `crates/spice2kicad/tests/labels.rs` runs a per-sheet
+  label-kind tally. Asserts `count(plain_label[net]) ≤ 2` and that
+  every `(global_label …)` either appears in a fixture's
+  hand-curated interface allow-list or originates from a one-pin
+  fallback path.
 
 - **V5 — Pin-facing orientation.** For any two adjacent placed
   elements that share a net, the placer must choose orientations
@@ -546,6 +577,64 @@ below describe intent.
   Recall the contrast with V5/V6/V7 (quality) and V10 (routing
   surface): V10 says *what* the router emits; V11 says *what it
   is forbidden to emit*.
+
+- **V12 — Wires do not cross foreign symbol bodies.** Every emitted
+  `(wire …)` segment's axis-parallel path must not strictly enter
+  the body bbox of any symbol that doesn't host the wire's net.
+  "Strictly" means the path penetrates the bbox interior — touching
+  the edge at a pin coordinate is fine, that's the whole point of a
+  pin. Today's `avoid_obstacles` pass in
+  `crates/spice-route/src/conflict.rs` tries alternate-L corners and
+  1..4-cell offset detours; on failure it logged an `obstacle: …`
+  warning and left the segment in place (V10 called this "ugly but
+  electrically valid"). V12 promotes the warning to a quality
+  defect with a per-fixture crossing budget.
+  Verifier: `crates/spice2kicad/tests/electrical_safety.rs::v12_*`.
+  Calibration: budget 0 on `rc_lowpass` and `multivibrator`;
+  fixture-specific cap on `common_emitter`, `diff_pair`, and
+  `opamp_inverting_real` until a v0.2 channel-rerouter closes the
+  residual cases. The budget is the **high-water mark we drive
+  down**, not a license to introduce new crossings — a regression
+  trips the test.
+
+- **V13 — Labels do not overlap symbol bodies, property text, or
+  foreign-net wires.** For every emitted `(label …)` /
+  `(global_label …)`:
+  1. The label's text bbox does not overlap any symbol body bbox.
+  2. The label's text bbox does not overlap any
+     `(property "Reference" …)` or `(property "Value" …)` text bbox
+     emitted on the same sheet.
+  3. The label's anchor position does not lie on the interior of a
+     `(wire …)` segment that belongs to a different net (V11 covers
+     the foreign-pin subcase; V13 extends to wire-interior
+     coincidence away from any pin).
+  v0.1 verifier in `crates/spice2kicad/tests/electrical_safety.rs`
+  enforces (1) only (body overlap) with a per-fixture allow-list;
+  (2) and (3) are tracked but not yet enforced — text-bbox sizing
+  needs a font-aware helper and the wire-interior-vs-label scan
+  needs a `(label, net_for_label)` map that today's emitter doesn't
+  expose. Both land alongside V13's full enforcement in a v0.2 pass.
+
+- **V14 — Power glyph orientation: GND down, VCC up.** Every
+  `power:GND` instance emits with the rotation that draws the
+  triangle below the connection point (KiCad lib convention: rot 0).
+  Every `power:+...` / `power:VCC` / `power:VDD` instance emits with
+  the rotation that draws the chevron above the connection point
+  (rot 0). The host pin's outward direction does *not* alter the
+  glyph rotation — the previous per-pin rotation match
+  (commit `b4838ee`) produced GND glyphs at any of {0, 90, 180, 270}
+  depending on which pin they attached to, which is not how
+  schematics are conventionally drawn.
+  Consequence: when the host pin's outward direction conflicts with
+  the locked orientation (e.g. a GND glyph attached to a pin that
+  sticks upward into the body's empty space), the glyph body may
+  visually overlap the host symbol's body. The V13 verifier flags
+  those cases as quality defects; closing them needs a placer-level
+  pin-choice improvement (tracked separately). V14's contract is
+  purely "no surprising rotations".
+  Verifier: `crates/spice2kicad/tests/placement_quality.rs::v14_*`
+  asserts every `power:GND` and `power:VCC` symbol's `(at … rot)`
+  has `rot == 0`.
 
 ## When changing the annotation spec
 

@@ -129,7 +129,7 @@ pub fn emit_root(
     for routed in route_nets(&net_pins, "root", library, &obstacles) {
         items.push(routed);
     }
-    for label in dangling_pin_labels(&net_pins, "root") {
+    for label in dangling_pin_labels(&net_pins, "root", &extra_pins) {
         items.push(label);
     }
 
@@ -208,7 +208,7 @@ pub fn emit_child_sheet(child: &ChildSheet<'_>, library: &Library) -> Result<Str
     for routed in route_nets(&net_pins, &child.name, library, &obstacles) {
         items.push(routed);
     }
-    for label in dangling_pin_labels(&net_pins, &child.name) {
+    for label in dangling_pin_labels(&net_pins, &child.name, &extra_pins) {
         items.push(label);
     }
 
@@ -390,6 +390,12 @@ fn no_connect(x: f64, y: f64, scope: &str, idx: usize) -> Sexpr {
     ])
 }
 
+/// `(global_label …)` — chevron-bordered marker. V4 reserves this
+/// kind for two cases: (1) nets that genuinely cross a sheet
+/// boundary (v0.1 emits none); (2) one-pin "interface" nets where
+/// no wire exists to anchor a plain label (ERC `label_dangling`
+/// fires on a wireless plain label, but accepts a global label as
+/// an external interface marker).
 fn global_label_simple(text: &str, x: f64, y: f64, scope: &str, idx: usize) -> Sexpr {
     let uuid = Uuid::new_v5(
         &UUID_NAMESPACE,
@@ -400,6 +406,36 @@ fn global_label_simple(text: &str, x: f64, y: f64, scope: &str, idx: usize) -> S
         atom("global_label"),
         qstring(text),
         list(vec![atom("shape"), atom("input")]),
+        list(vec![
+            atom("at"),
+            atom(&format_coord(x)),
+            atom(&format_coord(y)),
+            atom("0"),
+        ]),
+        list(vec![
+            atom("effects"),
+            list(vec![
+                atom("font"),
+                list(vec![atom("size"), atom("1.27"), atom("1.27")]),
+            ]),
+        ]),
+        list(vec![atom("uuid"), qstring(&uuid)]),
+    ])
+}
+
+/// Plain `(label …)` — sheet-local net name annotation (V4). Use
+/// for in-sheet net labels. (`global_label` is reserved for nets
+/// that cross a sheet boundary OR for one-pin "interface" nets
+/// where there is no wire to anchor a plain label.)
+fn label_simple(text: &str, x: f64, y: f64, scope: &str, idx: usize) -> Sexpr {
+    let uuid = Uuid::new_v5(
+        &UUID_NAMESPACE,
+        format!("label:{scope}:{idx}:{text}").as_bytes(),
+    )
+    .to_string();
+    list(vec![
+        atom("label"),
+        qstring(text),
         list(vec![
             atom("at"),
             atom(&format_coord(x)),
@@ -964,22 +1000,45 @@ fn lexpr_to_sexpr(v: &lexpr::Value) -> Sexpr {
     Sexpr::from(RawSexpr::from_lexpr(v))
 }
 
-/// Emit `(global_label "<net>" …)` markers at the pin positions of
-/// each net. The user-supplied SPICE net name (e.g. `0`, `vcc`,
-/// `in`) is preserved in `kicad-cli`'s SPICE export only if at
-/// least one label of that name appears on the schematic; otherwise
-/// kicad-cli synthesises a generic `Net-(...)` name and the
-/// round-trip topology comparator can't recover the original
-/// ground class.
+/// Emit plain `(label …)` markers naming each signal net. The label
+/// carries the SPICE net name (e.g. `b`, `in`, `out`); KiCad's
+/// SPICE netlist exporter preserves the original net name only if
+/// at least one label of that name appears on the schematic.
 ///
-/// To satisfy V4 (≤ 2 labels per net per sheet) we emit at most two
-/// labels per net: one at the first pin and one at the last (in the
-/// same sorted order the router used). Single-pin nets get one
-/// label, satisfying ERC's "no dangling pin" expectation.
+/// V4 hard rules enforced here:
+/// - **Plain `(label …)`, not `(global_label …)`.** Global labels
+///   mean "this net spans every sheet by name" and are reserved for
+///   hierarchical-sheet cross-boundary nets. Internal nets on a
+///   single-sheet schematic must use plain labels.
+/// - One label at the geometrically leftmost body pin (ties broken
+///   by smaller y), and — only when the net also touches a
+///   hierarchical-sheet port — a second label at the rightmost body
+///   pin. The second label is a sheet-local name-jump that pairs
+///   with the port-side `hierarchical_label` so KiCad's connectivity
+///   engine binds the body-side and port-side wire fragments even
+///   if the router's Steiner tree is split by an obstacle detour.
+///   Single-sheet fixtures emit one label per net.
+/// - Power/Ground nets emit zero labels — `power:*` glyphs from
+///   `spice_route` Stage 1 are the connectivity carrier.
+/// - The label anchor must not coincide with a foreign-net pin
+///   coordinate (V11 silent-short guard) or with a port marker
+///   (`extra_pins`) that already names the net at that coord.
 fn dangling_pin_labels(
     nets: &std::collections::BTreeMap<String, Vec<(f64, f64, u16)>>,
     scope: &str,
+    extra_pins: &[(String, f64, f64)],
 ) -> Vec<Sexpr> {
+    // Coordinates already carrying a port marker (sheet pin position
+    // on the parent, hierarchical_label on a child) name the net by
+    // themselves. Adding a `(label …)` on top is redundant and worse,
+    // *replaces* the body-pin anchor we actually need to identify the
+    // net at the body side (a wire from body to port without a label
+    // anywhere on the body leaves the body-pin segment auto-named).
+    #[allow(clippy::cast_possible_truncation)]
+    let port_coords: std::collections::HashSet<(i64, i64)> = extra_pins
+        .iter()
+        .map(|&(_, x, y)| ((x * 1000.0).round() as i64, (y * 1000.0).round() as i64))
+        .collect();
     // V11 — a `(global_label …)` for net N planted at the coordinate
     // of a pin that belongs to a different net silently merges the
     // two nets in KiCad. Build the foreign-coord set per net (every
@@ -1023,10 +1082,12 @@ fn dangling_pin_labels(
             }
         }
         // Deduplicate coincident pins; drop any coord that belongs to
-        // another net (V11 would silently short the two).
+        // another net (V11 would silently short the two) and any coord
+        // that already carries a port marker (sheet-pin / hierarchical_label).
         let mut uniq: Vec<(f64, f64)> = Vec::new();
         for &(x, y, _) in pins {
-            if foreign.contains(&key_of(x, y)) {
+            let k = key_of(x, y);
+            if foreign.contains(&k) || port_coords.contains(&k) {
                 continue;
             }
             if !uniq
@@ -1044,11 +1105,36 @@ fn dangling_pin_labels(
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then(a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
         });
+        // Classify the net's label kind:
+        //
+        //   - 1 body pin only → `(global_label …)`. The single pin
+        //     is an *interface* to the outside world (e.g. the
+        //     schematic's `in` or `out` port on a v0.1 single-sheet
+        //     fixture); plain labels would trip ERC `label_dangling`
+        //     because there's no wire to anchor a plain label on
+        //     a one-pin net.
+        //   - ≥ 2 body pins, no hierarchical-sheet port → 1 plain
+        //     `(label …)` at the leftmost body pin.
+        //   - ≥ 2 body pins, touches a port → 1 plain label at the
+        //     leftmost body pin and a second plain label at the
+        //     rightmost body pin. The pair acts as a name-jump:
+        //     KiCad's in-sheet plain-label name-matching binds the
+        //     body-side wire fragment to the port-side even when
+        //     the router's Steiner tree is split by an obstacle
+        //     detour.
+        let net_touches_port = pins.iter().any(|&(x, y, _)| {
+            let k = key_of(x, y);
+            port_coords.contains(&k)
+        });
         let (fx, fy) = uniq[0];
-        out.push(global_label_simple(net, fx, fy, scope, idx * 2));
-        if uniq.len() >= 2 {
-            let (lx, ly) = uniq[uniq.len() - 1];
-            out.push(global_label_simple(net, lx, ly, scope, idx * 2 + 1));
+        if uniq.len() == 1 && !net_touches_port {
+            out.push(global_label_simple(net, fx, fy, scope, idx));
+        } else {
+            out.push(label_simple(net, fx, fy, scope, idx * 2));
+            if net_touches_port && uniq.len() >= 2 {
+                let (lx, ly) = uniq[uniq.len() - 1];
+                out.push(label_simple(net, lx, ly, scope, idx * 2 + 1));
+            }
         }
     }
     out

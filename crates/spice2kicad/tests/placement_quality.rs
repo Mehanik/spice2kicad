@@ -998,3 +998,41 @@ fn common_emitter_signal_flows_left_to_right() {
          CIN.x={cin_x:.2}, Q1.x={q1_x:.2}, COUT.x={cout_x:.2}",
     );
 }
+
+#[test]
+fn v14_power_glyphs_have_canonical_orientation() {
+    // V14 — every `power:GND` instance is emitted at rot 0 (triangle
+    // points visually down); every `power:VCC` (and the variants
+    // `+5V`/`+12V`/`+3V3`/`VDD`) is emitted at rot 0 (chevron points
+    // visually up). Per-pin rotation matching the host pin's outward
+    // direction is no longer allowed.
+    for (name, path) in fixtures() {
+        let tmp = tempdir(name);
+        let sch = common::spice_to_kicad(&path, &tmp).expect("spice2kicad");
+        let root = parse_sch(&sch);
+        for sym in children(&root, "symbol") {
+            let Some(lib_id) = find_child(sym, "lib_id")
+                .and_then(|n| list_iter(n).nth(1))
+                .and_then(as_str)
+            else {
+                continue;
+            };
+            if !lib_id.starts_with("power:") {
+                continue;
+            }
+            let Some(at) = find_child(sym, "at") else {
+                continue;
+            };
+            let mut it = list_iter(at);
+            it.next();
+            let _ = it.next(); // x
+            let _ = it.next(); // y
+            let rotation = it.next().and_then(as_f64).unwrap_or(0.0);
+            assert!(
+                (rotation - 0.0).abs() < f64::EPSILON,
+                "{name}: power glyph {lib_id} rendered at rot {rotation}; V14 \
+                 requires rot 0 for GND (triangle down) / VCC (chevron up)",
+            );
+        }
+    }
+}

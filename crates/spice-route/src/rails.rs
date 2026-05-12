@@ -84,42 +84,29 @@ fn ground_lib_id(_net_name: &str) -> &'static str {
     "power:GND"
 }
 
-/// Compute (x, y, rotation_degrees) for the symbol body so its anchor
-/// pin sits at `pin`'s coordinate AND the glyph body extends *away*
-/// from the host pin (not toward it).
+/// Compute (x, y, rotation_degrees) for the power symbol so its
+/// anchor pin sits at `pin`'s coordinate. V14 locks the glyph
+/// rotation to its conventional orientation regardless of the host
+/// pin's outward direction:
 ///
-/// Rule: power-symbol body must extend in the same world-direction the
-/// host pin is "outward" pointing. Empirically (verified by rendering
-/// `power:GND` at all four rotations under kicad-cli — see
-/// `tests/symbol_pose_orientation` in this crate):
+/// * GND — always rot 0. Triangle renders visually DOWN below the
+///   anchor coordinate. (Empirically verified — see the
+///   `power_symbol_rotation_extends_body_away_from_host_pin`
+///   regression test.)
+/// * VCC (and the other `power:+…` variants) — always rot 0.
+///   Chevron renders visually UP above the anchor coordinate.
 ///
-/// * rotation 0   → glyph body extends visually DOWN (+Y in schematic).
-///   Use when host pin's outward direction is Down.
-/// * rotation 90  → body extends visually LEFT  (-X). Use for outward Left.
-/// * rotation 180 → body extends visually UP    (-Y). Use for outward Up.
-/// * rotation 270 → body extends visually RIGHT (+X). Use for outward Right.
-///
-/// Equivalently: `rot = (host_outward_angle + 180) mod 360`, where the
-/// host-outward angle in KiCad pin convention is 0=right, 90=up,
-/// 180=left, 270=down.
-///
-/// The previous mapping (Up→0, Right→90, Down→180, Left→270) was off
-/// by 180° on every axis: GND glyphs at the bottom of BJT emitters
-/// rendered with the triangle apex pointing UP toward the host instead
-/// of DOWN away from it. Fixed in the commit accompanying this comment.
+/// When the host pin's outward direction conflicts with the locked
+/// orientation (e.g. a GND glyph attached to a pin that sticks
+/// upward into empty space), the glyph body may visually overlap
+/// the host symbol's body. The V13 verifier flags such cases as a
+/// quality defect; closing those needs a placer-level pin-choice
+/// improvement (tracked separately). Locking the rotation is V14's
+/// hard contract regardless.
 fn symbol_pose(pin: &PinRef) -> (f64, f64, u16) {
-    // Anchor pin is at lib origin (0, 0); placing the symbol at the
-    // host pin's world coord makes the two pins coincide so KiCad
-    // treats them as connected without an explicit wire.
-    let (sx, sy) = (pin.x_mm, pin.y_mm);
-    let rot = match pin.outward {
-        Direction::Down => 0,
-        Direction::Left => 90,
-        Direction::Up => 180,
-        Direction::Right => 270,
-    };
     let _ = GRID_MM;
-    (sx, sy, rot)
+    let _ = pin.outward;
+    (pin.x_mm, pin.y_mm, 0)
 }
 
 fn power_symbol_sexpr(

@@ -109,24 +109,20 @@ fn signal_net_does_not_emit_power_symbol() {
 }
 
 #[test]
-fn power_symbol_rotation_extends_body_away_from_host_pin() {
-    // Verifier for Issue 1 (power:GND apex pointed AT the host pin
-    // before this commit). The chosen rotation must place the symbol
-    // body on the far side of the anchor pin from the host's outward
-    // direction. Empirical mapping (see `symbol_pose` doc):
-    //
-    //   host outward Down  → rotation 0   (body extends visually +Y)
-    //   host outward Left  → rotation 90  (body extends -X)
-    //   host outward Up    → rotation 180 (body extends -Y)
-    //   host outward Right → rotation 270 (body extends +X)
+fn power_symbol_rotation_always_zero_v14() {
+    // V14 — GND glyphs always render at rot 0 (triangle points
+    // visually DOWN); VCC glyphs always render at rot 0 (chevron
+    // points visually UP). Host pin's outward direction does not
+    // alter rotation. Cases where the locked orientation overlaps
+    // the host body are quality defects flagged by V13's verifier;
+    // V14's contract is purely "no surprising rotations".
     let lib = fixture_library();
-    let cases = [
-        (Direction::Down, "0"),
-        (Direction::Left, "90"),
-        (Direction::Up, "180"),
-        (Direction::Right, "270"),
-    ];
-    for (dir, expected_rot) in cases {
+    for dir in [
+        Direction::Down,
+        Direction::Left,
+        Direction::Up,
+        Direction::Right,
+    ] {
         let net = NetSpec {
             name: "0".into(),
             class: NetClass::Ground,
@@ -146,12 +142,9 @@ fn power_symbol_rotation_extends_body_away_from_host_pin() {
             .map(std::string::ToString::to_string)
             .find(|s| s.contains("power:GND"))
             .expect("power:GND present");
-        // The (at x y rot) triple sits right after lib_id; just look
-        // for the "10.16 20.32 <rot>)" pattern.
-        let needle = format!("10.16 20.32 {expected_rot})");
         assert!(
-            s.contains(&needle),
-            "outward {dir:?} expected rotation {expected_rot}; got: {s}",
+            s.contains("10.16 20.32 0)"),
+            "outward {dir:?}: expected rot 0; got: {s}",
         );
     }
 }
