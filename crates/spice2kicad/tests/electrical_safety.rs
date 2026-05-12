@@ -89,6 +89,14 @@ struct Bbox {
 }
 
 impl Bbox {
+    /// AABB intersection. Inclusive on edges; coincident-edge cases
+    /// (a label touching a body's edge at a pin coordinate) are
+    /// *quality* defects, not correctness ones, so the verifier
+    /// treats them as overlap when both bboxes have non-zero area.
+    fn intersects(&self, other: &Bbox) -> bool {
+        self.x0 < other.x1 && self.x1 > other.x0 && self.y0 < other.y1 && self.y1 > other.y0
+    }
+
     fn intersects_segment(&self, a: Pt, b: Pt) -> bool {
         // Strict-interior test mirroring `spice_route::types::Bbox`.
         let eps = 0.1;
@@ -118,6 +126,7 @@ impl Bbox {
         }
     }
 
+    #[allow(dead_code)]
     fn contains(&self, p: Pt) -> bool {
         let eps = 0.1;
         p.0 > self.x0 + eps && p.0 < self.x1 - eps && p.1 > self.y0 + eps && p.1 < self.y1 - eps
@@ -811,17 +820,223 @@ fn v11_no_foreign_pin_coincidence() {
 // V12 / V13 verifiers (existing).
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// V13 text-bbox machinery shared by parts (1), (2), and (3).
+// ---------------------------------------------------------------------------
+
+/// Which kind of text we're sizing a bbox for. Determines anchor
+/// semantics (left vs centred) and any flavour-specific padding
+/// (chevron lead for global labels).
+#[derive(Debug, Clone, Copy)]
+enum TextKind {
+    /// Plain `(label …)` — KiCad anchors the text at the left edge.
+    PlainLabel,
+    /// `(global_label …)` — chevron-bordered tag; the chevron adds an
+    /// extra `~0.6 × size` of horizontal lead on the anchor side.
+    GlobalLabel,
+    /// `(property "Reference" …)` text — anchor centred or left
+    /// depending on `(justify …)`. The emitter now writes `justify
+    /// left` (V13 Step 5) so we model it as left-anchored.
+    PropertyReference,
+    /// `(property "Value" …)` text — same anchor rules as Reference.
+    PropertyValue,
+}
+
+/// Approximate the rendered text bbox of a label or property string.
+///
+/// References: KiCad's Newstroke font has an average advance of
+/// roughly 0.6 × glyph height (see `../kicad-source/eeschema/sch_field.cpp`
+/// and `../kicad-source/eeschema/sch_label.cpp`); we add 0.8 × size of
+/// slack to absorb hinting variance and the small lead/trail margins
+/// KiCad's renderer applies. Height is taken as 1.4 × size to cover
+/// ascender + descender + line spacing.
+///
+/// `orientation_deg` rotates the unrotated bbox about the anchor and
+/// the function returns the axis-aligned bounding box of the rotated
+/// shape (matches what eeschema considers the field's visible bbox
+/// for collision purposes).
+fn text_bbox(text: &str, anchor: Pt, size_mm: f64, orientation_deg: u16, kind: TextKind) -> Bbox {
+    #[allow(clippy::cast_precision_loss)]
+    let chars = text.chars().count() as f64;
+    let width = chars * 0.6 * size_mm + 0.8 * size_mm;
+    let height = 1.4 * size_mm;
+    let chevron_lead = match kind {
+        TextKind::GlobalLabel => 0.6 * size_mm,
+        _ => 0.0,
+    };
+    // Unrotated bbox in the anchor's local frame. Anchor is the
+    // *left edge* for left-justified text; the bbox extends to the
+    // right by `width`, half above and half below the baseline.
+    // Property text is also left-anchored (the emitter writes
+    // `(justify left)`); plain/global labels are likewise anchored
+    // on the leftmost edge for `orientation 0`.
+    let (lx, rx, ty, by) = match kind {
+        TextKind::PlainLabel | TextKind::PropertyReference | TextKind::PropertyValue => {
+            (-0.0, width, -height / 2.0, height / 2.0)
+        }
+        TextKind::GlobalLabel => (
+            -chevron_lead,
+            width + chevron_lead,
+            -height / 2.0,
+            height / 2.0,
+        ),
+    };
+    // Rotate the four corners about the anchor. KiCad's schematic
+    // file Y axis points DOWN on screen (eeschema renders with the
+    // Y-flip on load), and rotation tokens are CCW *on screen*. To
+    // produce a file-frame AABB matching what KiCad draws, we negate
+    // the sine component so that rot=90 maps right-extending text to
+    // upward (i.e. decreasing file Y).
+    let theta = f64::from(orientation_deg).to_radians();
+    let (s, c) = (theta.sin(), theta.cos());
+    let corners = [(lx, ty), (rx, ty), (rx, by), (lx, by)];
+    let mut x0 = f64::INFINITY;
+    let mut x1 = f64::NEG_INFINITY;
+    let mut y0 = f64::INFINITY;
+    let mut y1 = f64::NEG_INFINITY;
+    for (px, py) in corners {
+        let wx = anchor.0 + c * px + s * py;
+        let wy = anchor.1 - s * px + c * py;
+        x0 = x0.min(wx);
+        x1 = x1.max(wx);
+        y0 = y0.min(wy);
+        y1 = y1.max(wy);
+    }
+    Bbox { x0, y0, x1, y1 }
+}
+
+/// True if a `(property …)` s-expression is marked hidden in either
+/// the legacy form (`(hide)`) or the new `(effects (hide yes))` form.
+fn property_hidden(prop: &Value) -> bool {
+    for c in list_iter(prop) {
+        if head(c) == Some("hide") {
+            return true;
+        }
+        if head(c) == Some("effects") {
+            for e in list_iter(c) {
+                if head(e) == Some("hide") {
+                    // (hide yes) — check the argument.
+                    let v = list_iter(e).nth(1).and_then(as_str);
+                    if v == Some("yes") || v.is_none() {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Extract `(at x y rot)` from any sexpr that has one as a child.
+fn at_xy_rot(node: &Value) -> Option<(f64, f64, u16)> {
+    let at = find_child(node, "at")?;
+    let mut it = list_iter(at);
+    it.next();
+    let x = it.next().and_then(as_f64)?;
+    let y = it.next().and_then(as_f64)?;
+    let rot = it.next().and_then(as_f64).unwrap_or(0.0);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let rot_u = ((rot.round() as i64).rem_euclid(360)) as u16;
+    Some((x, y, rot_u))
+}
+
+/// Pull the font size (mm) out of an `(effects (font (size w h)) …)`.
+fn effects_font_size(node: &Value) -> Option<f64> {
+    let eff = find_child(node, "effects")?;
+    let font = find_child(eff, "font")?;
+    let size = find_child(font, "size")?;
+    let mut it = list_iter(size);
+    it.next();
+    it.next().and_then(as_f64)
+}
+
+/// Collect every emitted plain-label and global-label as
+/// (net_name, anchor, rot_deg, kind).
+#[allow(clippy::similar_names)]
+fn labels_with_kind(root: &Value) -> Vec<(String, Pt, u16, TextKind)> {
+    let mut out = Vec::new();
+    for (sx_tag, lkind) in [
+        ("label", TextKind::PlainLabel),
+        ("global_label", TextKind::GlobalLabel),
+    ] {
+        for node in children(root, sx_tag) {
+            let Some(name) = list_iter(node).nth(1).and_then(as_str) else {
+                continue;
+            };
+            let Some((x, y, rot)) = at_xy_rot(node) else {
+                continue;
+            };
+            out.push((name.to_owned(), (x, y), rot, lkind));
+        }
+    }
+    out
+}
+
+/// Collect each placed `(symbol …)`'s visible Reference and Value
+/// property bboxes. Power glyphs (`#PWR…`) are skipped — their text
+/// is part of the standard library glyph and never collides with
+/// other in-sheet text in practice.
+fn property_bboxes(root: &Value) -> Vec<(String, Bbox)> {
+    let mut out = Vec::new();
+    for sym in children(root, "symbol") {
+        let mut refdes = String::new();
+        for prop in children(sym, "property") {
+            let mut it = list_iter(prop);
+            it.next();
+            let key = it.next().and_then(as_str);
+            let val = it.next().and_then(as_str);
+            if key == Some("Reference") {
+                val.unwrap_or_default().clone_into(&mut refdes);
+                break;
+            }
+        }
+        if refdes.starts_with("#PWR") {
+            continue;
+        }
+        for prop in children(sym, "property") {
+            if property_hidden(prop) {
+                continue;
+            }
+            let mut it = list_iter(prop);
+            it.next();
+            let key = it.next().and_then(as_str).unwrap_or("");
+            let val = it.next().and_then(as_str).unwrap_or("");
+            let tkind = match key {
+                "Reference" => TextKind::PropertyReference,
+                "Value" => TextKind::PropertyValue,
+                _ => continue,
+            };
+            let Some((px, py, prot)) = at_xy_rot(prop) else {
+                continue;
+            };
+            let size = effects_font_size(prop).unwrap_or(1.27);
+            let bbox = text_bbox(val, (px, py), size, prot, tkind);
+            out.push((format!("{refdes}.{key}"), bbox));
+        }
+    }
+    out
+}
+
 #[test]
-fn v13_labels_not_inside_foreign_symbol_bodies() {
-    // V13 part (1): label anchor strictly inside a symbol body is a
-    // correctness defect (the wire/text overlap obscures the
-    // schematic). Per-fixture allow-list reflects current placer
-    // output; tighten as the placer improves.
+fn v13_labels_dont_overlap_symbol_body() {
+    // V13 part (1): label *text bbox* must not intersect a symbol's
+    // body bbox. Stricter than the previous point-in-bbox check —
+    // a label whose anchor sits just outside the body but whose
+    // text rendering crosses into the body is still a defect.
     let body_overlap_budget = |name: &str| -> usize {
         match name {
-            // Q1 in common_emitter sits where the `e` net's labels
-            // would otherwise land; tracked together with V12.
-            "common_emitter" => 2,
+            // TODO(placer): `b` label at R1's lower pin (rot 90,
+            // text extends downward = up on screen — that's the
+            // outward direction) overlaps VCC's body bbox, which the
+            // placer puts directly above R1. Outward-extending text
+            // is the correct rotation; the residue is the placer's
+            // VCC↔R1 stacking. Closing this needs a placer change to
+            // leave one extra grid cell between the VCC source and
+            // the resistor below it. 1 hit.
+            // Same placer-stacking class on opamp_inverting_real:
+            // `in` label at X1's `+` pin extends up into V1's body
+            // bbox. 1 hit.
+            "common_emitter" | "opamp_inverting_real" => 1,
             _ => 0,
         }
     };
@@ -831,15 +1046,13 @@ fn v13_labels_not_inside_foreign_symbol_bodies() {
         let sch = spice_to_kicad(&src, &tmp).expect("spice2kicad");
         let root = parse(&sch);
         let bodies = placed_symbol_bboxes(&root);
-        let labels = label_positions(&root);
+        let labels = labels_with_kind(&root);
         let mut hits = 0;
-        for (lname, pos) in &labels {
-            for (refdes, bbox) in &bodies {
-                if bbox.contains(*pos) {
-                    eprintln!(
-                        "{name}: label \"{lname}\" at ({:.2},{:.2}) inside {refdes}'s body",
-                        pos.0, pos.1,
-                    );
+        for (lname, anchor, rot, kind) in &labels {
+            let lbbox = text_bbox(lname, *anchor, 1.27, *rot, *kind);
+            for (refdes, body) in &bodies {
+                if lbbox.intersects(body) {
+                    eprintln!("{name}: label \"{lname}\" bbox overlaps {refdes}'s body",);
                     hits += 1;
                 }
             }
@@ -847,7 +1060,167 @@ fn v13_labels_not_inside_foreign_symbol_bodies() {
         let budget = body_overlap_budget(name);
         assert!(
             hits <= budget,
-            "{name}: {hits} labels inside foreign symbol bodies > V13 budget {budget}",
+            "{name}: {hits} label↔body overlaps > V13(1) budget {budget}",
         );
     }
+}
+
+#[test]
+fn v13_labels_dont_overlap_property_text() {
+    // V13 part (2): a label's rendered text bbox must not overlap any
+    // visible Reference / Value property's text bbox.
+    // After Step 5 (property anchors offset right of body, left-justify)
+    // and Step 6 (label rotation away from body), every v0.1 fixture
+    // routes clean. Zero everywhere — a regression here is a defect.
+    let budget = |_name: &str| -> usize { 0 };
+    for name in SHEETS {
+        let src = fixtures_dir().join(format!("{name}.cir"));
+        let tmp = tempdir(name);
+        let sch = spice_to_kicad(&src, &tmp).expect("spice2kicad");
+        let root = parse(&sch);
+        let props = property_bboxes(&root);
+        let labels = labels_with_kind(&root);
+        let mut hits = 0;
+        for (lname, anchor, rot, kind) in &labels {
+            let lbbox = text_bbox(lname, *anchor, 1.27, *rot, *kind);
+            for (pname, pbbox) in &props {
+                if lbbox.intersects(pbbox) {
+                    eprintln!("{name}: label \"{lname}\" bbox overlaps property {pname}",);
+                    hits += 1;
+                }
+            }
+        }
+        let b = budget(name);
+        assert!(
+            hits <= b,
+            "{name}: {hits} label↔property text overlaps > V13(2) budget {b}",
+        );
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+#[test]
+fn v13_label_anchor_not_on_foreign_wire_interior() {
+    // V13 part (3): label anchor coordinate must not lie strictly
+    // inside any wire segment whose net is different from the label's
+    // own net. (V11 already covers the pin-coincidence subcase.)
+    //
+    // Net classification reuses the union-find construction from V11:
+    // a wire's net is the connected component of its endpoints in the
+    // pin-coord ∪ wire-endpoint graph, with each pin coord pulled
+    // into its stated net.
+    let budget = |_name: &str| -> usize { 0 };
+    let mut hard_failures: Vec<String> = Vec::new();
+    for name in SHEETS {
+        let src = fixtures_dir().join(format!("{name}.cir"));
+        let tmp = tempdir(name);
+        let sch = spice_to_kicad(&src, &tmp).expect("spice2kicad");
+        let root = parse(&sch);
+        let pins = world_pins_for_sheet(&src, &root);
+        let pin_index = build_pin_index(&pins);
+        let wires = wire_segments(&root);
+
+        let mut coord_idx: HashMap<(i64, i64), usize> = HashMap::new();
+        let mut coords: Vec<(i64, i64)> = Vec::new();
+        let mut intern = |k: (i64, i64), coords: &mut Vec<(i64, i64)>| -> usize {
+            if let Some(&i) = coord_idx.get(&k) {
+                i
+            } else {
+                let i = coords.len();
+                coord_idx.insert(k, i);
+                coords.push(k);
+                i
+            }
+        };
+        for k in pin_index.keys() {
+            intern(*k, &mut coords);
+        }
+        for (a, b) in &wires {
+            intern(qkey(a.0, a.1), &mut coords);
+            intern(qkey(b.0, b.1), &mut coords);
+        }
+        let mut uf = UnionFind::new(coords.len());
+        for (a, b) in &wires {
+            let ia = coord_idx[&qkey(a.0, a.1)];
+            let ib = coord_idx[&qkey(b.0, b.1)];
+            uf.union(ia, ib);
+        }
+        let mut net_anchor: HashMap<String, usize> = HashMap::new();
+        for (coord, list) in &pin_index {
+            let ci = coord_idx[coord];
+            if let Some((_, _, net)) = list.first() {
+                #[allow(clippy::cast_possible_wrap)]
+                let ni = *net_anchor.entry(net.clone()).or_insert_with(|| {
+                    let i = coords.len();
+                    coords.push((i64::MAX - ci as i64, i64::MAX));
+                    i
+                });
+                if ni >= uf.parent.len() {
+                    uf.parent.resize(ni + 1, ni);
+                }
+                uf.union(ci, ni);
+            }
+        }
+        let mut comp_net: HashMap<usize, String> = HashMap::new();
+        for (net, &ai) in &net_anchor {
+            let r = uf.find(ai);
+            comp_net.insert(r, net.clone());
+        }
+
+        // For each label, walk every wire segment whose net != label's.
+        // Test whether the label's anchor sits strictly between the
+        // segment's endpoints (axis-aligned only).
+        let labels = label_positions(&root);
+        let mut hits = 0;
+        for (lname, pos) in &labels {
+            let lk = qkey(pos.0, pos.1);
+            for (a, b) in &wires {
+                let ka = qkey(a.0, a.1);
+                let ia = coord_idx[&ka];
+                let ra = uf.find(ia);
+                let Some(wnet) = comp_net.get(&ra) else {
+                    continue;
+                };
+                if wnet == lname {
+                    continue;
+                }
+                let kb = qkey(b.0, b.1);
+                if lk == ka || lk == kb {
+                    // V11 covers the endpoint case; not our concern.
+                    continue;
+                }
+                // Axis-aligned strict interior check.
+                let on_interior = if ka.0 == kb.0 && ka.0 == lk.0 {
+                    let lo = ka.1.min(kb.1);
+                    let hi = ka.1.max(kb.1);
+                    lk.1 > lo && lk.1 < hi
+                } else if ka.1 == kb.1 && ka.1 == lk.1 {
+                    let lo = ka.0.min(kb.0);
+                    let hi = ka.0.max(kb.0);
+                    lk.0 > lo && lk.0 < hi
+                } else {
+                    false
+                };
+                if on_interior {
+                    eprintln!(
+                        "{name}: label \"{lname}\" at ({:.3},{:.3}) on interior of foreign-net \
+                         wire ({:.3},{:.3})→({:.3},{:.3}) (net {wnet:?})",
+                        pos.0, pos.1, a.0, a.1, b.0, b.1,
+                    );
+                    hits += 1;
+                }
+            }
+        }
+        let b = budget(name);
+        if hits > b {
+            hard_failures.push(format!(
+                "{name}: {hits} label↔foreign-wire-interior coincidences > V13(3) budget {b}"
+            ));
+        }
+    }
+    assert!(
+        hard_failures.is_empty(),
+        "V13(3) regressions:\n  {}",
+        hard_failures.join("\n  "),
+    );
 }

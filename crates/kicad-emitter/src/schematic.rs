@@ -396,7 +396,7 @@ fn no_connect(x: f64, y: f64, scope: &str, idx: usize) -> Sexpr {
 /// no wire exists to anchor a plain label (ERC `label_dangling`
 /// fires on a wireless plain label, but accepts a global label as
 /// an external interface marker).
-fn global_label_simple(text: &str, x: f64, y: f64, scope: &str, idx: usize) -> Sexpr {
+fn global_label_simple(text: &str, x: f64, y: f64, rot_deg: u16, scope: &str, idx: usize) -> Sexpr {
     let uuid = Uuid::new_v5(
         &UUID_NAMESPACE,
         format!("glabel:{scope}:{idx}:{text}").as_bytes(),
@@ -410,7 +410,7 @@ fn global_label_simple(text: &str, x: f64, y: f64, scope: &str, idx: usize) -> S
             atom("at"),
             atom(&format_coord(x)),
             atom(&format_coord(y)),
-            atom("0"),
+            atom(&rot_deg.to_string()),
         ]),
         list(vec![
             atom("effects"),
@@ -427,7 +427,7 @@ fn global_label_simple(text: &str, x: f64, y: f64, scope: &str, idx: usize) -> S
 /// for in-sheet net labels. (`global_label` is reserved for nets
 /// that cross a sheet boundary OR for one-pin "interface" nets
 /// where there is no wire to anchor a plain label.)
-fn label_simple(text: &str, x: f64, y: f64, scope: &str, idx: usize) -> Sexpr {
+fn label_simple(text: &str, x: f64, y: f64, rot_deg: u16, scope: &str, idx: usize) -> Sexpr {
     let uuid = Uuid::new_v5(
         &UUID_NAMESPACE,
         format!("label:{scope}:{idx}:{text}").as_bytes(),
@@ -440,7 +440,7 @@ fn label_simple(text: &str, x: f64, y: f64, scope: &str, idx: usize) -> Sexpr {
             atom("at"),
             atom(&format_coord(x)),
             atom(&format_coord(y)),
-            atom("0"),
+            atom(&rot_deg.to_string()),
         ]),
         list(vec![
             atom("effects"),
@@ -518,9 +518,16 @@ fn child_symbol_instance(el: &PlacedElement, instance_refdeses: &[String]) -> Se
         fields.push(list(vec![atom("mirror"), atom(m)]));
     }
     fields.push(list(vec![atom("uuid"), qstring(&instance_uuid(el))]));
-    fields.push(reference_property(&el.refdes, x_mm, y_mm));
+    // V13: offset property anchors to the symbol's right side so the
+    // Reference / Value text bboxes do not overlap the body. Reference
+    // above, Value below. The offset is rotated through the placed
+    // orientation so a rotated/mirrored symbol gets a sensibly rotated
+    // property too.
+    let (rx, ry) = property_anchor(x_mm, y_mm, el.orientation, 2.54, -2.54);
+    fields.push(reference_property(&el.refdes, rx, ry));
     let value_text = el.value.as_deref().unwrap_or(&el.refdes);
-    fields.push(value_property(value_text, x_mm, y_mm));
+    let (vx, vy) = property_anchor(x_mm, y_mm, el.orientation, 2.54, 2.54);
+    fields.push(value_property(value_text, vx, vy));
     for prop in sim_properties(&el.lib_id, value_text, &el.pin_mapping) {
         fields.push(prop);
     }
@@ -671,9 +678,16 @@ fn symbol_instance(el: &PlacedElement) -> Sexpr {
         fields.push(list(vec![atom("mirror"), atom(m)]));
     }
     fields.push(list(vec![atom("uuid"), qstring(&instance_uuid(el))]));
-    fields.push(reference_property(&el.refdes, x_mm, y_mm));
+    // V13: offset property anchors to the symbol's right side so the
+    // Reference / Value text bboxes do not overlap the body. Reference
+    // above, Value below. The offset is rotated through the placed
+    // orientation so a rotated/mirrored symbol gets a sensibly rotated
+    // property too.
+    let (rx, ry) = property_anchor(x_mm, y_mm, el.orientation, 2.54, -2.54);
+    fields.push(reference_property(&el.refdes, rx, ry));
     let value_text = el.value.as_deref().unwrap_or(&el.refdes);
-    fields.push(value_property(value_text, x_mm, y_mm));
+    let (vx, vy) = property_anchor(x_mm, y_mm, el.orientation, 2.54, 2.54);
+    fields.push(value_property(value_text, vx, vy));
     for prop in sim_properties(&el.lib_id, value_text, &el.pin_mapping) {
         fields.push(prop);
     }
@@ -1115,17 +1129,20 @@ fn dangling_pin_labels(
         // Deduplicate coincident pins; drop any coord that belongs to
         // another net (V11 would silently short the two) and any coord
         // that already carries a port marker (sheet-pin / hierarchical_label).
-        let mut uniq: Vec<(f64, f64)> = Vec::new();
-        for &(x, y, _) in pins {
+        // Carry pin-outward-angle per coord so the label can rotate to
+        // extend AWAY from the symbol body (V13 — text bbox doesn't
+        // overlap the body the pin belongs to).
+        let mut uniq: Vec<(f64, f64, u16)> = Vec::new();
+        for &(x, y, ang) in pins {
             let k = key_of(x, y);
             if foreign.contains(&k) || port_coords.contains(&k) {
                 continue;
             }
             if !uniq
                 .iter()
-                .any(|&(ux, uy)| approx_eq(ux, x) && approx_eq(uy, y))
+                .any(|&(ux, uy, _)| approx_eq(ux, x) && approx_eq(uy, y))
             {
-                uniq.push((x, y));
+                uniq.push((x, y, ang));
             }
         }
         if uniq.is_empty() {
@@ -1136,6 +1153,22 @@ fn dangling_pin_labels(
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then(a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
         });
+        // Label rotation: orient the label so its text extends in the
+        // pin's *outward* direction (away from the symbol body), so
+        // the label's text bbox doesn't overlap the body it anchors
+        // on (V13 — label↔body overlap). KiCad's `.kicad_sym` pin
+        // `(at x y angle)` stores the angle the pin line extends
+        // *toward the body* (tip at (x,y), body in direction `angle`).
+        // The outward direction is therefore `angle + 180 (mod 360)`.
+        //
+        // Additionally, eeschema applies a world-Y flip when loading
+        // pins (see the matching comment in `collect_net_pins`), which
+        // is purely a frame conversion for pin tip coordinates and
+        // does *not* affect the label's `(at … rot)` interpretation —
+        // labels live in the same flipped world frame as the pins, so
+        // we can pass the outward-angle straight through as the
+        // label's rotation token.
+        let label_rot = |pin_angle: u16| -> u16 { (pin_angle + 180) % 360 };
         // Classify the net's label kind:
         //
         //   - 1 body pin only → `(global_label …)`. The single pin
@@ -1157,14 +1190,28 @@ fn dangling_pin_labels(
             let k = key_of(x, y);
             port_coords.contains(&k)
         });
-        let (fx, fy) = uniq[0];
+        let (fx, fy, fang) = uniq[0];
         if uniq.len() == 1 && !net_touches_port {
-            out.push(global_label_simple(net, fx, fy, scope, idx));
+            out.push(global_label_simple(
+                net,
+                fx,
+                fy,
+                label_rot(fang),
+                scope,
+                idx,
+            ));
         } else {
-            out.push(label_simple(net, fx, fy, scope, idx * 2));
+            out.push(label_simple(net, fx, fy, label_rot(fang), scope, idx * 2));
             if net_touches_port && uniq.len() >= 2 {
-                let (lx, ly) = uniq[uniq.len() - 1];
-                out.push(label_simple(net, lx, ly, scope, idx * 2 + 1));
+                let (lx, ly, lang) = uniq[uniq.len() - 1];
+                out.push(label_simple(
+                    net,
+                    lx,
+                    ly,
+                    label_rot(lang),
+                    scope,
+                    idx * 2 + 1,
+                ));
             }
         }
     }
@@ -1188,6 +1235,40 @@ fn mirror_token(orient: Orientation) -> Option<&'static str> {
     if orient.mirror_y { Some("y") } else { None }
 }
 
+/// Property text effects: 1.27 mm Newstroke font, left-justified so the
+/// emitted `(at x y)` anchors the *leftmost* edge of the rendered text.
+/// Left-justify is essential for V13's text-bbox computation: with
+/// centred text the verifier would have to widen the bbox in both
+/// directions and the placer's right-of-body offset would still overlap
+/// the symbol itself.
+fn property_effects() -> Sexpr {
+    list(vec![
+        atom("effects"),
+        list(vec![
+            atom("font"),
+            list(vec![atom("size"), atom("1.27"), atom("1.27")]),
+        ]),
+        list(vec![atom("justify"), atom("left")]),
+    ])
+}
+
+/// Offset the `Reference` / `Value` property `(at …)` from the symbol
+/// origin by `(dx, dy)` in symbol-local space, rotated/mirrored by the
+/// placed instance's orientation. Returns the world-space anchor.
+fn property_anchor(
+    origin_x: f64,
+    origin_y: f64,
+    orient: Orientation,
+    dx: f64,
+    dy: f64,
+) -> (f64, f64) {
+    // `apply_point` operates in symbol-local space; the eeschema
+    // convention places property anchors in world space using the same
+    // rotation/mirror that `at`'s `rot` token encodes.
+    let (rx, ry) = orient.apply_point(dx, dy);
+    (origin_x + rx, origin_y + ry)
+}
+
 fn reference_property(refdes: &str, x: f64, y: f64) -> Sexpr {
     list(vec![
         atom("property"),
@@ -1199,6 +1280,7 @@ fn reference_property(refdes: &str, x: f64, y: f64) -> Sexpr {
             atom(&format_coord(y)),
             atom("0"),
         ]),
+        property_effects(),
     ])
 }
 
@@ -1213,6 +1295,7 @@ fn value_property(value: &str, x: f64, y: f64) -> Sexpr {
             atom(&format_coord(y)),
             atom("0"),
         ]),
+        property_effects(),
     ])
 }
 
