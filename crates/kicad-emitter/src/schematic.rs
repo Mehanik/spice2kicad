@@ -126,7 +126,7 @@ pub fn emit_root(
 
     let net_pins = collect_net_pins(placement, library, &extra_pins);
     let obstacles = placement_obstacles(placement);
-    for routed in route_nets(&net_pins, "root", library, &obstacles) {
+    for routed in route_nets(&net_pins, "root", library, &obstacles)? {
         items.push(routed);
     }
     for label in dangling_pin_labels(&net_pins, "root", &extra_pins) {
@@ -205,7 +205,7 @@ pub fn emit_child_sheet(child: &ChildSheet<'_>, library: &Library) -> Result<Str
 
     let net_pins = collect_net_pins(child.placement, library, &extra_pins);
     let obstacles = placement_obstacles(child.placement);
-    for routed in route_nets(&net_pins, &child.name, library, &obstacles) {
+    for routed in route_nets(&net_pins, &child.name, library, &obstacles)? {
         items.push(routed);
     }
     for label in dangling_pin_labels(&net_pins, &child.name, &extra_pins) {
@@ -881,7 +881,7 @@ fn route_nets(
     scope: &str,
     library: &Library,
     obstacles: &[spice_route::Bbox],
-) -> Vec<Sexpr> {
+) -> Result<Vec<Sexpr>, EmitError> {
     use spice_route::{NetSpec, PinRef, RouteRequest};
 
     // Build the per-net pin list expected by spice_route. Net class
@@ -929,10 +929,40 @@ fn route_nets(
         project_name: GENERATOR,
         obstacles,
     });
+    // Split V11 (correctness) residue from other warnings. A `v11:`
+    // prefix indicates a wire still touches a foreign pin after the
+    // active rerouter ran — KiCad would silently short the two nets
+    // on load. We escalate that to a hard `EmitError` when the
+    // `SPICE2KICAD_V11_STRICT` env var is set; the env-gate keeps the
+    // existing single fixture with a known placer-level pin overlap
+    // (`opamp_inverting_real`) emittable for the V12/V13 verifier
+    // suite while still giving callers a way to opt into nonzero
+    // exit-status on V11 residue. The `v11-placer:` tag (router-
+    // detected placer overlap, see `conflict::avoid_foreign_pins`)
+    // is logged as a warning regardless. Other warnings (V12 body
+    // crossings, missing `power:*` lib_id, conflict-resolver cap)
+    // stay at the warning tier.
+    let mut v11_errors: Vec<&String> = Vec::new();
     for w in &result.warnings {
-        eprintln!("spice2kicad route: {w}");
+        if w.starts_with("v11:") {
+            v11_errors.push(w);
+            eprintln!("spice2kicad route: {w}");
+        } else {
+            eprintln!("spice2kicad route: {w}");
+        }
     }
-    result.sexprs.iter().map(lexpr_to_sexpr).collect()
+    if !v11_errors.is_empty() && std::env::var_os("SPICE2KICAD_V11_STRICT").is_some() {
+        return Err(EmitError::V11Violation(format!(
+            "{} unresolved foreign-pin coincidence(s) in `{scope}`: {}",
+            v11_errors.len(),
+            v11_errors
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join("; "),
+        )));
+    }
+    Ok(result.sexprs.iter().map(lexpr_to_sexpr).collect())
 }
 
 /// Build the set of symbol-body bounding boxes the router should

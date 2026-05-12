@@ -59,6 +59,13 @@ pub fn route_signal_nets(req: &RouteRequest<'_>, out: &mut RouteResult) -> Vec<R
         if !matches!(net.class, NetClass::Signal) {
             continue;
         }
+        // Stage 2 emits the Hwang/MST tree without V11 awareness.
+        // V11 enforcement happens at Stage 3c
+        // (`conflict::avoid_foreign_pins`) where the rerouter can
+        // detect and roll back a detour that would collinearly
+        // overlap a sibling routed net. A conflict-aware
+        // constructor that subsumes both stages is a v0.2 channel-
+        // router work item.
         let (segs, junctions) = steiner::route_signal(net);
         routed.push(RoutedNet {
             segments: segs,
@@ -67,6 +74,49 @@ pub fn route_signal_nets(req: &RouteRequest<'_>, out: &mut RouteResult) -> Vec<R
     }
     let _ = out;
     routed
+}
+
+/// Pre-compute, in routed-net (signal-only) order, the set of pin
+/// coordinates owned by *any other* net (signal, power, or ground)
+/// that the corresponding Steiner tree must avoid. Coordinates are
+/// quantised to 1 µm via `(x*1000.0).round() as i64`, matching the
+/// router-internal `qk` helper.
+#[allow(clippy::cast_possible_truncation)]
+fn foreign_pin_sets(req: &RouteRequest<'_>) -> Vec<std::collections::HashSet<(i64, i64)>> {
+    let signal_nets: Vec<&NetSpec> = req
+        .nets
+        .iter()
+        .filter(|n| matches!(n.class, NetClass::Signal))
+        .collect();
+    signal_nets
+        .iter()
+        .map(|own| {
+            let own_keys: std::collections::HashSet<(i64, i64)> = own
+                .pins
+                .iter()
+                .map(|p| {
+                    (
+                        (p.x_mm * 1000.0).round() as i64,
+                        (p.y_mm * 1000.0).round() as i64,
+                    )
+                })
+                .collect();
+            let mut acc: std::collections::HashSet<(i64, i64)> = std::collections::HashSet::new();
+            for net in req.nets {
+                for p in &net.pins {
+                    let k = (
+                        (p.x_mm * 1000.0).round() as i64,
+                        (p.y_mm * 1000.0).round() as i64,
+                    );
+                    if own_keys.contains(&k) {
+                        continue;
+                    }
+                    acc.insert(k);
+                }
+            }
+            acc
+        })
+        .collect()
 }
 
 /// Route the supplied nets and return their wire / junction / symbol
@@ -88,14 +138,11 @@ pub fn route(req: RouteRequest<'_>) -> RouteResult {
     // coordinate that's a pin on net A but only a Steiner / wire
     // crossing on net B should be resolved by jogging B (not A);
     // jogging at A would silently disconnect A's pin.
-    let signal_nets: Vec<&NetSpec> = req
+    #[allow(clippy::cast_possible_truncation)]
+    let net_pin_coords: Vec<std::collections::HashSet<(i64, i64)>> = req
         .nets
         .iter()
         .filter(|n| matches!(n.class, NetClass::Signal))
-        .collect();
-    #[allow(clippy::cast_possible_truncation)]
-    let net_pin_coords: Vec<std::collections::HashSet<(i64, i64)>> = signal_nets
-        .iter()
         .map(|n| {
             n.pins
                 .iter()
@@ -110,42 +157,37 @@ pub fn route(req: RouteRequest<'_>) -> RouteResult {
         .collect();
     let warnings = conflict::resolve_conflicts(&mut routed, &net_pin_coords);
     out.warnings.extend(warnings);
-    // Stage 3b — avoid wires crossing symbol bodies.
+    // Stage 3c — V11 enforcement. **Correctness invariant**: wire
+    // endpoints, wire interiors, and labels must not coincide with a
+    // pin owned by a different net (KiCad's wire-touches-pin rule
+    // silently merges those nets on export). Foreign-pin sets here
+    // include Power/Ground pins too: routing through a ground pin
+    // would silently merge the signal net into ground just as routing
+    // through a foreign signal pin would.
+    //
+    // Runs *before* the V12 (symbol-body) pass: a V11 violation is a
+    // wrong netlist, while a V12 violation is just ugly. If we have
+    // to choose between the two, take the V12 hit. The rerouter
+    // jogs offending segments perpendicular to the violating axis
+    // and rolls the change back if it would collinearly overlap a
+    // sibling routed net (the symmetric multivibrator failure
+    // mode); residual cases drive the v0.2 channel-router work
+    // item, with the V11 verifier in
+    // `crates/spice2kicad/tests/electrical_safety.rs` holding the
+    // budget as a high-water mark.
+    let foreign_per_routed = foreign_pin_sets(&req);
+    let warnings = conflict::avoid_foreign_pins(
+        &mut routed,
+        &foreign_per_routed,
+        &net_pin_coords,
+        req.obstacles,
+    );
+    out.warnings.extend(warnings);
+    // Stage 3b — avoid wires crossing symbol bodies (V12 quality).
     if !req.obstacles.is_empty() {
         let warnings = conflict::avoid_obstacles(&mut routed, req.obstacles, &net_pin_coords);
         out.warnings.extend(warnings);
     }
-    // Stage 3c — V11 enforcement. Reroute / warn for any segment whose
-    // endpoint or interior touches a pin owned by another net (KiCad's
-    // wire-touches-pin rule silently merges those nets). Foreign-pin
-    // sets here include Power/Ground pins too: routing through a
-    // ground pin would silently merge the signal net into ground just
-    // as routing through a foreign signal pin would (regression seen
-    // on diff_pair when Q.E coords coincided with V.- pins).
-    #[allow(clippy::cast_possible_truncation)]
-    let foreign_per_routed: Vec<std::collections::HashSet<(i64, i64)>> = signal_nets
-        .iter()
-        .enumerate()
-        .map(|(i, _)| {
-            let own = &net_pin_coords[i];
-            let mut acc: std::collections::HashSet<(i64, i64)> = std::collections::HashSet::new();
-            for net in req.nets {
-                for p in &net.pins {
-                    let k = (
-                        (p.x_mm * 1000.0).round() as i64,
-                        (p.y_mm * 1000.0).round() as i64,
-                    );
-                    if own.contains(&k) {
-                        continue;
-                    }
-                    acc.insert(k);
-                }
-            }
-            acc
-        })
-        .collect();
-    let warnings = conflict::avoid_foreign_pins(&mut routed, &foreign_per_routed);
-    out.warnings.extend(warnings);
     // Stage 4 — per-net coalesce of collinear segments + dedup of
     // coincident junctions across nets.
     cleanup::drop_zero_length(&mut routed);

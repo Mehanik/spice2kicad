@@ -76,6 +76,32 @@ pub struct Bbox {
 }
 
 impl Bbox {
+    /// Build a small bbox centred on a pin coordinate, used by V11
+    /// foreign-pin avoidance to reuse the segment-vs-bbox plumbing
+    /// already exercised for V12 symbol-body avoidance.
+    ///
+    /// The half-extent is slightly less than half a grid cell so a
+    /// segment whose *endpoint* sits exactly on the pin (the
+    /// owning-net case the caller is responsible for filtering out)
+    /// would not be flagged — only a segment whose path strictly
+    /// penetrates the box's interior triggers
+    /// [`Bbox::intersects_segment`]. The 0.5 mm half-extent picks
+    /// up pin coords located on the 1.27 mm grid without trapping
+    /// segments routed one grid cell away.
+    #[must_use]
+    pub fn from_point(x_mm: f64, y_mm: f64) -> Self {
+        // 0.5 mm half-extent: well inside one grid cell (1.27 mm)
+        // and comfortably outside the 0.1 mm "graze" tolerance the
+        // `intersects_segment` test uses for pins on the boundary.
+        let h = 0.5_f64;
+        Self {
+            x0: x_mm - h,
+            y0: y_mm - h,
+            x1: x_mm + h,
+            y1: y_mm + h,
+        }
+    }
+
     /// Strict interior intersection of an axis-parallel segment with
     /// this bbox, ignoring touches that only graze the boundary
     /// (where pins legitimately attach).

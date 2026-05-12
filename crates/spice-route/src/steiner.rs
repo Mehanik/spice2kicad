@@ -150,6 +150,15 @@ fn coalesce_at(segs: &mut Vec<Segment>, mx: f64, my: f64) {
 /// Route the signal net by pin count, dispatching to the
 /// closed-form 2-pin / 3-pin cases or the N-pin Hanan-grid /
 /// rectilinear-MST routes for N ≥ 4. Returns `(segments, junctions)`.
+///
+/// V11 enforcement (no segment may pass through a pin owned by a
+/// different net) is **not** applied at construction time — Stage
+/// 3c's [`crate::conflict::avoid_foreign_pins`] handles it
+/// per-segment so the rerouter can detect and roll back a detour
+/// that would collinearly overlap a sibling routed net (the
+/// symmetric multivibrator / diff-pair failure mode). A conflict-
+/// aware constructor that subsumes both is a v0.2 channel-router
+/// work item.
 pub(crate) fn route_signal(net: &crate::NetSpec) -> (Vec<Segment>, Vec<(f64, f64)>) {
     match net.pins.len() {
         0 | 1 => (Vec::new(), Vec::new()),

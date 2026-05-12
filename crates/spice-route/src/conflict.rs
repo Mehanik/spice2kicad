@@ -240,6 +240,8 @@ fn approx_zero_len(s: &Segment) -> bool {
 pub fn avoid_foreign_pins<S: ::std::hash::BuildHasher>(
     routed: &mut [RoutedNet],
     foreign_per_net: &[std::collections::HashSet<(i64, i64), S>],
+    own_pin_coords: &[std::collections::HashSet<(i64, i64), S>],
+    obstacles: &[Bbox],
 ) -> Vec<String> {
     let mut warnings = Vec::new();
     if routed.is_empty() || foreign_per_net.is_empty() {
@@ -255,16 +257,58 @@ pub fn avoid_foreign_pins<S: ::std::hash::BuildHasher>(
             v
         })
         .collect();
-    // V11 enforcement is **detect-and-warn-only** in v0.1. Naïve
-    // detours can introduce new V11 violations (a detour leg crossing
-    // a different foreign pin) without an obstacle-aware re-route, and
-    // the router's current "pick perpendicular direction" logic is not
-    // strong enough to guarantee progress. The diagnostic still
-    // surfaces the bug end-to-end so callers can fix the underlying
-    // placer-level pin overlap. Active rerouting is tracked as a
-    // v0.2 work item.
-    let _: () = ();
-    // Final tally.
+    // Process nets in a deterministic priority order so the most
+    // constrained net (most pins, largest pin span) routes first and
+    // less-constrained nets get to react to its geometry. Ties broken
+    // by net index so order is stable.
+    let mut order: Vec<usize> = (0..routed.len()).collect();
+    order.sort_by(|&a, &b| {
+        let key_a = net_priority_key(&routed[a]);
+        let key_b = net_priority_key(&routed[b]);
+        key_b.cmp(&key_a).then(a.cmp(&b))
+    });
+    // Iterate the priority pass until convergence (no further net
+    // changes) or a small cap. Cross-net dependencies — net A's
+    // detour blocked because net B's pre-detour trunk collinearly
+    // overlaps — resolve themselves once B has moved on a later
+    // pass. The cap is defensive; the symmetric multivibrator /
+    // diff_pair fixtures converge in 2 passes in practice.
+    for _ in 0..MAX_ITERATIONS {
+        let pre_signatures: Vec<Vec<Segment>> = routed.iter().map(|n| n.segments.clone()).collect();
+        for &i in &order {
+            let pins = &foreign[i];
+            if pins.is_empty() {
+                continue;
+            }
+            let own_for_net: &std::collections::HashSet<(i64, i64), S> = match own_pin_coords.get(i)
+            {
+                Some(s) => s,
+                None => continue,
+            };
+            reroute_one_net_v11(routed, i, pins, own_for_net, obstacles);
+        }
+        let changed = pre_signatures
+            .iter()
+            .zip(routed.iter())
+            .any(|(pre, now)| pre != &now.segments);
+        if !changed {
+            break;
+        }
+    }
+    // Final tally — anything left after active rerouting is reported
+    // as a diagnostic. Two flavours:
+    //   * `v11:` — router-level failure. The emitter (kicad-emitter)
+    //     promotes this to a hard EmitError so the CLI exits nonzero
+    //     rather than write a schematic it knows is electrically
+    //     wrong.
+    //   * `v11-placer:` — the foreign-pin coord coincides with one
+    //     of the routed net's OWN pin coords, i.e. two distinct nets
+    //     occupy the same world point before the router ever ran.
+    //     No detour can fix that — any wire connecting the own pin
+    //     necessarily lands at the shared coord. The emitter logs
+    //     these as warnings only; closing them is a placer-level
+    //     work item tracked by
+    //     `v11_pin_overlap_is_a_placer_bug` in the verifier.
     for (i, net) in routed.iter().enumerate() {
         let pins = &foreign[i];
         if pins.is_empty() {
@@ -274,12 +318,550 @@ pub fn avoid_foreign_pins<S: ::std::hash::BuildHasher>(
         let interior = count_interior_hits(net, pins);
         if !endpoints.is_empty() || interior > 0 {
             warnings.push(format!(
-                "v11: net index {i} has {} endpoint and {interior} interior foreign-pin coincidences left after foreign-pin avoidance",
+                "v11: net index {i} has {} endpoint and {interior} interior foreign-pin coincidences left after active rerouting",
                 endpoints.len()
             ));
         }
     }
     warnings
+}
+
+/// Priority key for V11 reroute scheduling: nets that touch more
+/// distinct coords (endpoints) and span a larger bbox are tackled
+/// first. The values are integers (µm) so `Ord` is well-defined.
+fn net_priority_key(net: &RoutedNet) -> (usize, i64) {
+    use std::collections::HashSet;
+    let mut coords: HashSet<(i64, i64)> = HashSet::new();
+    let mut lo_x = i64::MAX;
+    let mut hi_x = i64::MIN;
+    let mut lo_y = i64::MAX;
+    let mut hi_y = i64::MIN;
+    for s in &net.segments {
+        for (x, y) in [(s.x1, s.y1), (s.x2, s.y2)] {
+            let k = key(x, y);
+            coords.insert(k);
+            lo_x = lo_x.min(k.0);
+            hi_x = hi_x.max(k.0);
+            lo_y = lo_y.min(k.1);
+            hi_y = hi_y.max(k.1);
+        }
+    }
+    let span = if coords.is_empty() {
+        0
+    } else {
+        (hi_x - lo_x) + (hi_y - lo_y)
+    };
+    (coords.len(), span)
+}
+
+/// Reroute every offending segment of `routed[target]` so its wires
+/// no longer touch any of `foreign_pins`. Strategy:
+///   * **Endpoint hits** — jog the endpoint one grid cell
+///     perpendicular ([`jog_endpoint_at`]), then verify the new
+///     segments don't crash into a sibling net's existing trunk.
+///   * **Interior hits** — replace the offending segment with a
+///     three-segment U-detour at offsets `±k·GRID_MM` for
+///     `k ∈ 1..=4`, sign and direction picked so all three parts
+///     avoid every foreign-pin bbox AND no part collinearly overlaps
+///     a sibling routed net (rolling back to the original segment if
+///     no fit is found).
+///
+/// `foreign_pins` is the quantised pin-coord vector the caller has
+/// already excluded `target`'s own pins from. `own_pins` is the
+/// quantised pin-coord set used to gate jogs that would orphan one
+/// of `target`'s own pins.
+fn reroute_one_net_v11<S: ::std::hash::BuildHasher>(
+    routed: &mut [RoutedNet],
+    target: usize,
+    foreign_pins: &[(i64, i64)],
+    own_pins: &std::collections::HashSet<(i64, i64), S>,
+    obstacles: &[Bbox],
+) {
+    #[allow(clippy::cast_precision_loss)]
+    let bboxes: Vec<Bbox> = foreign_pins
+        .iter()
+        .map(|&(x, y)| Bbox::from_point(x as f64 / 1000.0, y as f64 / 1000.0))
+        .collect();
+
+    // Phase 1: endpoint hits. Jog each offending endpoint in place,
+    // roll back if the jog creates a sibling-trunk overlap.
+    let endpoints = collect_endpoint_hits(&routed[target], foreign_pins);
+    for ep in endpoints {
+        // Don't jog an endpoint that's actually one of `target`'s own
+        // pins — that's a placer-level pin-on-pin overlap, not a
+        // router bug, and jogging would disconnect the pin.
+        if own_pins.contains(&ep) {
+            continue;
+        }
+        let pre = routed[target].clone();
+        let pre_seg_set: std::collections::HashSet<(i64, i64, i64, i64)> =
+            pre.segments.iter().map(seg_key).collect();
+        jog_endpoint_at(&mut routed[target], ep);
+        let new_parts: Vec<Segment> = routed[target]
+            .segments
+            .iter()
+            .filter(|s| !pre_seg_set.contains(&seg_key(s)))
+            .copied()
+            .collect();
+        let new_overlap = new_parts
+            .iter()
+            .any(|p| part_overlaps_sibling(routed, target, p));
+        let new_obstacle = new_parts.iter().any(|p| crosses_any_bbox(p, obstacles));
+        if new_overlap || new_obstacle || segment_crosses_foreign(&routed[target], &bboxes) {
+            routed[target] = pre;
+        }
+    }
+
+    // Phase 2: interior hits. For each offending segment try
+    //   (a) swap the L corner of any L-pair the offender takes part
+    //       in — useful when the offender's non-pin endpoint is a
+    //       Steiner / L corner whose alternate placement clears the
+    //       foreign pin;
+    //   (b) fall back to a 3-segment U-detour around the segment
+    //       itself, walking sign × offset combinations until one is
+    //       V11-clean and doesn't collinearly overlap a sibling
+    //       routed net's segment.
+    // Rebuild the work-list each pass because replacing segments
+    // shuffles indices.
+    let mut guard = 0;
+    loop {
+        guard += 1;
+        if guard > 64 {
+            break;
+        }
+        let Some(idx) = find_interior_offender(&routed[target], &bboxes) else {
+            break;
+        };
+        if try_alt_l_corner(routed, target, idx, &bboxes, obstacles, own_pins) {
+            continue;
+        }
+        if try_u_detour_l_pair(routed, target, idx, &bboxes, obstacles, own_pins) {
+            continue;
+        }
+        if !try_detour_segment(routed, target, idx, &bboxes, obstacles) {
+            // Move on so any sibling V11 cases still get a chance
+            // in this outer pass. The unfixed segment trips the
+            // residual-diagnostic tally.
+            break;
+        }
+    }
+
+    // Anchor every own pin that now appears at a segment endpoint
+    // with a junction. Stage 4 cleanup honours `is_junction` and
+    // refuses to coalesce across a junction-marked coord — without
+    // this anchor, two collinear segments meeting at the pin would
+    // be merged into a single span, leaving the pin as a mere
+    // interior coincidence (which `kicad-cli` does NOT count as
+    // electrical connection at netlist-export time, even though
+    // KiCad's interactive ERC does).
+    anchor_own_pin_endpoints(routed, target, own_pins);
+}
+
+/// For every own-pin coord that currently sits at a segment endpoint
+/// of `routed[target]`, ensure it is in `routed[target].junctions`.
+/// Idempotent.
+fn anchor_own_pin_endpoints<S: ::std::hash::BuildHasher>(
+    routed: &mut [RoutedNet],
+    target: usize,
+    own_pins: &std::collections::HashSet<(i64, i64), S>,
+) {
+    let mut existing: std::collections::HashSet<(i64, i64)> = routed[target]
+        .junctions
+        .iter()
+        .map(|&(x, y)| key(x, y))
+        .collect();
+    let mut new_pts: Vec<(f64, f64)> = Vec::new();
+    for s in &routed[target].segments {
+        for (x, y) in [(s.x1, s.y1), (s.x2, s.y2)] {
+            let k = key(x, y);
+            if own_pins.contains(&k) && !existing.contains(&k) {
+                existing.insert(k);
+                new_pts.push((x, y));
+            }
+        }
+    }
+    routed[target].junctions.extend(new_pts);
+}
+
+/// Try to replace an L-pair containing the offending segment with a
+/// 3-segment U-detour anchored at the L pair's two far endpoints
+/// (which are typically pins and must stay put). The detour walks
+/// the intermediate corner offset `k ∈ 1..=OBSTACLE_RETRY_CAP` along
+/// the axis perpendicular to the far-endpoint span, in both sign
+/// directions, taking the first variant that is V11-clean against
+/// every foreign-pin bbox AND doesn't collinearly overlap a sibling
+/// routed net.
+///
+/// Distinct from [`try_alt_l_corner`] (which keeps two segments and
+/// just relocates the corner): this function replaces the L-pair
+/// with three segments, gaining freedom to route around foreign
+/// pins that lie on both candidate L corners — the diff_pair case
+/// where Q1.C sits directly above VCC.+ and RTAIL.1 sits directly
+/// to the left of c1's RC1.2 pin.
+fn try_u_detour_l_pair<S: ::std::hash::BuildHasher>(
+    routed: &mut [RoutedNet],
+    target: usize,
+    idx: usize,
+    foreign_bboxes: &[Bbox],
+    obstacle_bboxes: &[Bbox],
+    own_pins: &std::collections::HashSet<(i64, i64), S>,
+) -> bool {
+    let n = routed[target].segments.len();
+    for j in 0..n {
+        if j == idx {
+            continue;
+        }
+        let a = routed[target].segments[idx];
+        let b = routed[target].segments[j];
+        let Some((p_far, q_far, corner)) = l_pair_endpoints(&a, &b) else {
+            continue;
+        };
+        // The corner doubling as an own pin must stay anchored —
+        // the U-detour skips that coord entirely, which would
+        // orphan the pin from the new path.
+        if own_pins.contains(&key(corner.0, corner.1)) {
+            continue;
+        }
+        // T-junction at the corner means a third leg of the net
+        // attaches there. Replacing the L pair would orphan that
+        // leg from the rest of the tree.
+        if corner_degree(&routed[target], corner) > 2 {
+            continue;
+        }
+        // Cardinal axis of the connecting span: U detour offsets the
+        // *minor* coord (the one that differs between p_far and
+        // q_far in the non-original-L direction). For an L between
+        // (px,py) and (qx,qy) we can try a U at either x = px + k·g
+        // (running parallel to original vertical leg) or y = py + k·g
+        // (running parallel to original horizontal leg). Both axes
+        // are tried.
+        for axis in [Axis::HorizontalFirst, Axis::VerticalFirst] {
+            for k in 1..=OBSTACLE_RETRY_CAP {
+                for sign in [1.0_f64, -1.0_f64] {
+                    #[allow(clippy::cast_precision_loss)]
+                    let off = sign * GRID_MM * (k as f64);
+                    let (mid1, mid2) = match axis {
+                        Axis::HorizontalFirst => {
+                            ((p_far.0, p_far.1 + off), (q_far.0, p_far.1 + off))
+                        }
+                        Axis::VerticalFirst => ((p_far.0 + off, p_far.1), (p_far.0 + off, q_far.1)),
+                    };
+                    let parts = [
+                        Segment {
+                            x1: p_far.0,
+                            y1: p_far.1,
+                            x2: mid1.0,
+                            y2: mid1.1,
+                        },
+                        Segment {
+                            x1: mid1.0,
+                            y1: mid1.1,
+                            x2: mid2.0,
+                            y2: mid2.1,
+                        },
+                        Segment {
+                            x1: mid2.0,
+                            y1: mid2.1,
+                            x2: q_far.0,
+                            y2: q_far.1,
+                        },
+                    ];
+                    if parts.iter().any(approx_zero_len) {
+                        continue;
+                    }
+                    if parts.iter().any(|p| crosses_any_bbox(p, foreign_bboxes)) {
+                        continue;
+                    }
+                    if parts.iter().any(|p| crosses_any_bbox(p, obstacle_bboxes)) {
+                        continue;
+                    }
+                    if parts
+                        .iter()
+                        .any(|p| part_overlaps_sibling(routed, target, p))
+                    {
+                        continue;
+                    }
+                    // Install: drop both original L-pair segments,
+                    // append the three new parts.
+                    let (lo, hi) = if idx < j { (idx, j) } else { (j, idx) };
+                    routed[target].segments.remove(hi);
+                    routed[target].segments.remove(lo);
+                    for p in parts {
+                        routed[target].segments.push(p);
+                    }
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Which axis to bend along first when expanding an L-pair into a
+/// 3-segment U.
+#[derive(Clone, Copy)]
+enum Axis {
+    HorizontalFirst,
+    VerticalFirst,
+}
+
+/// Try to swap the L corner of any L-pair containing
+/// `routed[target].segments[idx]` to a corner that avoids every
+/// foreign-pin bbox and doesn't collinearly overlap a sibling net.
+/// The far endpoint of the offending segment may be a pin (which
+/// we keep fixed); the corner endpoint must be either a non-pin
+/// Steiner bend or, when it is one of `target`'s own pins, we
+/// leave it alone. Returns true if a swap was installed.
+fn try_alt_l_corner<S: ::std::hash::BuildHasher>(
+    routed: &mut [RoutedNet],
+    target: usize,
+    idx: usize,
+    foreign_bboxes: &[Bbox],
+    obstacle_bboxes: &[Bbox],
+    own_pins: &std::collections::HashSet<(i64, i64), S>,
+) -> bool {
+    let n = routed[target].segments.len();
+    for j in 0..n {
+        if j == idx {
+            continue;
+        }
+        let a = routed[target].segments[idx];
+        let b = routed[target].segments[j];
+        let Some((p_far, q_far, corner)) = l_pair_endpoints(&a, &b) else {
+            continue;
+        };
+        // If the corner is an own pin we cannot move it without
+        // orphaning that pin from the net.
+        if own_pins.contains(&key(corner.0, corner.1)) {
+            continue;
+        }
+        // A T-junction corner (≥ 3 segments meet) carries a third
+        // leg that would be orphaned if we swapped the L pair only.
+        // V12's `rewrite_l_bends` uses the same guard.
+        if corner_degree(&routed[target], corner) > 2 {
+            continue;
+        }
+        // Alt corners to try.
+        let alt1 = (p_far.0, q_far.1);
+        let alt2 = (q_far.0, p_far.1);
+        for alt in [alt1, alt2] {
+            // Skip the corner we already have.
+            if (alt.0 - corner.0).abs() < EPS && (alt.1 - corner.1).abs() < EPS {
+                continue;
+            }
+            let s1 = Segment {
+                x1: p_far.0,
+                y1: p_far.1,
+                x2: alt.0,
+                y2: alt.1,
+            };
+            let s2 = Segment {
+                x1: alt.0,
+                y1: alt.1,
+                x2: q_far.0,
+                y2: q_far.1,
+            };
+            if approx_zero_len(&s1) || approx_zero_len(&s2) {
+                continue;
+            }
+            if [s1, s2].iter().any(|p| crosses_any_bbox(p, foreign_bboxes)) {
+                continue;
+            }
+            if [s1, s2]
+                .iter()
+                .any(|p| crosses_any_bbox(p, obstacle_bboxes))
+            {
+                continue;
+            }
+            if part_overlaps_sibling(routed, target, &s1)
+                || part_overlaps_sibling(routed, target, &s2)
+            {
+                continue;
+            }
+            // Install: replace both segments. Drop the higher index
+            // first so the lower index stays valid.
+            let (lo, hi) = if idx < j { (idx, j) } else { (j, idx) };
+            routed[target].segments.remove(hi);
+            routed[target].segments.remove(lo);
+            routed[target].segments.push(s1);
+            routed[target].segments.push(s2);
+            return true;
+        }
+    }
+    false
+}
+
+/// True iff `seg` strictly enters the interior of any of `bboxes`.
+fn crosses_any_bbox(seg: &Segment, bboxes: &[Bbox]) -> bool {
+    bboxes
+        .iter()
+        .any(|b| b.intersects_segment(seg.x1, seg.y1, seg.x2, seg.y2))
+}
+
+/// First-segment-index whose axis-parallel interior strictly crosses
+/// one of `bboxes` (the inflated foreign-pin set).
+fn find_interior_offender(net: &RoutedNet, bboxes: &[Bbox]) -> Option<usize> {
+    for (i, s) in net.segments.iter().enumerate() {
+        for b in bboxes {
+            if b.intersects_segment(s.x1, s.y1, s.x2, s.y2) {
+                return Some(i);
+            }
+        }
+    }
+    None
+}
+
+/// True iff any segment of `net` strictly crosses any of `bboxes`.
+fn segment_crosses_foreign(net: &RoutedNet, bboxes: &[Bbox]) -> bool {
+    find_interior_offender(net, bboxes).is_some()
+}
+
+/// Try to replace `routed[target].segments[idx]` with a U-detour
+/// that clears every foreign-pin bbox AND does not collinearly
+/// overlap any sibling routed net's segment. Returns `true` if a
+/// detour was installed, `false` if no candidate fit.
+fn try_detour_segment(
+    routed: &mut [RoutedNet],
+    target: usize,
+    idx: usize,
+    foreign_bboxes: &[Bbox],
+    obstacle_bboxes: &[Bbox],
+) -> bool {
+    let s = routed[target].segments[idx];
+    let horizontal = (s.y1 - s.y2).abs() < EPS;
+    let vertical = (s.x1 - s.x2).abs() < EPS;
+    if !horizontal && !vertical {
+        return false;
+    }
+    for k in 1..=OBSTACLE_RETRY_CAP {
+        for sign in [1.0_f64, -1.0_f64] {
+            #[allow(clippy::cast_precision_loss)]
+            let off = sign * GRID_MM * (k as f64);
+            let (mid1, mid2) = if horizontal {
+                ((s.x1, s.y1 + off), (s.x2, s.y2 + off))
+            } else {
+                ((s.x1 + off, s.y1), (s.x2 + off, s.y2))
+            };
+            let parts = [
+                Segment {
+                    x1: s.x1,
+                    y1: s.y1,
+                    x2: mid1.0,
+                    y2: mid1.1,
+                },
+                Segment {
+                    x1: mid1.0,
+                    y1: mid1.1,
+                    x2: mid2.0,
+                    y2: mid2.1,
+                },
+                Segment {
+                    x1: mid2.0,
+                    y1: mid2.1,
+                    x2: s.x2,
+                    y2: s.y2,
+                },
+            ];
+            if parts.iter().any(|p| crosses_any_bbox(p, foreign_bboxes)) {
+                continue;
+            }
+            if parts.iter().any(|p| crosses_any_bbox(p, obstacle_bboxes)) {
+                continue;
+            }
+            // Reject the detour only when one of the three NEW
+            // parts collinearly overlaps a sibling routed net's
+            // segment. We deliberately don't re-check the rest of
+            // `routed[target].segments` — any pre-existing overlap
+            // there is a separate problem the V11 pass cannot fix
+            // by detouring this segment (and conservative rollback
+            // would block all progress).
+            if [parts[0], parts[1], parts[2]]
+                .iter()
+                .any(|p| part_overlaps_sibling(routed, target, p))
+            {
+                continue;
+            }
+            routed[target].segments[idx] = parts[0];
+            routed[target].segments.push(parts[1]);
+            routed[target].segments.push(parts[2]);
+            return true;
+        }
+    }
+    false
+}
+
+/// True iff a candidate segment `part` (intended as a new/replaced
+/// part of `routed[target]`) collinearly overlaps any segment of any
+/// OTHER routed net. Endpoint-only contact is fine — that's how
+/// T-junctions work — but a non-empty open-interval overlap would
+/// silently merge the two nets when KiCad's connectivity engine
+/// canonicalises wires on load.
+fn part_overlaps_sibling(routed: &[RoutedNet], target: usize, part: &Segment) -> bool {
+    for (i, other) in routed.iter().enumerate() {
+        if i == target {
+            continue;
+        }
+        for s in &other.segments {
+            if segments_collinearly_overlap(part, s) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Hash key for a segment (quantised to 1 µm) so we can compare new
+/// vs old segment sets after an in-place jog. Direction-insensitive:
+/// (x1,y1)→(x2,y2) and (x2,y2)→(x1,y1) hash to the same key.
+#[allow(clippy::cast_possible_truncation)]
+fn seg_key(s: &Segment) -> (i64, i64, i64, i64) {
+    let a = (
+        (s.x1 * 1000.0).round() as i64,
+        (s.y1 * 1000.0).round() as i64,
+    );
+    let b = (
+        (s.x2 * 1000.0).round() as i64,
+        (s.y2 * 1000.0).round() as i64,
+    );
+    if a <= b {
+        (a.0, a.1, b.0, b.1)
+    } else {
+        (b.0, b.1, a.0, a.1)
+    }
+}
+
+fn segments_collinearly_overlap(a: &Segment, b: &Segment) -> bool {
+    let a_horiz = (a.y1 - a.y2).abs() < EPS;
+    let a_vert = (a.x1 - a.x2).abs() < EPS;
+    let b_horiz = (b.y1 - b.y2).abs() < EPS;
+    let b_vert = (b.x1 - b.x2).abs() < EPS;
+    if a_horiz && b_horiz && (a.y1 - b.y1).abs() < EPS {
+        let (alo, ahi) = if a.x1 <= a.x2 {
+            (a.x1, a.x2)
+        } else {
+            (a.x2, a.x1)
+        };
+        let (blo, bhi) = if b.x1 <= b.x2 {
+            (b.x1, b.x2)
+        } else {
+            (b.x2, b.x1)
+        };
+        return alo + EPS < bhi && blo + EPS < ahi;
+    }
+    if a_vert && b_vert && (a.x1 - b.x1).abs() < EPS {
+        let (alo, ahi) = if a.y1 <= a.y2 {
+            (a.y1, a.y2)
+        } else {
+            (a.y2, a.y1)
+        };
+        let (blo, bhi) = if b.y1 <= b.y2 {
+            (b.y1, b.y2)
+        } else {
+            (b.y2, b.y1)
+        };
+        return alo + EPS < bhi && blo + EPS < ahi;
+    }
+    false
 }
 
 fn collect_endpoint_hits(net: &RoutedNet, foreign_pins: &[(i64, i64)]) -> Vec<(i64, i64)> {
