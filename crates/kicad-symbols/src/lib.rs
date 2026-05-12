@@ -239,10 +239,61 @@ pub struct Symbol {
     pub body: RawSexpr,
 }
 
+/// Axis-aligned bounding box of a symbol's graphical body in
+/// symbol-local frame, millimetres.
+///
+/// This is the union of every drawn primitive (rectangles, polylines,
+/// circles, arcs, beziers) inside the symbol's `(symbol "Name_0_1" …)`
+/// sub-units. Pin stems are intentionally **excluded** — the body
+/// bbox stops at the pin roots so a wire entering through a pin does
+/// not register as crossing the body.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LocalBbox {
+    pub x0: f64,
+    pub y0: f64,
+    pub x1: f64,
+    pub y1: f64,
+}
+
 impl Symbol {
     #[must_use]
     pub fn pin_count(&self) -> usize {
         self.pins.len()
+    }
+
+    /// Axis-aligned bounding box of the symbol's graphical body in
+    /// symbol-local frame (millimetres). Returns `None` when the
+    /// symbol carries no drawable primitives (e.g. the abstract
+    /// `power:*` glyphs whose body is a single polyline that is
+    /// nonetheless captured — see specifics below).
+    ///
+    /// Walks the captured `(symbol …)` body's `RawSexpr` tree,
+    /// extracting corner points from:
+    /// * `(polyline (pts (xy x y) …))` — every `xy`.
+    /// * `(rectangle (start x y) (end x y))` — both corners.
+    /// * `(circle (center cx cy) (radius r))` — the four bbox corners
+    ///   `(cx ± r, cy ± r)`.
+    /// * `(arc (start) (mid) (end))` — three sampled points (a
+    ///   conservative under-approximation; the arc may bulge slightly
+    ///   beyond, but for the v0.1 fixture geometries this is below
+    ///   the 0.5 mm router margin).
+    /// * `(bezier (pts …))` — control hull (an over-approximation,
+    ///   correct upper bound).
+    ///
+    /// Pin sub-trees are skipped. Sub-units (`(symbol "Name_0_1" …)`)
+    /// are recursively walked.
+    #[must_use]
+    pub fn body_bbox(&self) -> Option<LocalBbox> {
+        let mut x0 = f64::INFINITY;
+        let mut y0 = f64::INFINITY;
+        let mut x1 = f64::NEG_INFINITY;
+        let mut y1 = f64::NEG_INFINITY;
+        body_bbox_walk(&self.body, &mut x0, &mut y0, &mut x1, &mut y1);
+        if x0.is_finite() && x1.is_finite() && y0.is_finite() && y1.is_finite() {
+            Some(LocalBbox { x0, y0, x1, y1 })
+        } else {
+            None
+        }
     }
 
     #[must_use]
@@ -483,6 +534,150 @@ fn parse_pin(node: &Value, path: &Path) -> Result<Pin, LoadError> {
         y,
         angle,
     })
+}
+
+// ---------------------------------------------------------------------------
+// body_bbox helpers
+// ---------------------------------------------------------------------------
+
+/// Recursively walk a `RawSexpr` subtree, expanding the running bbox
+/// (`x0, y0, x1, y1`) to cover every graphical primitive's extent.
+/// Pin sub-trees are skipped; sub-`(symbol …)` nodes recurse so
+/// `Name_0_1` unit bodies are included.
+fn body_bbox_walk(node: &RawSexpr, x0: &mut f64, y0: &mut f64, x1: &mut f64, y1: &mut f64) {
+    let RawSexpr::List(items) = node else {
+        return;
+    };
+    let head = items.first().and_then(raw_atom);
+    match head {
+        Some("pin") => {
+            // Skip pin stems — body bbox stops at pin roots.
+        }
+        Some("polyline" | "bezier") => {
+            if let Some(pts) = find_raw_child(items, "pts") {
+                for it in pts {
+                    if raw_head_of(it) == Some("xy") {
+                        if let Some((x, y)) = raw_xy(it) {
+                            extend_bbox(x0, y0, x1, y1, x, y);
+                        }
+                    }
+                }
+            }
+        }
+        Some("rectangle") => {
+            if let Some(s) = raw_named_xy(items, "start") {
+                extend_bbox(x0, y0, x1, y1, s.0, s.1);
+            }
+            if let Some(e) = raw_named_xy(items, "end") {
+                extend_bbox(x0, y0, x1, y1, e.0, e.1);
+            }
+        }
+        Some("circle") => {
+            let center = raw_named_xy(items, "center");
+            let radius = items.iter().find_map(|it| {
+                if raw_head_of(it) == Some("radius") {
+                    raw_first_f64_arg(it)
+                } else {
+                    None
+                }
+            });
+            if let (Some((cx, cy)), Some(r)) = (center, radius) {
+                extend_bbox(x0, y0, x1, y1, cx - r, cy - r);
+                extend_bbox(x0, y0, x1, y1, cx + r, cy + r);
+            }
+        }
+        Some("arc") => {
+            for tag in ["start", "mid", "end"] {
+                if let Some((x, y)) = raw_named_xy(items, tag) {
+                    extend_bbox(x0, y0, x1, y1, x, y);
+                }
+            }
+        }
+        _ => {
+            // Recurse into anything else: nested (symbol …) sub-units
+            // or unknown wrapper nodes that may still contain graphics.
+            for child in items.iter().skip(1) {
+                body_bbox_walk(child, x0, y0, x1, y1);
+            }
+        }
+    }
+}
+
+fn extend_bbox(x0: &mut f64, y0: &mut f64, x1: &mut f64, y1: &mut f64, x: f64, y: f64) {
+    if x < *x0 {
+        *x0 = x;
+    }
+    if x > *x1 {
+        *x1 = x;
+    }
+    if y < *y0 {
+        *y0 = y;
+    }
+    if y > *y1 {
+        *y1 = y;
+    }
+}
+
+fn raw_atom(node: &RawSexpr) -> Option<&str> {
+    match node {
+        RawSexpr::Atom(s) | RawSexpr::QString(s) => Some(s.as_str()),
+        RawSexpr::List(_) => None,
+    }
+}
+
+fn raw_head_of(node: &RawSexpr) -> Option<&str> {
+    if let RawSexpr::List(items) = node {
+        items.first().and_then(raw_atom)
+    } else {
+        None
+    }
+}
+
+fn find_raw_child<'a>(items: &'a [RawSexpr], name: &str) -> Option<&'a [RawSexpr]> {
+    for it in items.iter().skip(1) {
+        if let RawSexpr::List(list) = it {
+            if list.first().and_then(raw_atom) == Some(name) {
+                return Some(&list[1..]);
+            }
+        }
+    }
+    None
+}
+
+/// Locate the first `(name x y …)` child under `items` and return
+/// `(x, y)` if found.
+fn raw_named_xy(items: &[RawSexpr], name: &str) -> Option<(f64, f64)> {
+    items.iter().find_map(|it| {
+        if raw_head_of(it) == Some(name) {
+            raw_xy(it)
+        } else {
+            None
+        }
+    })
+}
+
+fn raw_xy(node: &RawSexpr) -> Option<(f64, f64)> {
+    let RawSexpr::List(items) = node else {
+        return None;
+    };
+    let mut nums = items.iter().skip(1).filter_map(raw_as_f64);
+    let x = nums.next()?;
+    let y = nums.next()?;
+    Some((x, y))
+}
+
+fn raw_first_f64_arg(node: &RawSexpr) -> Option<f64> {
+    let RawSexpr::List(items) = node else {
+        return None;
+    };
+    items.iter().skip(1).find_map(raw_as_f64)
+}
+
+fn raw_as_f64(n: &RawSexpr) -> Option<f64> {
+    match n {
+        RawSexpr::Atom(s) | RawSexpr::QString(s) => s.parse::<f64>().ok(),
+        RawSexpr::List(_) => None,
+    }
 }
 
 // ---------------------------------------------------------------------------

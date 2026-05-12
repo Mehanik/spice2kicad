@@ -632,6 +632,121 @@ fn v11_violation_budget(_name: &str) -> usize {
     0
 }
 
+/// Build wire-only union-find over wire-endpoint coordinates. Returns
+/// `(coord_idx, uf, coords)` so callers can map any coordinate back to
+/// its connected component. Pin coords are NOT unioned here — see the
+/// "phase B" assignment below.
+#[allow(clippy::type_complexity)]
+fn build_wire_uf(wires: &[(Pt, Pt)]) -> (HashMap<(i64, i64), usize>, UnionFind, Vec<(i64, i64)>) {
+    let mut coord_idx: HashMap<(i64, i64), usize> = HashMap::new();
+    let mut coords: Vec<(i64, i64)> = Vec::new();
+    let mut intern = |k: (i64, i64), coords: &mut Vec<(i64, i64)>| -> usize {
+        if let Some(&i) = coord_idx.get(&k) {
+            i
+        } else {
+            let i = coords.len();
+            coord_idx.insert(k, i);
+            coords.push(k);
+            i
+        }
+    };
+    for (a, b) in wires {
+        intern(qkey(a.0, a.1), &mut coords);
+        intern(qkey(b.0, b.1), &mut coords);
+    }
+    let mut uf = UnionFind::new(coords.len());
+    for (a, b) in wires {
+        let ia = coord_idx[&qkey(a.0, a.1)];
+        let ib = coord_idx[&qkey(b.0, b.1)];
+        uf.union(ia, ib);
+    }
+    (coord_idx, uf, coords)
+}
+
+/// For each wire-island (connected component of the wire-only UF),
+/// determine its single owning net by surveying pin coords coincident
+/// with the island's wire endpoints AND interior grid points. Returns
+/// `(island_root -> nominal_net, extra_violations)` where
+/// `extra_violations` reports any pins on a multi-net island that
+/// disagree with the lexicographically-smallest nominal net (a silent
+/// short).
+#[allow(clippy::cast_precision_loss, clippy::type_complexity)]
+fn assign_island_nets(
+    wires: &[(Pt, Pt)],
+    coord_idx: &HashMap<(i64, i64), usize>,
+    uf: &mut UnionFind,
+    pin_index: &PinIndex,
+    name: &str,
+) -> (HashMap<usize, String>, Vec<String>) {
+    // island root -> set of (coord, refdes, pin_no, net) touching it.
+    let mut island_pins: HashMap<usize, Vec<((i64, i64), String, String, String)>> = HashMap::new();
+    // Endpoint coincidences.
+    for (a, b) in wires {
+        for k in [qkey(a.0, a.1), qkey(b.0, b.1)] {
+            let r = uf.find(coord_idx[&k]);
+            if let Some(list) = pin_index.get(&k) {
+                for (refdes, pin_no, net) in list {
+                    island_pins.entry(r).or_default().push((
+                        k,
+                        refdes.clone(),
+                        pin_no.clone(),
+                        net.clone(),
+                    ));
+                }
+            }
+        }
+    }
+    // Interior coincidences also contribute (a wire whose interior
+    // passes through a pin is electrically connected per V11).
+    for (a, b) in wires {
+        let ka = qkey(a.0, a.1);
+        let r = uf.find(coord_idx[&ka]);
+        for k in interior_grid_coords(&(*a, *b)) {
+            if let Some(list) = pin_index.get(&k) {
+                for (refdes, pin_no, net) in list {
+                    island_pins.entry(r).or_default().push((
+                        k,
+                        refdes.clone(),
+                        pin_no.clone(),
+                        net.clone(),
+                    ));
+                }
+            }
+        }
+    }
+
+    let mut comp_net: HashMap<usize, String> = HashMap::new();
+    let mut extras: Vec<String> = Vec::new();
+    for (root, pins) in &island_pins {
+        let mut nets: Vec<&str> = pins.iter().map(|(_, _, _, n)| n.as_str()).collect();
+        nets.sort_unstable();
+        nets.dedup();
+        if nets.len() == 1 {
+            comp_net.insert(*root, nets[0].to_string());
+        } else {
+            // Silent short — multiple distinct nets on the same wire
+            // island. Pick the lex-smallest as nominal so subsequent
+            // foreign-pin checks have a deterministic owner.
+            let nominal = nets[0].to_string();
+            for (coord, refdes, pin_no, net) in pins {
+                if net != &nominal {
+                    extras.push(format!(
+                        "{name}: silent short — wire island carries pins from nets {nets:?}; \
+                         pin {refdes}.{pin_no} at ({:.3},{:.3}) on net {:?} differs from \
+                         nominal {:?}",
+                        coord.0 as f64 / 1000.0,
+                        coord.1 as f64 / 1000.0,
+                        net,
+                        nominal,
+                    ));
+                }
+            }
+            comp_net.insert(*root, nominal);
+        }
+    }
+    (comp_net, extras)
+}
+
 #[allow(
     clippy::too_many_lines,
     clippy::cast_precision_loss,
@@ -669,65 +784,23 @@ fn v11_no_foreign_pin_coincidence() {
             }
         }
 
-        // Union-find pass: build connected components over wire
-        // endpoints + pin coords. This gives each wire segment a net
-        // label (via the component containing its endpoint).
+        // Phase A — wire-only union-find: connected components over
+        // wire-endpoint coords ONLY. Pin coords are intentionally NOT
+        // unioned with wire endpoints — that's the bug the previous
+        // verifier had (a foreign-pin endpoint coincidence got
+        // silently absorbed into the wire's net by union-find).
         let wires = wire_segments(&root);
-        let mut coord_idx: HashMap<(i64, i64), usize> = HashMap::new();
-        let mut coords: Vec<(i64, i64)> = Vec::new();
-        let mut intern = |k: (i64, i64), coords: &mut Vec<(i64, i64)>| -> usize {
-            if let Some(&i) = coord_idx.get(&k) {
-                i
-            } else {
-                let i = coords.len();
-                coord_idx.insert(k, i);
-                coords.push(k);
-                i
-            }
-        };
-        // Intern every pin coord and wire endpoint up front.
-        for k in pin_index.keys() {
-            intern(*k, &mut coords);
-        }
-        for (a, b) in &wires {
-            intern(qkey(a.0, a.1), &mut coords);
-            intern(qkey(b.0, b.1), &mut coords);
-        }
-        let mut uf = UnionFind::new(coords.len());
-        for (a, b) in &wires {
-            let ia = coord_idx[&qkey(a.0, a.1)];
-            let ib = coord_idx[&qkey(b.0, b.1)];
-            uf.union(ia, ib);
-        }
-        // Union pin coords coincident with any wire endpoint so the
-        // pin's net "names" that component. Pin coords also pull in
-        // their stated net via a synthetic anchor index per net name.
-        let mut net_anchor: HashMap<String, usize> = HashMap::new();
-        for (coord, list) in &pin_index {
-            let ci = coord_idx[coord];
-            // Use the (sole, by the placer check above) net at this coord.
-            if let Some((_, _, net)) = list.first() {
-                let ni = *net_anchor.entry(net.clone()).or_insert_with(|| {
-                    let i = coords.len();
-                    coords.push((i64::MAX - ci as i64, i64::MAX));
-                    i
-                });
-                if ni >= uf.parent.len() {
-                    uf.parent.resize(ni + 1, ni);
-                }
-                uf.union(ci, ni);
-            }
-        }
+        let (coord_idx, mut uf, _coords) = build_wire_uf(&wires);
 
-        // Component-id -> net name (if any pin pulled in that component).
-        let mut comp_net: HashMap<usize, String> = HashMap::new();
-        for (net, &ai) in &net_anchor {
-            let r = uf.find(ai);
-            comp_net.insert(r, net.clone());
-        }
+        // Phase B — assign each wire-island a single owning net by
+        // surveying every pin coord that touches the island (endpoint
+        // or interior). Multi-net islands are silent shorts; record
+        // every non-nominal pin as a violation.
+        let (comp_net, extras) = assign_island_nets(&wires, &coord_idx, &mut uf, &pin_index, name);
+        failures.extend(extras);
 
-        // Now walk every wire segment, identify its net (via comp), and
-        // check endpoint + interior pin coincidence.
+        // Phase C — for every wire segment, check endpoint and interior
+        // pin coincidences against the island's nominal net.
         for (a, b) in &wires {
             let ka = qkey(a.0, a.1);
             let kb = qkey(b.0, b.1);
@@ -735,9 +808,8 @@ fn v11_no_foreign_pin_coincidence() {
             let ra = uf.find(ia);
             let net = match comp_net.get(&ra) {
                 Some(n) => n.clone(),
-                // Unlabelled component (a wire isolated from every
-                // pin, which shouldn't happen post-routing but is not
-                // a V11 violation per se — skip).
+                // Unlabelled component (a wire island with zero pin
+                // contact). Not a V11 violation per se — skip.
                 None => continue,
             };
             for k in [ka, kb] {
@@ -784,7 +856,7 @@ fn v11_no_foreign_pin_coincidence() {
             }
         }
 
-        // Label anchors coincident with a pin must agree on net.
+        // Phase D — label anchors coincident with a pin must agree on net.
         for (lname, pos) in label_positions(&root) {
             let k = qkey(pos.0, pos.1);
             if let Some(pins_at) = pin_index.get(&k) {
@@ -1119,53 +1191,8 @@ fn v13_label_anchor_not_on_foreign_wire_interior() {
         let pins = world_pins_for_sheet(&src, &root);
         let pin_index = build_pin_index(&pins);
         let wires = wire_segments(&root);
-
-        let mut coord_idx: HashMap<(i64, i64), usize> = HashMap::new();
-        let mut coords: Vec<(i64, i64)> = Vec::new();
-        let mut intern = |k: (i64, i64), coords: &mut Vec<(i64, i64)>| -> usize {
-            if let Some(&i) = coord_idx.get(&k) {
-                i
-            } else {
-                let i = coords.len();
-                coord_idx.insert(k, i);
-                coords.push(k);
-                i
-            }
-        };
-        for k in pin_index.keys() {
-            intern(*k, &mut coords);
-        }
-        for (a, b) in &wires {
-            intern(qkey(a.0, a.1), &mut coords);
-            intern(qkey(b.0, b.1), &mut coords);
-        }
-        let mut uf = UnionFind::new(coords.len());
-        for (a, b) in &wires {
-            let ia = coord_idx[&qkey(a.0, a.1)];
-            let ib = coord_idx[&qkey(b.0, b.1)];
-            uf.union(ia, ib);
-        }
-        let mut net_anchor: HashMap<String, usize> = HashMap::new();
-        for (coord, list) in &pin_index {
-            let ci = coord_idx[coord];
-            if let Some((_, _, net)) = list.first() {
-                #[allow(clippy::cast_possible_wrap)]
-                let ni = *net_anchor.entry(net.clone()).or_insert_with(|| {
-                    let i = coords.len();
-                    coords.push((i64::MAX - ci as i64, i64::MAX));
-                    i
-                });
-                if ni >= uf.parent.len() {
-                    uf.parent.resize(ni + 1, ni);
-                }
-                uf.union(ci, ni);
-            }
-        }
-        let mut comp_net: HashMap<usize, String> = HashMap::new();
-        for (net, &ai) in &net_anchor {
-            let r = uf.find(ai);
-            comp_net.insert(r, net.clone());
-        }
+        let (coord_idx, mut uf, _coords) = build_wire_uf(&wires);
+        let (comp_net, _extras) = assign_island_nets(&wires, &coord_idx, &mut uf, &pin_index, name);
 
         // For each label, walk every wire segment whose net != label's.
         // Test whether the label's anchor sits strictly between the

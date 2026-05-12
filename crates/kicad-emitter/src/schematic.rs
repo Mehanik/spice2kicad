@@ -125,7 +125,7 @@ pub fn emit_root(
     }
 
     let net_pins = collect_net_pins(placement, library, &extra_pins);
-    let obstacles = placement_obstacles(placement);
+    let obstacles = placement_obstacles(placement, library);
     for routed in route_nets(&net_pins, "root", library, &obstacles)? {
         items.push(routed);
     }
@@ -204,7 +204,7 @@ pub fn emit_child_sheet(child: &ChildSheet<'_>, library: &Library) -> Result<Str
     }
 
     let net_pins = collect_net_pins(child.placement, library, &extra_pins);
-    let obstacles = placement_obstacles(child.placement);
+    let obstacles = placement_obstacles(child.placement, library);
     for routed in route_nets(&net_pins, &child.name, library, &obstacles)? {
         items.push(routed);
     }
@@ -987,10 +987,21 @@ fn route_nets(
 /// Power-rail glyphs (`#PWR*`) are emitted by the router itself at pin
 /// coordinates, so they never appear in `placement.elements` and don't
 /// need filtering here.
-fn placement_obstacles(placement: &Placement) -> Vec<spice_route::Bbox> {
+///
+/// **TODO(V12)**: replace the uniform `SYM_HALF_MM` with a per-symbol
+/// body bbox sourced from [`kicad_symbols::Symbol::body_bbox`] and
+/// transformed through the placed orientation. The infrastructure
+/// (the API, the local→world transform, and a margin policy) is in
+/// place but enabling it without router-side companion changes
+/// (pin-outward leg direction, foreign-pin-aware corner choice)
+/// causes the router to take alternate L corners that re-introduce
+/// V11 silent shorts on the symmetric multivibrator / diff_pair
+/// fixtures. Re-enable once the router is pin-outward-aware.
+fn placement_obstacles(placement: &Placement, library: &Library) -> Vec<spice_route::Bbox> {
     /// Half-extent (mm) covering a typical R/C/Q body. Matches
     /// `placement_quality::SYM_HALF_MM`.
     const SYM_HALF_MM: f64 = 2.54;
+    let _ = library; // reserved for future V12 body-bbox enablement
     placement
         .elements
         .iter()
