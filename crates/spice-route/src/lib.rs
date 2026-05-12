@@ -176,18 +176,41 @@ pub fn route(req: RouteRequest<'_>) -> RouteResult {
     // `crates/spice2kicad/tests/electrical_safety.rs` holding the
     // budget as a high-water mark.
     let foreign_per_routed = foreign_pin_sets(&req);
-    let warnings = conflict::avoid_foreign_pins(
-        &mut routed,
-        &foreign_per_routed,
-        &net_pin_coords,
-        req.obstacles,
-    );
-    out.warnings.extend(warnings);
-    // Stage 3b — avoid wires crossing symbol bodies (V12 quality).
-    if !req.obstacles.is_empty() {
-        let warnings = conflict::avoid_obstacles(&mut routed, req.obstacles, &net_pin_coords);
-        out.warnings.extend(warnings);
+    // V11/V12 convergence loop. Each pass runs V11 (correctness) first
+    // so a V12 detour can't re-introduce a foreign-pin coincidence,
+    // then V12 (quality). Detours land in segment-set signatures that
+    // the next V11 pass observes; we iterate until two consecutive
+    // signatures agree or 3 passes elapse (a defensive cap — the v0.1
+    // fixtures converge in ≤ 2).
+    let mut accumulated_warnings: Vec<String> = Vec::new();
+    for _ in 0..3 {
+        let pre_signatures: Vec<Vec<Segment>> = routed.iter().map(|n| n.segments.clone()).collect();
+        let w11 = conflict::avoid_foreign_pins(
+            &mut routed,
+            &foreign_per_routed,
+            &net_pin_coords,
+            req.obstacles,
+        );
+        accumulated_warnings = w11;
+        if !req.obstacles.is_empty() {
+            let w12 = conflict::avoid_obstacles(
+                &mut routed,
+                req.obstacles,
+                &net_pin_coords,
+                &foreign_per_routed,
+                req.bounds,
+            );
+            accumulated_warnings.extend(w12);
+        }
+        let changed = pre_signatures
+            .iter()
+            .zip(routed.iter())
+            .any(|(pre, now)| pre != &now.segments);
+        if !changed {
+            break;
+        }
     }
+    out.warnings.extend(accumulated_warnings);
     // Stage 4 — per-net coalesce of collinear segments + dedup of
     // coincident junctions across nets.
     cleanup::drop_zero_length(&mut routed);

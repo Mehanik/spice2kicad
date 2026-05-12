@@ -63,6 +63,10 @@ pub struct RouteRequest<'a> {
     /// a body the conflict is recorded as a warning. Empty slice
     /// disables obstacle avoidance (legacy behaviour).
     pub obstacles: &'a [Bbox],
+    /// Optional sheet bounds used by the V12 maze router to size its
+    /// working grid. When `None`, the router infers a bbox from the
+    /// union of routed-net pin coordinates and `MAZE_GRID_MARGIN_MM`.
+    pub bounds: Option<Bbox>,
 }
 
 /// Axis-aligned bounding box in world millimetres. Used by the router

@@ -25,7 +25,29 @@ const MAX_ITERATIONS: usize = 10;
 /// the alternate L corner (or shifts the bend by a grid cell). After
 /// the cap a warning is recorded and the offending segment is left
 /// alone — a body-crossing wire is ugly but still electrically valid.
-const OBSTACLE_RETRY_CAP: usize = 4;
+const OBSTACLE_RETRY_CAP: usize = 12;
+/// Convergence cap for `avoid_obstacles`'s outer priority-pass loop.
+const OBSTACLE_OUTER_CAP: usize = 8;
+/// Bend-penalty in millimetres for the Lee/BFS maze router. A bend
+/// costs `MAZE_BEND_PENALTY_MM` plus the segment length, so the
+/// router prefers fewer-bend paths over slightly shorter zig-zags.
+const MAZE_BEND_PENALTY_MM: f64 = 5.0;
+/// Half-cell margin around the union of pins used to size the maze
+/// router's working grid when the caller hasn't supplied explicit
+/// bounds. Picked to give the router a few cells of slack at each
+/// edge without blowing the grid up.
+const MAZE_GRID_MARGIN_MM: f64 = 12.7;
+/// Hard ceiling on grid cells the maze router will consider. A
+/// 200×200-cell grid (1.27 mm step ≈ 25 × 25 cm sheet) is well above
+/// any v0.1 fixture; beyond that the routing problem is no longer a
+/// single sheet and the maze pass bails out.
+const MAZE_CELL_CAP: usize = 200 * 200;
+/// Radius (in 1.27 mm grid cells) of the spiral search that
+/// `try_move_steiner_junction` walks when looking for a free cell to
+/// relocate a Steiner T-junction that sits inside an obstacle. The
+/// v0.1 fixtures need ≤ 2 cells of clearance; 8 is comfortable
+/// slack without producing absurdly long detours.
+const STEINER_MOVE_RADIUS_CELLS: i32 = 8;
 
 /// Resolve cross-net endpoint conflicts in place.
 ///
@@ -111,11 +133,6 @@ fn find_conflicts(routed: &[RoutedNet]) -> Vec<((i64, i64), Vec<usize>)> {
 
 #[allow(clippy::cast_possible_truncation)]
 fn key(x: f64, y: f64) -> (i64, i64) {
-    ((x * 1000.0).round() as i64, (y * 1000.0).round() as i64)
-}
-
-#[allow(clippy::cast_possible_truncation)]
-fn pin_key(x: f64, y: f64) -> (i64, i64) {
     ((x * 1000.0).round() as i64, (y * 1000.0).round() as i64)
 }
 
@@ -637,7 +654,6 @@ fn try_alt_l_corner<S: ::std::hash::BuildHasher>(
         }
         // A T-junction corner (≥ 3 segments meet) carries a third
         // leg that would be orphaned if we swapped the L pair only.
-        // V12's `rewrite_l_bends` uses the same guard.
         if corner_degree(&routed[target], corner) > 2 {
             continue;
         }
@@ -907,47 +923,139 @@ fn count_interior_hits(net: &RoutedNet, foreign_pins: &[(i64, i64)]) -> usize {
     n
 }
 
-/// Re-route segments that pass through a symbol body (`obstacles`).
+/// V12 — eliminate wires that strictly enter a foreign symbol body.
 ///
-/// Strategy per net: identify L-shaped pin-to-pin bends (a pair of
-/// orthogonal segments sharing an endpoint) where one of the two legs
-/// crosses an obstacle, and try the **alternate** L corner — the other
-/// way of routing the same pin pair. If the alternate also crosses,
-/// shift the corner by ±1 grid cell along each axis up to the retry
-/// cap. Standalone non-bend segments (the rare case after stage-3
-/// jogging) are inspected too: the segment is replaced with an L via
-/// a corner offset by 1 cell perpendicular to the segment, and the
-/// retry budget walks 1 → 2 → … cells out.
+/// Strategy mirrors `avoid_foreign_pins`: process nets in the same
+/// `net_priority_key` order so the most-constrained net moves first
+/// and less-constrained nets react to its geometry. For every segment
+/// of `routed[i]` that strictly crosses any `obstacles[k]` try, in
+/// order:
+///   1. `try_alt_l_corner` — swap the L corner of any L-pair the
+///      offender is part of (cheap, no new segments).
+///   2. `try_u_detour_l_pair` — replace an L pair with a 3-segment U
+///      detour anchored on the L's far endpoints.
+///   3. `try_detour_segment` — replace a single offending segment
+///      with a 3-segment U detour around the obstacle.
+///   4. Stage B fallback: BFS/Lee maze route on a coarse 1.27 mm
+///      grid, returning the shortest bend-minimising path that
+///      avoids every obstacle, every foreign pin, and every sibling
+///      net's segment interior.
 ///
-/// Returns one warning per remaining body-crossing segment after the
-/// retry budget is exhausted. A body-crossing wire is electrically
-/// valid (KiCad still routes the net correctly), just visually ugly.
+/// `obstacles` is the symbol-body bbox list (V12 sense).
+/// `foreign_pins_per_net[i]` is the set of pin coords *foreign* to
+/// `routed[i]` — passed through so detours don't re-introduce a V11
+/// violation. `own_pin_coords[i]` is `routed[i]`'s own pin set —
+/// anchored as junctions so Stage 4 cleanup can't coalesce away a
+/// pin endpoint.
+///
+/// `placer_broken[i]` is set when `routed[i]`'s own pin sits strictly
+/// inside a foreign symbol body — no router pass can fix that (any
+/// wire connecting that pin must enter the body); the net is skipped
+/// with a `v12-placer:` diagnostic so the offender's residual
+/// crossing is not double-counted.
+///
+/// Iterates the priority pass to convergence (segment-set
+/// signatures unchanged between iterations) or `OBSTACLE_OUTER_CAP`,
+/// then emits one warning per net that still has residual crossings.
 pub fn avoid_obstacles<S: ::std::hash::BuildHasher>(
     routed: &mut [RoutedNet],
     obstacles: &[Bbox],
-    net_pin_coords: &[std::collections::HashSet<(i64, i64), S>],
+    own_pin_coords: &[std::collections::HashSet<(i64, i64), S>],
+    foreign_pins_per_net: &[std::collections::HashSet<(i64, i64), S>],
+    bounds: Option<Bbox>,
 ) -> Vec<String> {
     let mut warnings = Vec::new();
-    if obstacles.is_empty() {
+    if obstacles.is_empty() || routed.is_empty() {
         return warnings;
     }
-    for (net_idx, net) in routed.iter_mut().enumerate() {
-        let pins_iter: Vec<(i64, i64)> = net_pin_coords
-            .get(net_idx)
-            .map_or_else(Vec::new, |s| s.iter().copied().collect());
-        // Reroute L-bend pairs first: pairs of segments that share an
-        // endpoint and form an axis-aligned L. The alternate L swaps
-        // the corner — but only when the corner is NOT a pin (pins
-        // must remain segment endpoints to keep the net connected).
-        rewrite_l_bends(net, obstacles, &pins_iter);
-        // Standalone offending segments: try perpendicular detours.
-        // Pin coordinates flow through so the detour avoids creating a
-        // collinear extension at a pin endpoint (Stage 4 cleanup would
-        // coalesce that into a single span and orphan the pin from
-        // electrical connectivity).
-        rewrite_standalone_crossings(net, obstacles, &pins_iter);
 
-        // Tally remaining crossings.
+    // Pre-build per-net foreign-pin bbox lists once (reused on every
+    // outer pass).
+    let foreign_bboxes_per_net: Vec<Vec<Bbox>> = (0..routed.len())
+        .map(|i| {
+            foreign_pins_per_net
+                .get(i)
+                .map(|s| {
+                    s.iter()
+                        .map(|&(x, y)| {
+                            #[allow(clippy::cast_precision_loss)]
+                            Bbox::from_point(x as f64 / 1000.0, y as f64 / 1000.0)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+        .collect();
+
+    // Detect placer-broken nets: any own pin strictly inside an
+    // obstacle bbox. The router cannot fix this — emit a diagnostic
+    // and skip enforcement for that net.
+    let mut placer_broken = vec![false; routed.len()];
+    for (i, _net) in routed.iter().enumerate() {
+        let Some(own) = own_pin_coords.get(i) else {
+            continue;
+        };
+        for &(x, y) in own {
+            #[allow(clippy::cast_precision_loss)]
+            let (fx, fy) = (x as f64 / 1000.0, y as f64 / 1000.0);
+            for o in obstacles {
+                // Use a degenerate segment (point) as the probe so the
+                // strict-interior bbox test fires when the point sits
+                // inside the body.
+                if o.intersects_segment(fx, fy, fx, fy)
+                    || (fx > o.x0 + 0.1 && fx < o.x1 - 0.1 && fy > o.y0 + 0.1 && fy < o.y1 - 0.1)
+                {
+                    placer_broken[i] = true;
+                    warnings.push(format!(
+                        "v12-placer: net index {i} has own pin ({fx:.3}, {fy:.3}) strictly inside a foreign symbol body; skipping V12 enforcement"
+                    ));
+                    break;
+                }
+            }
+            if placer_broken[i] {
+                break;
+            }
+        }
+    }
+
+    let mut order: Vec<usize> = (0..routed.len()).collect();
+    order.sort_by(|&a, &b| {
+        let key_a = net_priority_key(&routed[a]);
+        let key_b = net_priority_key(&routed[b]);
+        key_b.cmp(&key_a).then(a.cmp(&b))
+    });
+
+    // Maze-router blocked grid is rebuilt each outer pass (sibling
+    // segments change as other nets reroute).
+    for _ in 0..OBSTACLE_OUTER_CAP {
+        let pre_signatures: Vec<Vec<Segment>> = routed.iter().map(|n| n.segments.clone()).collect();
+        for &i in &order {
+            if placer_broken[i] {
+                continue;
+            }
+            let own_for_net: &std::collections::HashSet<(i64, i64), S> = match own_pin_coords.get(i)
+            {
+                Some(s) => s,
+                None => continue,
+            };
+            let foreign_bboxes: &[Bbox] = &foreign_bboxes_per_net[i];
+            reroute_one_net_v12(routed, i, obstacles, foreign_bboxes, own_for_net, bounds);
+        }
+        let changed = pre_signatures
+            .iter()
+            .zip(routed.iter())
+            .any(|(pre, now)| pre != &now.segments);
+        if !changed {
+            break;
+        }
+    }
+
+    // Final tally: emit one warning per net that still has a segment
+    // crossing any obstacle.
+    for (net_idx, net) in routed.iter().enumerate() {
+        if placer_broken[net_idx] {
+            continue;
+        }
         let mut remaining = 0usize;
         for s in &net.segments {
             for o in obstacles {
@@ -959,113 +1067,740 @@ pub fn avoid_obstacles<S: ::std::hash::BuildHasher>(
         }
         if remaining > 0 {
             warnings.push(format!(
-                "obstacle: net index {net_idx} has {remaining} segment(s) crossing a symbol body after {OBSTACLE_RETRY_CAP} retries"
+                "obstacle: net index {net_idx} has {remaining} segment(s) crossing a symbol body after {OBSTACLE_OUTER_CAP} outer passes"
             ));
         }
     }
     warnings
 }
 
-/// For every pair of segments (A, B) within a net that share an
-/// endpoint and form an axis-parallel L, if either leg crosses an
-/// obstacle try the alternate corner: an L between the same two
-/// far endpoints via the *other* coordinate axis. Replace the pair
-/// when the alternate has fewer crossings.
-fn rewrite_l_bends(net: &mut RoutedNet, obstacles: &[Bbox], pin_coords: &[(i64, i64)]) {
-    let is_pin = |p: (f64, f64)| -> bool {
-        let k = pin_key(p.0, p.1);
-        pin_coords.contains(&k)
-    };
-    let mut iter = 0;
+/// V12 per-net pass: walk offending segments, attempt the V11 cascade
+/// of corner-swap → L-pair-U → segment-U → maze. Stops when the net
+/// is clean or every offender has been tried unsuccessfully.
+fn reroute_one_net_v12<S: ::std::hash::BuildHasher>(
+    routed: &mut [RoutedNet],
+    target: usize,
+    obstacles: &[Bbox],
+    foreign_bboxes: &[Bbox],
+    own_pins: &std::collections::HashSet<(i64, i64), S>,
+    bounds: Option<Bbox>,
+) {
+    let mut guard = 0;
     loop {
-        if iter >= OBSTACLE_RETRY_CAP {
-            return;
+        guard += 1;
+        if guard > 128 {
+            break;
         }
-        iter += 1;
-        let n = net.segments.len();
-        let mut chosen: Option<(usize, usize, Segment, Segment)> = None;
-        'outer: for i in 0..n {
-            for j in (i + 1)..n {
-                let a = net.segments[i];
-                let b = net.segments[j];
-                let Some((p_far, q_far, corner)) = l_pair_endpoints(&a, &b) else {
-                    continue;
-                };
-                let curr_cross = seg_crosses_any(&a, obstacles) || seg_crosses_any(&b, obstacles);
-                if !curr_cross {
-                    continue;
+        let Some(idx) = find_obstacle_offender(&routed[target], obstacles) else {
+            break;
+        };
+        // 1. Alt L corner.
+        if try_alt_l_corner(routed, target, idx, foreign_bboxes, obstacles, own_pins) {
+            continue;
+        }
+        // 2. U-detour around an L pair.
+        if try_u_detour_l_pair(routed, target, idx, foreign_bboxes, obstacles, own_pins) {
+            continue;
+        }
+        // 3. U-detour around the offending segment alone.
+        if try_detour_segment(routed, target, idx, foreign_bboxes, obstacles) {
+            continue;
+        }
+        // 4. Move a Steiner T-junction that sits inside an obstacle.
+        //    Both endpoints of the offending segment are tried; the
+        //    one that isn't an own pin and has degree ≥ 2 is a
+        //    candidate junction. If one of its incident segments has
+        //    its other endpoint inside the same obstacle, that
+        //    endpoint is *also* considered.
+        if try_move_steiner_junction(routed, target, idx, obstacles, foreign_bboxes, own_pins) {
+            continue;
+        }
+        // 5. Stage B — maze route. Replaces the offending segment with
+        // a BFS shortest-path that avoids every obstacle, foreign pin
+        // and sibling segment interior.
+        if try_maze_route_segment(routed, target, idx, obstacles, foreign_bboxes, bounds) {
+            continue;
+        }
+        // Nothing helped — leave the segment and bail so the residual
+        // tally surfaces it.
+        break;
+    }
+    // Anchor any own-pin endpoint so Stage 4 cleanup can't coalesce
+    // through it (mirrors `reroute_one_net_v11`).
+    anchor_own_pin_endpoints(routed, target, own_pins);
+}
+
+/// First segment index of `net` strictly entering any `obstacles[k]`.
+fn find_obstacle_offender(net: &RoutedNet, obstacles: &[Bbox]) -> Option<usize> {
+    for (i, s) in net.segments.iter().enumerate() {
+        for o in obstacles {
+            if o.intersects_segment(s.x1, s.y1, s.x2, s.y2) {
+                return Some(i);
+            }
+        }
+    }
+    None
+}
+
+/// Try to relocate a Steiner T-junction (≥ 3 incident segments) that
+/// sits strictly inside an obstacle. The maze router cannot help once
+/// a segment's endpoint is committed inside a body: any path
+/// arriving at the goal emits a final segment whose interior crosses
+/// the body. Moving the T-junction to a free cell rewires every
+/// incident segment to a new corner that, given a good landing site,
+/// clears the body in one move.
+///
+/// Strategy:
+///   1. Locate every endpoint of `routed[target].segments[idx]` that
+///      is **not** an own pin (those cannot move) and that has
+///      degree ≥ 2 in `routed[target]` — a candidate junction.
+///   2. For each candidate, enumerate landing cells in a small
+///      rectangular halo around the junction.
+///   3. For each landing, build the rewired segment set:
+///      every incident segment's junction-endpoint moves to the new
+///      landing; if the segment becomes non-axis-aligned it is split
+///      into an L-pair (the new corner placed to keep the foreign
+///      endpoint axis-stable).
+///   4. Accept the first landing whose rewired segments avoid every
+///      obstacle, foreign-pin bbox, and sibling-net interior.
+#[allow(clippy::too_many_lines)]
+fn try_move_steiner_junction<S: ::std::hash::BuildHasher>(
+    routed: &mut [RoutedNet],
+    target: usize,
+    idx: usize,
+    obstacles: &[Bbox],
+    foreign_bboxes: &[Bbox],
+    own_pins: &std::collections::HashSet<(i64, i64), S>,
+) -> bool {
+    let s = routed[target].segments[idx];
+    for &endpoint in &[(s.x1, s.y1), (s.x2, s.y2)] {
+        if own_pins.contains(&key(endpoint.0, endpoint.1)) {
+            continue;
+        }
+        // Find every segment incident to `endpoint` (by either end),
+        // recording for each incident the *other* endpoint (the one
+        // that stays put after the move). The junction must have
+        // degree ≥ 2 to be a Steiner T worth moving.
+        let incidents: Vec<(usize, (f64, f64))> = routed[target]
+            .segments
+            .iter()
+            .enumerate()
+            .filter_map(|(i, seg)| {
+                if (seg.x1 - endpoint.0).abs() < EPS && (seg.y1 - endpoint.1).abs() < EPS {
+                    Some((i, (seg.x2, seg.y2)))
+                } else if (seg.x2 - endpoint.0).abs() < EPS && (seg.y2 - endpoint.1).abs() < EPS {
+                    Some((i, (seg.x1, seg.y1)))
+                } else {
+                    None
                 }
-                // Skip rewriting if the shared corner is a Steiner
-                // T-junction (≥ 3 segments meet): rerouting the L would
-                // disconnect the third leg from the tree.
-                if corner_degree(net, corner) > 2 {
-                    continue;
-                }
-                // Skip if the corner is a pin coordinate. Pins must
-                // remain segment endpoints — swapping the L corner
-                // away from a pin disconnects the net (this was the
-                // opamp_inverting roundtrip regression: a 3-pin
-                // Steiner tree with the L corner sitting on RF's pin).
-                if is_pin(corner) {
-                    continue;
-                }
-                // Skip if either far endpoint is a pin: the alt L
-                // routes through the alt corner, which lies on the
-                // axis of the OTHER far endpoint — Stage 4 cleanup
-                // can then coalesce the alt's leg with any collinear
-                // segment in the same net through that pin. The
-                // resulting single span still passes geometrically
-                // through the pin's coordinate, so KiCad's
-                // wire-touches-pin rule (V11) keeps the pin
-                // electrically connected — but the segment we keep
-                // in `RoutedNet` no longer has the pin as an
-                // endpoint, breaking downstream invariants that
-                // expect every pin to anchor at least one segment
-                // endpoint (e.g. junction emission, `find_conflicts`
-                // foreign-pin checks). Only swap when both far
-                // endpoints are Steiner points or non-pins.
-                if is_pin(p_far) || is_pin(q_far) {
-                    continue;
-                }
-                // Alternate L: corner at (p_far.x, q_far.y) if current
-                // corner is (q_far.x, p_far.y), and vice versa. Try
-                // both alternates and pick the one with fewer crossings.
-                let alt1 = (p_far.0, q_far.1);
-                let alt2 = (q_far.0, p_far.1);
-                for alt in [alt1, alt2] {
-                    let s1 = Segment {
-                        x1: p_far.0,
-                        y1: p_far.1,
-                        x2: alt.0,
-                        y2: alt.1,
-                    };
-                    let s2 = Segment {
-                        x1: alt.0,
-                        y1: alt.1,
-                        x2: q_far.0,
-                        y2: q_far.1,
-                    };
-                    if approx_zero_len(&s1) || approx_zero_len(&s2) {
+            })
+            .collect();
+        if incidents.len() < 2 {
+            continue;
+        }
+        // Only attempt this when `endpoint` is actually strictly
+        // inside one of the obstacles — otherwise moving it isn't
+        // motivated by V12.
+        let endpoint_in_obstacle = obstacles.iter().any(|o| {
+            endpoint.0 > o.x0 + 0.1
+                && endpoint.0 < o.x1 - 0.1
+                && endpoint.1 > o.y0 + 0.1
+                && endpoint.1 < o.y1 - 0.1
+        });
+        if !endpoint_in_obstacle {
+            continue;
+        }
+        // Search landings on the 1.27 mm grid in a spiral around the
+        // original junction. `STEINER_MOVE_RADIUS_CELLS` is small —
+        // the v0.1 fixtures only ever need 1–2 cells of clearance.
+        for r in 1..=STEINER_MOVE_RADIUS_CELLS {
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    // Only the spiral perimeter at radius r.
+                    if dx.abs() != r && dy.abs() != r {
                         continue;
                     }
-                    let alt_cross =
-                        seg_crosses_any(&s1, obstacles) || seg_crosses_any(&s2, obstacles);
-                    if !alt_cross {
-                        chosen = Some((i, j, s1, s2));
-                        break 'outer;
+                    #[allow(clippy::cast_precision_loss)]
+                    let nx = endpoint.0 + f64::from(dx) * GRID_MM;
+                    #[allow(clippy::cast_precision_loss)]
+                    let ny = endpoint.1 + f64::from(dy) * GRID_MM;
+                    // Candidate must be outside every obstacle and
+                    // every foreign-pin bbox.
+                    let inside_any = obstacles.iter().chain(foreign_bboxes.iter()).any(|o| {
+                        nx > o.x0 + 0.1 && nx < o.x1 - 0.1 && ny > o.y0 + 0.1 && ny < o.y1 - 0.1
+                    });
+                    if inside_any {
+                        continue;
+                    }
+                    // Build the rewired segment set for this landing.
+                    // For each incident (i, other), the new pair is:
+                    //   - if (other.x, ny) is the natural corner (i.e.
+                    //     other already shares an axis with the
+                    //     landing), a single segment;
+                    //   - otherwise an L-pair: (other → corner →
+                    //     landing) with the corner picked to keep the
+                    //     foreign endpoint on its own axis.
+                    let mut new_parts: Vec<(usize, Vec<Segment>)> = Vec::new();
+                    let mut ok = true;
+                    for (seg_i, other) in &incidents {
+                        let (ox, oy) = *other;
+                        let parts: Vec<Segment> = if (ox - nx).abs() < EPS || (oy - ny).abs() < EPS
+                        {
+                            vec![Segment {
+                                x1: ox,
+                                y1: oy,
+                                x2: nx,
+                                y2: ny,
+                            }]
+                        } else {
+                            // Two L-corner choices. Pick whichever
+                            // produces no obstacle / foreign-pin /
+                            // sibling-overlap collision.
+                            let mut chosen: Option<Vec<Segment>> = None;
+                            for corner in [(ox, ny), (nx, oy)] {
+                                let a = Segment {
+                                    x1: ox,
+                                    y1: oy,
+                                    x2: corner.0,
+                                    y2: corner.1,
+                                };
+                                let b = Segment {
+                                    x1: corner.0,
+                                    y1: corner.1,
+                                    x2: nx,
+                                    y2: ny,
+                                };
+                                if [a, b].iter().any(approx_zero_len) {
+                                    continue;
+                                }
+                                if [a, b].iter().any(|p| crosses_any_bbox(p, foreign_bboxes)) {
+                                    continue;
+                                }
+                                if [a, b].iter().any(|p| crosses_any_bbox(p, obstacles)) {
+                                    continue;
+                                }
+                                if [a, b]
+                                    .iter()
+                                    .any(|p| part_overlaps_sibling(routed, target, p))
+                                {
+                                    continue;
+                                }
+                                chosen = Some(vec![a, b]);
+                                break;
+                            }
+                            if let Some(v) = chosen {
+                                v
+                            } else {
+                                ok = false;
+                                break;
+                            }
+                        };
+                        for p in &parts {
+                            if crosses_any_bbox(p, foreign_bboxes)
+                                || crosses_any_bbox(p, obstacles)
+                                || part_overlaps_sibling(routed, target, p)
+                            {
+                                ok = false;
+                                break;
+                            }
+                        }
+                        if !ok {
+                            break;
+                        }
+                        new_parts.push((*seg_i, parts));
+                    }
+                    if !ok {
+                        continue;
+                    }
+                    // Install: remove old incident segments (highest
+                    // index first), then push all new parts.
+                    let mut victims: Vec<usize> = new_parts.iter().map(|(i, _)| *i).collect();
+                    victims.sort_unstable();
+                    for v in victims.iter().rev() {
+                        routed[target].segments.remove(*v);
+                    }
+                    for (_, parts) in new_parts {
+                        for p in parts {
+                            routed[target].segments.push(p);
+                        }
+                    }
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Stage B — Lee/BFS maze router fallback. Replaces a single offending
+/// segment with the shortest bend-minimising rectilinear path between
+/// its two endpoints that avoids every obstacle interior, every
+/// foreign pin coord, and every sibling routed net's segment
+/// interior.
+///
+/// The blocked grid is quantised at `GRID_MM` (1.27 mm) over a bbox
+/// derived from `bounds` (caller-supplied) or, when `None`, the pin
+/// union of `routed[target]` extended by `MAZE_GRID_MARGIN_MM`. A
+/// cell is blocked iff it strictly lies inside an obstacle bbox, on
+/// a foreign-pin coord, or on the interior of a sibling net's
+/// segment (segments belonging to the same net are not blocked —
+/// the path is allowed to land on existing trunks of its own net).
+/// The two endpoint cells are explicitly unblocked.
+///
+/// Returns `true` when a path was installed. The path is converted to
+/// a list of axis-aligned `Segment`s replacing the original segment
+/// at index `idx`. Complexity: O(V · log V) with V ≤ `MAZE_CELL_CAP`
+/// — comfortably under 1 ms per fixture in practice.
+fn try_maze_route_segment(
+    routed: &mut [RoutedNet],
+    target: usize,
+    idx: usize,
+    obstacles: &[Bbox],
+    foreign_bboxes: &[Bbox],
+    bounds: Option<Bbox>,
+) -> bool {
+    let s = routed[target].segments[idx];
+    // Don't maze-route a zero-length probe.
+    if approx_zero_len(&s) {
+        return false;
+    }
+    let Some(grid) = build_maze_grid(routed, target, obstacles, foreign_bboxes, bounds) else {
+        return false;
+    };
+    let start = grid.world_to_cell(s.x1, s.y1);
+    let goal = grid.world_to_cell(s.x2, s.y2);
+    let (Some(start), Some(goal)) = (start, goal) else {
+        return false;
+    };
+    if start == goal {
+        return false;
+    }
+    let Some(path) = maze_shortest_path(&grid, start, goal) else {
+        return false;
+    };
+    if path.len() < 2 {
+        return false;
+    }
+    // Convert grid path to axis-aligned world segments. Coalesce
+    // collinear hops on the fly so a straight run lands as a single
+    // segment.
+    let mut new_segs: Vec<Segment> = Vec::new();
+    let mut anchor = path[0];
+    let mut prev = path[0];
+    let sgn = |a: usize, b: usize| -> i8 {
+        match a.cmp(&b) {
+            std::cmp::Ordering::Less => -1,
+            std::cmp::Ordering::Equal => 0,
+            std::cmp::Ordering::Greater => 1,
+        }
+    };
+    for &cur in path.iter().skip(1) {
+        let dir_prev = (sgn(prev.0, anchor.0), sgn(prev.1, anchor.1));
+        let dir_cur = (sgn(cur.0, prev.0), sgn(cur.1, prev.1));
+        if dir_prev != (0, 0) && dir_prev != dir_cur {
+            // Bend. Emit anchor..prev, restart anchor at prev.
+            let (ax, ay) = grid.cell_to_world(anchor);
+            let (bx, by) = grid.cell_to_world(prev);
+            new_segs.push(Segment {
+                x1: ax,
+                y1: ay,
+                x2: bx,
+                y2: by,
+            });
+            anchor = prev;
+        }
+        prev = cur;
+    }
+    let (ax, ay) = grid.cell_to_world(anchor);
+    let (bx, by) = grid.cell_to_world(prev);
+    new_segs.push(Segment {
+        x1: ax,
+        y1: ay,
+        x2: bx,
+        y2: by,
+    });
+    if new_segs.iter().any(approx_zero_len) {
+        // Defensive: drop zero-length parts that might survive
+        // float-rounding.
+        new_segs.retain(|seg| !approx_zero_len(seg));
+        if new_segs.is_empty() {
+            return false;
+        }
+    }
+    // Defensive re-check: the blocked grid already excludes these
+    // cases, but verify before installation.
+    if new_segs.iter().any(|p| crosses_any_bbox(p, foreign_bboxes)) {
+        return false;
+    }
+    if new_segs.iter().any(|p| crosses_any_bbox(p, obstacles)) {
+        return false;
+    }
+    if new_segs
+        .iter()
+        .any(|p| part_overlaps_sibling(routed, target, p))
+    {
+        return false;
+    }
+    // Install: replace segments[idx] with the first new segment,
+    // append the rest.
+    routed[target].segments[idx] = new_segs[0];
+    for p in new_segs.into_iter().skip(1) {
+        routed[target].segments.push(p);
+    }
+    true
+}
+
+/// Quantised blocked-cell grid for the Lee/BFS maze router.
+///
+/// Two block sets are maintained:
+///
+/// * `blocked[i]` — cell `i` may not be visited at all.
+/// * `edge_blocked_h[i]` / `edge_blocked_v[i]` — the 1.27 mm step from
+///   cell `i` to its `+x` / `+y` neighbour, respectively, strictly
+///   crosses an obstacle even though both endpoint cells passed the
+///   strict-interior cell test. This happens when an obstacle's body
+///   edge lies on a grid line: the cell on the boundary is "unblocked"
+///   by the point-sample test but stepping into the body emits a wire
+///   segment that strictly enters the body interior. We treat that
+///   edge as impassable in [`maze_shortest_path`].
+struct MazeGrid {
+    cols: usize,
+    rows: usize,
+    x0: f64,
+    y0: f64,
+    blocked: Vec<bool>,
+    edge_blocked_h: Vec<bool>,
+    edge_blocked_v: Vec<bool>,
+}
+
+impl MazeGrid {
+    fn idx(&self, c: (usize, usize)) -> usize {
+        c.1 * self.cols + c.0
+    }
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    fn in_bounds(&self, c: (i64, i64)) -> bool {
+        c.0 >= 0 && c.1 >= 0 && (c.0 as usize) < self.cols && (c.1 as usize) < self.rows
+    }
+    fn world_to_cell(&self, x: f64, y: f64) -> Option<(usize, usize)> {
+        let cx = ((x - self.x0) / GRID_MM).round();
+        let cy = ((y - self.y0) / GRID_MM).round();
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_possible_wrap
+        )]
+        let k = (cx as i64, cy as i64);
+        if !self.in_bounds(k) {
+            return None;
+        }
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        Some((k.0 as usize, k.1 as usize))
+    }
+    fn cell_to_world(&self, c: (usize, usize)) -> (f64, f64) {
+        #[allow(clippy::cast_precision_loss)]
+        let x = self.x0 + (c.0 as f64) * GRID_MM;
+        #[allow(clippy::cast_precision_loss)]
+        let y = self.y0 + (c.1 as f64) * GRID_MM;
+        (x, y)
+    }
+}
+
+/// Compute the bounding box used to size the maze grid. Caller may
+/// supply explicit bounds; otherwise fall back to the union of every
+/// routed net's pin endpoints (i.e. the union of every segment
+/// endpoint), padded by `MAZE_GRID_MARGIN_MM`.
+fn compute_maze_bounds(routed: &[RoutedNet], explicit: Option<Bbox>) -> Option<Bbox> {
+    if let Some(b) = explicit {
+        return Some(b);
+    }
+    let mut lo_x = f64::INFINITY;
+    let mut lo_y = f64::INFINITY;
+    let mut hi_x = f64::NEG_INFINITY;
+    let mut hi_y = f64::NEG_INFINITY;
+    for net in routed {
+        for s in &net.segments {
+            for (x, y) in [(s.x1, s.y1), (s.x2, s.y2)] {
+                lo_x = lo_x.min(x);
+                lo_y = lo_y.min(y);
+                hi_x = hi_x.max(x);
+                hi_y = hi_y.max(y);
+            }
+        }
+    }
+    if !lo_x.is_finite() || !hi_x.is_finite() {
+        return None;
+    }
+    Some(Bbox {
+        x0: lo_x - MAZE_GRID_MARGIN_MM,
+        y0: lo_y - MAZE_GRID_MARGIN_MM,
+        x1: hi_x + MAZE_GRID_MARGIN_MM,
+        y1: hi_y + MAZE_GRID_MARGIN_MM,
+    })
+}
+
+/// Build the maze blocked grid: a cell at (col, row) is blocked iff
+/// it strictly lies inside an obstacle bbox, on a foreign-pin coord,
+/// or on the interior of a sibling routed net's axis-parallel
+/// segment. Sibling segments belonging to `routed[target]` are not
+/// considered blockers — the maze path may share endpoints with the
+/// rest of the same net's trunk.
+#[allow(clippy::too_many_lines)]
+fn build_maze_grid(
+    routed: &[RoutedNet],
+    target: usize,
+    obstacles: &[Bbox],
+    foreign_bboxes: &[Bbox],
+    explicit_bounds: Option<Bbox>,
+) -> Option<MazeGrid> {
+    let bounds = compute_maze_bounds(routed, explicit_bounds)?;
+    let width = bounds.x1 - bounds.x0;
+    let height = bounds.y1 - bounds.y0;
+    if !(width.is_finite() && height.is_finite()) || width <= 0.0 || height <= 0.0 {
+        return None;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let cols = ((width / GRID_MM).round() as usize).max(2) + 1;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let rows = ((height / GRID_MM).round() as usize).max(2) + 1;
+    if cols.saturating_mul(rows) > MAZE_CELL_CAP {
+        return None;
+    }
+    let mut grid = MazeGrid {
+        cols,
+        rows,
+        x0: bounds.x0,
+        y0: bounds.y0,
+        blocked: vec![false; cols * rows],
+        edge_blocked_h: vec![false; cols * rows],
+        edge_blocked_v: vec![false; cols * rows],
+    };
+
+    // Mark obstacle cells. A cell is blocked iff its center falls
+    // inside any obstacle's body, including the 0.1 mm interior slop
+    // used by `Bbox::intersects_segment`. We also block any cell whose
+    // 4-neighbour edge would cross strictly into an obstacle interior:
+    // a path step from cell A → cell B emits a 1.27 mm segment, and if
+    // that segment penetrates a body bbox by ≥ 0.1 mm the verifier
+    // counts it as a crossing. So we conservatively block cells that
+    // are within one half-cell of any obstacle interior.
+    for cy in 0..rows {
+        #[allow(clippy::cast_precision_loss)]
+        let wy = grid.y0 + (cy as f64) * GRID_MM;
+        for cx in 0..cols {
+            #[allow(clippy::cast_precision_loss)]
+            let wx = grid.x0 + (cx as f64) * GRID_MM;
+            for o in obstacles {
+                // Block any cell strictly inside the obstacle's
+                // 0.1-mm-inflated-inward bbox. This matches the
+                // verifier's strict-interior test.
+                if wx > o.x0 + 0.1 && wx < o.x1 - 0.1 && wy > o.y0 + 0.1 && wy < o.y1 - 0.1 {
+                    let i = grid.idx((cx, cy));
+                    grid.blocked[i] = true;
+                    break;
+                }
+            }
+        }
+    }
+    // Pre-compute per-edge obstacle crossings. Two cells passing the
+    // strict-interior cell test can still be connected by a segment
+    // that crosses an obstacle when the body edge sits exactly on a
+    // grid line (the case for our 1.27 mm-aligned placer output).
+    for cy in 0..rows {
+        for cx in 0..cols {
+            let i = grid.idx((cx, cy));
+            #[allow(clippy::cast_precision_loss)]
+            let wx = grid.x0 + (cx as f64) * GRID_MM;
+            #[allow(clippy::cast_precision_loss)]
+            let wy = grid.y0 + (cy as f64) * GRID_MM;
+            // +x neighbour (horizontal edge).
+            if cx + 1 < cols {
+                for o in obstacles {
+                    if o.intersects_segment(wx, wy, wx + GRID_MM, wy) {
+                        grid.edge_blocked_h[i] = true;
+                        break;
+                    }
+                }
+            }
+            // +y neighbour (vertical edge).
+            if cy + 1 < rows {
+                for o in obstacles {
+                    if o.intersects_segment(wx, wy, wx, wy + GRID_MM) {
+                        grid.edge_blocked_v[i] = true;
+                        break;
                     }
                 }
             }
         }
-        let Some((i, j, s1, s2)) = chosen else {
-            return;
-        };
-        let (lo, hi) = if i < j { (i, j) } else { (j, i) };
-        net.segments.remove(hi);
-        net.segments.remove(lo);
-        net.segments.push(s1);
-        net.segments.push(s2);
     }
+    // Mark foreign-pin coords.
+    for b in foreign_bboxes {
+        let cx = ((b.x0 + b.x1) * 0.5 - grid.x0) / GRID_MM;
+        let cy = ((b.y0 + b.y1) * 0.5 - grid.y0) / GRID_MM;
+        let cx = cx.round();
+        let cy = cy.round();
+        if cx < 0.0 || cy < 0.0 {
+            continue;
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let col = cx as usize;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let row = cy as usize;
+        if col >= cols || row >= rows {
+            continue;
+        }
+        let i = grid.idx((col, row));
+        grid.blocked[i] = true;
+    }
+    // Mark sibling-net segment interior cells (and endpoints — sharing
+    // an endpoint with a sibling net is a V11 short by definition).
+    for (i, other) in routed.iter().enumerate() {
+        if i == target {
+            continue;
+        }
+        for seg in &other.segments {
+            let Some(a) = grid.world_to_cell(seg.x1, seg.y1) else {
+                continue;
+            };
+            let Some(b) = grid.world_to_cell(seg.x2, seg.y2) else {
+                continue;
+            };
+            let horiz = (seg.y1 - seg.y2).abs() < EPS;
+            let vert = (seg.x1 - seg.x2).abs() < EPS;
+            if horiz {
+                let (lo, hi) = (a.0.min(b.0), a.0.max(b.0));
+                for cx in lo..=hi {
+                    let k = grid.idx((cx, a.1));
+                    grid.blocked[k] = true;
+                }
+            } else if vert {
+                let (lo, hi) = (a.1.min(b.1), a.1.max(b.1));
+                for cy in lo..=hi {
+                    let k = grid.idx((a.0, cy));
+                    grid.blocked[k] = true;
+                }
+            }
+        }
+    }
+    Some(grid)
+}
+
+/// BFS / Lee on the blocked grid with a bend penalty applied via
+/// Dijkstra over (cell, in-direction) states. Returns the path as a
+/// list of cells from `start` to `goal` inclusive, with the
+/// shortest-bend-penalty score, or `None` when unreachable.
+fn maze_shortest_path(
+    grid: &MazeGrid,
+    start: (usize, usize),
+    goal: (usize, usize),
+) -> Option<Vec<(usize, usize)>> {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+
+    // Pre-clear the start and goal cells: a maze-rerouted segment's
+    // endpoints are pin / Steiner-junction positions the caller has
+    // already committed to. Treating them as blocked would prevent the
+    // search from leaving the start or arriving at the goal even when
+    // a valid path exists everywhere else. (`maze_shortest_path` is
+    // called only for endpoints the caller has determined are not
+    // own pins of the target net, so opening them is safe.)
+    let mut grid_blocked: Vec<bool> = grid.blocked.clone();
+    let start_idx = grid.idx(start);
+    let goal_idx = grid.idx(goal);
+    grid_blocked[start_idx] = false;
+    grid_blocked[goal_idx] = false;
+    // 4-connected moves, indexed 0..4: 0=+x, 1=-x, 2=+y, 3=-y, 4=initial.
+    let dx = [1_i32, -1, 0, 0];
+    let dy = [0_i32, 0, 1, -1];
+
+    // State key: (col, row, dir). We allow `dir = 4` for the start
+    // state (no incoming direction yet).
+    let state_dim = grid.cols * grid.rows * 5;
+    // Cost in micrometres so the ordering is integer and tight.
+    let mut best: Vec<u64> = vec![u64::MAX; state_dim];
+    let mut parent: Vec<Option<(usize, u8)>> = vec![None; state_dim]; // (prev_state_idx, prev_dir)
+    let state_idx = |c: (usize, usize), dir: usize| (c.1 * grid.cols + c.0) * 5 + dir;
+    let start_state = state_idx(start, 4);
+    best[start_state] = 0;
+    let mut heap: BinaryHeap<Reverse<(u64, usize)>> = BinaryHeap::new();
+    heap.push(Reverse((0, start_state)));
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let step_um: u64 = (GRID_MM * 1000.0).round() as u64;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let bend_um: u64 = (MAZE_BEND_PENALTY_MM * 1000.0).round() as u64;
+
+    let mut found: Option<usize> = None;
+    while let Some(Reverse((cost, sidx))) = heap.pop() {
+        if cost > best[sidx] {
+            continue;
+        }
+        // Decode.
+        let dir = sidx % 5;
+        let cell_lin = sidx / 5;
+        let cur = (cell_lin % grid.cols, cell_lin / grid.cols);
+        if cur == goal {
+            found = Some(sidx);
+            break;
+        }
+        for nd in 0..4_usize {
+            #[allow(clippy::cast_possible_wrap)]
+            let nx = cur.0 as i64 + i64::from(dx[nd]);
+            #[allow(clippy::cast_possible_wrap)]
+            let ny = cur.1 as i64 + i64::from(dy[nd]);
+            if !grid.in_bounds((nx, ny)) {
+                continue;
+            }
+            #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+            let next_cell = (nx as usize, ny as usize);
+            // Skip blocked cells. Start and goal cells were pre-cleared
+            // above so the search can enter them.
+            if grid_blocked[grid.idx(next_cell)] {
+                continue;
+            }
+            // Skip if the step `cur → next_cell` crosses an obstacle
+            // edge that the cell-blocked test missed (body edge on a
+            // grid line). The edge tables are keyed on the lower-index
+            // cell of the pair.
+            let cur_i = grid.idx(cur);
+            let next_i = grid.idx(next_cell);
+            let edge_block = match nd {
+                0 => grid.edge_blocked_h[cur_i],  // +x from cur
+                1 => grid.edge_blocked_h[next_i], // -x: edge stored at next
+                2 => grid.edge_blocked_v[cur_i],  // +y from cur
+                3 => grid.edge_blocked_v[next_i], // -y: edge stored at next
+                _ => false,
+            };
+            if edge_block {
+                continue;
+            }
+            let mut step = cost.saturating_add(step_um);
+            if dir != 4 && dir != nd {
+                step = step.saturating_add(bend_um);
+            }
+            let nsidx = state_idx(next_cell, nd);
+            if step < best[nsidx] {
+                best[nsidx] = step;
+                #[allow(clippy::cast_possible_truncation)]
+                {
+                    parent[nsidx] = Some((sidx, dir as u8));
+                }
+                heap.push(Reverse((step, nsidx)));
+            }
+        }
+    }
+
+    let mut sidx = found?;
+    let mut out_rev: Vec<(usize, usize)> = Vec::new();
+    loop {
+        let cell_lin = sidx / 5;
+        out_rev.push((cell_lin % grid.cols, cell_lin / grid.cols));
+        match parent[sidx] {
+            Some((prev, _)) => sidx = prev,
+            None => break,
+        }
+    }
+    out_rev.reverse();
+    Some(out_rev)
 }
 
 /// If segments `a` and `b` share an endpoint and are axis-aligned with
@@ -1105,98 +1840,6 @@ fn corner_degree(net: &RoutedNet, point: (f64, f64)) -> usize {
         }
     }
     deg
-}
-
-fn seg_crosses_any(s: &Segment, obstacles: &[Bbox]) -> bool {
-    obstacles
-        .iter()
-        .any(|o| o.intersects_segment(s.x1, s.y1, s.x2, s.y2))
-}
-
-/// Standalone segment that crosses an obstacle (not part of an L-pair).
-/// Try replacing it with a 3-segment detour: bend perpendicular by k
-/// cells, traverse parallel, bend back. k walks 1..=OBSTACLE_RETRY_CAP.
-fn rewrite_standalone_crossings(
-    net: &mut RoutedNet,
-    obstacles: &[Bbox],
-    pin_coords: &[(i64, i64)],
-) {
-    let is_pin = |x: f64, y: f64| -> bool {
-        let k = pin_key(x, y);
-        pin_coords.contains(&k)
-    };
-    let mut i = 0;
-    while i < net.segments.len() {
-        let s = net.segments[i];
-        if !seg_crosses_any(&s, obstacles) {
-            i += 1;
-            continue;
-        }
-        let horizontal = (s.y1 - s.y2).abs() < EPS;
-        let mut replaced = false;
-        for k in 1..=OBSTACLE_RETRY_CAP {
-            for sign in [1.0_f64, -1.0_f64] {
-                #[allow(clippy::cast_precision_loss)]
-                let off = sign * GRID_MM * (k as f64);
-                let (mid1, mid2) = if horizontal {
-                    ((s.x1, s.y1 + off), (s.x2, s.y2 + off))
-                } else {
-                    ((s.x1 + off, s.y1), (s.x2 + off, s.y2))
-                };
-                let parts = [
-                    Segment {
-                        x1: s.x1,
-                        y1: s.y1,
-                        x2: mid1.0,
-                        y2: mid1.1,
-                    },
-                    Segment {
-                        x1: mid1.0,
-                        y1: mid1.1,
-                        x2: mid2.0,
-                        y2: mid2.1,
-                    },
-                    Segment {
-                        x1: mid2.0,
-                        y1: mid2.1,
-                        x2: s.x2,
-                        y2: s.y2,
-                    },
-                ];
-                if parts.iter().any(|p| seg_crosses_any(p, obstacles)) {
-                    continue;
-                }
-                // Replace original segment with the three detour parts.
-                net.segments[i] = parts[0];
-                net.segments.push(parts[1]);
-                net.segments.push(parts[2]);
-                // Anchor original endpoints as junctions so Stage 4
-                // coalescing does not merge the perpendicular stub
-                // with a collinear segment elsewhere on the net.
-                // Coalescing would still leave the pin geometrically
-                // on the merged wire (KiCad's V11 wire-touches-pin
-                // rule keeps it connected) but the pin would no
-                // longer be a segment endpoint, which breaks
-                // downstream invariants that key on endpoints (e.g.
-                // foreign-pin conflict detection). Only mark when
-                // the endpoint is a pin coord, otherwise we'd
-                // over-decorate the schematic with unnecessary
-                // junction dots.
-                if is_pin(s.x1, s.y1) {
-                    net.junctions.push((s.x1, s.y1));
-                }
-                if is_pin(s.x2, s.y2) {
-                    net.junctions.push((s.x2, s.y2));
-                }
-                replaced = true;
-                break;
-            }
-            if replaced {
-                break;
-            }
-        }
-        i += 1;
-    }
 }
 
 #[cfg(test)]
@@ -1257,5 +1900,201 @@ mod tests {
         // both nets.
         let conflicts = find_conflicts(&routed);
         assert!(conflicts.is_empty(), "still conflicting: {conflicts:?}");
+    }
+
+    // ----------------------------------------------------------------
+    // Maze router (Stage B) unit tests.
+    // ----------------------------------------------------------------
+
+    /// Helper: build an empty `MazeGrid` over the explicit bounds, with
+    /// no nets, obstacles, or pins. Used by maze-only tests.
+    fn empty_grid(bounds: Bbox) -> MazeGrid {
+        build_maze_grid(&[], usize::MAX, &[], &[], Some(bounds))
+            .expect("build_maze_grid should succeed for a positive-area bbox")
+    }
+
+    fn ucell((c, r): (usize, usize)) -> (usize, usize) {
+        (c, r)
+    }
+
+    #[test]
+    fn maze_trivial_straight_line_in_empty_grid() {
+        let g = empty_grid(Bbox {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 10.0 * GRID_MM,
+            y1: 10.0 * GRID_MM,
+        });
+        let path = maze_shortest_path(&g, ucell((0, 0)), ucell((5, 0))).expect("path should exist");
+        // Straight line: 6 cells (inclusive of both ends).
+        assert_eq!(path.len(), 6);
+        // All on row 0.
+        assert!(path.iter().all(|(_, r)| *r == 0));
+    }
+
+    #[test]
+    fn maze_returns_l_for_diagonal_endpoints_in_empty_grid() {
+        let g = empty_grid(Bbox {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 10.0 * GRID_MM,
+            y1: 10.0 * GRID_MM,
+        });
+        let path = maze_shortest_path(&g, ucell((0, 0)), ucell((3, 3))).expect("path should exist");
+        // Manhattan distance 6 → path length 7 cells, with exactly one
+        // bend (i.e. two collinear runs).
+        assert_eq!(path.len(), 7);
+        let mut bends = 0;
+        for w in path.windows(3) {
+            let d1 = (w[1].0.cmp(&w[0].0) as i32, w[1].1.cmp(&w[0].1) as i32);
+            let d2 = (w[2].0.cmp(&w[1].0) as i32, w[2].1.cmp(&w[1].1) as i32);
+            if d1 != d2 {
+                bends += 1;
+            }
+        }
+        assert_eq!(bends, 1, "expected one bend, got {bends} in path {path:?}");
+    }
+
+    #[test]
+    fn maze_routes_around_an_obstacle() {
+        // A 5×5 cell obstacle in the middle of a 15×15 grid forces a
+        // detour. Start left of the obstacle, goal to the right.
+        let bounds = Bbox {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 14.0 * GRID_MM,
+            y1: 14.0 * GRID_MM,
+        };
+        let obstacle = Bbox {
+            x0: 5.0 * GRID_MM,
+            y0: 5.0 * GRID_MM,
+            x1: 9.0 * GRID_MM,
+            y1: 9.0 * GRID_MM,
+        };
+        let g = build_maze_grid(&[], usize::MAX, &[obstacle], &[], Some(bounds))
+            .expect("build_maze_grid");
+        // Start at (2, 7), goal at (12, 7): centerline blocked.
+        let path = maze_shortest_path(&g, ucell((2, 7)), ucell((12, 7))).expect("path");
+        // Verify no path point lies strictly inside the obstacle
+        // (using the same 0.1 mm tolerance the verifier uses).
+        for &(c, r) in &path {
+            #[allow(clippy::cast_precision_loss)]
+            let wx = g.x0 + (c as f64) * GRID_MM;
+            #[allow(clippy::cast_precision_loss)]
+            let wy = g.y0 + (r as f64) * GRID_MM;
+            assert!(
+                !(wx > obstacle.x0 + 0.1
+                    && wx < obstacle.x1 - 0.1
+                    && wy > obstacle.y0 + 0.1
+                    && wy < obstacle.y1 - 0.1),
+                "path cell ({c},{r}) = ({wx:.3},{wy:.3}) is inside obstacle"
+            );
+        }
+        // Path is longer than the straight-line 11.
+        assert!(path.len() > 11);
+    }
+
+    #[test]
+    fn maze_returns_none_when_goal_unreachable() {
+        // A horizontal wall splits the grid into halves; routing
+        // across is impossible.
+        let bounds = Bbox {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 10.0 * GRID_MM,
+            y1: 10.0 * GRID_MM,
+        };
+        // Wall spans the full width as a single big obstacle.
+        let wall = Bbox {
+            x0: -GRID_MM,
+            y0: 4.0 * GRID_MM,
+            x1: 12.0 * GRID_MM,
+            y1: 6.0 * GRID_MM,
+        };
+        let g =
+            build_maze_grid(&[], usize::MAX, &[wall], &[], Some(bounds)).expect("build_maze_grid");
+        // The cell-blocked test marks the wall's strict interior
+        // (cells whose center is at y=5*GRID_MM); the edge-blocked
+        // test additionally marks the boundary edges. Together no
+        // path crosses from row<5 to row>5.
+        assert!(maze_shortest_path(&g, ucell((1, 1)), ucell((1, 9))).is_none());
+    }
+
+    #[test]
+    fn maze_prefers_fewer_bends_when_lengths_tie() {
+        // From (0,0) to (4,4), Manhattan distance 8 (path length 9).
+        // Many minimum-length paths exist with varying bend counts.
+        // The bend penalty should force a 1-bend path (L-shape).
+        let g = empty_grid(Bbox {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 8.0 * GRID_MM,
+            y1: 8.0 * GRID_MM,
+        });
+        let path = maze_shortest_path(&g, ucell((0, 0)), ucell((4, 4))).expect("path");
+        assert_eq!(path.len(), 9);
+        let mut bends = 0;
+        for w in path.windows(3) {
+            let d1 = (w[1].0.cmp(&w[0].0) as i32, w[1].1.cmp(&w[0].1) as i32);
+            let d2 = (w[2].0.cmp(&w[1].0) as i32, w[2].1.cmp(&w[1].1) as i32);
+            if d1 != d2 {
+                bends += 1;
+            }
+        }
+        assert_eq!(
+            bends, 1,
+            "bend-minimising router should produce 1-bend path, got {bends}"
+        );
+    }
+
+    #[test]
+    fn try_move_steiner_junction_relocates_offender_into_clear_space() {
+        // A single net with a Steiner T-junction inside an obstacle.
+        // The junction is at (0,0), surrounded by three incident
+        // segments going to (-5,0), (5,0), and (0,5). The obstacle
+        // covers (-1..1)x(-1..1) — the junction sits in its interior.
+        let mut routed = vec![RoutedNet {
+            segments: vec![
+                Segment {
+                    x1: -5.0,
+                    y1: 0.0,
+                    x2: 0.0,
+                    y2: 0.0,
+                },
+                Segment {
+                    x1: 5.0,
+                    y1: 0.0,
+                    x2: 0.0,
+                    y2: 0.0,
+                },
+                Segment {
+                    x1: 0.0,
+                    y1: 5.0,
+                    x2: 0.0,
+                    y2: 0.0,
+                },
+            ],
+            junctions: vec![],
+        }];
+        let obstacles = [Bbox {
+            x0: -1.0,
+            y0: -1.0,
+            x1: 1.0,
+            y1: 1.0,
+        }];
+        let own_pins: std::collections::HashSet<(i64, i64)> =
+            [(-5000, 0), (5000, 0), (0, 5000)].into_iter().collect();
+        let foreign: [Bbox; 0] = [];
+        // Pick segment 0 (incident on the junction).
+        let installed =
+            try_move_steiner_junction(&mut routed, 0, 0, &obstacles, &foreign, &own_pins);
+        assert!(installed, "junction move should succeed in open space");
+        // Every segment of the net must be outside the obstacle.
+        for s in &routed[0].segments {
+            assert!(
+                !obstacles[0].intersects_segment(s.x1, s.y1, s.x2, s.y2),
+                "segment {s:?} still crosses obstacle"
+            );
+        }
     }
 }

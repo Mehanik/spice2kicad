@@ -232,26 +232,12 @@ const SHEETS: &[&str] = &[
     "opamp_inverting_real",
 ];
 
-/// Per-fixture crossing budget. v0.1 baselines (tracked as v0.2
-/// router-improvement work items):
-///
-/// * `common_emitter` — the `e` net cannot detour around Q1's body
-///   with the current obstacle-avoidance heuristic.
-/// * `diff_pair` — VCC's voltage-source body sits in the path of
-///   the supply rail's routing for the same reason.
-///
-/// The other three fixtures emit zero foreign-body crossings.
-fn v12_crossing_budget(name: &str) -> usize {
-    // v0.1 baselines per fixture, each tracked as a v0.2 router or
-    // placer improvement task. The budget is calibrated to the
-    // current emit so a *regression* (an additional crossing newly
-    // introduced) trips the test; the budget is the high-water mark
-    // we expect to drive down as the router learns better detours.
-    match name {
-        "common_emitter" | "diff_pair" => 4,
-        "opamp_inverting_real" => 8,
-        _ => 0,
-    }
+/// Per-fixture crossing budget. After the V11/V12 cascade + Steiner-
+/// junction-move step + maze fallback, every router-fixable case is
+/// gone across all five v0.1 fixtures. A non-zero budget here would
+/// be a regression: every fixture should route clean.
+fn v12_crossing_budget(_name: &str) -> usize {
+    0
 }
 
 #[test]

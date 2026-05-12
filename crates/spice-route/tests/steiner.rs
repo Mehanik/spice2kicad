@@ -135,6 +135,7 @@ fn route_pipeline_emits_wires_for_two_pin_signal_net() {
         sheet_uuid: "test-uuid",
         project_name: "test",
         obstacles: &[],
+        bounds: None,
     });
     assert_eq!(count_starting(&r, "(wire"), 2);
     assert_eq!(count_starting(&r, "(junction"), 0);
@@ -253,6 +254,7 @@ fn route_pipeline_emits_junction_for_three_pin_t() {
         sheet_uuid: "test-uuid",
         project_name: "test",
         obstacles: &[],
+        bounds: None,
     });
     let wires = count_starting(&r, "(wire");
     assert!((2..=3).contains(&wires), "got {wires} wires");

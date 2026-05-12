@@ -928,6 +928,7 @@ fn route_nets(
         sheet_uuid: &suuid,
         project_name: GENERATOR,
         obstacles,
+        bounds: None,
     });
     // Split V11 (correctness) residue from other warnings. A `v11:`
     // prefix indicates a wire still touches a foreign pin after the
