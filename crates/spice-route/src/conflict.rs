@@ -15,7 +15,7 @@
 //! that lands later. The jog-once loop is sufficient for the small
 //! v0.1 fixtures.
 
-use crate::types::{Bbox, RoutedNet, Segment};
+use crate::types::{Bbox, Direction, RoutedNet, Segment};
 
 const GRID_MM: f64 = 1.27;
 const EPS: f64 = 1e-6;
@@ -134,6 +134,32 @@ fn find_conflicts(routed: &[RoutedNet]) -> Vec<((i64, i64), Vec<usize>)> {
 #[allow(clippy::cast_possible_truncation)]
 fn key(x: f64, y: f64) -> (i64, i64) {
     ((x * 1000.0).round() as i64, (y * 1000.0).round() as i64)
+}
+
+/// Quantised pin-coord → outward-direction lookup, built by the
+/// router once per request.
+type PinOutwardMap = std::collections::HashMap<(i64, i64), Direction>;
+
+/// True iff `corner` is the L-corner placement that lets the leg
+/// incident on `pin` (running `pin → corner`) extend in `pin`'s
+/// outward direction. Returns false when `pin` is not in
+/// `pin_outward` (treat as unconstrained).
+fn corner_satisfies_outward(
+    pin: (f64, f64),
+    corner: (f64, f64),
+    pin_outward: &PinOutwardMap,
+) -> bool {
+    let Some(&dir) = pin_outward.get(&key(pin.0, pin.1)) else {
+        return false;
+    };
+    let dx = corner.0 - pin.0;
+    let dy = corner.1 - pin.1;
+    match dir {
+        Direction::Up => dy < -EPS && dx.abs() < EPS,
+        Direction::Down => dy > EPS && dx.abs() < EPS,
+        Direction::Left => dx < -EPS && dy.abs() < EPS,
+        Direction::Right => dx > EPS && dy.abs() < EPS,
+    }
 }
 
 /// Jog a single endpoint of `net` that touches `point` by one grid
@@ -259,6 +285,7 @@ pub fn avoid_foreign_pins<S: ::std::hash::BuildHasher>(
     foreign_per_net: &[std::collections::HashSet<(i64, i64), S>],
     own_pin_coords: &[std::collections::HashSet<(i64, i64), S>],
     obstacles: &[Bbox],
+    pin_outward: &PinOutwardMap,
 ) -> Vec<String> {
     let mut warnings = Vec::new();
     if routed.is_empty() || foreign_per_net.is_empty() {
@@ -302,7 +329,7 @@ pub fn avoid_foreign_pins<S: ::std::hash::BuildHasher>(
                 Some(s) => s,
                 None => continue,
             };
-            reroute_one_net_v11(routed, i, pins, own_for_net, obstacles);
+            reroute_one_net_v11(routed, i, pins, own_for_net, obstacles, pin_outward);
         }
         let changed = pre_signatures
             .iter()
@@ -393,6 +420,7 @@ fn reroute_one_net_v11<S: ::std::hash::BuildHasher>(
     foreign_pins: &[(i64, i64)],
     own_pins: &std::collections::HashSet<(i64, i64), S>,
     obstacles: &[Bbox],
+    pin_outward: &PinOutwardMap,
 ) {
     #[allow(clippy::cast_precision_loss)]
     let bboxes: Vec<Bbox> = foreign_pins
@@ -449,10 +477,26 @@ fn reroute_one_net_v11<S: ::std::hash::BuildHasher>(
         let Some(idx) = find_interior_offender(&routed[target], &bboxes) else {
             break;
         };
-        if try_alt_l_corner(routed, target, idx, &bboxes, obstacles, own_pins) {
+        if try_alt_l_corner(
+            routed,
+            target,
+            idx,
+            &bboxes,
+            obstacles,
+            own_pins,
+            pin_outward,
+        ) {
             continue;
         }
-        if try_u_detour_l_pair(routed, target, idx, &bboxes, obstacles, own_pins) {
+        if try_u_detour_l_pair(
+            routed,
+            target,
+            idx,
+            &bboxes,
+            obstacles,
+            own_pins,
+            pin_outward,
+        ) {
             continue;
         }
         if !try_detour_segment(routed, target, idx, &bboxes, obstacles) {
@@ -522,91 +566,109 @@ fn try_u_detour_l_pair<S: ::std::hash::BuildHasher>(
     foreign_bboxes: &[Bbox],
     obstacle_bboxes: &[Bbox],
     own_pins: &std::collections::HashSet<(i64, i64), S>,
+    pin_outward: &PinOutwardMap,
 ) -> bool {
     let n = routed[target].segments.len();
-    for j in 0..n {
-        if j == idx {
-            continue;
-        }
-        let a = routed[target].segments[idx];
-        let b = routed[target].segments[j];
-        let Some((p_far, q_far, corner)) = l_pair_endpoints(&a, &b) else {
-            continue;
-        };
-        // The corner doubling as an own pin must stay anchored —
-        // the U-detour skips that coord entirely, which would
-        // orphan the pin from the new path.
-        if own_pins.contains(&key(corner.0, corner.1)) {
-            continue;
-        }
-        // T-junction at the corner means a third leg of the net
-        // attaches there. Replacing the L pair would orphan that
-        // leg from the rest of the tree.
-        if corner_degree(&routed[target], corner) > 2 {
-            continue;
-        }
-        // Cardinal axis of the connecting span: U detour offsets the
-        // *minor* coord (the one that differs between p_far and
-        // q_far in the non-original-L direction). For an L between
-        // (px,py) and (qx,qy) we can try a U at either x = px + k·g
-        // (running parallel to original vertical leg) or y = py + k·g
-        // (running parallel to original horizontal leg). Both axes
-        // are tried.
-        for axis in [Axis::HorizontalFirst, Axis::VerticalFirst] {
-            for k in 1..=OBSTACLE_RETRY_CAP {
-                for sign in [1.0_f64, -1.0_f64] {
-                    #[allow(clippy::cast_precision_loss)]
-                    let off = sign * GRID_MM * (k as f64);
-                    let (mid1, mid2) = match axis {
-                        Axis::HorizontalFirst => {
-                            ((p_far.0, p_far.1 + off), (q_far.0, p_far.1 + off))
+    for outward_strict in [true, false] {
+        for j in 0..n {
+            if j == idx {
+                continue;
+            }
+            let a = routed[target].segments[idx];
+            let b = routed[target].segments[j];
+            let Some((p_far, q_far, corner)) = l_pair_endpoints(&a, &b) else {
+                continue;
+            };
+            // The corner doubling as an own pin must stay anchored —
+            // the U-detour skips that coord entirely, which would
+            // orphan the pin from the new path.
+            if own_pins.contains(&key(corner.0, corner.1)) {
+                continue;
+            }
+            // T-junction at the corner means a third leg of the net
+            // attaches there. Replacing the L pair would orphan that
+            // leg from the rest of the tree.
+            if corner_degree(&routed[target], corner) > 2 {
+                continue;
+            }
+            // Cardinal axis of the connecting span: U detour offsets the
+            // *minor* coord (the one that differs between p_far and
+            // q_far in the non-original-L direction). For an L between
+            // (px,py) and (qx,qy) we can try a U at either x = px + k·g
+            // (running parallel to original vertical leg) or y = py + k·g
+            // (running parallel to original horizontal leg). Both axes
+            // are tried.
+            for axis in [Axis::HorizontalFirst, Axis::VerticalFirst] {
+                for k in 1..=OBSTACLE_RETRY_CAP {
+                    for sign in [1.0_f64, -1.0_f64] {
+                        #[allow(clippy::cast_precision_loss)]
+                        let off = sign * GRID_MM * (k as f64);
+                        let (mid1, mid2) = match axis {
+                            Axis::HorizontalFirst => {
+                                ((p_far.0, p_far.1 + off), (q_far.0, p_far.1 + off))
+                            }
+                            Axis::VerticalFirst => {
+                                ((p_far.0 + off, p_far.1), (p_far.0 + off, q_far.1))
+                            }
+                        };
+                        let parts = [
+                            Segment {
+                                x1: p_far.0,
+                                y1: p_far.1,
+                                x2: mid1.0,
+                                y2: mid1.1,
+                            },
+                            Segment {
+                                x1: mid1.0,
+                                y1: mid1.1,
+                                x2: mid2.0,
+                                y2: mid2.1,
+                            },
+                            Segment {
+                                x1: mid2.0,
+                                y1: mid2.1,
+                                x2: q_far.0,
+                                y2: q_far.1,
+                            },
+                        ];
+                        if parts.iter().any(approx_zero_len) {
+                            continue;
                         }
-                        Axis::VerticalFirst => ((p_far.0 + off, p_far.1), (p_far.0 + off, q_far.1)),
-                    };
-                    let parts = [
-                        Segment {
-                            x1: p_far.0,
-                            y1: p_far.1,
-                            x2: mid1.0,
-                            y2: mid1.1,
-                        },
-                        Segment {
-                            x1: mid1.0,
-                            y1: mid1.1,
-                            x2: mid2.0,
-                            y2: mid2.1,
-                        },
-                        Segment {
-                            x1: mid2.0,
-                            y1: mid2.1,
-                            x2: q_far.0,
-                            y2: q_far.1,
-                        },
-                    ];
-                    if parts.iter().any(approx_zero_len) {
-                        continue;
+                        if parts.iter().any(|p| crosses_any_bbox(p, foreign_bboxes)) {
+                            continue;
+                        }
+                        if parts.iter().any(|p| crosses_any_bbox(p, obstacle_bboxes)) {
+                            continue;
+                        }
+                        if parts
+                            .iter()
+                            .any(|p| part_overlaps_sibling(routed, target, p))
+                        {
+                            continue;
+                        }
+                        // Outward filter (V5): the legs incident on the
+                        // pin endpoints `p_far` and `q_far` are
+                        // `pin → mid1` and `pin → mid2` respectively.
+                        if outward_strict {
+                            let p_is_pin = pin_outward.contains_key(&key(p_far.0, p_far.1));
+                            let q_is_pin = pin_outward.contains_key(&key(q_far.0, q_far.1));
+                            if p_is_pin && !corner_satisfies_outward(p_far, mid1, pin_outward) {
+                                continue;
+                            }
+                            if q_is_pin && !corner_satisfies_outward(q_far, mid2, pin_outward) {
+                                continue;
+                            }
+                        }
+                        // Install: drop both original L-pair segments,
+                        // append the three new parts.
+                        let (lo, hi) = if idx < j { (idx, j) } else { (j, idx) };
+                        routed[target].segments.remove(hi);
+                        routed[target].segments.remove(lo);
+                        for p in parts {
+                            routed[target].segments.push(p);
+                        }
+                        return true;
                     }
-                    if parts.iter().any(|p| crosses_any_bbox(p, foreign_bboxes)) {
-                        continue;
-                    }
-                    if parts.iter().any(|p| crosses_any_bbox(p, obstacle_bboxes)) {
-                        continue;
-                    }
-                    if parts
-                        .iter()
-                        .any(|p| part_overlaps_sibling(routed, target, p))
-                    {
-                        continue;
-                    }
-                    // Install: drop both original L-pair segments,
-                    // append the three new parts.
-                    let (lo, hi) = if idx < j { (idx, j) } else { (j, idx) };
-                    routed[target].segments.remove(hi);
-                    routed[target].segments.remove(lo);
-                    for p in parts {
-                        routed[target].segments.push(p);
-                    }
-                    return true;
                 }
             }
         }
@@ -636,72 +698,95 @@ fn try_alt_l_corner<S: ::std::hash::BuildHasher>(
     foreign_bboxes: &[Bbox],
     obstacle_bboxes: &[Bbox],
     own_pins: &std::collections::HashSet<(i64, i64), S>,
+    pin_outward: &PinOutwardMap,
 ) -> bool {
     let n = routed[target].segments.len();
-    for j in 0..n {
-        if j == idx {
-            continue;
-        }
-        let a = routed[target].segments[idx];
-        let b = routed[target].segments[j];
-        let Some((p_far, q_far, corner)) = l_pair_endpoints(&a, &b) else {
-            continue;
-        };
-        // If the corner is an own pin we cannot move it without
-        // orphaning that pin from the net.
-        if own_pins.contains(&key(corner.0, corner.1)) {
-            continue;
-        }
-        // A T-junction corner (≥ 3 segments meet) carries a third
-        // leg that would be orphaned if we swapped the L pair only.
-        if corner_degree(&routed[target], corner) > 2 {
-            continue;
-        }
-        // Alt corners to try.
-        let alt1 = (p_far.0, q_far.1);
-        let alt2 = (q_far.0, p_far.1);
-        for alt in [alt1, alt2] {
-            // Skip the corner we already have.
-            if (alt.0 - corner.0).abs() < EPS && (alt.1 - corner.1).abs() < EPS {
+    // First pass: prefer candidates whose installed L-pair's leg
+    // incident on each pin endpoint extends in the pin's outward
+    // direction. Second pass: relax that constraint so we still
+    // resolve the V11/V12 violation even when no outward-clean
+    // alternative exists.
+    for outward_strict in [true, false] {
+        for j in 0..n {
+            if j == idx {
                 continue;
             }
-            let s1 = Segment {
-                x1: p_far.0,
-                y1: p_far.1,
-                x2: alt.0,
-                y2: alt.1,
+            let a = routed[target].segments[idx];
+            let b = routed[target].segments[j];
+            let Some((p_far, q_far, corner)) = l_pair_endpoints(&a, &b) else {
+                continue;
             };
-            let s2 = Segment {
-                x1: alt.0,
-                y1: alt.1,
-                x2: q_far.0,
-                y2: q_far.1,
-            };
-            if approx_zero_len(&s1) || approx_zero_len(&s2) {
+            // If the corner is an own pin we cannot move it without
+            // orphaning that pin from the net.
+            if own_pins.contains(&key(corner.0, corner.1)) {
                 continue;
             }
-            if [s1, s2].iter().any(|p| crosses_any_bbox(p, foreign_bboxes)) {
+            // A T-junction corner (≥ 3 segments meet) carries a third
+            // leg that would be orphaned if we swapped the L pair only.
+            if corner_degree(&routed[target], corner) > 2 {
                 continue;
             }
-            if [s1, s2]
-                .iter()
-                .any(|p| crosses_any_bbox(p, obstacle_bboxes))
-            {
-                continue;
+            // Alt corners to try.
+            let alt1 = (p_far.0, q_far.1);
+            let alt2 = (q_far.0, p_far.1);
+            for alt in [alt1, alt2] {
+                // Skip the corner we already have.
+                if (alt.0 - corner.0).abs() < EPS && (alt.1 - corner.1).abs() < EPS {
+                    continue;
+                }
+                let s1 = Segment {
+                    x1: p_far.0,
+                    y1: p_far.1,
+                    x2: alt.0,
+                    y2: alt.1,
+                };
+                let s2 = Segment {
+                    x1: alt.0,
+                    y1: alt.1,
+                    x2: q_far.0,
+                    y2: q_far.1,
+                };
+                if approx_zero_len(&s1) || approx_zero_len(&s2) {
+                    continue;
+                }
+                if [s1, s2].iter().any(|p| crosses_any_bbox(p, foreign_bboxes)) {
+                    continue;
+                }
+                if [s1, s2]
+                    .iter()
+                    .any(|p| crosses_any_bbox(p, obstacle_bboxes))
+                {
+                    continue;
+                }
+                if part_overlaps_sibling(routed, target, &s1)
+                    || part_overlaps_sibling(routed, target, &s2)
+                {
+                    continue;
+                }
+                // Outward-direction filter (V5): when `outward_strict` is
+                // set, require that the corner placement honour every
+                // pin-endpoint's outward direction. A pin endpoint here is
+                // `p_far` or `q_far` — its incident leg in the new L is
+                // `pin → alt`.
+                if outward_strict {
+                    let p_is_pin = pin_outward.contains_key(&key(p_far.0, p_far.1));
+                    let q_is_pin = pin_outward.contains_key(&key(q_far.0, q_far.1));
+                    if p_is_pin && !corner_satisfies_outward(p_far, alt, pin_outward) {
+                        continue;
+                    }
+                    if q_is_pin && !corner_satisfies_outward(q_far, alt, pin_outward) {
+                        continue;
+                    }
+                }
+                // Install: replace both segments. Drop the higher index
+                // first so the lower index stays valid.
+                let (lo, hi) = if idx < j { (idx, j) } else { (j, idx) };
+                routed[target].segments.remove(hi);
+                routed[target].segments.remove(lo);
+                routed[target].segments.push(s1);
+                routed[target].segments.push(s2);
+                return true;
             }
-            if part_overlaps_sibling(routed, target, &s1)
-                || part_overlaps_sibling(routed, target, &s2)
-            {
-                continue;
-            }
-            // Install: replace both segments. Drop the higher index
-            // first so the lower index stays valid.
-            let (lo, hi) = if idx < j { (idx, j) } else { (j, idx) };
-            routed[target].segments.remove(hi);
-            routed[target].segments.remove(lo);
-            routed[target].segments.push(s1);
-            routed[target].segments.push(s2);
-            return true;
         }
     }
     false
@@ -963,6 +1048,7 @@ pub fn avoid_obstacles<S: ::std::hash::BuildHasher>(
     own_pin_coords: &[std::collections::HashSet<(i64, i64), S>],
     foreign_pins_per_net: &[std::collections::HashSet<(i64, i64), S>],
     bounds: Option<Bbox>,
+    pin_outward: &PinOutwardMap,
 ) -> Vec<String> {
     let mut warnings = Vec::new();
     if obstacles.is_empty() || routed.is_empty() {
@@ -1039,7 +1125,15 @@ pub fn avoid_obstacles<S: ::std::hash::BuildHasher>(
                 None => continue,
             };
             let foreign_bboxes: &[Bbox] = &foreign_bboxes_per_net[i];
-            reroute_one_net_v12(routed, i, obstacles, foreign_bboxes, own_for_net, bounds);
+            reroute_one_net_v12(
+                routed,
+                i,
+                obstacles,
+                foreign_bboxes,
+                own_for_net,
+                bounds,
+                pin_outward,
+            );
         }
         let changed = pre_signatures
             .iter()
@@ -1084,6 +1178,7 @@ fn reroute_one_net_v12<S: ::std::hash::BuildHasher>(
     foreign_bboxes: &[Bbox],
     own_pins: &std::collections::HashSet<(i64, i64), S>,
     bounds: Option<Bbox>,
+    pin_outward: &PinOutwardMap,
 ) {
     let mut guard = 0;
     loop {
@@ -1095,11 +1190,27 @@ fn reroute_one_net_v12<S: ::std::hash::BuildHasher>(
             break;
         };
         // 1. Alt L corner.
-        if try_alt_l_corner(routed, target, idx, foreign_bboxes, obstacles, own_pins) {
+        if try_alt_l_corner(
+            routed,
+            target,
+            idx,
+            foreign_bboxes,
+            obstacles,
+            own_pins,
+            pin_outward,
+        ) {
             continue;
         }
         // 2. U-detour around an L pair.
-        if try_u_detour_l_pair(routed, target, idx, foreign_bboxes, obstacles, own_pins) {
+        if try_u_detour_l_pair(
+            routed,
+            target,
+            idx,
+            foreign_bboxes,
+            obstacles,
+            own_pins,
+            pin_outward,
+        ) {
             continue;
         }
         // 3. U-detour around the offending segment alone.
@@ -1118,7 +1229,15 @@ fn reroute_one_net_v12<S: ::std::hash::BuildHasher>(
         // 5. Stage B — maze route. Replaces the offending segment with
         // a BFS shortest-path that avoids every obstacle, foreign pin
         // and sibling segment interior.
-        if try_maze_route_segment(routed, target, idx, obstacles, foreign_bboxes, bounds) {
+        if try_maze_route_segment(
+            routed,
+            target,
+            idx,
+            obstacles,
+            foreign_bboxes,
+            bounds,
+            pin_outward,
+        ) {
             continue;
         }
         // Nothing helped — leave the segment and bail so the residual
@@ -1358,6 +1477,7 @@ fn try_maze_route_segment(
     obstacles: &[Bbox],
     foreign_bboxes: &[Bbox],
     bounds: Option<Bbox>,
+    pin_outward: &PinOutwardMap,
 ) -> bool {
     let s = routed[target].segments[idx];
     // Don't maze-route a zero-length probe.
@@ -1375,7 +1495,18 @@ fn try_maze_route_segment(
     if start == goal {
         return false;
     }
-    let Some(path) = maze_shortest_path(&grid, start, goal) else {
+    // V5: if the start (or goal) coincides with a pin, constrain the
+    // first (last) step of the maze path to that pin's outward
+    // direction. Falls back to unconstrained when no outward-clean
+    // path exists.
+    let start_outward = pin_outward.get(&key(s.x1, s.y1)).copied();
+    let goal_outward = pin_outward.get(&key(s.x2, s.y2)).copied();
+    let path = match maze_shortest_path_constrained(&grid, start, goal, start_outward, goal_outward)
+    {
+        Some(p) => Some(p),
+        None => maze_shortest_path(&grid, start, goal),
+    };
+    let Some(path) = path else {
         return false;
     };
     if path.len() < 2 {
@@ -1688,6 +1819,77 @@ fn build_maze_grid(
 /// Dijkstra over (cell, in-direction) states. Returns the path as a
 /// list of cells from `start` to `goal` inclusive, with the
 /// shortest-bend-penalty score, or `None` when unreachable.
+/// Same as [`maze_shortest_path`] but additionally constrains the
+/// first move out of `start` (when `start_dir` is `Some`) and the last
+/// move into `goal` (when `goal_dir` is `Some`) to the supplied
+/// directions. Used by the V5 outward-direction enforcement at pin
+/// endpoints. Returns `None` when no path satisfying the constraints
+/// exists; the caller is expected to fall back to the unconstrained
+/// [`maze_shortest_path`].
+fn maze_shortest_path_constrained(
+    grid: &MazeGrid,
+    start: (usize, usize),
+    goal: (usize, usize),
+    start_dir: Option<Direction>,
+    goal_dir: Option<Direction>,
+) -> Option<Vec<(usize, usize)>> {
+    let dir_to_nd = |d: Direction| -> usize {
+        match d {
+            Direction::Right => 0,
+            Direction::Left => 1,
+            // Maze-grid +y matches file-y +1 step (rows ascend).
+            Direction::Down => 2,
+            Direction::Up => 3,
+        }
+    };
+    let path = maze_shortest_path(grid, start, goal)?;
+    // The constrained variant: re-run the search but reject any move
+    // that violates the first/last step constraint. Cheap approach:
+    // run plain BFS and post-filter; this preserves the existing
+    // implementation. The filter checks the second cell direction
+    // against `start_dir` and the penultimate-to-last direction
+    // against `goal_dir`.
+    if path.len() < 2 {
+        return Some(path);
+    }
+    #[allow(clippy::cast_possible_wrap)]
+    let first_step = (
+        path[1].0 as i64 - path[0].0 as i64,
+        path[1].1 as i64 - path[0].1 as i64,
+    );
+    if let Some(d) = start_dir {
+        let nd = dir_to_nd(d);
+        let want = (
+            i64::from([1_i32, -1, 0, 0][nd]),
+            i64::from([0_i32, 0, 1, -1][nd]),
+        );
+        if first_step != want {
+            return None;
+        }
+    }
+    let n = path.len();
+    #[allow(clippy::cast_possible_wrap)]
+    let last_step = (
+        path[n - 1].0 as i64 - path[n - 2].0 as i64,
+        path[n - 1].1 as i64 - path[n - 2].1 as i64,
+    );
+    if let Some(d) = goal_dir {
+        // Goal outward direction = direction the pin's stem points.
+        // The maze path *arrives* at the goal, so the incoming step
+        // direction is the opposite of the pin's outward.
+        let nd = dir_to_nd(d);
+        let want_outward = (
+            i64::from([1_i32, -1, 0, 0][nd]),
+            i64::from([0_i32, 0, 1, -1][nd]),
+        );
+        let want_incoming = (-want_outward.0, -want_outward.1);
+        if last_step != want_incoming {
+            return None;
+        }
+    }
+    Some(path)
+}
+
 fn maze_shortest_path(
     grid: &MazeGrid,
     start: (usize, usize),

@@ -39,18 +39,50 @@ pub fn drop_zero_length(routed: &mut [RoutedNet]) {
 ///
 /// Iterates until no more merges fire.
 pub fn coalesce_collinear(routed: &mut [RoutedNet]) {
-    for net in routed.iter_mut() {
-        coalesce_one(net);
+    let empty: [std::collections::HashSet<(i64, i64)>; 0] = [];
+    coalesce_collinear_with_barriers(routed, &empty);
+}
+
+/// Variant of [`coalesce_collinear`] that additionally treats every
+/// coord in `barriers[i]` (per routed-net `i`) as a non-mergeable
+/// shared endpoint. Used by the router pipeline to anchor own pins
+/// without leaking extra `(junction …)` glyphs into the emitted
+/// schematic.
+pub fn coalesce_collinear_with_barriers<S: ::std::hash::BuildHasher>(
+    routed: &mut [RoutedNet],
+    barriers: &[std::collections::HashSet<(i64, i64), S>],
+) {
+    let empty: std::collections::HashSet<(i64, i64)> = std::collections::HashSet::new();
+    for (i, net) in routed.iter_mut().enumerate() {
+        let bar = barriers
+            .get(i)
+            .map_or_else(|| &empty as &dyn BarrierSet, |s| s as &dyn BarrierSet);
+        coalesce_one(net, bar);
     }
 }
 
-fn coalesce_one(net: &mut RoutedNet) {
+/// Object-safe trait so the cleanup pass can take either an empty
+/// barrier (legacy callers) or a populated one, regardless of the
+/// caller's `HashSet` hasher.
+trait BarrierSet {
+    fn contains_qkey(&self, k: (i64, i64)) -> bool;
+}
+
+impl<S: ::std::hash::BuildHasher> BarrierSet for std::collections::HashSet<(i64, i64), S> {
+    fn contains_qkey(&self, k: (i64, i64)) -> bool {
+        self.contains(&k)
+    }
+}
+
+fn coalesce_one(net: &mut RoutedNet, barriers: &dyn BarrierSet) {
     loop {
         let n = net.segments.len();
         let mut merged = false;
         'outer: for i in 0..n {
             for j in (i + 1)..n {
-                if let Some(m) = try_merge(&net.segments[i], &net.segments[j], &net.junctions) {
+                if let Some(m) =
+                    try_merge(&net.segments[i], &net.segments[j], &net.junctions, barriers)
+                {
                     // Preserve indices: replace i, remove j.
                     net.segments[i] = m;
                     net.segments.remove(j);
@@ -65,7 +97,12 @@ fn coalesce_one(net: &mut RoutedNet) {
     }
 }
 
-fn try_merge(a: &Segment, b: &Segment, junctions: &[(f64, f64)]) -> Option<Segment> {
+fn try_merge(
+    a: &Segment,
+    b: &Segment,
+    junctions: &[(f64, f64)],
+    barriers: &dyn BarrierSet,
+) -> Option<Segment> {
     let a_horiz = (a.y1 - a.y2).abs() < EPS;
     let a_vert = (a.x1 - a.x2).abs() < EPS;
     let b_horiz = (b.y1 - b.y2).abs() < EPS;
@@ -79,14 +116,23 @@ fn try_merge(a: &Segment, b: &Segment, junctions: &[(f64, f64)]) -> Option<Segme
             (a.x1, b.x1, a.x2, b.x2),
             (a.x1, b.x2, a.x2, b.x1),
         ] {
-            if (ax - bx).abs() < EPS && !is_junction((ax, a.y1), junctions) {
-                // shared point at (ax, a.y1).
-                return Some(Segment {
+            if (ax - bx).abs() < EPS
+                && !is_junction((ax, a.y1), junctions)
+                && !is_barrier((ax, a.y1), barriers)
+            {
+                // shared point at (ax, a.y1). Reject when the merged
+                // span would have a barrier coord in its interior —
+                // that's the V5 outward-stub case where the trunk
+                // passes through a pin between the two stubs.
+                let merged = Segment {
                     x1: other_a,
                     y1: a.y1,
                     x2: other_b,
                     y2: a.y1,
-                });
+                };
+                if !barrier_in_interior(&merged, barriers) {
+                    return Some(merged);
+                }
             }
         }
     }
@@ -98,13 +144,19 @@ fn try_merge(a: &Segment, b: &Segment, junctions: &[(f64, f64)]) -> Option<Segme
             (a.y1, b.y1, a.y2, b.y2),
             (a.y1, b.y2, a.y2, b.y1),
         ] {
-            if (ay - by).abs() < EPS && !is_junction((a.x1, ay), junctions) {
-                return Some(Segment {
+            if (ay - by).abs() < EPS
+                && !is_junction((a.x1, ay), junctions)
+                && !is_barrier((a.x1, ay), barriers)
+            {
+                let merged = Segment {
                     x1: a.x1,
                     y1: other_a,
                     x2: a.x1,
                     y2: other_b,
-                });
+                };
+                if !barrier_in_interior(&merged, barriers) {
+                    return Some(merged);
+                }
             }
         }
     }
@@ -115,6 +167,46 @@ fn is_junction(p: (f64, f64), junctions: &[(f64, f64)]) -> bool {
     junctions
         .iter()
         .any(|&(jx, jy)| (jx - p.0).abs() < EPS && (jy - p.1).abs() < EPS)
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn is_barrier(p: (f64, f64), barriers: &dyn BarrierSet) -> bool {
+    let k = ((p.0 * 1000.0).round() as i64, (p.1 * 1000.0).round() as i64);
+    barriers.contains_qkey(k)
+}
+
+/// True iff any barrier coordinate lies strictly inside `seg`'s
+/// axis-parallel span (exclusive of both endpoints). Walks the 1.27 mm
+/// grid between the endpoints; barrier coords align to the grid by
+/// construction. Used by the cleanup pass to refuse a merge that
+/// would route the merged trunk through a pin.
+#[allow(clippy::cast_possible_truncation, clippy::similar_names)]
+fn barrier_in_interior(seg: &Segment, barriers: &dyn BarrierSet) -> bool {
+    const GRID_UM: i64 = 1270;
+    let qx1 = (seg.x1 * 1000.0).round() as i64;
+    let qy1 = (seg.y1 * 1000.0).round() as i64;
+    let qx2 = (seg.x2 * 1000.0).round() as i64;
+    let qy2 = (seg.y2 * 1000.0).round() as i64;
+    if qx1 == qx2 {
+        let (lo, hi) = (qy1.min(qy2), qy1.max(qy2));
+        let mut y = lo + GRID_UM;
+        while y < hi {
+            if barriers.contains_qkey((qx1, y)) {
+                return true;
+            }
+            y += GRID_UM;
+        }
+    } else if qy1 == qy2 {
+        let (lo, hi) = (qx1.min(qx2), qx1.max(qx2));
+        let mut x = lo + GRID_UM;
+        while x < hi {
+            if barriers.contains_qkey((x, qy1)) {
+                return true;
+            }
+            x += GRID_UM;
+        }
+    }
+    false
 }
 
 /// Collapse the per-net junction lists into a single deduplicated set.

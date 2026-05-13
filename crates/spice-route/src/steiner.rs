@@ -12,10 +12,36 @@
 //! Higher-N nets fall through to a stub that lands in Task 4
 //! (Hanan-grid DP) and Task 5 (FLUTE for N ≥ 10).
 
-use crate::types::{PinRef, Segment};
+use crate::types::{Direction, PinRef, Segment};
 use lexpr::Value as Sexpr;
 
 const EPS: f64 = 1e-6;
+const GRID_MM: f64 = 1.27;
+
+/// Apply one grid-cell step in `dir` to the point `(x, y)`. Used by the
+/// outward-stub fallback when neither L corner aligns with a pin's
+/// outward direction.
+fn step(dir: Direction, x: f64, y: f64) -> (f64, f64) {
+    match dir {
+        Direction::Up => (x, y - GRID_MM),
+        Direction::Down => (x, y + GRID_MM),
+        Direction::Left => (x - GRID_MM, y),
+        Direction::Right => (x + GRID_MM, y),
+    }
+}
+
+/// True iff the axis-parallel segment `from → to` extends in `dir`
+/// from `from`. Returns false for zero-length segments.
+fn segment_extends_in(from: (f64, f64), to: (f64, f64), dir: Direction) -> bool {
+    let dx = to.0 - from.0;
+    let dy = to.1 - from.1;
+    match dir {
+        Direction::Up => dy < -EPS && dx.abs() < EPS,
+        Direction::Down => dy > EPS && dx.abs() < EPS,
+        Direction::Left => dx < -EPS && dy.abs() < EPS,
+        Direction::Right => dx > EPS && dy.abs() < EPS,
+    }
+}
 
 /// Route a 2-pin net: single segment when collinear on either axis,
 /// otherwise an L-shape via `(b.x, a.y)` (horizontal-then-vertical).
@@ -25,10 +51,156 @@ const EPS: f64 = 1e-6;
 /// responsibility. The router preserves the coordinates verbatim.
 #[must_use]
 pub fn route_two_pin(a: (f64, f64), b: (f64, f64)) -> Vec<Segment> {
+    route_two_pin_with_outward(a, None, b, None)
+}
+
+/// Route a 2-pin net with per-endpoint outward-direction constraints.
+///
+/// Each endpoint may carry an [`Direction`] hint describing the
+/// direction the pin's stem points away from its symbol body. The
+/// routed L-corner is chosen so that the leg incident on a constrained
+/// endpoint extends in that endpoint's outward direction. When neither
+/// L corner satisfies a constrained endpoint, a one-grid-cell outward
+/// stub is prepended (`a → a + (out_a × grid) → corner → b`) so the
+/// wire leaves the pin in its outward direction before bending toward
+/// the destination.
+///
+/// `route_two_pin(a, b)` is preserved as a thin wrapper passing
+/// `None`/`None` so existing closed-form unit tests continue to pass.
+#[must_use]
+pub fn route_two_pin_with_outward(
+    a: (f64, f64),
+    out_a: Option<Direction>,
+    b: (f64, f64),
+    out_b: Option<Direction>,
+) -> Vec<Segment> {
     let (x1, y1) = (a.0, a.1);
     let (x2, y2) = (b.0, b.1);
     if (x1 - x2).abs() < EPS && (y1 - y2).abs() < EPS {
         // Coincident pins: nothing to route.
+        return Vec::new();
+    }
+    if (y1 - y2).abs() < EPS || (x1 - x2).abs() < EPS {
+        // Collinear: a single segment. Outward constraints are
+        // satisfied iff the segment already extends outward from each
+        // constrained endpoint.
+        let single = Segment { x1, y1, x2, y2 };
+        let ok_a = out_a.is_none_or(|d| segment_extends_in(a, b, d));
+        let ok_b = out_b.is_none_or(|d| segment_extends_in(b, a, d));
+        if ok_a && ok_b {
+            return vec![single];
+        }
+        // Outward direction conflicts with the collinear axis: detour
+        // perpendicular via the constrained endpoint that fails. We
+        // emit a stub from `a` (or `b`) outward, then return to the
+        // collinear axis and run to the destination.
+        return route_with_stub(a, out_a, b, out_b);
+    }
+    // Non-collinear: two L candidates.
+    let horizontal_first = [
+        Segment { x1, y1, x2, y2: y1 }, // horizontal first
+        Segment { x1: x2, y1, x2, y2 },
+    ];
+    let vertical_first = [
+        Segment { x1, y1, x2: x1, y2 }, // vertical first
+        Segment { x1, y1: y2, x2, y2 },
+    ];
+    let h_first_corner = (x2, y1);
+    let v_first_corner = (x1, y2);
+
+    let constraints = u8::from(out_a.is_some()) + u8::from(out_b.is_some());
+    let score_h = score_outward(a, h_first_corner, b, out_a, out_b);
+    let score_v = score_outward(a, v_first_corner, b, out_a, out_b);
+
+    // If there are no outward constraints, default to the legacy
+    // horizontal-first L (matches `route_two_pin(a, b)` behaviour).
+    if constraints == 0 {
+        return horizontal_first.to_vec();
+    }
+    // Take a candidate that satisfies every constraint, preferring
+    // horizontal-first on a tie.
+    if score_h >= constraints {
+        return horizontal_first.to_vec();
+    }
+    if score_v >= constraints {
+        return vertical_first.to_vec();
+    }
+    // Neither L satisfies every constraint: emit an outward stub at
+    // the unsatisfied pin so its leg extends outward, then route from
+    // the stub endpoint to the other pin with the remaining
+    // constraint. `route_with_stub` consumes whichever side it stubs
+    // (preferring `out_a`) and recurses.
+    route_with_stub(a, out_a, b, out_b)
+}
+
+/// Score an L-corner choice by how many constrained endpoints have
+/// their incident leg extending in their outward direction. The leg
+/// incident on `a` runs `a → corner`; the leg incident on `b` runs
+/// `b → corner`.
+fn score_outward(
+    a: (f64, f64),
+    corner: (f64, f64),
+    b: (f64, f64),
+    out_a: Option<Direction>,
+    out_b: Option<Direction>,
+) -> u8 {
+    let mut score = 0u8;
+    if let Some(d) = out_a {
+        if segment_extends_in(a, corner, d) {
+            score += 1;
+        }
+    }
+    if let Some(d) = out_b {
+        if segment_extends_in(b, corner, d) {
+            score += 1;
+        }
+    }
+    score
+}
+
+/// Fallback when no L corner satisfies the outward constraint at `a`:
+/// emit a one-cell stub from `a` in its outward direction, then route
+/// from the stub endpoint to `b` (recursing without `a`'s constraint,
+/// since the stub has already discharged it). When only `b` is
+/// constrained and the L route can't honour it, the stub anchors at
+/// `b` instead.
+fn route_with_stub(
+    a: (f64, f64),
+    out_a: Option<Direction>,
+    b: (f64, f64),
+    out_b: Option<Direction>,
+) -> Vec<Segment> {
+    if let Some(d) = out_a {
+        let mid = step(d, a.0, a.1);
+        let mut segs = vec![Segment {
+            x1: a.0,
+            y1: a.1,
+            x2: mid.0,
+            y2: mid.1,
+        }];
+        // Continue from `mid` to `b`. The stub already extended outward
+        // at `a`, so drop `out_a`; keep `out_b` so the destination's
+        // outward constraint can still steer the rest.
+        segs.extend(route_two_pin_with_outward(mid, None, b, out_b));
+        return segs;
+    }
+    if let Some(d) = out_b {
+        let mid = step(d, b.0, b.1);
+        let mut segs = vec![Segment {
+            x1: b.0,
+            y1: b.1,
+            x2: mid.0,
+            y2: mid.1,
+        }];
+        segs.extend(route_two_pin_with_outward(a, None, mid, None));
+        return segs;
+    }
+    // No constraints to honour: fall back to the plain L. Inline the
+    // legacy 2-pin route here to avoid recursing back through
+    // `route_two_pin_with_outward`.
+    let (x1, y1) = (a.0, a.1);
+    let (x2, y2) = (b.0, b.1);
+    if (x1 - x2).abs() < EPS && (y1 - y2).abs() < EPS {
         return Vec::new();
     }
     if (y1 - y2).abs() < EPS || (x1 - x2).abs() < EPS {
@@ -48,6 +220,19 @@ pub fn route_two_pin(a: (f64, f64), b: (f64, f64)) -> Vec<Segment> {
 /// emitted.
 #[must_use]
 pub fn route_three_pin(pins: [(f64, f64); 3]) -> Vec<Segment> {
+    route_three_pin_with_outward(pins, [None, None, None])
+}
+
+/// Route a 3-pin net with optional per-pin outward-direction
+/// constraints. The Steiner point is still `(median(xs), median(ys))`;
+/// for each pin, the leg from the Steiner point to that pin uses the
+/// outward-aware 2-pin helper so the leg incident on the pin extends
+/// in the pin's outward direction.
+#[must_use]
+pub fn route_three_pin_with_outward(
+    pins: [(f64, f64); 3],
+    outs: [Option<Direction>; 3],
+) -> Vec<Segment> {
     let xs = [pins[0].0, pins[1].0, pins[2].0];
     let ys = [pins[0].1, pins[1].1, pins[2].1];
 
@@ -59,24 +244,14 @@ pub fn route_three_pin(pins: [(f64, f64); 3]) -> Vec<Segment> {
 
     let mut segs: Vec<Segment> = Vec::new();
     for i in 0..3 {
-        let dx = (xs[i] - mx).abs() > EPS;
-        let dy = (ys[i] - my).abs() > EPS;
-        if dx {
-            segs.push(Segment {
-                x1: xs[i],
-                y1: ys[i],
-                x2: mx,
-                y2: ys[i],
-            });
+        let pin = (xs[i], ys[i]);
+        let steiner = (mx, my);
+        if (pin.0 - steiner.0).abs() < EPS && (pin.1 - steiner.1).abs() < EPS {
+            continue;
         }
-        if dy {
-            segs.push(Segment {
-                x1: mx,
-                y1: ys[i],
-                x2: mx,
-                y2: my,
-            });
-        }
+        // Route pin → Steiner with the pin's outward constraint. The
+        // Steiner end is unconstrained (it's an internal node).
+        segs.extend(route_two_pin_with_outward(pin, outs[i], steiner, None));
     }
 
     // Coalesce collinear horizontal segments through the Steiner X
@@ -159,13 +334,25 @@ fn coalesce_at(segs: &mut Vec<Segment>, mx: f64, my: f64) {
 /// symmetric multivibrator / diff-pair failure mode). A conflict-
 /// aware constructor that subsumes both is a v0.2 channel-router
 /// work item.
-pub(crate) fn route_signal(net: &crate::NetSpec) -> (Vec<Segment>, Vec<(f64, f64)>) {
+pub(crate) fn route_signal(
+    net: &crate::NetSpec,
+    foreign_pins: &std::collections::HashSet<(i64, i64)>,
+) -> (Vec<Segment>, Vec<(f64, f64)>) {
     match net.pins.len() {
         0 | 1 => (Vec::new(), Vec::new()),
         2 => {
             let a = pin_xy(&net.pins[0]);
             let b = pin_xy(&net.pins[1]);
-            (route_two_pin(a, b), Vec::new())
+            (
+                route_two_pin_with_outward_avoiding(
+                    a,
+                    Some(net.pins[0].outward),
+                    b,
+                    Some(net.pins[1].outward),
+                    foreign_pins,
+                ),
+                Vec::new(),
+            )
         }
         3 => {
             let pts = [
@@ -173,17 +360,63 @@ pub(crate) fn route_signal(net: &crate::NetSpec) -> (Vec<Segment>, Vec<(f64, f64
                 pin_xy(&net.pins[1]),
                 pin_xy(&net.pins[2]),
             ];
-            let segs = route_three_pin(pts);
+            let outs = [
+                Some(net.pins[0].outward),
+                Some(net.pins[1].outward),
+                Some(net.pins[2].outward),
+            ];
+            let segs = route_three_pin_with_outward(pts, outs);
             let junctions = steiner_junctions(&pts, &segs);
             (segs, junctions)
         }
         _ => {
             let pins: Vec<(f64, f64)> = net.pins.iter().map(pin_xy).collect();
-            let segs = route_n_pin(&pins);
+            let outs: Vec<Option<Direction>> = net.pins.iter().map(|p| Some(p.outward)).collect();
+            let segs = route_n_pin_with_outward(&pins, &outs);
             let junctions = compute_junctions(&segs, &pins);
             (segs, junctions)
         }
     }
+}
+
+/// 2-pin route variant that, before falling back to an outward stub,
+/// checks whether the stub's endpoint would land on a foreign pin. If
+/// so, prefer the legacy L (one outward constraint will be violated
+/// but the V11 detour cascade will not have to undo our work). Used
+/// only by the top-level [`route_signal`] entry; library callers use
+/// [`route_two_pin_with_outward`] directly.
+#[allow(clippy::cast_possible_truncation)]
+fn route_two_pin_with_outward_avoiding(
+    a: (f64, f64),
+    out_a: Option<Direction>,
+    b: (f64, f64),
+    out_b: Option<Direction>,
+    foreign_pins: &std::collections::HashSet<(i64, i64)>,
+) -> Vec<Segment> {
+    let qk = |(x, y): (f64, f64)| -> (i64, i64) {
+        ((x * 1000.0).round() as i64, (y * 1000.0).round() as i64)
+    };
+    let stub_lands_on_foreign = |dir: Option<Direction>, pin: (f64, f64)| -> bool {
+        let Some(d) = dir else {
+            return false;
+        };
+        foreign_pins.contains(&qk(step(d, pin.0, pin.1)))
+    };
+    // If we know the stub would land on a foreign pin, suppress the
+    // outward constraint at that end. The standard route_two_pin
+    // logic then falls back to the legacy L (or honours the
+    // remaining constraint).
+    let safe_out_a = if stub_lands_on_foreign(out_a, a) {
+        None
+    } else {
+        out_a
+    };
+    let safe_out_b = if stub_lands_on_foreign(out_b, b) {
+        None
+    } else {
+        out_b
+    };
+    route_two_pin_with_outward(a, safe_out_a, b, safe_out_b)
 }
 
 /// Route a 4+ pin net.
@@ -204,18 +437,30 @@ pub(crate) fn route_signal(net: &crate::NetSpec) -> (Vec<Segment>, Vec<(f64, f64
 /// the same grid as the inputs.
 #[must_use]
 pub fn route_n_pin(pins: &[(f64, f64)]) -> Vec<Segment> {
+    let outs: Vec<Option<Direction>> = vec![None; pins.len()];
+    route_n_pin_with_outward(pins, &outs)
+}
+
+/// Outward-aware variant of [`route_n_pin`]. `outs[i]` is the outward
+/// direction for `pins[i]`; `None` means unconstrained (Steiner points
+/// added by [`steinerize`] are always unconstrained). Each tree edge
+/// whose endpoint is a pin uses the outward-aware 2-pin helper so the
+/// leg incident on the pin extends outward.
+#[must_use]
+pub fn route_n_pin_with_outward(pins: &[(f64, f64)], outs: &[Option<Direction>]) -> Vec<Segment> {
+    debug_assert_eq!(pins.len(), outs.len());
     match pins.len() {
         0 | 1 => Vec::new(),
-        2 => route_two_pin(pins[0], pins[1]),
-        3 => route_three_pin([pins[0], pins[1], pins[2]]),
+        2 => route_two_pin_with_outward(pins[0], outs[0], pins[1], outs[1]),
+        3 => route_three_pin_with_outward([pins[0], pins[1], pins[2]], [outs[0], outs[1], outs[2]]),
         n if n <= 9 => {
             let mut tree = rectilinear_mst(pins);
             steinerize(&mut tree, pins);
-            tree_to_segments(&tree)
+            tree_to_segments(&tree, pins.len(), outs)
         }
         _ => {
             let tree = rectilinear_mst(pins);
-            tree_to_segments(&tree)
+            tree_to_segments(&tree, pins.len(), outs)
         }
     }
 }
@@ -405,36 +650,31 @@ fn prune_degree_one_steiner(tree: &mut (Vec<Node>, Vec<Edge>), pin_count: usize)
 /// Convert tree edges to L-shaped axis-parallel segment pairs.
 /// Each MST edge becomes one or two segments depending on whether
 /// the endpoints share a coordinate.
-fn tree_to_segments(tree: &(Vec<Node>, Vec<Edge>)) -> Vec<Segment> {
+fn tree_to_segments(
+    tree: &(Vec<Node>, Vec<Edge>),
+    pin_count: usize,
+    outs: &[Option<Direction>],
+) -> Vec<Segment> {
     let mut segs: Vec<Segment> = Vec::new();
+    let out_of = |idx: usize| -> Option<Direction> {
+        if idx < pin_count {
+            outs.get(idx).copied().flatten()
+        } else {
+            None
+        }
+    };
     for e in &tree.1 {
         let a = tree.0[e.0];
         let b = tree.0[e.1];
         if (a.x - b.x).abs() < EPS && (a.y - b.y).abs() < EPS {
             continue;
         }
-        if (a.x - b.x).abs() < EPS || (a.y - b.y).abs() < EPS {
-            segs.push(Segment {
-                x1: a.x,
-                y1: a.y,
-                x2: b.x,
-                y2: b.y,
-            });
-        } else {
-            // L via (b.x, a.y) — same convention as 2-pin.
-            segs.push(Segment {
-                x1: a.x,
-                y1: a.y,
-                x2: b.x,
-                y2: a.y,
-            });
-            segs.push(Segment {
-                x1: b.x,
-                y1: a.y,
-                x2: b.x,
-                y2: b.y,
-            });
-        }
+        segs.extend(route_two_pin_with_outward(
+            (a.x, a.y),
+            out_of(e.0),
+            (b.x, b.y),
+            out_of(e.1),
+        ));
     }
     segs
 }

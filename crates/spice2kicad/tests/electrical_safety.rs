@@ -364,6 +364,12 @@ struct WorldPin {
     x_mm: f64,
     y_mm: f64,
     net: String,
+    /// Pin's outward direction in degrees (0=Right, 90=Down, 180=Left,
+    /// 270=Up, file-y semantics). Mirrors `angle_to_direction` in
+    /// `kicad-emitter::schematic`. Power glyphs synthesise a sentinel
+    /// `u16::MAX` since they don't have a meaningful body-relative
+    /// outward direction.
+    angle: u16,
 }
 
 /// Load the standard fixture libraries used by every test fixture.
@@ -495,6 +501,7 @@ fn world_pins_for_sheet(spice_path: &std::path::Path, root: &Value) -> Vec<World
                 x_mm: wx,
                 y_mm: wy,
                 net,
+                angle: tp.angle,
             });
         }
     }
@@ -534,6 +541,7 @@ fn world_pins_for_sheet(spice_path: &std::path::Path, root: &Value) -> Vec<World
             x_mm: ox,
             y_mm: oy,
             net,
+            angle: u16::MAX,
         });
     }
 
@@ -1311,6 +1319,145 @@ fn v13_label_anchor_not_on_foreign_wire_interior() {
     assert!(
         hard_failures.is_empty(),
         "V13(3) regressions:\n  {}",
+        hard_failures.join("\n  "),
+    );
+}
+
+/// Per-fixture V5 violation budget. The first wire segment at a pin
+/// should extend in the pin's outward direction (V5). The router's
+/// Steiner stage emits an outward stub at each pin whenever no L
+/// corner satisfies the pin's outward constraint; the V11/V12 detour
+/// passes prefer outward-clean corner placements when resolving
+/// foreign-pin / symbol-body conflicts. Residual cases fall into two
+/// buckets:
+/// 1. Multi-pin nets where the Steiner tree places the pin on the
+///    trunk axis and the outward direction is perpendicular to that
+///    axis — splitting the trunk would create a V11/V12 conflict the
+///    detour cascade can't resolve.
+/// 2. V11/V12 detours that had to abandon the outward-clean option
+///    because no foreign-pin- / obstacle-clean alternative existed.
+///
+/// Both buckets are tracked as v0.2 placer / channel-router work
+/// items. The budgets here lock in the current high-water mark — a
+/// regression trips the test.
+fn v5_violation_budget(name: &str) -> usize {
+    match name {
+        "common_emitter" => 3,
+        "multivibrator" => 4,
+        "diff_pair" | "opamp_inverting_real" => 2,
+        // "rc_lowpass" and any other fixture: zero violations expected.
+        _ => 0,
+    }
+}
+
+/// V5 — first wire segment at every pin extends outward.
+///
+/// For each placed symbol's pin, find a wire endpoint coincident with
+/// the pin coordinate and check that the segment's far end lies in the
+/// pin's outward direction. Pins where the wire's segment passes
+/// *through* the pin in its interior (T-on-trunk topology) are
+/// reported as known limitations and not counted: the V5 stub-fallback
+/// would have to split the trunk and likely create a V11/V12
+/// violation. Other residual cases are counted against the per-fixture
+/// budget in [`v5_violation_budget`].
+#[test]
+fn v5_first_segment_extends_outward() {
+    // Outward step in micrometres, one grid cell.
+    const STEP: i64 = 1270;
+    let mut hard_failures: Vec<String> = Vec::new();
+    for name in SHEETS {
+        let src = fixtures_dir().join(format!("{name}.cir"));
+        let tmp = tempdir(name);
+        let sch = spice_to_kicad(&src, &tmp).expect("spice2kicad");
+        let root = parse(&sch);
+        let pins = world_pins_for_sheet(&src, &root);
+        let wires = wire_segments(&root);
+
+        let mut violations: Vec<String> = Vec::new();
+        for p in &pins {
+            // Skip power glyphs (synthetic; no symbol-body outward).
+            if p.angle == u16::MAX {
+                continue;
+            }
+            let pk = qkey(p.x_mm, p.y_mm);
+            let (dx, dy) = match p.angle % 360 {
+                0 => (STEP, 0),    // Right
+                90 => (0, STEP),   // Down (file-y +)
+                180 => (-STEP, 0), // Left
+                270 => (0, -STEP), // Up (file-y -)
+                _ => continue,     // Non-cardinal: skip (out of scope).
+            };
+            // Find every wire segment incident on this pin, plus any
+            // wire whose interior passes through the pin.
+            let mut endpoint_dirs: Vec<(i64, i64)> = Vec::new();
+            let mut interior_through = false;
+            for (a, b) in &wires {
+                let ka = qkey(a.0, a.1);
+                let kb = qkey(b.0, b.1);
+                if ka == pk {
+                    endpoint_dirs.push((kb.0 - ka.0, kb.1 - ka.1));
+                } else if kb == pk {
+                    endpoint_dirs.push((ka.0 - kb.0, ka.1 - kb.1));
+                } else {
+                    // Interior coincidence: axis-parallel only.
+                    if interior_grid_coords(&(*a, *b)).contains(&pk) {
+                        interior_through = true;
+                    }
+                }
+            }
+            if endpoint_dirs.is_empty() && !interior_through {
+                // Pin has no wire connection (e.g. one-pin net handled
+                // by a global label, or unconnected). Skip.
+                continue;
+            }
+            // Normalise endpoint directions to unit grid steps.
+            let outward_ok = endpoint_dirs.iter().any(|&(ex, ey)| {
+                let nx = ex.signum() * STEP;
+                let ny = ey.signum() * STEP;
+                // Axis-aligned segments only — the router's invariant.
+                if ex != 0 && ey != 0 {
+                    return false;
+                }
+                (nx, ny) == (dx, dy)
+            });
+            if outward_ok {
+                continue;
+            }
+            // No incident wire extends outward. Pin-on-trunk-interior
+            // is recorded as a known limitation; everything else is a
+            // hard regression.
+            if interior_through && endpoint_dirs.is_empty() {
+                // Pure interior: report but don't fail (tracked as
+                // v0.2 placer/router work).
+                eprintln!(
+                    "{name}: V5 interior-trunk pin {}.{} at ({:.2}, {:.2}) sits on a coalesced trunk; outward stub would split the trunk",
+                    p.refdes, p.pin_number, p.x_mm, p.y_mm,
+                );
+                continue;
+            }
+            violations.push(format!(
+                "{}.{} at ({:.2}, {:.2}) angle={} has no outward-extending wire (incident dirs={:?}, interior_through={})",
+                p.refdes, p.pin_number, p.x_mm, p.y_mm, p.angle, endpoint_dirs, interior_through,
+            ));
+        }
+        let budget = v5_violation_budget(name);
+        if violations.len() > budget {
+            hard_failures.push(format!(
+                "{name}: {} V5 outward-direction violation(s) > budget {budget}:\n    {}",
+                violations.len(),
+                violations.join("\n    "),
+            ));
+        } else if !violations.is_empty() {
+            eprintln!(
+                "{name}: {} V5 violation(s) within budget {budget}:\n    {}",
+                violations.len(),
+                violations.join("\n    "),
+            );
+        }
+    }
+    assert!(
+        hard_failures.is_empty(),
+        "V5 regressions:\n  {}",
         hard_failures.join("\n  "),
     );
 }

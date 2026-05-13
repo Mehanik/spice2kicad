@@ -55,18 +55,55 @@ pub fn place_power_symbols(req: &RouteRequest<'_>, out: &mut RouteResult) {
 /// serialisation to `out.sexprs`.
 pub fn route_signal_nets(req: &RouteRequest<'_>, out: &mut RouteResult) -> Vec<RoutedNet> {
     let mut routed: Vec<RoutedNet> = Vec::new();
+    // Pre-build a quantised foreign-pin set per signal net so the
+    // Steiner stage can avoid emitting an outward stub that would
+    // land on a foreign pin (which the V11 detour cascade can rarely
+    // recover from cleanly).
+    #[allow(clippy::cast_possible_truncation)]
+    let foreign_per_net: Vec<std::collections::HashSet<(i64, i64)>> = req
+        .nets
+        .iter()
+        .filter(|n| matches!(n.class, NetClass::Signal))
+        .map(|own| {
+            let own_keys: std::collections::HashSet<(i64, i64)> = own
+                .pins
+                .iter()
+                .map(|p| {
+                    (
+                        (p.x_mm * 1000.0).round() as i64,
+                        (p.y_mm * 1000.0).round() as i64,
+                    )
+                })
+                .collect();
+            let mut acc: std::collections::HashSet<(i64, i64)> = std::collections::HashSet::new();
+            for net in req.nets {
+                for p in &net.pins {
+                    let k = (
+                        (p.x_mm * 1000.0).round() as i64,
+                        (p.y_mm * 1000.0).round() as i64,
+                    );
+                    if own_keys.contains(&k) {
+                        continue;
+                    }
+                    acc.insert(k);
+                }
+            }
+            acc
+        })
+        .collect();
+    let mut signal_idx = 0;
     for net in req.nets {
         if !matches!(net.class, NetClass::Signal) {
             continue;
         }
-        // Stage 2 emits the Hwang/MST tree without V11 awareness.
-        // V11 enforcement happens at Stage 3c
-        // (`conflict::avoid_foreign_pins`) where the rerouter can
-        // detect and roll back a detour that would collinearly
-        // overlap a sibling routed net. A conflict-aware
-        // constructor that subsumes both stages is a v0.2 channel-
-        // router work item.
-        let (segs, junctions) = steiner::route_signal(net);
+        // Stage 2 emits the Hwang/MST tree. The V11/V12 enforcement
+        // at Stages 3c / 3d (`conflict::avoid_foreign_pins`,
+        // `avoid_obstacles`) rolls back detours that would collinearly
+        // overlap a sibling routed net. A conflict-aware constructor
+        // that subsumes both stages is a v0.2 channel-router work
+        // item.
+        let (segs, junctions) = steiner::route_signal(net, &foreign_per_net[signal_idx]);
+        signal_idx += 1;
         routed.push(RoutedNet {
             segments: segs,
             junctions,
@@ -119,6 +156,57 @@ fn foreign_pin_sets(req: &RouteRequest<'_>) -> Vec<std::collections::HashSet<(i6
         .collect()
 }
 
+/// Per-signal-net own-pin quantised coordinates used as no-coalesce
+/// barriers by [`cleanup::coalesce_collinear`]. Distinct from
+/// `(junction …)` markers — the cleanup pass treats these coords as
+/// non-mergeable shared endpoints without producing extra junction
+/// glyphs in the emitted schematic.
+#[allow(clippy::cast_possible_truncation)]
+fn build_signal_own_pin_coords(
+    req: &RouteRequest<'_>,
+) -> Vec<std::collections::HashSet<(i64, i64)>> {
+    req.nets
+        .iter()
+        .filter(|n| matches!(n.class, NetClass::Signal))
+        .map(|n| {
+            n.pins
+                .iter()
+                .map(|p| {
+                    (
+                        (p.x_mm * 1000.0).round() as i64,
+                        (p.y_mm * 1000.0).round() as i64,
+                    )
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Build a quantised pin-coord → outward-direction map across every
+/// net in the request. The V11/V12 detour passes consult this map to
+/// pick corner placements whose leg incident on a pin extends in the
+/// pin's outward direction.
+#[allow(clippy::cast_possible_truncation)]
+fn build_pin_outward_map(
+    req: &RouteRequest<'_>,
+) -> std::collections::HashMap<(i64, i64), Direction> {
+    let mut map: std::collections::HashMap<(i64, i64), Direction> =
+        std::collections::HashMap::new();
+    for net in req.nets {
+        for p in &net.pins {
+            let k = (
+                (p.x_mm * 1000.0).round() as i64,
+                (p.y_mm * 1000.0).round() as i64,
+            );
+            // Multiple pins on the same coord would already trip V11
+            // ("pin overlap is a placer bug"); first writer wins is
+            // fine here — the verifier reports the underlying overlap.
+            map.entry(k).or_insert(p.outward);
+        }
+    }
+    map
+}
+
 /// Route the supplied nets and return their wire / junction / symbol
 /// S-expressions for splicing into the emitted schematic.
 ///
@@ -133,6 +221,8 @@ pub fn route(req: RouteRequest<'_>) -> RouteResult {
     let mut out = RouteResult::default();
     place_power_symbols(&req, &mut out);
     let mut routed = route_signal_nets(&req, &mut out);
+    // Per-net own-pin coords for the cleanup pass below.
+    let own_pin_coords_for_cleanup = build_signal_own_pin_coords(&req);
     // Stage 3 — resolve cross-net endpoint conflicts.
     // Build per-routed-net pin-coordinate sets. A conflict at a
     // coordinate that's a pin on net A but only a Steiner / wire
@@ -176,6 +266,11 @@ pub fn route(req: RouteRequest<'_>) -> RouteResult {
     // `crates/spice2kicad/tests/electrical_safety.rs` holding the
     // budget as a high-water mark.
     let foreign_per_routed = foreign_pin_sets(&req);
+    // Global pin-outward map: every routed-net pin's outward direction
+    // keyed by its quantised world coord. Used by the V11/V12 detour
+    // passes to prefer corner choices whose leg incident on a pin
+    // extends in the pin's outward direction.
+    let pin_outward = build_pin_outward_map(&req);
     // V11/V12 convergence loop. Each pass runs V11 (correctness) first
     // so a V12 detour can't re-introduce a foreign-pin coincidence,
     // then V12 (quality). Detours land in segment-set signatures that
@@ -190,6 +285,7 @@ pub fn route(req: RouteRequest<'_>) -> RouteResult {
             &foreign_per_routed,
             &net_pin_coords,
             req.obstacles,
+            &pin_outward,
         );
         accumulated_warnings = w11;
         if !req.obstacles.is_empty() {
@@ -199,6 +295,7 @@ pub fn route(req: RouteRequest<'_>) -> RouteResult {
                 &net_pin_coords,
                 &foreign_per_routed,
                 req.bounds,
+                &pin_outward,
             );
             accumulated_warnings.extend(w12);
         }
@@ -212,9 +309,11 @@ pub fn route(req: RouteRequest<'_>) -> RouteResult {
     }
     out.warnings.extend(accumulated_warnings);
     // Stage 4 — per-net coalesce of collinear segments + dedup of
-    // coincident junctions across nets.
+    // coincident junctions across nets. The own-pin barrier set
+    // prevents the cleanup pass from merging across a pin coord and
+    // erasing the V5-aware outward stubs the Steiner stage emits.
     cleanup::drop_zero_length(&mut routed);
-    cleanup::coalesce_collinear(&mut routed);
+    cleanup::coalesce_collinear_with_barriers(&mut routed, &own_pin_coords_for_cleanup);
     cleanup::drop_zero_length(&mut routed);
     let junctions = cleanup::dedup_junctions(&routed);
     // Serialise routed nets to s-exprs.
