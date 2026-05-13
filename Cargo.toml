@@ -33,7 +33,7 @@ proptest = "1"
 thiserror = "2"
 clap = { version = "4", features = ["derive"] }
 chumsky = "0.10"
-ariadne = "0.5"
+ariadne = "0.6"
 log = "0.4"
 env_logger = "0.11"
 lexpr = "0.2"
