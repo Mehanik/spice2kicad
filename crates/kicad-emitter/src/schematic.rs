@@ -981,40 +981,101 @@ fn route_nets(
 }
 
 /// Build the set of symbol-body bounding boxes the router should
-/// avoid. Each placed element gets a square box of half-extent
-/// `SYM_HALF_MM` around its origin — the same approximation used by
-/// the placement-quality verifier (`crates/spice2kicad/tests/placement_quality.rs`).
-/// Power-rail glyphs (`#PWR*`) are emitted by the router itself at pin
-/// coordinates, so they never appear in `placement.elements` and don't
-/// need filtering here.
+/// avoid for V12 (wires do not cross foreign symbol bodies).
 ///
-/// **TODO(V12)**: replace the uniform `SYM_HALF_MM` with a per-symbol
-/// body bbox sourced from [`kicad_symbols::Symbol::body_bbox`] and
-/// transformed through the placed orientation. The infrastructure
-/// (the API, the local→world transform, and a margin policy) is in
-/// place but enabling it without router-side companion changes
-/// (pin-outward leg direction, foreign-pin-aware corner choice)
-/// causes the router to take alternate L corners that re-introduce
-/// V11 silent shorts on the symmetric multivibrator / diff_pair
-/// fixtures. Re-enable once the router is pin-outward-aware.
+/// For each placed element we look up its library symbol and use
+/// [`Symbol::body_bbox`] to obtain the real graphical extent in
+/// symbol-local coordinates, then transform to world frame using the
+/// same convention as pin coordinates (rotate/mirror via
+/// [`Orientation::apply_point`], then apply the eeschema y-flip
+/// `world_y = origin_y - local_y`). A 0.5 mm margin is added so
+/// wires routed on the adjacent grid line clear the body cleanly.
+///
+/// Elements that resolve to a library symbol without graphics (V8
+/// hierarchical-sheet stubs, `power:*` glyphs) fall back to the
+/// uniform 2.54 mm half-extent box used previously — they are
+/// either not visible obstacles (sheets are drawn separately and
+/// don't carry V12-relevant graphics) or correctly skipped as
+/// router-managed (power glyphs are placed by Stage 1, not present
+/// in `placement.elements`).
+///
+/// Power-rail glyphs are filtered out explicitly by `lib_id` prefix
+/// just in case a caller has injected one into the placement.
 fn placement_obstacles(placement: &Placement, library: &Library) -> Vec<spice_route::Bbox> {
-    /// Half-extent (mm) covering a typical R/C/Q body. Matches
-    /// `placement_quality::SYM_HALF_MM`.
+    /// Half-extent (mm) fallback for symbols whose body bbox is
+    /// unavailable (sheet stubs, missing libraries).
     const SYM_HALF_MM: f64 = 2.54;
-    let _ = library; // reserved for future V12 body-bbox enablement
     placement
         .elements
         .iter()
-        .map(|el| {
-            let (cx, cy) = el.origin.to_mm();
-            spice_route::Bbox {
-                x0: cx - SYM_HALF_MM,
-                y0: cy - SYM_HALF_MM,
-                x1: cx + SYM_HALF_MM,
-                y1: cy + SYM_HALF_MM,
+        .filter_map(|el| {
+            if el.lib_id.starts_with("power:") {
+                return None;
             }
+            let (ox, oy) = el.origin.to_mm();
+            let bbox = library
+                .lookup(&el.lib_id)
+                .and_then(Symbol::body_bbox)
+                .map_or(
+                    spice_route::Bbox {
+                        x0: ox - SYM_HALF_MM,
+                        y0: oy - SYM_HALF_MM,
+                        x1: ox + SYM_HALF_MM,
+                        y1: oy + SYM_HALF_MM,
+                    },
+                    |local| body_bbox_to_world(local, ox, oy, el.orientation),
+                );
+            Some(bbox)
         })
         .collect()
+}
+
+/// Transform a symbol-local [`LocalBbox`] into world-frame
+/// [`spice_route::Bbox`] using the same convention as pin
+/// coordinates: rotate / mirror via [`Orientation::apply_point`],
+/// then apply the eeschema y-flip
+/// `world_y = origin_y - local_y` and take the AABB of the four
+/// transformed corners. The output bbox is axis-aligned in world
+/// space even after a 90° rotation.
+fn body_bbox_to_world(
+    local: kicad_symbols::LocalBbox,
+    origin_x: f64,
+    origin_y: f64,
+    orient: Orientation,
+) -> spice_route::Bbox {
+    let corners = [
+        (local.x0, local.y0),
+        (local.x0, local.y1),
+        (local.x1, local.y0),
+        (local.x1, local.y1),
+    ];
+    let mut min_x = f64::INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+    for (lx, ly) in corners {
+        let (rx, ry) = orient.apply_point(lx, ly);
+        let wx = origin_x + rx;
+        let wy = origin_y - ry;
+        if wx < min_x {
+            min_x = wx;
+        }
+        if wx > max_x {
+            max_x = wx;
+        }
+        if wy < min_y {
+            min_y = wy;
+        }
+        if wy > max_y {
+            max_y = wy;
+        }
+    }
+    spice_route::Bbox {
+        x0: min_x,
+        y0: min_y,
+        x1: max_x,
+        y1: max_y,
+    }
 }
 
 /// Heuristic Power/Ground classification from the net name alone.

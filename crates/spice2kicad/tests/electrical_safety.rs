@@ -27,6 +27,7 @@ mod common;
 use std::path::PathBuf;
 
 use common::spice_to_kicad;
+use kicad_symbols::{Orientation, Rotation};
 use lexpr::Value;
 
 fn fixtures_dir() -> PathBuf {
@@ -136,6 +137,7 @@ impl Bbox {
 const SYM_HALF_MM: f64 = 2.54;
 
 fn placed_symbol_bboxes(root: &Value) -> Vec<(String, Bbox)> {
+    let library = load_test_library();
     let mut out = Vec::new();
     for sym in children(root, "symbol") {
         let Some(at) = find_child(sym, "at") else {
@@ -149,6 +151,10 @@ fn placed_symbol_bboxes(root: &Value) -> Vec<(String, Bbox)> {
         let Some(y) = it.next().and_then(as_f64) else {
             continue;
         };
+        let rot_deg = it.next().and_then(as_f64).unwrap_or(0.0);
+        let mirror_y = find_child(sym, "mirror")
+            .and_then(|m| list_iter(m).nth(1).and_then(as_str))
+            .is_some_and(|t| t.eq_ignore_ascii_case("y"));
         let mut refdes = String::new();
         let mut lib_id = String::new();
         if let Some(lid_node) = find_child(sym, "lib_id") {
@@ -171,15 +177,72 @@ fn placed_symbol_bboxes(root: &Value) -> Vec<(String, Bbox)> {
             // they are not obstacles for wire routing or label placement.
             continue;
         }
-        let bbox = Bbox {
-            x0: x - SYM_HALF_MM,
-            y0: y - SYM_HALF_MM,
-            x1: x + SYM_HALF_MM,
-            y1: y + SYM_HALF_MM,
-        };
+        let bbox = library
+            .lookup(&lib_id)
+            .and_then(kicad_symbols::Symbol::body_bbox)
+            .map_or(
+                Bbox {
+                    x0: x - SYM_HALF_MM,
+                    y0: y - SYM_HALF_MM,
+                    x1: x + SYM_HALF_MM,
+                    y1: y + SYM_HALF_MM,
+                },
+                |local| body_bbox_to_world(local, x, y, rot_deg, mirror_y),
+            );
         out.push((refdes, bbox));
     }
     out
+}
+
+/// Transform a symbol-local `LocalBbox` into world-frame `Bbox` using
+/// the same convention as pin coordinates: rotate / mirror via
+/// orientation, then eeschema y-flip `world_y = origin_y - local_y`,
+/// take AABB of the four transformed corners.
+fn body_bbox_to_world(
+    local: kicad_symbols::LocalBbox,
+    origin_x: f64,
+    origin_y: f64,
+    rot_degrees: f64,
+    mirror_y: bool,
+) -> Bbox {
+    let rot_norm = rot_degrees.rem_euclid(360.0).round();
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let rot = rot_norm as u16;
+    let rotation = match rot {
+        90 => Rotation::R90,
+        180 => Rotation::R180,
+        270 => Rotation::R270,
+        _ => Rotation::R0,
+    };
+    let orient = Orientation { rotation, mirror_y };
+    let corners = [
+        (local.x0, local.y0),
+        (local.x0, local.y1),
+        (local.x1, local.y0),
+        (local.x1, local.y1),
+    ];
+    let mut x0 = f64::INFINITY;
+    let mut y0 = f64::INFINITY;
+    let mut x1 = f64::NEG_INFINITY;
+    let mut y1 = f64::NEG_INFINITY;
+    for (lx, ly) in corners {
+        let (rx, ry) = orient.apply_point(lx, ly);
+        let wx = origin_x + rx;
+        let wy = origin_y - ry;
+        if wx < x0 {
+            x0 = wx;
+        }
+        if wx > x1 {
+            x1 = wx;
+        }
+        if wy < y0 {
+            y0 = wy;
+        }
+        if wy > y1 {
+            y1 = wy;
+        }
+    }
+    Bbox { x0, y0, x1, y1 }
 }
 
 fn wire_segments(root: &Value) -> Vec<(Pt, Pt)> {
@@ -282,7 +345,7 @@ fn v12_wires_do_not_cross_foreign_symbol_bodies() {
 // V11 — Wire/label–pin coincidence is electrical.
 // ---------------------------------------------------------------------------
 
-use kicad_symbols::{Library, Orientation, Rotation};
+use kicad_symbols::Library;
 use spice_diagnostics::FileId;
 use std::collections::{HashMap, HashSet};
 
