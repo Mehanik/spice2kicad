@@ -395,6 +395,15 @@ override constraints from earlier phases.
    phase, source order wins on conflict (`W101`).
 5. **Auto-fill** — anything still unconstrained is laid out by the
    default heuristic (force-directed within the parent cluster).
+6. **Decoration** — once every symbol's position and orientation are
+   final, a decoration pass emits the remaining geometry: `(wire …)`
+   routing, power/ground glyphs, plain and global labels, and
+   junctions. This phase is a strict *consumer* of the placed layout.
+   It reads final symbol positions but never moves a symbol, never
+   re-rotates one, and never feeds a position or orientation change
+   back into phases 1–5. It may only add detached geometry — wire
+   stubs, glyphs, junctions, labels — anchored to the positions it was
+   given.
 
 Orientation (rotation / mirror) is **not** part of the user-facing
 annotation language in v0.1. The placer chooses orientation
@@ -416,10 +425,12 @@ with a `W104` warning.
 
 ### 5.1 Wire emission and label policy
 
-After phase 4 (auto-fill), a routing pass emits `(wire …)` segments
-connecting pins on the same net. Wires are the default carrier of
-connectivity; labels are not a substitute. The emitter never emits a
-label "instead of" routing a wire it could otherwise have drawn.
+This section details the **decoration phase** (phase 6 above). With
+every symbol placed and oriented by phases 1–5, the routing pass emits
+`(wire …)` segments connecting pins on the same net. Wires are the
+default carrier of connectivity; labels are not a substitute. The
+emitter never emits a label "instead of" routing a wire it could
+otherwise have drawn.
 
 Per-sheet label budget:
 

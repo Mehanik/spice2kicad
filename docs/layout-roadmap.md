@@ -128,6 +128,58 @@ crates/
 `kicad-emitter` consumes `Placed<Element>`. It should not contain
 any layout logic.
 
+### 4.1 The placement → decoration boundary
+
+Placement (`spice-layout`) ends when every symbol has a final
+position and orientation. Everything emitted *after* that — wire
+routing, power/ground glyphs, plain and global labels, junctions —
+is the **decoration phase** (annotation-spec §5 phase 6, CLAUDE.md
+"Layout phases" item 5). The data flow across this boundary is
+strictly one-way: Placement → Decoration. Decoration reads the placed
+layout and adds detached geometry anchored to it; it never writes a
+position or orientation back into a placed symbol.
+
+This boundary is architectural, not just conventional. `spice-layout`
+emits `Placed<Element>`; `kicad-emitter::emit` takes `&Placement` by
+shared reference and `spice-route` operates on the per-net pin
+positions derived from it. Neither crate can mutate placement state —
+the type signatures enforce the one-way flow, and the current code
+respects it (the emitter builds router obstacles and net-pin maps from
+`&Placement`, routes, then appends glyphs/labels/junctions, never
+calling back into the placer).
+
+The consequence for where a fix goes: any defect in **glyph
+attachment**, **glyph orientation as rendered**, **label placement**,
+**junction insertion**, or **wire routing** is a *decoration* defect
+and must be fixed in `kicad-emitter` or `spice-route` — never by
+perturbing the placer in `spice-layout`. The two recent failed fixes
+both broke this rule: they chased a glyph-direction (decoration)
+symptom by re-weighting the placer's orientation scorer, which
+rearranged the whole layout. Naming the boundary makes the correct
+fix-shape obvious: fix it downstream of placement, where the symbols
+are already frozen.
+
+The one subtlety is **V14 (power-glyph orientation)**, which spans the
+boundary:
+
+- The host *symbol's* rotation is chosen by the placer. Whether a
+  power/ground pin ends up facing up, down, or sideways is therefore a
+  **placement** concern, enforced as a *hard constraint* on the
+  orientation candidate set (see CLAUDE.md "Constraints vs. costs" —
+  V14 is Tier 1 and categorical, so it filters orientations in
+  `pick_orientations` and the SA rotate move, not as a soft cost).
+- Given that fixed pin direction, the glyph's *attachment* — drawn
+  directly at the pin vs. detached with a short stub wire — is a
+  **decoration** concern, owned by the emitter/router. When the
+  placer is forced to leave a power pin sideways (the filtered
+  orientation set is empty), the decoration phase's escape is the
+  detached-glyph-with-stub-wire path, NOT a placement perturbation.
+
+So V14's "which way does the symbol face" half lives in `spice-layout`
+as a hard constraint, and its "how is the glyph attached" half lives
+in the decoration phase. The two halves compose without either feeding
+back into the other.
+
 ## 5. Cost function
 
 ```

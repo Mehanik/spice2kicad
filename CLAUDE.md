@@ -144,6 +144,14 @@ Layout phases (later phases never override earlier):
 2. Aligned (`align`)
 3. Placed (`place`)
 4. Auto-fill (force-directed within parent cluster)
+5. **Decoration** — routing (wires), power/ground glyphs, labels,
+   junctions. Reads final symbol positions; never moves them.
+
+Decoration is a strict consumer of placement output: it may add wire
+stubs, detached glyphs, junctions, and labels, but must never feed a
+position or orientation change back into an already-placed symbol.
+This is the contract the V14 glyph-direction work and the upcoming RC
+fix must respect.
 
 For full grammar, examples, and diagnostics, see
 `docs/annotation-spec.md`.
@@ -222,6 +230,84 @@ annotation spec but load-bearing for implementation:
 See `docs/layout-roadmap.md` for the consequences on placer
 architecture.
 
+### Constraints vs. costs (how invariants are enforced)
+
+The placer has two enforcement mechanisms, and *which one* an
+invariant uses is load-bearing. The codebase has historically not
+written this down, so contributors guess — and guess wrong (see the
+V14 failure below). Be explicit.
+
+- **Hard constraint** — applied as a *filter/projection on the
+  candidate space*: eliminate the orientations that violate it,
+  snap coords onto the grid, reject infeasible moves. The
+  solver/SA can never emit output that violates it. Getting it
+  wrong yields *infeasibility*, not a penalty. Lives at the
+  candidate-generation boundary (`pick_orientations` in `lib.rs`,
+  the grid snap and `propose_move` accept/reject in
+  `solver/anneal.rs`), **not** in `cost.rs`.
+- **Soft cost** — a weighted penalty term in the SA objective
+  (`CostBreakdown` / `CostWeights::total` in `cost.rs`). The
+  optimizer *trades it off* against the other soft terms. Correct
+  for *preferences* and *tie-breakers*; wrong for any property
+  that must categorically hold — at a safe weight a soft term can
+  (and routinely does) change nothing.
+
+**Decision rule.** A property is a **hard constraint** when it is
+Tier 0 or Tier 1 (see the tiers subsection) AND *categorical* — a
+yes/no geometric fact with one correct answer ("VCC pin faces up",
+"origin on grid", "no orientation puts a power pin sideways"). It is
+a **soft cost** when it is a *continuous quality gradient* with no
+single correct value (total wire length, crossing count,
+band-misalignment, soft-Y position). Continuous gradients are
+inherently Tier-2 refinements.
+
+**Consistency requirement (the bug both V14 attempts hit).** If a
+property is enforced as a hard constraint at the *seeding/placement*
+stage, the SA refiner MUST treat it as hard too — either give its
+cost term effectively-infinite weight OR project every SA move back
+into the feasible set. A hard constraint at seed-time + weight-0
+soft cost at refine-time = the refiner silently undoes it.
+Concretely: **Attempt B filtered orientations at seed time but left
+the SA cost weight at 0; `propose_move`'s `rotate` move (p≈0.1,
+`rotate_once` in `anneal.rs`) then rotated the element back out of
+the filtered set.** A hard constraint must be hard at *every* stage
+that can move the element — here, both `pick_orientations` and the
+SA rotate move.
+
+**V14 is a hard constraint (Tier 1, categorical), not a cost.**
+Design intent the RC fix must follow: the orientation candidate set
+for any element bearing a power/ground pin is *filtered* to those
+placing VCC-pins up / GND-pins down; if the filtered set is
+non-empty, both `pick_orientations` and the SA rotate move are
+restricted to it (they may choose among survivors, may not leave
+the set). When the filtered set is *empty* (a forced sideways pin),
+the escape is the **detached-glyph-with-stub-wire** path — itself
+the documented fallback, NOT a soft penalty that trades V14 away.
+There is deliberately **no `power_pin_outward` weight in `cost.rs`**
+today; adding one would re-create Attempt A (a tunable term that at
+safe weights does nothing). V14 belongs in the candidate filter.
+
+**Per-invariant mapping** (read off the code; re-derive nothing):
+
+| Invariant                | Enforcement                          |
+| ------------------------ | ------------------------------------ |
+| grid alignment           | hard (snap at SA boundary)           |
+| V11 wire/pin coincidence | hard (router conflict resolution)    |
+| V14 power-glyph orient.  | hard + detached-glyph stub fallback  |
+| V12 obstacle avoidance   | hard with budgeted-fallback (logs)   |
+| V5 pin-facing            | soft (seed heuristic; no SA term*)   |
+| V6 bands/layers          | soft seed + soft cost terms          |
+| V7 symmetry              | soft (mirror move, deferred)         |
+
+*Discrepancies vs. the original guess.* (a) **V5 is not an SA cost
+term** — `cost.rs` has no `pin_facing`/orientation term; V5 is a
+*seed-time heuristic* in `pick_orientations`, and the SA `rotate`
+move can override it (consistent with V5 being Tier-2 quality).
+(b) **There is no `power_pin_outward` term** in `CostWeights` — the
+"soft cost" Attempt A described is not in the current tree. (c) V14
+is currently *unenforced* at both stages; the table row states the
+target design, not today's behaviour.
+
 ## Visual quality invariants
 
 Project-level acceptance criteria for any emitted `.kicad_sch`.
@@ -230,6 +316,118 @@ are falsifiable properties a checker can measure on the output.
 Every invariant has a verifier — the test that enforces it. The
 verifiers are being added in a parallel work stream; their names
 below describe intent.
+
+### Invariant tiers (priority ordering)
+
+V1–V14 are **not** a flat list of interchangeable budgets. Past
+fixes failed because nothing forbade *loosening one fixture's
+budget to tighten another's*, or regressing one aesthetic
+invariant to satisfy a different one. Trade-offs need a defined
+direction, so each invariant lives in exactly one tier and the
+tiers are strictly ordered.
+
+- **Tier 0 — Correctness (inviolable).** A violation means the
+  emitted schematic is electrically WRONG or unopenable.
+  Members: **V1** (an invisible symbol is a broken file), **V2**
+  (zero ERC errors), **V3** (verbatim `lib_symbols` — portability
+  correctness), **V8** (its correctness clauses: right symbol, no
+  phantom sheet / no stray `<subckt>.kicad_sch`), **V11** (its own
+  text: "a correctness invariant, not a quality one" — geometric
+  coincidence must not silently short two nets). Tier 0 is a hard
+  gate, never traded for any lower-tier gain.
+
+- **Tier 1 — Readability constraints.** Strong legibility
+  properties a human notices immediately as "wrong-looking", but
+  not electrical correctness. Members: **V4** (label policy),
+  **V9** (SI value formatting), **V10** (routing surface: power
+  glyphs / Steiner trees), **V12** (no wires through foreign
+  bodies), **V13** (labels don't overlap bodies / text / foreign
+  wires), **V14** (power-glyph orientation). Note V12's own text
+  calls it "quality" — it is tiered here as Tier 1 because a wire
+  spearing a body is a legibility defect a reader flags on sight,
+  not a pure-aesthetic refinement.
+
+- **Tier 2 — Aesthetic refinement.** Pure layout heuristics that
+  make the result look hand-drawn. Members (each self-described as
+  a "quality" metric): **V5** (pin-facing orientation), **V6**
+  (structural layered placement), **V7** (symmetry-aware
+  placement).
+
+**Ordering rule (load-bearing).** A change may never regress a
+higher-priority (lower-numbered) tier to improve a
+lower-priority one:
+
+  1. Never trade a Tier-0 violation for any Tier-1/2 gain.
+  2. Never introduce a Tier-1 regression to improve a Tier-2
+     metric (e.g. don't route a wire through a body (V12) to make
+     placement prettier (V6)).
+  3. Within a tier, never loosen one fixture's budget to tighten
+     another's. Budgets are per-fixture high-water marks that
+     ratchet *down*, never sideways — see the direction-of-change
+     / monotonic-ratchet policy for the budget mechanics.
+
+**Cautionary example (from a real failure).** An attempt to fix
+V14 glyph-direction on `common_emitter` by changing the V5
+orientation scorer rearranged the whole layout, and was "made to
+pass" only by loosening V5/V13 budgets on other fixtures. Under
+the tier rule this is forbidden twice over: it regressed a tier
+(V13) and it loosened budgets sideways.
+
+### Budgets are ratchets, not knobs
+
+Every per-fixture quality budget — crossing counts, wire-length
+ratios, body-overlap counts, V5/V13/V14 violation counts — is a
+*recorded high-water mark*, not a tunable headroom. The literal
+records the actual current count on `master`; it only ever goes
+**down**.
+
+**The rule.** A commit MAY *decrease* a stored budget, and SHOULD
+whenever a fix removes violations — update the literal in the same
+commit. A commit may **never increase** a stored budget to make a
+failing test pass. If a change raises a fixture's count, that is a
+regression to *fix*, not a budget to *bump*.
+
+**The one exception (bar is high; default answer is "no").** A
+budget may rise only when the change *adds genuinely new geometry
+that did not exist before* — a new fixture, or a feature that
+legitimately introduces elements — AND the rise carries a one-line
+rationale in the commit message AND the user signs off. Absent all
+three, treat any required increase as a defect.
+
+**Why direction-of-change beats absolute caps.** An absolute cap of
+`≤ 5` cannot distinguish "improved 5→4" from "regressed 3→4" — both
+pass under it. A ratchet stores the *actual current* value, so any
+increase trips the test even while still under the old cap. The
+ideal is **zero slack**: each budget literal equals the measured
+count, so the test fails on ANY rise.
+
+**Where the budgets live (apply this policy there).** They are
+expressed three ways today; all three are subject to this rule:
+- inline match arms returning the cap per fixture, e.g.
+  `body_overlap_budget` (`tests/electrical_safety.rs:1182`,
+  `"common_emitter" | "opamp_inverting_real" => 1`);
+- `&[(&str, _)]` const tables, e.g. the crossing budgets in
+  `crossing_count_within_budget_across_fixtures`
+  (`tests/placement_quality.rs:954`, `("common_emitter", 4)`) and
+  the wire-length-ratio budgets at
+  `tests/placement_quality.rs:881` (`("common_emitter", 2.5)`);
+- bare `const` literals, e.g. `V5_RC_LOWPASS_OUT_MAX_MM`
+  (`tests/placement_quality.rs:228`).
+
+**Practical guidance.**
+- When you *fix* something, run the verifier, read the new (lower)
+  count, and lower the literal to match. Don't leave slack.
+- When a test fails because a count *rose*, do NOT touch the
+  budget — diagnose the geometry regression instead.
+- Corollary of the tiers subsection's within-tier rule: you cannot
+  pay for tightening fixture A by loosening fixture B. Ratchets
+  move down, never sideways.
+
+A future v0.2 tooling idea (do not implement now) makes this
+self-enforcing: a shared `assert_ratchet!(fixture, metric,
+current)` helper that prints "you may lower this to N" on pass and
+"regression: rose to N" on fail, replacing the hand-maintained
+literals above.
 
 - **V1 — Symbols render visibly.** Every emitted `.kicad_sch` opens
   in eeschema with all components drawn at non-zero extent (no
