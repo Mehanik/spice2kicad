@@ -344,10 +344,11 @@ tiers are strictly ordered.
   **V9** (SI value formatting), **V10** (routing surface: power
   glyphs / Steiner trees), **V12** (no wires through foreign
   bodies), **V13** (labels don't overlap bodies / text / foreign
-  wires), **V14** (power-glyph orientation). Note V12's own text
-  calls it "quality" — it is tiered here as Tier 1 because a wire
-  spearing a body is a legibility defect a reader flags on sight,
-  not a pure-aesthetic refinement.
+  wires), **V14** (power-glyph orientation), **V15** (content lands
+  within the page's usable area). Note V12's own text calls it
+  "quality" — it is tiered here as Tier 1 because a wire spearing a
+  body is a legibility defect a reader flags on sight, not a
+  pure-aesthetic refinement.
 
 - **Tier 2 — Aesthetic refinement.** Pure layout heuristics that
   make the result look hand-drawn. Members (each self-described as
@@ -845,6 +846,36 @@ literals above.
   Verifier: `crates/spice2kicad/tests/placement_quality.rs::v14_*`
   asserts every `power:GND` and `power:VCC` symbol's `(at … rot)`
   has `rot == 0`.
+
+- **V15 — Content lands within the page's usable area.** Every
+  emitted coordinate (symbol / property / wire / label / glyph /
+  junction / sheet / no_connect anchor) has non-negative X/Y and
+  lies inside the A4 drawable region. The placer's grid frame allows
+  negative origins, so without a final pass the whole circuit spills
+  off the top-left page border with ~90% of the sheet empty. The fix
+  is a single final grid-snapped *uniform translation* that shifts
+  the entire placed bounding box so its top-left corner sits at a
+  fixed positive page margin (`PAGE_MARGIN_MM = 25.4 mm`, 20 grid
+  cells). Because it is one uniform offset — no scaling, no per-
+  element moves, an integer number of grid cells — every relative-
+  geometry invariant (V5–V7, V10–V14) is preserved by construction
+  and everything stays grid-snapped. It is applied as the single
+  chokepoint `translate_into_page` in `kicad-emitter/src/schematic.rs`,
+  run on the final `Sexpr` tree of every sheet (root and child)
+  immediately before `to_pretty()`; operating on the emitted tree
+  means it cannot miss a coordinate category generated from emitter
+  constants (hierarchical labels at `-25.4`, sheet blocks, …). Two
+  subtrees are excluded: the `(lib_symbols …)` block (symbol-
+  definition-local geometry that must not move with the instance
+  layout) and hidden `(property … (hide yes))` nodes (emitted at a
+  fixed `(0 0 0)`, not visible content). This is a categorical floor,
+  not a quality gradient: it needs no per-fixture ratchet budget, a
+  hard `min ≥ margin` assertion suffices.
+  Verifier: `crates/spice2kicad/tests/placement_quality.rs::v15_*`
+  collects every instance-section coordinate of every emitted sheet
+  (excluding `lib_symbols`) and asserts the content bbox's top-left
+  corner sits at the margin, no coordinate is negative, and the bbox
+  fits within the A4 (297×210) drawable rectangle.
 
 ## When changing the annotation spec
 

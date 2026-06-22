@@ -1036,3 +1036,171 @@ fn v14_power_glyphs_have_canonical_orientation() {
         }
     }
 }
+
+// --- V15: content lands within the page's usable area --------------------
+
+/// Every emitted instance-section coordinate must sit at a positive page
+/// margin, with the whole content bbox inside the A4 drawable region. The
+/// margin must match the production constant `spice_layout::PAGE_MARGIN_MM`
+/// (the top-left corner of the content bbox is shifted exactly to it).
+const V15_MARGIN_MM: f64 = 25.4;
+
+/// A4 drawable extent in millimetres. KiCad's A4 frame is 297×210; we
+/// assert the content bbox fits within the page rectangle (a generous
+/// upper bound — the point of V15 is the *floor*, but the content must
+/// not run off the right/bottom edge either).
+const V15_A4_W_MM: f64 = 297.0;
+const V15_A4_H_MM: f64 = 210.0;
+
+/// Recursively collect every translatable instance-section coordinate
+/// `(at x y …)` / `(xy x y)` under `v`, EXCLUDING:
+///   * the entire `(lib_symbols …)` subtree (definition-local geometry),
+///   * any `(property … (hide yes))` node's `(at …)` (hidden sim props
+///     are emitted at a fixed `(0 0 0)` and are not visible content).
+///
+/// Mirrors the production translator's notion of "what is content".
+fn collect_instance_coords(v: &Value, out: &mut Vec<Pt>) {
+    let Some(name) = head(v) else {
+        // Not a list with a head symbol; nothing to collect here.
+        if let Some(it) = v.list_iter() {
+            for child in it {
+                collect_instance_coords(child, out);
+            }
+        }
+        return;
+    };
+
+    // Never descend into symbol-definition-local geometry.
+    if name == "lib_symbols" {
+        return;
+    }
+
+    // A hidden property's `(at …)` is not content — skip the whole node.
+    if name == "property" && property_is_hidden(v) {
+        return;
+    }
+
+    if name == "at" || name == "xy" {
+        let mut it = list_iter(v);
+        it.next(); // head
+        if let (Some(x), Some(y)) = (it.next().and_then(as_f64), it.next().and_then(as_f64)) {
+            out.push((x, y));
+        }
+        // `at`/`xy` carry only scalars after head; no nested coords.
+        return;
+    }
+
+    for child in list_iter(v) {
+        collect_instance_coords(child, out);
+    }
+}
+
+/// True when a `(property …)` node carries `(effects … (hide yes))`.
+fn property_is_hidden(prop: &Value) -> bool {
+    let Some(effects) = find_child(prop, "effects") else {
+        return false;
+    };
+    children(effects, "hide")
+        .into_iter()
+        .any(|h| list_iter(h).nth(1).and_then(as_str) == Some("yes"))
+}
+
+/// Every V15 fixture: the five v0.1 reference fixtures, the
+/// hierarchical-sheet opamp (`opamp_inverting`, which exercises sheet
+/// blocks + hierarchical labels + no_connect anchors), and the
+/// repo-level example.
+fn v15_fixtures() -> Vec<(&'static str, PathBuf)> {
+    let mut out: Vec<(&'static str, PathBuf)> = vec![
+        ("rc_lowpass", fixtures_dir().join("rc_lowpass.cir")),
+        ("common_emitter", fixtures_dir().join("common_emitter.cir")),
+        ("multivibrator", fixtures_dir().join("multivibrator.cir")),
+        ("diff_pair", fixtures_dir().join("diff_pair.cir")),
+        (
+            "opamp_inverting_real",
+            fixtures_dir().join("opamp_inverting_real.cir"),
+        ),
+        (
+            "opamp_inverting",
+            fixtures_dir().join("opamp_inverting.cir"),
+        ),
+    ];
+    let example = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/rc_lowpass.cir");
+    out.push(("example_rc_lowpass", example));
+    out
+}
+
+#[test]
+fn v15_content_within_page_bounds() {
+    for (name, path) in v15_fixtures() {
+        let tmp = tempdir(name);
+        let sch = common::spice_to_kicad(&path, &tmp).expect("spice2kicad");
+        // Translate the root sheet AND every child sheet emitted into
+        // the directory: hierarchical fixtures write extra `.kicad_sch`
+        // files whose coordinates must also land in-page.
+        let dir = sch.parent().expect("sch parent");
+        let mut sheet_files: Vec<PathBuf> = std::fs::read_dir(dir)
+            .expect("read out dir")
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "kicad_sch"))
+            .collect();
+        sheet_files.sort();
+        assert!(!sheet_files.is_empty(), "{name}: no .kicad_sch emitted");
+
+        for file in &sheet_files {
+            let root = parse_sch(file);
+            let mut coords = Vec::new();
+            collect_instance_coords(&root, &mut coords);
+            assert!(
+                !coords.is_empty(),
+                "{name} ({}): no instance-section coordinates collected",
+                file.display(),
+            );
+            let min_x = coords.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
+            let min_y = coords.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
+            let max_x = coords.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max);
+            let max_y = coords.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max);
+
+            // Floor: content top-left corner sits at the page margin.
+            // No coordinate may be left of / above the margin (this is
+            // what catches the negative-X spill the fix removes).
+            assert!(
+                min_x >= V15_MARGIN_MM - 1e-6,
+                "{name} ({}): min_x = {min_x:.3} < margin {V15_MARGIN_MM}; \
+                 content spills off the left page border",
+                file.display(),
+            );
+            assert!(
+                min_y >= V15_MARGIN_MM - 1e-6,
+                "{name} ({}): min_y = {min_y:.3} < margin {V15_MARGIN_MM}; \
+                 content sits above the top page margin",
+                file.display(),
+            );
+            // The content's top-left corner lands *at* the margin (within
+            // one grid cell) — the translation is exact, not arbitrary.
+            assert!(
+                (min_x - V15_MARGIN_MM).abs() <= 1.27 + 1e-6,
+                "{name} ({}): min_x = {min_x:.3} not snapped to margin \
+                 {V15_MARGIN_MM} (±1 grid cell)",
+                file.display(),
+            );
+            assert!(
+                (min_y - V15_MARGIN_MM).abs() <= 1.27 + 1e-6,
+                "{name} ({}): min_y = {min_y:.3} not snapped to margin \
+                 {V15_MARGIN_MM} (±1 grid cell)",
+                file.display(),
+            );
+            // Ceiling: content fits inside the A4 drawable rectangle.
+            assert!(
+                max_x <= V15_A4_W_MM + 1e-6,
+                "{name} ({}): max_x = {max_x:.3} exceeds A4 width {V15_A4_W_MM}",
+                file.display(),
+            );
+            assert!(
+                max_y <= V15_A4_H_MM + 1e-6,
+                "{name} ({}): max_y = {max_y:.3} exceeds A4 height {V15_A4_H_MM}",
+                file.display(),
+            );
+        }
+    }
+}

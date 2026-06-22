@@ -43,6 +43,11 @@ use uuid::Uuid;
 const SCHEMA_VERSION: &str = "20231120";
 const GENERATOR: &str = "spice2kicad";
 
+/// Fixed positive page margin (mm) at which the top-left corner of the
+/// emitted content bounding box is parked (V15). A multiple of the KiCad
+/// schematic grid step (1.27 mm): 25.4 mm = 20 cells.
+pub const PAGE_MARGIN_MM: f64 = 25.4;
+
 /// Stable namespace for v5 UUIDs emitted by spice2kicad. Picked once
 /// and frozen so two runs over the same input produce byte-identical
 /// output.
@@ -143,7 +148,9 @@ pub fn emit_root(
         ]),
     ]));
 
-    Ok(Sexpr::List(items).to_pretty())
+    let mut root = Sexpr::List(items);
+    translate_into_page(&mut root);
+    Ok(root.to_pretty())
 }
 
 /// Emit a hierarchical-sheet child schematic. The child carries a
@@ -233,7 +240,9 @@ pub fn emit_child_sheet(child: &ChildSheet<'_>, library: &Library) -> Result<Str
     }
     items.push(Sexpr::List(sheet_instances_items));
 
-    Ok(Sexpr::List(items).to_pretty())
+    let mut root = Sexpr::List(items);
+    translate_into_page(&mut root);
+    Ok(root.to_pretty())
 }
 
 /// Render a `(sheet …)` block plus the `(global_label …)` pieces that
@@ -1484,6 +1493,150 @@ fn instance_uuid(el: &PlacedElement) -> String {
     Uuid::new_v5(&UUID_NAMESPACE, seed.as_bytes()).to_string()
 }
 
+/// V15 — translate the entire emitted sheet so its content bounding box
+/// top-left corner lands at [`PAGE_MARGIN_MM`].
+///
+/// This is the *single* place the placed layout is shifted into the
+/// page's usable area. It is a uniform, grid-snapped affine translation
+/// of every instance-section coordinate — symbol/property `(at …)`, wire
+/// `(xy …)`, power-glyph `(at …)`, junctions, labels, hierarchical
+/// labels, no_connects, and `(sheet …)` blocks (their `(at …)` and pin
+/// `(at …)`, but **not** `(size …)`). Because it operates on the final
+/// `Sexpr` tree it cannot miss a category that other passes generate from
+/// constants (hierarchical labels at `-25.4`, sheet blocks, …).
+///
+/// Two subtrees are deliberately excluded:
+///   * `(lib_symbols …)` — its `(at …)`/`(xy …)` are symbol-DEFINITION
+///     -local geometry that must not move with the instance layout.
+///   * hidden `(property … (hide yes))` nodes — emitted at a fixed
+///     `(0 0 0)` and not visible content; translating them would skew
+///     the bounding box.
+///
+/// Uniform translation only: no scaling, no per-element moves, so every
+/// relative-geometry invariant (V5–V7, V10–V14) is preserved by
+/// construction. The offset is an integer number of grid cells, so all
+/// coordinates remain grid-snapped.
+fn translate_into_page(root: &mut Sexpr) {
+    let mut min = (f64::INFINITY, f64::INFINITY);
+    collect_translatable_min(root, &mut min);
+    if !min.0.is_finite() || !min.1.is_finite() {
+        // No content coordinates (e.g. an empty sheet) — nothing to do.
+        return;
+    }
+    // Snap the offset to an integer number of grid cells so the result
+    // stays on the KiCad grid. Round the per-axis shift to the nearest
+    // cell; the content top-left then lands within one cell of the
+    // margin.
+    let step = 1.27_f64;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let off_cells_x = ((PAGE_MARGIN_MM - min.0) / step).round() as i64;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let off_cells_y = ((PAGE_MARGIN_MM - min.1) / step).round() as i64;
+    #[allow(clippy::cast_precision_loss)]
+    let dx = off_cells_x as f64 * step;
+    #[allow(clippy::cast_precision_loss)]
+    let dy = off_cells_y as f64 * step;
+    apply_translation(root, dx, dy);
+}
+
+/// Recurse, folding the minimum X/Y over every translatable coordinate
+/// node (see [`translate_into_page`] for the exclusion rules).
+fn collect_translatable_min(node: &Sexpr, min: &mut (f64, f64)) {
+    let Sexpr::List(items) = node else {
+        return;
+    };
+    match sexpr_head(items) {
+        Some("lib_symbols") => return,
+        Some("property") if property_node_hidden(items) => return,
+        Some("at" | "xy") => {
+            if let Some((x, y)) = coord_pair(items) {
+                if x < min.0 {
+                    min.0 = x;
+                }
+                if y < min.1 {
+                    min.1 = y;
+                }
+            }
+            return;
+        }
+        _ => {}
+    }
+    for child in items {
+        collect_translatable_min(child, min);
+    }
+}
+
+/// Recurse, adding `(dx, dy)` to every translatable coordinate node
+/// (same exclusion rules as [`collect_translatable_min`]).
+fn apply_translation(node: &mut Sexpr, dx: f64, dy: f64) {
+    let Sexpr::List(items) = node else {
+        return;
+    };
+    match sexpr_head(items) {
+        Some("lib_symbols") => return,
+        Some("property") if property_node_hidden(items) => return,
+        Some("at" | "xy") => {
+            // items[0] = head, items[1] = x, items[2] = y, [3..] = rot etc.
+            if let Some(Sexpr::Atom(s)) = items.get(1) {
+                if let Ok(x) = s.parse::<f64>() {
+                    items[1] = Sexpr::Atom(format_coord(x + dx));
+                }
+            }
+            if let Some(Sexpr::Atom(s)) = items.get(2) {
+                if let Ok(y) = s.parse::<f64>() {
+                    items[2] = Sexpr::Atom(format_coord(y + dy));
+                }
+            }
+            return;
+        }
+        _ => {}
+    }
+    for child in items.iter_mut() {
+        apply_translation(child, dx, dy);
+    }
+}
+
+/// Head symbol of an s-expr list, if its first element is an atom.
+fn sexpr_head(items: &[Sexpr]) -> Option<&str> {
+    match items.first() {
+        Some(Sexpr::Atom(s)) => Some(s.as_str()),
+        _ => None,
+    }
+}
+
+/// The first two scalar children of an `(at …)` / `(xy …)` node parsed as
+/// `(x, y)` millimetre coordinates.
+fn coord_pair(items: &[Sexpr]) -> Option<(f64, f64)> {
+    let x = match items.get(1)? {
+        Sexpr::Atom(s) => s.parse::<f64>().ok()?,
+        _ => return None,
+    };
+    let y = match items.get(2)? {
+        Sexpr::Atom(s) => s.parse::<f64>().ok()?,
+        _ => return None,
+    };
+    Some((x, y))
+}
+
+/// True when a `(property …)` list carries `(effects … (hide yes))`.
+fn property_node_hidden(items: &[Sexpr]) -> bool {
+    items.iter().any(|child| {
+        let Sexpr::List(effects) = child else {
+            return false;
+        };
+        if sexpr_head(effects) != Some("effects") {
+            return false;
+        }
+        effects.iter().any(|e| {
+            let Sexpr::List(hide) = e else {
+                return false;
+            };
+            sexpr_head(hide) == Some("hide")
+                && matches!(hide.get(1), Some(Sexpr::Atom(v)) if v == "yes")
+        })
+    })
+}
+
 fn format_coord(v: f64) -> String {
     let rounded = (v * 1_000_000.0).round() / 1_000_000.0;
     if rounded == 0.0 {
@@ -1542,9 +1695,21 @@ mod tests {
             out.contains("(lib_id \"Device:R\")"),
             "missing lib_id in output:\n{out}"
         );
+        // V15 translates the placement into the page's usable area, so
+        // the origin no longer sits at (0 0 0). The single resistor's
+        // symbol `(at …)` lands at the page margin (rotation 0 kept).
         assert!(
-            out.contains("(at 0 0 0)"),
-            "missing origin (at 0 0 0) in output:\n{out}"
+            out.contains(&format!(
+                "(at {} {} 0)",
+                format_coord(PAGE_MARGIN_MM),
+                format_coord(PAGE_MARGIN_MM + 2.54)
+            )),
+            "missing margin-translated origin in output:\n{out}"
+        );
+        // No coordinate may be negative after the V15 translation.
+        assert!(
+            !out.contains("(at -"),
+            "negative origin survived V15 translation:\n{out}"
         );
         assert!(out.contains("(kicad_sch"));
         assert!(out.contains("(sheet_instances"));
@@ -1600,8 +1765,24 @@ mod tests {
             }],
         };
         let out = emit(&placement, &fixture_library()).expect("emit");
-        // 2 grid * 1.27mm = 2.54, 4 * 1.27 = 5.08
-        assert!(out.contains("(at 2.54 5.08 90)"), "got:\n{out}");
+        // V15 translates absolute coordinates into the page area, but the
+        // rotation token (and the relative geometry) is preserved: the
+        // symbol's `(at …)` still carries the 90° rotation, and no
+        // coordinate is negative.
+        let sym_at = out
+            .split("(symbol")
+            .nth(1)
+            .and_then(|s| s.split("(at ").nth(1))
+            .and_then(|s| s.split(')').next())
+            .expect("symbol (at …)");
+        assert!(
+            sym_at.trim_end().ends_with(" 90"),
+            "rotation 90 not preserved through V15 translation; got `(at {sym_at})`:\n{out}"
+        );
+        assert!(
+            !out.contains("(at -"),
+            "negative origin survived V15 translation:\n{out}"
+        );
     }
 
     #[test]
