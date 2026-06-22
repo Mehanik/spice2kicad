@@ -16,6 +16,8 @@ spice-policy.workspace = true
 spice-diagnostics.workspace = true
 kicad-symbols.workspace = true
 log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

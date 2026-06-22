@@ -21,6 +21,73 @@ pub enum NetClass {
 /// A map from net name to [`NetClass`].
 pub type NetClassMap = HashMap<String, NetClass>;
 
+/// Preferred *screen-vertical* side for a rail net, used by the V14
+/// power-glyph-orientation hard constraint in the placer.
+///
+/// A positive supply rail (VCC / VDD / V+) conventionally runs along
+/// the top of the sheet, so any element pin sitting on it should face
+/// screen-**up**. Ground and *negative* supply rails (GND / VEE / VSS /
+/// V- and any `*@power=-…` source) run along the bottom, so their pins
+/// face screen-**down**. Signal nets carry no preference.
+///
+/// Note this is finer-grained than [`NetClass`]: a `*@power=-15V`
+/// source's net is `NetClass::Power` (it is a *@power-tagged supply)
+/// but its [`VertPref`] is [`VertPref::Down`], because a negative rail
+/// belongs at the bottom of the sheet next to ground — not at the top
+/// with VCC. V14 orientation keys off `VertPref`, never off `NetClass`
+/// directly, so split ±rails orient correctly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VertPref {
+    /// Pin on this net should face screen-up (positive supply rail).
+    Up,
+    /// Pin on this net should face screen-down (ground / negative rail).
+    Down,
+}
+
+/// Map every net to its [`VertPref`], or absent for signal nets.
+///
+/// Rules (applied after [`classify_nets`]):
+/// * `NetClass::Ground` → [`VertPref::Down`].
+/// * `NetClass::Power` → [`VertPref::Down`] when the net is a negative
+///   rail (lowercased name matches `vee`/`vss`/`v-`/`vminus`, OR a
+///   `*@power`-tagged source on the net carries a rail string that
+///   begins with `-`); otherwise [`VertPref::Up`].
+/// * `NetClass::Signal` → no entry.
+#[must_use]
+pub fn vertical_prefs(checked: &CheckedNetlist) -> HashMap<String, VertPref> {
+    let classes = classify_nets(checked);
+
+    // Nets whose *@power source carries a negative rail string.
+    let mut negative_power: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for el in &checked.elements {
+        if let ElementRole::Power(rail) = &el.role
+            && rail.trim_start().starts_with('-')
+        {
+            for n in &el.nodes {
+                negative_power.insert(n.clone());
+            }
+        }
+    }
+
+    let mut out = HashMap::new();
+    for (net, class) in classes {
+        let pref = match class {
+            NetClass::Ground => VertPref::Down,
+            NetClass::Power => {
+                let lower = net.to_ascii_lowercase();
+                if matches_ground_name(&lower) || negative_power.contains(&net) {
+                    VertPref::Down
+                } else {
+                    VertPref::Up
+                }
+            }
+            NetClass::Signal => continue,
+        };
+        out.insert(net, pref);
+    }
+    out
+}
+
 /// Classify every net referenced by the netlist.
 ///
 /// Rules (spec §3), applied in priority order via `entry().or_insert`:
@@ -155,5 +222,38 @@ mod tests {
     fn signal_net_default() {
         let m = classify_str("test\nV1 in 0 AC 1\nR1 in mid 1k\nC1 mid 0 1u\n.end\n");
         assert_eq!(m.get("mid"), Some(&NetClass::Signal));
+    }
+
+    fn prefs_str(src: &str) -> HashMap<String, VertPref> {
+        let file_id = FileId(0);
+        let parsed = spice_parser::parse(src, file_id)
+            .expect("parse failed")
+            .netlist;
+        let resolved = spice_resolve::resolve(&parsed, fixture_library()).expect("resolve failed");
+        let (checked, _warns) = check(resolved).expect("policy check failed");
+        vertical_prefs(&checked)
+    }
+
+    #[test]
+    fn positive_rail_prefers_up_ground_prefers_down() {
+        let p = prefs_str("test\nV1 vcc 0 12 ;@ power=vcc\nR1 vcc out 1k\n.end\n");
+        assert_eq!(p.get("vcc"), Some(&VertPref::Up));
+        assert_eq!(p.get("0"), Some(&VertPref::Down));
+        assert_eq!(p.get("out"), None); // signal → no preference
+    }
+
+    #[test]
+    fn negative_power_rail_prefers_down() {
+        // A *@power source with a negative rail string is Power-class
+        // but belongs at the bottom (VertPref::Down).
+        let p = prefs_str("test\nVEE vee 0 DC -15 ;@ power=-15V\nR1 vee out 1k\n.end\n");
+        assert_eq!(p.get("vee"), Some(&VertPref::Down));
+    }
+
+    #[test]
+    fn name_based_negative_rail_prefers_down() {
+        // `vee` matches the ground-name pattern even when it is power.
+        let p = prefs_str("test\nVEE vee 0 DC 15 ;@ power=vee\nR1 vee out 1k\n.end\n");
+        assert_eq!(p.get("vee"), Some(&VertPref::Down));
     }
 }

@@ -1,5 +1,16 @@
 # Wiring redesign — proposal
 
+> **SUPERSEDED — historical design artifact.** This proposal predates
+> implementation and has shipped. The authoritative contract is now
+> `CLAUDE.md` (invariants V10/V11/V12) plus the as-built router in
+> `crates/spice-route/`. NOTE: the RSMT algorithm discussion here
+> (FLUTE / Hanan-grid DP / "exact for N<=9") was NOT what shipped. The
+> as-built `crates/spice-route/src/steiner.rs` is Hwang-exact only at
+> N=3 and uses a rectilinear-MST + Borah-Owens-Irwin Steinerization
+> heuristic for 4<=N<=9 (plain RMST for N>=10). Do not treat any
+> decision below as current; consult CLAUDE.md and the code. Kept for
+> history only.
+
 **Status:** proposal, awaiting approval. Author: 2026-05-03.
 
 ## Problem

@@ -54,6 +54,15 @@ struct Cli {
     /// Iteration cap for the SA refiner (default 200).
     #[arg(long)]
     refine_iterations: Option<u32>,
+
+    /// Disable the position-stability layout cache (ADR-4). By default
+    /// the converter reads `<basename>.layout.json` next to the output
+    /// `.kicad_sch` (if present) to keep untouched parts in place across
+    /// re-conversions, and rewrites it on every run. Pass this flag to
+    /// ignore and not write that cache — every run then re-anneals from
+    /// scratch. Schematic target with an `--output` path only.
+    #[arg(long)]
+    no_layout_cache: bool,
 }
 
 fn load_library(paths: &[PathBuf]) -> Result<Library> {
@@ -174,13 +183,39 @@ fn emit_schematic_target(
         refine_iterations: cli.refine_iterations.unwrap_or(200),
         ..LayoutOptions::default()
     };
-    let placement = match spice_layout::place_with(checked, &library, &opts) {
+
+    // Position-stability sidecar (ADR-4): when the cache is enabled and
+    // an output path is known, load `<basename>.layout.json` (if present)
+    // as a placement hint so untouched elements keep their saved
+    // position across re-conversions. This is a tool-owned position
+    // CACHE, not a user-annotation carrier (see ADR-4 / sidecar.rs).
+    let sidecar_path = (!cli.no_layout_cache)
+        .then_some(cli.output.as_deref())
+        .flatten()
+        .map(spice_layout::sidecar::sidecar_path_for);
+    let hint = sidecar_path
+        .as_deref()
+        .and_then(|p| fs::read_to_string(p).ok())
+        .and_then(|text| spice_layout::sidecar::Sidecar::from_json(&text))
+        .map(|s| s.to_hint())
+        .unwrap_or_default();
+
+    let placement = match spice_layout::place_with_hint(checked, &library, &opts, &hint) {
         Ok(p) => p,
         Err(diags) => {
             surface_diags(&diags, sources);
             std::process::exit(1);
         }
     };
+
+    // Rewrite the sidecar from the freshly-computed placement on every
+    // run. Removed refdeses simply do not appear in the new snapshot, so
+    // they drop out of the cache (ADR-4 step 2).
+    if let Some(ref sc_path) = sidecar_path {
+        let snapshot = spice_layout::sidecar::Sidecar::from_placement(&placement);
+        fs::write(sc_path, snapshot.to_json())
+            .with_context(|| format!("writing layout cache {}", sc_path.display()))?;
+    }
 
     // Place each subckt body on its own child sheet. Only emit children
     // for subckts that actually have an instance in this file.

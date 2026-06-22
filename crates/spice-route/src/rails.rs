@@ -51,10 +51,21 @@ pub fn emit(
                 lib_id,
                 &net.name,
                 pin,
+                net.class,
                 &refdes,
                 sheet_uuid,
                 project_name,
             ));
+            // V14 forced-sideways fallback: when the host pin does not
+            // face the glyph's canonical axis (power → up, ground →
+            // down), the glyph — locked at rot 0 — would extend into
+            // the host body. Offset it one grid cell along the
+            // canonical axis and bridge the gap with a one-cell stub
+            // wire so the glyph body never overlaps the host body while
+            // the rotation stays the conventional 0.
+            if let Some(stub) = stub_wire(pin, net.class) {
+                out.push(stub);
+            }
         } else {
             out.push(global_label_sexpr(&net.name, pin));
         }
@@ -84,40 +95,105 @@ fn ground_lib_id(_net_name: &str) -> &'static str {
     "power:GND"
 }
 
-/// Compute (x, y, rotation_degrees) for the power symbol so its
-/// anchor pin sits at `pin`'s coordinate. V14 locks the glyph
-/// rotation to its conventional orientation regardless of the host
-/// pin's outward direction:
+/// The canonical screen-vertical direction a rot-0 glyph of `class`
+/// extends its body away from its anchor pin.
 ///
-/// * GND — always rot 0. Triangle renders visually DOWN below the
-///   anchor coordinate. (Empirically verified — see the
-///   `power_symbol_rotation_extends_body_away_from_host_pin`
-///   regression test.)
-/// * VCC (and the other `power:+…` variants) — always rot 0.
-///   Chevron renders visually UP above the anchor coordinate.
+/// * Power → up (chevron above the anchor).
+/// * Ground → down (triangle below the anchor).
+fn canonical_axis(class: NetClass) -> Direction {
+    match class {
+        NetClass::Power => Direction::Up,
+        // Ground (the only other class that reaches here; Signal is
+        // filtered out before `symbol_pose` is called).
+        _ => Direction::Down,
+    }
+}
+
+/// True only in the V14 *forced-sideways* case the offset+stub fallback
+/// exists for: the host pin points in the exact *opposite* of the
+/// glyph's canonical body direction, so a rot-0 glyph placed at the pin
+/// coordinate would extend its body back through the host symbol body
+/// (a GND pin pointing screen-up, or a VCC pin pointing screen-down).
 ///
-/// When the host pin's outward direction conflicts with the locked
-/// orientation (e.g. a GND glyph attached to a pin that sticks
-/// upward into empty space), the glyph body may visually overlap
-/// the host symbol's body. The V13 verifier flags such cases as a
-/// quality defect; closing those needs a placer-level pin-choice
-/// improvement (tracked separately). Locking the rotation is V14's
-/// hard contract regardless.
-fn symbol_pose(pin: &PinRef) -> (f64, f64, u16) {
-    let _ = GRID_MM;
-    let _ = pin.outward;
-    (pin.x_mm, pin.y_mm, 0)
+/// A horizontal pin (Left/Right) is *not* forced-sideways: the rot-0
+/// glyph hangs vertically off to the side and does not enter the host
+/// body, so it keeps the on-pin placement with no stub (matching the
+/// pre-V14 behaviour and avoiding a spurious vertical stub that would
+/// otherwise read as a V5 non-outward first segment).
+fn is_forced_sideways(pin: &PinRef, class: NetClass) -> bool {
+    let canon = canonical_axis(class);
+    let opposite = match canon {
+        Direction::Up => Direction::Down,
+        Direction::Down => Direction::Up,
+        Direction::Left => Direction::Right,
+        Direction::Right => Direction::Left,
+    };
+    pin.outward == opposite
+}
+
+/// One grid-cell file-coordinate delta along a pin's outward direction.
+/// File Y increases downward, so `Up` is a negative Y delta.
+fn outward_delta(dir: Direction) -> (f64, f64) {
+    match dir {
+        Direction::Up => (0.0, -GRID_MM),
+        Direction::Down => (0.0, GRID_MM),
+        Direction::Left => (-GRID_MM, 0.0),
+        Direction::Right => (GRID_MM, 0.0),
+    }
+}
+
+/// Compute (x, y, rotation_degrees) for the power symbol's anchor pin.
+///
+/// V14 locks the glyph rotation to its conventional orientation (rot 0
+/// always: GND triangle down, VCC chevron up) regardless of the host
+/// pin's outward direction.
+///
+/// Forced-sideways fallback: when the host pin points opposite the
+/// glyph's canonical body direction (see [`is_forced_sideways`]),
+/// placing the rot-0 glyph at the pin coordinate would extend its body
+/// back through the host symbol body. The anchor is then offset one
+/// grid cell *along the pin's outward direction* so the glyph body
+/// clears the host; [`stub_wire`] bridges the host pin to the offset
+/// anchor along that same outward direction (so the first segment from
+/// the pin extends outward, satisfying V5). Otherwise the anchor sits
+/// exactly on the pin (no stub).
+fn symbol_pose(pin: &PinRef, class: NetClass) -> (f64, f64, u16) {
+    if is_forced_sideways(pin, class) {
+        let (dx, dy) = outward_delta(pin.outward);
+        (pin.x_mm + dx, pin.y_mm + dy, 0)
+    } else {
+        (pin.x_mm, pin.y_mm, 0)
+    }
+}
+
+/// One-cell stub wire from the host pin to the offset glyph anchor,
+/// emitted only in the V14 forced-sideways case. The stub extends along
+/// the pin's outward direction, so it doubles as the pin's outward first
+/// segment (V5). Returns `None` when the glyph sits on the pin.
+fn stub_wire(pin: &PinRef, class: NetClass) -> Option<Sexpr> {
+    if !is_forced_sideways(pin, class) {
+        return None;
+    }
+    let (dx, dy) = outward_delta(pin.outward);
+    let (x0, y0) = (pin.x_mm, pin.y_mm);
+    let (x1, y1) = (pin.x_mm + dx, pin.y_mm + dy);
+    let txt = format!(
+        "(wire (pts (xy {x0:.2} {y0:.2}) (xy {x1:.2} {y1:.2})) \
+         (stroke (width 0) (type default)))",
+    );
+    Some(lexpr::from_str(&txt).expect("stub wire s-expr parses"))
 }
 
 fn power_symbol_sexpr(
     lib_id: &str,
     net_name: &str,
     pin: &PinRef,
+    class: NetClass,
     refdes: &str,
     sheet_uuid: &str,
     project_name: &str,
 ) -> Sexpr {
-    let (x, y, rot) = symbol_pose(pin);
+    let (x, y, rot) = symbol_pose(pin, class);
     // Use the same pattern as the existing emitter: nested `(symbol …)`
     // with `lib_id`, `at`, `unit`, properties. Reference is a unique
     // `#PWR<n>`, Value is the net name (which is what wires the global

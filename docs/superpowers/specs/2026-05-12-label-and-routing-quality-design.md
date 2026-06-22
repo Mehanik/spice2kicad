@@ -1,5 +1,24 @@
 # Label kind, power glyph orientation, and routing-quality invariants
 
+> **SUPERSEDED — historical design artifact. DO NOT IMPLEMENT AS
+> WRITTEN.** This document predates implementation and has shipped, but
+> two of its proposals diverge from shipped behaviour and MUST NOT be
+> revived:
+>
+> - Its V4 label rule (<=1 plain `(label …)` per net, zero
+>   `(global_label …)`) is wrong for the as-built emitter, which emits
+>   global labels at pin positions for connectivity. Implementing the
+>   rule below regresses ERC (wireless plain labels fire
+>   `label_dangling`). The authoritative V4 contract is in `CLAUDE.md`.
+> - Its V14 stem-wire / per-pin glyph-rotation mechanism MUST NOT be
+>   implemented. The shipped V14 contract (CLAUDE.md) locks power-glyph
+>   rotation to 0 (GND down, VCC up) regardless of host-pin direction;
+>   the stem-wire scheme here diverges from that and from the
+>   detached-glyph-with-stub fallback.
+>
+> The authoritative contract is `CLAUDE.md` (V4, V13, V14) plus the
+> as-built code. Kept for history only.
+
 Date: 2026-05-12
 Status: approved — ready for implementation
 

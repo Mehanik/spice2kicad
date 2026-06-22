@@ -13,7 +13,7 @@
 //! See `docs/layout-roadmap.md` §4 (architecture) and §5 (cost
 //! function), and `docs/layout-adr.md` ADR-3 (orientation search).
 
-use kicad_symbols::Library;
+use kicad_symbols::{Library, Orientation};
 use spice_policy::CheckedNetlist;
 
 use crate::Placement;
@@ -64,12 +64,17 @@ impl Default for LayoutOptions {
 /// Pinned elements come from `align` / `place` constraints; the SA
 /// pass also treats them as immovable so it cannot trade a hard
 /// constraint for a soft one.
+///
+/// `allowed[i]` is element `i`'s V14 allowed-orientation set. The SA
+/// rotate / mirror-Y moves accept-reject against it so the V14 hard
+/// constraint is preserved at every move (CLAUDE.md consistency rule).
 pub(crate) fn refine(
     seed: Placement,
     pinned: &[bool],
     checked: &CheckedNetlist,
     library: &Library,
     opts: &LayoutOptions,
+    allowed: &[Vec<Orientation>],
 ) -> Placement {
     let after_fr = force::seed(seed, pinned, checked, opts);
     // Compute layer assignment once so the annealer can propose
@@ -77,5 +82,5 @@ pub(crate) fn refine(
     // Y rank). Cheap relative to the SA loop itself.
     let classes = crate::net_class::classify_nets(checked);
     let layers = crate::layers::assign_x_layers(checked, &classes);
-    anneal::refine(after_fr, pinned, checked, library, opts, &layers)
+    anneal::refine(after_fr, pinned, checked, library, opts, &layers, allowed)
 }

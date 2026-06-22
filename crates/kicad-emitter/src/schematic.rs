@@ -129,7 +129,8 @@ pub fn emit_root(
     for routed in route_nets(&net_pins, "root", library, &obstacles)? {
         items.push(routed);
     }
-    for label in dangling_pin_labels(&net_pins, "root", &extra_pins) {
+    let property_bboxes = placement_property_bboxes(placement);
+    for label in dangling_pin_labels(&net_pins, "root", &extra_pins, &property_bboxes) {
         items.push(label);
     }
 
@@ -208,7 +209,8 @@ pub fn emit_child_sheet(child: &ChildSheet<'_>, library: &Library) -> Result<Str
     for routed in route_nets(&net_pins, &child.name, library, &obstacles)? {
         items.push(routed);
     }
-    for label in dangling_pin_labels(&net_pins, &child.name, &extra_pins) {
+    let child_props = placement_property_bboxes(child.placement);
+    for label in dangling_pin_labels(&net_pins, &child.name, &extra_pins, &child_props) {
         items.push(label);
     }
 
@@ -1144,6 +1146,7 @@ fn dangling_pin_labels(
     nets: &std::collections::BTreeMap<String, Vec<(f64, f64, u16)>>,
     scope: &str,
     extra_pins: &[(String, f64, f64)],
+    property_bboxes: &[TextBbox],
 ) -> Vec<Sexpr> {
     // Coordinates already carrying a port marker (sheet pin position
     // on the parent, hierarchical_label on a child) name the net by
@@ -1264,6 +1267,10 @@ fn dangling_pin_labels(
         });
         let (fx, fy, fang) = uniq[0];
         if uniq.len() == 1 && !net_touches_port {
+            // Global labels carry a chevron; their bbox differs from a
+            // plain label, so we keep the body-clearing rotation as-is
+            // (the property-text avoidance below targets plain labels,
+            // where the regression appears).
             out.push(global_label_simple(
                 net,
                 fx,
@@ -1273,17 +1280,16 @@ fn dangling_pin_labels(
                 idx,
             ));
         } else {
-            out.push(label_simple(net, fx, fy, label_rot(fang), scope, idx * 2));
+            // V13: prefer the body-clearing outward rotation, but if that
+            // makes the label text overlap a Reference/Value bbox (e.g.
+            // the inverting-amp `out` label landing on the feedback
+            // resistor's Value), rotate the label to a clear direction.
+            let rot = label_rotation_avoiding(net, (fx, fy), label_rot(fang), property_bboxes);
+            out.push(label_simple(net, fx, fy, rot, scope, idx * 2));
             if net_touches_port && uniq.len() >= 2 {
                 let (lx, ly, lang) = uniq[uniq.len() - 1];
-                out.push(label_simple(
-                    net,
-                    lx,
-                    ly,
-                    label_rot(lang),
-                    scope,
-                    idx * 2 + 1,
-                ));
+                let rot2 = label_rotation_avoiding(net, (lx, ly), label_rot(lang), property_bboxes);
+                out.push(label_simple(net, lx, ly, rot2, scope, idx * 2 + 1));
             }
         }
     }
@@ -1292,6 +1298,104 @@ fn dangling_pin_labels(
 
 fn approx_eq(a: f64, b: f64) -> bool {
     (a - b).abs() < 1e-6
+}
+
+/// Axis-aligned text bounding box (world mm). Mirrors the geometry the
+/// V13 verifier uses so the emitter can pre-empt a label↔property-text
+/// overlap before it is written.
+#[derive(Debug, Clone, Copy)]
+struct TextBbox {
+    x0: f64,
+    y0: f64,
+    x1: f64,
+    y1: f64,
+}
+
+impl TextBbox {
+    fn intersects(self, o: TextBbox) -> bool {
+        let eps = 1e-3;
+        self.x0 + eps < o.x1 && o.x0 + eps < self.x1 && self.y0 + eps < o.y1 && o.y0 + eps < self.y1
+    }
+}
+
+/// World-frame AABB of left-justified text drawn at `anchor`, rotated
+/// `rot_deg` CCW on screen. Matches the V13 verifier's `text_bbox`
+/// (size 1.27 mm, width = 0.6·n·size + 0.8·size, height = 1.4·size) so
+/// the emitter's collision check agrees with the test that grades it.
+fn text_bbox(text: &str, anchor: (f64, f64), rot_deg: u16) -> TextBbox {
+    let size = 1.27_f64;
+    #[allow(clippy::cast_precision_loss)]
+    let chars = text.chars().count() as f64;
+    let width = chars * 0.6 * size + 0.8 * size;
+    let height = 1.4 * size;
+    let (lx, rx, ty, by) = (0.0, width, -height / 2.0, height / 2.0);
+    let theta = f64::from(rot_deg).to_radians();
+    let (s, c) = (theta.sin(), theta.cos());
+    let corners = [(lx, ty), (rx, ty), (rx, by), (lx, by)];
+    let (mut x0, mut y0, mut x1, mut y1) = (
+        f64::INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NEG_INFINITY,
+    );
+    for (px, py) in corners {
+        let wx = anchor.0 + c * px + s * py;
+        let wy = anchor.1 - s * px + c * py;
+        x0 = x0.min(wx);
+        y0 = y0.min(wy);
+        x1 = x1.max(wx);
+        y1 = y1.max(wy);
+    }
+    TextBbox { x0, y0, x1, y1 }
+}
+
+/// Reference / Value property-text bboxes for every placed element, in
+/// the same world frame and offsets the emitter writes them at
+/// (Reference at local `(2.54, -2.54)`, Value at `(2.54, 2.54)`, both
+/// left-justified, rot 0). Hidden properties are excluded — the
+/// resistor/cap/opamp Reference & Value are the only visible ones.
+fn placement_property_bboxes(placement: &Placement) -> Vec<TextBbox> {
+    let mut out = Vec::new();
+    for el in &placement.elements {
+        let (ox, oy) = el.origin.to_mm();
+        let (rx, ry) = property_anchor(ox, oy, el.orientation, 2.54, -2.54);
+        out.push(text_bbox(&el.refdes, (rx, ry), 0));
+        let value_text = el.value.as_deref().unwrap_or(&el.refdes);
+        let (vx, vy) = property_anchor(ox, oy, el.orientation, 2.54, 2.54);
+        out.push(text_bbox(value_text, (vx, vy), 0));
+    }
+    out
+}
+
+/// Pick a label rotation that does not collide with any property-text
+/// bbox, preferring the body-clearing `preferred` rotation. Falls back
+/// through the perpendicular rotations (±90) and finally 180° before
+/// giving up and returning `preferred` (a property overlap is a
+/// quality defect, never a correctness one, so we never fail to label).
+fn label_rotation_avoiding(
+    text: &str,
+    anchor: (f64, f64),
+    preferred: u16,
+    props: &[TextBbox],
+) -> u16 {
+    let collides = |rot: u16| {
+        let b = text_bbox(text, anchor, rot);
+        props.iter().any(|p| b.intersects(*p))
+    };
+    // Order: preferred first (keeps the existing body-clearing choice
+    // and every non-colliding fixture byte-identical), then the two
+    // perpendiculars, then the opposite.
+    for cand in [
+        preferred,
+        (preferred + 90) % 360,
+        (preferred + 270) % 360,
+        (preferred + 180) % 360,
+    ] {
+        if !collides(cand) {
+            return cand;
+        }
+    }
+    preferred
 }
 
 fn rotation_degrees(orient: Orientation) -> u16 {

@@ -65,7 +65,8 @@ pub struct RouteRequest<'a> {
     pub obstacles: &'a [Bbox],
     /// Optional sheet bounds used by the V12 maze router to size its
     /// working grid. When `None`, the router infers a bbox from the
-    /// union of routed-net pin coordinates and `MAZE_GRID_MARGIN_MM`.
+    /// union of routed-net pin coordinates, padded by the per-instance
+    /// margin derived in `compute_maze_bounds`.
     pub bounds: Option<Bbox>,
 }
 

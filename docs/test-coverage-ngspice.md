@@ -72,8 +72,8 @@ Source references are to `src/frontend/inpcom.c` unless otherwise noted.
 | `//` inline comment — strips rest of line | `inpcom.c:3633`–3635 (`c == '/'` and `*d == '/'` branch) | `lex_edges.rs::double_slash_comment` — `#[ignore]`; our lexer intentionally does not strip `//` (ngspice-only, `$` and `;` are the portable forms) | out-of-scope |
 | `*` line comment — line starting with `*` treated as full comment | `inpcom.c:3582` (`*s == '*'` early return in `inp_stripcomments_line`) | `lex_edges.rs::pure_comment_dropped` | covered |
 | CRLF line endings — `\r` stripped before processing | `inpcom.c:1864`–1868 (`s[-1] == '\r'` zap) | `lex_edges.rs::crlf_line_endings`, `lex_edges.rs::mixed_lf_and_crlf` | covered |
-| Bare `\r` line endings — single physical line; matches `inpcom.c` which only zaps `\r` before `\n` | `inpcom.c:1864`–1868 | `edge_inputs.rs::bare_cr_line_endings` | covered |
-| Dangling `+` continuation at file start — no preceding line; produces a bogus element | `inpcom.c:704` (continuation logic with no `prev`) | `edge_inputs.rs::continuation_at_start_of_file` | covered |
+| Bare `\r` line endings — single physical line; matches `inpcom.c` which only zaps `\r` before `\n` | `inpcom.c:1864`–1868 | `lex_edges.rs::bare_cr_line_endings` | covered |
+| Dangling `+` continuation at file start — no preceding line; produces a bogus element | `inpcom.c:704` (continuation logic with no `prev`) | `lex_edges.rs::continuation_at_start_of_file` | covered |
 | `.control … .endc` block — all content skipped | `inpcom.c:948`, `inpcom.c:3541`–3545 (`inp_stripcomments_deck` sets `found_control`) | `lex_edges.rs::control_block_skipped`, `lex_edges.rs::control_block_case_insensitive`, `directives.rs::control_block_skipped`, `lexer.rs::control_block_skipped` | covered |
 | `.include "file"` — resolved and spliced at load time | `inpcom.c:1486` (`ciprefix(".include", buffer)`) | `directives.rs::include_preserved` — we preserve as directive, do not follow | partial — scope limit: we do not follow includes; test confirms preservation |
 | `.lib "file" name` — library section selected | `inpcom.c:1798` (`ciprefix(".lib", buffer)`) | `directives.rs::lib_preserved` — we preserve as directive | partial — same scope limit as `.include` |
@@ -82,7 +82,7 @@ Source references are to `src/frontend/inpcom.c` unless otherwise noted.
 | `4k7` RKM infix form (multiplier between integer and fractional digits) | `src/spicelib/parser/inpeval.c:206`–448 (`INPevaluateRKM_R`); documented at line 206 | `numbers.rs::infix_4k7_form` | covered |
 | Atto suffix `a`/`A` = 1e-18 | `src/spicelib/parser/inpeval.c:172`–175 (case `'a'`/`'A'` in main `INPevaluate`) | `numbers.rs::atto_suffix` | covered |
 | Scientific notation `1e-3`, `1E+6` | `src/spicelib/parser/inpeval.c:120` (`'E'`/`'e'` branch) | `numbers.rs::scientific_notation` | covered |
-| Number overflow (`1e500` → `Value::Number(inf)`) — matches ngspice's `INPevaluate` silent overflow | `src/spicelib/parser/inpeval.c:120` (no overflow check) | `edge_inputs.rs::number_overflow_input` | covered |
+| Number overflow (`1e500` → `Value::Number(inf)`) — matches ngspice's `INPevaluate` silent overflow | `src/spicelib/parser/inpeval.c:120` (no overflow check) | `numbers.rs::number_overflow_input` | covered |
 | D/d Fortran-style exponent (`1d3`, `1D-9`, `1.5d3k`) | `src/spicelib/parser/inpeval.c:120` (`'D'`/`'d'` same branch as `'E'`/`'e'`) | `numbers.rs::d_exponent_lowercase`, `numbers.rs::d_exponent_uppercase`, `numbers.rs::d_exponent_with_eng_suffix` | covered |
 | Trailing unit letters dropped (e.g. `1kOhm` → 1000) | `inpcom.c:3104`–3115 (strips `ohms`, `farad`, `henry`) | `numbers.rs::trailing_unit_letters_dropped` | covered |
 
@@ -95,7 +95,7 @@ Pre-processing (`.subckt`, `.include`, `.lib`) is in `src/frontend/inpcom.c`.
 
 | Directive | `inp2dot.c` ref | Covered by | Status |
 |---|---|---|---|
-| `.subckt` / `.ends` — definition parsed, nested OK | `inpcom.c:2884`; `inp2dot.c:917` | `directives.rs::subckt_basic`, `directives.rs::subckt_ports_with_kv_params`, `directives.rs::subckt_params_keyword`, `directives.rs::subckt_nested`, `directives.rs::subckt_unterminated_yields_warning_not_error`, `directives.rs::ends_without_subckt_is_error` | covered |
+| `.subckt` / `.ends` — definition parsed, nested OK | `inpcom.c:2884`; `inp2dot.c:917` | `directives.rs::subckt_basic`, `directives.rs::subckt_ports_with_kv_params`, `directives.rs::subckt_params_keyword`, `directives.rs::subckt_nested`, `directives.rs::subckt_unterminated_yields_warning_not_error`, `diagnostics.rs::e900_stray_ends` | covered |
 | `.model name type (params…)` — paren and paren-less forms | `inp2dot.c:837` | `directives.rs::model_npn_parenless`, `directives.rs::model_npn_paren_wrapped`, `directives.rs::model_continuation`, `directives.rs::model_case_insensitive_name` | covered |
 | `.include "file"` | `inpcom.c:1486` | `directives.rs::include_preserved` | partial — preserved, not followed |
 | `.lib "file" name` | `inpcom.c:1798` | `directives.rs::lib_preserved` | partial — preserved, not followed |

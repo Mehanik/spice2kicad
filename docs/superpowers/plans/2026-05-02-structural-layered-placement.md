@@ -1,5 +1,16 @@
 # Structural Layered Placement Implementation Plan
 
+> **SUPERSEDED — historical implementation plan.** This plan predates
+> implementation and has shipped. The authoritative contract is now
+> `CLAUDE.md` (invariant V6) plus the as-built code in
+> `crates/spice-layout/src/` (`net_class.rs`, `bands.rs`, `layers.rs`,
+> `symmetry.rs`). The general structural pipeline shipped; the
+> archetype matcher this plan removed does not exist in the tree.
+> Note: SA refinement runs by default — `LayoutOptions` has an
+> explicit `impl Default` with `refine: true` (`solver/mod.rs`), and
+> the CLI sets `refine: !cli.no_refine`. Do not execute the steps
+> below; consult CLAUDE.md and the code. Kept for history only.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the V6 topology-archetype matcher with a general structural pipeline (net classification → Y-banding → X-layering with cycle-breaking → band-constrained refinement) and prove it on the five existing fixtures.
@@ -802,6 +813,10 @@ pub struct CostBreakdown {
     pub layer_order: f64,
     /// NEW: net-bbox cross-pair count (cheap crossing proxy).
     pub net_bbox_crossings: f64,
+    /// NEW: Σ (yu - yd)² over pairs ordered by soft_y_target_frac
+    /// but placed inverted (an element in a band inverted vs its
+    /// net-class ordering).
+    pub band_inversion: f64,
 }
 ```
 
@@ -856,7 +871,7 @@ impl Default for LayoutOptions {
     fn default() -> Self {
         Self {
             refine: true,
-            refine_iterations: 200,
+            refine_iterations: 2000,
             // …
         }
     }
@@ -872,7 +887,7 @@ In `solver/anneal.rs::propose_move`, add a 4th move type that picks two same-lay
 - [ ] **Step 3: CLI flag rename**
 
 In `crates/spice2kicad/src/main.rs`:
-- Replace `--refine` boolean with `--no-refine` (escape hatch) and `--refine-iterations N` (default 200).
+- Replace `--refine` boolean with `--no-refine` (escape hatch) and `--refine-iterations N` (default 2000).
 - Wire through to `LayoutOptions`.
 
 - [ ] **Step 4: Run solver tests**
@@ -1079,5 +1094,5 @@ If anything was tweaked in Step 2, commit it: `git commit -m "polish(layout): fi
 - All spec sections (§1–§9) are covered: §1 → Task 5; §2 → Task 4; §3 → Task 1; §4 → Task 2; §5 → Task 3; §6 → Task 6/7; §7 → Task 8; §8 → Task 10; §9 (risks) → calibration loops in Tasks 6/8.
 - Cost-weight calibration is intentionally a loop in Task 8 ("adjust weights, not thresholds"), addressing Risk 3.
 - Cycle-break heuristic (Risk 1) is implemented in Task 3 with the explicit "highest in-degree source" rule from the spec.
-- Annealer runtime risk (Risk 4) is mitigated by `refine_iterations: 200` cap in Task 7.
+- Annealer runtime risk (Risk 4) is mitigated by `refine_iterations: 2000` cap in Task 7.
 - The placeholder-scan check: cost-weight values in Task 6 are concrete starting numbers; the "calibrate during Task 8" is a real iteration step, not a TBD.

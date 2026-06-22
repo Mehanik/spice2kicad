@@ -1,5 +1,15 @@
 # Structural Layered Placement (V6 redesign)
 
+> **SUPERSEDED — historical design artifact.** This document predates
+> implementation and has shipped. The authoritative contract is now
+> `CLAUDE.md` (invariant V6) plus the as-built code in
+> `crates/spice-layout/src/` (`net_class.rs`, `bands.rs`, `layers.rs`,
+> `symmetry.rs`). What actually shipped is the general structural
+> pipeline described here; the topology-archetype matcher this proposal
+> set out to replace was removed and no archetype matcher exists in the
+> tree. Do not treat any decision below as current; consult CLAUDE.md
+> and the code. Kept for history only.
+
 **Status:** design approved 2026-05-02. Replaces the topology-archetype
 implementation of V6 (`feat(layout): topology-aware common-emitter
 archetype` — commit `47a2d32`).
@@ -53,13 +63,13 @@ CLAUDE.md V6 invariant section is rewritten in place from
 5. overlay user *@align / *@place / *@power
                                      (these pin coords; heuristics back off)
 6. symmetry::detect_pairs + apply  (V7, unchanged)
-7. solver::refine                  (now runs by default — see §6)
-8. pick_orientations                (V5, unchanged)
+7. pick_orientations                (V5, unchanged)
+8. solver::refine                  (now runs by default — see §6)
 ```
 
 User annotations strictly override heuristics. The four-phase placer
 described in annotation-spec §5 maps to: phase 1 = structural+rails,
-phase 2 = aligned, phase 3 = placed, phase 4 = refine.
+phase 2 = aligned, phase 3 = placed, phase 4 = orientation + refine.
 
 ## §3 — Net classification
 
@@ -164,7 +174,7 @@ Multivibrator falls into this path.
 
 `solver::refine` runs by default after seeding. The `--refine` CLI
 flag is repurposed: `--refine-iterations N` controls anneal sweep count
-(default 200; cap honoured for fixtures up to ~50 elements).
+(default 2000; cap honoured for fixtures up to ~50 elements).
 
 Cost function (`crates/spice-layout/src/cost.rs`) gains four terms:
 
@@ -178,7 +188,13 @@ Cost function (`crates/spice-layout/src/cost.rs`) gains four terms:
    signal-DAG predecessor that drifted right of its successor. Soft.
 6. **NEW — Wire-crossing approximation.** Count net-bbox intersections
    between distinct nets (cheap proxy for true crossings). Quadratic.
-7. **Grid snap** (existing). Final pass.
+7. **NEW — Band inversion.** `K_inv * Σ (yu − yd)²` over each pair of
+   elements whose `soft_y_target_frac` orders them (frac difference
+   > 0.1) but whose placement Y is inverted — penalises an element
+   placed in a band inverted vs its net-class ordering. Unlike soft Y
+   target (item 4), this anchors on pairwise *ordering*, so it is
+   invariant under uniform Y shifts. Quadratic.
+8. **Grid snap** (existing). Final pass.
 
 Concrete weight values are picked during implementation by calibrating
 against the five fixtures, not committed up-front. Stored in a single
@@ -276,9 +292,11 @@ documentation of what each one is responsible for.
 
 **Risk 4 — Annealer runtime in default path.** Currently `--refine` is
 opt-in because it's slow. Making it default means CLI users wait
-longer. Mitigation: cap iterations at 200 sweeps; expose
+longer. Mitigation: cap iterations at 2000 sweeps; expose
 `--refine-iterations N` for power users. Acceptable for the test
 fixtures (all <50 elements); may need revisiting for larger circuits.
+Note: the shipped default is 2000 sweeps, not the 200 this risk was
+sized against — the runtime tradeoff should be re-evaluated at 2000.
 
 **Open question — when do we restore archetype matching?** This design
 deliberately removes it. The CLAUDE.md principle in §8 prevents

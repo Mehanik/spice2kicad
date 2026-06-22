@@ -18,6 +18,25 @@ use lexpr::Value as Sexpr;
 const EPS: f64 = 1e-6;
 const GRID_MM: f64 = 1.27;
 
+/// Work budget for the exact Hanan-grid Steiner search in
+/// [`steinerize`], expressed as a count of trial-MST inner-loop
+/// operations (`passes · H · nodes²`). Above this, a net keeps its
+/// plain rectilinear MST.
+///
+/// Calibration is empirical and tied to ADR-8's interactive target
+/// (a single net's routing must finish well within the ~10s/500-element
+/// end-to-end budget). A 60-pin spread net measures ≈ 1.3 × 10⁹ such
+/// operations and runs in ≈ 16 s on the dev machine, i.e. ≈ 8 × 10⁷
+/// ops/s. A budget of 2 × 10⁸ therefore caps a single net's exact
+/// Steiner search at ≈ 2.5 s worst case — comfortably interactive —
+/// while still admitting full Steinerization far past any realistic
+/// signal net (a spread net stays under budget up to ≈ 40 pins; a
+/// collinear-heavy net, whose Hanan grid is much smaller than N², goes
+/// considerably higher). The number is a measured throughput bound,
+/// not arbitrary slack: re-derive it from a fresh `large_n_*`
+/// measurement if the inner loop's constant factor changes.
+const STEINER_WORK_BUDGET: usize = 200_000_000;
+
 /// Apply one grid-cell step in `dir` to the point `(x, y)`. Used by the
 /// outward-stub fallback when neither L corner aligns with a pin's
 /// outward direction.
@@ -424,12 +443,13 @@ fn route_two_pin_with_outward_avoiding(
 /// Dispatch:
 /// * **N == 2** / **3** — defer to closed-form helpers (also exposed
 ///   on this entry point so callers don't special-case).
-/// * **4 ≤ N ≤ 9** — rectilinear MST, then Borah-Owens-Irwin
+/// * **N ≥ 4** — rectilinear MST, then Borah-Owens-Irwin
 ///   Steinerization on the Hanan grid: while a Hanan-grid candidate
 ///   point exists whose insertion strictly shortens the tree, splice
-///   it in. Iterates until no positive gain remains.
-/// * **N ≥ 10** — plain rectilinear MST. Acceptable v0.1 floor; none
-///   of the existing fixtures has a net this large.
+///   it in. Iterates until no positive gain remains. There is no
+///   special-cased upper bound on N — see [`steinerize`] for the
+///   work bound that keeps large nets within ADR-8's interactive
+///   target.
 ///
 /// All inputs and outputs sit on whatever grid the caller chose
 /// (typically 1.27 mm). The router never invents fractional offsets:
@@ -453,13 +473,9 @@ pub fn route_n_pin_with_outward(pins: &[(f64, f64)], outs: &[Option<Direction>])
         0 | 1 => Vec::new(),
         2 => route_two_pin_with_outward(pins[0], outs[0], pins[1], outs[1]),
         3 => route_three_pin_with_outward([pins[0], pins[1], pins[2]], [outs[0], outs[1], outs[2]]),
-        n if n <= 9 => {
+        _ => {
             let mut tree = rectilinear_mst(pins);
             steinerize(&mut tree, pins);
-            tree_to_segments(&tree, pins.len(), outs)
-        }
-        _ => {
-            let tree = rectilinear_mst(pins);
             tree_to_segments(&tree, pins.len(), outs)
         }
     }
@@ -545,22 +561,55 @@ fn tree_length(nodes: &[Node], edges: &[Edge]) -> f64 {
 /// then re-MST and keep the change if length strictly drops. Stops
 /// when no candidate improves the tree.
 ///
-/// O(passes * H * (N + S)^2) where H = Hanan grid size ≤ N². For
-/// N ≤ 9 this is comfortably under a millisecond.
+/// Complexity: O(passes · H · (N + S)²) where H = Hanan grid size
+/// (= |unique xs| · |unique ys|, ≤ N²) and S = Steiner points added
+/// so far. Each *successful* pass splices exactly one Steiner point,
+/// and a rectilinear Steiner tree over N terminals has at most N − 2
+/// Steiner points (the Steiner topology bound), so the pass count is
+/// bounded by `N - 2` — the exact convergence bound, not a defensive
+/// guess. Worst-case total work is therefore
+/// `(N-2) · H · (N + S)²`, i.e. O(N⁵) in a single net's pin count.
+///
+/// The exact Hanan search is only run when that estimated work stays
+/// under [`STEINER_WORK_BUDGET`] (calibrated to keep a single net's
+/// Steinerization interactive per ADR-8). Above the budget the tree
+/// keeps its plain rectilinear MST: a documented quality tradeoff for
+/// pathologically large single nets (real ngspice-tractable signal
+/// nets have a handful of pins; the budget admits exact Steiner well
+/// past any realistic net — see `STEINER_WORK_BUDGET`). The large-N
+/// MST fallback is exercised by `large_n_steiner_completes_in_time`.
 fn steinerize(tree: &mut (Vec<Node>, Vec<Edge>), pins: &[(f64, f64)]) {
     let xs: Vec<f64> = unique_sorted(pins.iter().map(|p| p.0));
     let ys: Vec<f64> = unique_sorted(pins.iter().map(|p| p.1));
-    let mut hanan: Vec<(f64, f64)> = Vec::with_capacity(xs.len() * ys.len());
+
+    // At most `N - 2` Steiner points can be added to a rectilinear
+    // Steiner tree over N terminals, and each pass that finds a
+    // strictly-shortening candidate adds exactly one. `max_passes` is
+    // that exact bound (saturating to 0 for N < 2).
+    let max_passes = pins.len().saturating_sub(2);
+
+    // Estimated worst-case trial-MST evaluations for the exact search:
+    // `passes · H · (N+S)²`, conservatively using S ≈ passes so the
+    // node count is bounded by `N + max_passes`. When this exceeds the
+    // interactive work budget, skip the exact search and keep the
+    // plain RMST (route_n_pin already built it into `tree`).
+    let h = xs.len().saturating_mul(ys.len());
+    let nodes = pins.len().saturating_add(max_passes);
+    let est_work = max_passes
+        .saturating_mul(h)
+        .saturating_mul(nodes.saturating_mul(nodes));
+    if est_work > STEINER_WORK_BUDGET {
+        return;
+    }
+
+    let mut hanan: Vec<(f64, f64)> = Vec::with_capacity(h);
     for &x in &xs {
         for &y in &ys {
             hanan.push((x, y));
         }
     }
 
-    // Cap iterations defensively — improvement is monotone and each
-    // step strictly decreases length, but f64 arithmetic plus the
-    // Hanan-grid finite candidate set means we should converge fast.
-    for _ in 0..32 {
+    for _ in 0..max_passes {
         let baseline = tree_length(&tree.0, &tree.1);
         let mut best_gain = 0.0_f64;
         let mut best_candidate: Option<(f64, f64)> = None;

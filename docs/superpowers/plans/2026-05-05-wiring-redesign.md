@@ -1,5 +1,15 @@
 # Wiring Redesign Implementation Plan
 
+> **SUPERSEDED — historical implementation plan.** This plan predates
+> implementation and has shipped. The authoritative contract is now
+> `CLAUDE.md` (invariants V10/V11/V12) plus the as-built router in
+> `crates/spice-route/`. NOTE: the RSMT algorithm discussion here
+> (FLUTE / Hanan-grid DP / "exact for N<=9") was NOT what shipped. The
+> as-built `crates/spice-route/src/steiner.rs` is Hwang-exact only at
+> N=3 and uses a rectilinear-MST + Borah-Owens-Irwin Steinerization
+> heuristic for 4<=N<=9 (plain RMST for N>=10). Do not execute the
+> steps below; consult CLAUDE.md and the code. Kept for history only.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the channel-and-trunk router in

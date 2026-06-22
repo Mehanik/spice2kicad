@@ -186,7 +186,7 @@ Block form with `for=` (defaults across many elements):
   malformed and should produce a diagnostic. Implementations that
   silently accept an empty value violate the spec. (Current parser
   produces `Tag::Symbol("")` without a diagnostic — known gap;
-  see `tests/edge_inputs.rs::semicolon_at_equals_only`.)
+  see `tests/lex_edges.rs::semicolon_at_equals_only`.)
 
 **Glob syntax.** Shell-style: `*` matches any run of characters
 (including empty). No other metacharacters. Matching is
@@ -368,40 +368,28 @@ override constraints from earlier phases.
    `.include` boundaries (visual clusters).
 2. **Aligned** — every `align` directive fixes both the shared axis
    and the order along the free axis (declaration order).
-3. **Topology-matched** *(v0.2+; not implemented in v0.1)* — the
-   resolved netlist is matched against a built-in library of analog
-   archetype templates (common-emitter / common-source amplifier,
-   differential pair, current mirror, voltage divider, RC ladder,
-   inverting / non-inverting op-amp, …). When a subgraph matches an
-   archetype, its members are positioned per the archetype's
-   template (rails horizontal, signal flow left-to-right, bias
-   network on the input side, bypass caps beside their active
-   device — see CLAUDE.md invariant V6). Members already pinned by
-   phases 1–2 are *not* moved; the archetype templates fill in
-   relative positions for everything else in the matched subgraph.
-   Subgraphs that match no archetype fall through unchanged.
-   This phase also performs **symmetry detection** as a sub-step:
-   when a non-trivial refdes pairing makes the resolved netlist
-   graph-isomorphic to itself (modulo node renames), members of
-   each mirrored pair are co-positioned about a common axis with
-   mirrored orientation. The classic case is the symmetric astable
-   multivibrator (CLAUDE.md invariant V7). Symmetry detection
-   composes with archetype matching — many archetypes (diff pair,
-   current mirror, multivibrator) imply symmetry, and detected
-   symmetry is exploited for any remaining roles the archetype
-   template did not pin.
-4. **Placed** — every `place` directive on an element not already
-   constrained by `align` or by a matched archetype. Within this
-   phase, source order wins on conflict (`W101`).
-5. **Auto-fill** — anything still unconstrained is laid out by the
-   default heuristic (force-directed within the parent cluster).
-6. **Decoration** — once every symbol's position and orientation are
+3. **Placed** — every `place` directive on an element not already
+   constrained by `align`. Within this phase, source order wins on
+   conflict (`W101`).
+4. **Auto-fill** — anything still unconstrained is laid out by the
+   default structural heuristic: net classification → Y-band
+   assignment → X-layer (signal-flow) ordering, refined by a
+   force-directed pass within the parent cluster (CLAUDE.md
+   invariant V6). Structure is inferred from net classification and
+   signal-flow direction alone; no named-topology templates are
+   matched. This phase also performs **symmetry detection** as a
+   sub-step: when a non-trivial refdes pairing makes the resolved
+   netlist graph-isomorphic to itself (modulo node renames),
+   members of each mirrored pair are co-positioned about a common
+   axis with mirrored orientation. The classic case is the
+   symmetric astable multivibrator (CLAUDE.md invariant V7).
+5. **Decoration** — once every symbol's position and orientation are
    final, a decoration pass emits the remaining geometry: `(wire …)`
    routing, power/ground glyphs, plain and global labels, and
    junctions. This phase is a strict *consumer* of the placed layout.
    It reads final symbol positions but never moves a symbol, never
    re-rotates one, and never feeds a position or orientation change
-   back into phases 1–5. It may only add detached geometry — wire
+   back into phases 1–4. It may only add detached geometry — wire
    stubs, glyphs, junctions, labels — anchored to the positions it was
    given.
 
@@ -425,8 +413,8 @@ with a `W104` warning.
 
 ### 5.1 Wire emission and label policy
 
-This section details the **decoration phase** (phase 6 above). With
-every symbol placed and oriented by phases 1–5, the routing pass emits
+This section details the **decoration phase** (phase 5 above). With
+every symbol placed and oriented by phases 1–4, the routing pass emits
 `(wire …)` segments connecting pins on the same net. Wires are the
 default carrier of connectivity; labels are not a substitute. The
 emitter never emits a label "instead of" routing a wire it could
@@ -506,8 +494,12 @@ because of the `power=vcc` directive on `Vcc`.
 
 Codes prefixed `E` are errors that block conversion; codes prefixed
 `W` are warnings that allow conversion to proceed with the
-remediation noted. The numeric ranges (`E0xx`, `W1xx`) are reserved
-for future expansion within each class.
+remediation noted. Two numeric ranges are in use per class: `E0xx` /
+`W1xx` for semantic diagnostics raised by the resolve, policy, and
+layout passes (listed below), and `E9xx` / `W9xx` for syntax
+diagnostics raised by the parser and lexer (see the parser/lexer
+subsection). Unused numbers within either range are available for
+future expansion.
 
 The converter reports, in this order:
 
@@ -517,7 +509,11 @@ The converter reports, in this order:
   directive or the built-in default table) is not present in any
   loaded `.kicad_sym` library, *or* an element has no symbol
   mapping (e.g. `X…` subckt instance with no `;@ symbol=` tag)
-- **E004** `align` references cross a sheet boundary
+- **E004** `align` references cross a sheet boundary — *reserved;
+  not yet detected.* Subckt scoping is not preserved in the resolved
+  netlist today, so this check is unimplemented (see the `TODO(E004)`
+  in `crates/spice-policy/src/lib.rs`). The semantics below are the
+  intended contract.
 - **E005** invalid `pinmap` — references an unknown pin (by number
   or name), uses an out-of-range SPICE terminal index, or repeats
   a SPICE index or KiCad pin
@@ -536,6 +532,35 @@ The converter reports, in this order:
   element (typo guard)
 - **W104** `place` directive on an element already fixed by `align`
   (directive dropped)
+
+### Parser / lexer syntax diagnostics (`E9xx` / `W9xx`)
+
+These are raised by the parser and lexer while turning SPICE source
+into the typed AST, before the semantic passes above run.
+
+- **E900** `.ends` without a matching `.subckt` (stray `.ends`)
+- **E901** `.subckt` missing a name
+- **E902** `.model` missing a type
+- **E903** invalid `place` directive value
+- **E904** `align` requires an axis and at least one refdes, or the
+  axis keyword is not `horizontal` / `vertical`
+- **E905** controlled source (`E`/`G`/`H`/`F`) has the wrong token
+  count for its required `n+ n- …` form
+- **E908** `*@symbol` block directive missing its `for=GLOB` key
+- **E909** `*@symbol` block directive missing its `Lib:Name`
+  positional
+- **W900** a `.subckt` was never closed by `.ends` (closed
+  implicitly at end of file)
+- **W907** malformed BJT line — `Q…` needs at least three nodes and
+  a model name
+- **W910** a control directive inside a `.subckt` body is ignored
+- **W911** `.if` / `.elseif` / `.else` conditional blocks are
+  ignored (one warning per top-level `.if`)
+
+> Note: `E908` and `E909` are constructed as warnings today despite
+> their `E` prefix — a missing key on a `*@symbol` directive degrades
+> the directive rather than blocking conversion. Treat the prefix as
+> indicative of severity intent, not current blocking behaviour.
 
 ---
 
@@ -600,23 +625,6 @@ Two caveats:
   uniform orientation within an `align` block, warn otherwise;
   (b) define a canonical pin per element kind. Defer until a real
   file demonstrates the need.
-- **Archetype library** — concrete set of built-in topology
-  templates that the phase-3 *Topology-matched* pass (§5)
-  recognises and positions. Candidate archetypes: common-emitter
-  amp, common-source amp, common-base / common-gate, differential
-  pair, current mirror, cascode, voltage divider, RC low/high-pass
-  ladder, op-amp inverting and non-inverting, Schmitt trigger.
-  Each template specifies the element *roles* (active device,
-  bias network, supply rail, signal-coupling cap, load) and the
-  relative positions those roles occupy in the conventional
-  drawing. Defer the concrete template set until V6 implementation
-  begins; current fixtures cover common-emitter
-  (`tests/fixtures/common_emitter.cir`) and the differential-pair
-  fixture is the next planned addition. A future
-  `;@ ignore-archetype` (or similarly named) trailing tag would
-  let the user opt a sub-network out of matching when the
-  template picks a layout the user dislikes — defer until matching
-  is real and a real file demonstrates the need.
 - **Symmetry hints** — `;@ symmetric-with=…` (or similarly named)
   trailing tag to override or guide the auto-detector when it picks
   the wrong pairing or misses a non-obvious one. Defer until
@@ -637,10 +645,10 @@ Two caveats:
   `inp inn vcc vee out` or `+ - V+ V- OUT`, …) and offer the
   conventional `Amplifier_Operational:*` / `Comparator:*` / … as a
   default that an explicit `;@ symbol=` can still override. Defer
-  until the V6 archetype matcher exists (CLAUDE.md V6, V8) — the
-  same pattern-matching machinery serves both layout templating and
-  symbol promotion. Until then the user opts in per instance via
-  the §4.1 "Targeting `.subckt` instances" mechanism.
+  until a v0.2 subckt-pattern matcher exists (CLAUDE.md V8's
+  "auto-promotion heuristic" — the zero-annotation ceiling). Until
+  then the user opts in per instance via the §4.1 "Targeting
+  `.subckt` instances" mechanism.
 - **Pinmap port-name syntax for `X<n>`** — accept
   `pinmap=<port_name>:<kicad_pin>` on subckt instances so that
   `pinmap=inp:3,inn:2,vcc:8,vee:4,out:1` reads as the schematic

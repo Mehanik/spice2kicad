@@ -636,32 +636,16 @@ fn interior_grid_coords(seg: &(Pt, Pt)) -> Vec<(i64, i64)> {
     out
 }
 
-/// Fixtures excluded from V11 enforcement because of an upstream
-/// placer-level pin overlap (two distinct nets land at the same world
-/// coordinate before the router ever runs). The router cannot fix a
-/// placer bug — once two nets share a coord, any wire entering that
-/// coord is a V11 violation by construction. Tracked as a v0.2
-/// placer-improvement work item.
-fn v11_fixture_placer_broken(name: &str) -> bool {
-    // X1's output pin coincides with VEE's `-` pin at (-1.27, 25.4)
-    // on `opamp_inverting_real`. The verifier still flags this as a
-    // diagnostic (with a clearer `pin overlap …` message via
-    // [`v11_pin_overlap_is_a_placer_bug`] below) but does not assert
-    // here. Closing this needs the placer to learn that VEE's body
-    // collides with X1's port pin geometry.
-    matches!(name, "opamp_inverting_real")
-}
-
 #[test]
 fn v11_pin_overlap_is_a_placer_bug() {
-    // Companion to [`v11_no_foreign_pin_coincidence`]: surfaces the
-    // *placer*-level pin-on-pin overlap explicitly so it stays
-    // visible as a v0.2 work item even while the V11 verifier
-    // tolerates the resulting wire-touches-foreign-pin fallout.
+    // Companion to [`v11_no_foreign_pin_coincidence`]: surfaces any
+    // *placer*-level pin-on-pin overlap (two distinct nets at the same
+    // world coord before the router runs) explicitly. The V14
+    // power-pin-orientation fix removed the last such overlap
+    // (`opamp_inverting_real`'s X1 output vs VEE `-` pin), so the budget
+    // is now **zero on every fixture** — a non-zero count is a
+    // regression, never a budget to bump.
     for name in SHEETS {
-        if !v11_fixture_placer_broken(name) {
-            continue;
-        }
         let src = fixtures_dir().join(format!("{name}.cir"));
         let tmp = tempdir(name);
         let sch = spice_to_kicad(&src, &tmp).expect("spice2kicad");
@@ -675,15 +659,9 @@ fn v11_pin_overlap_is_a_placer_bug() {
                 overlaps += 1;
             }
         }
-        // Lock the *number* of known placer-level pin overlaps so a
-        // regression introduces a hard failure.
-        let expected = match *name {
-            "opamp_inverting_real" => 1,
-            _ => 0,
-        };
         assert_eq!(
-            overlaps, expected,
-            "{name}: expected {expected} placer-level pin overlap(s), found {overlaps}"
+            overlaps, 0,
+            "{name}: expected 0 placer-level pin overlap(s), found {overlaps}"
         );
     }
 }
@@ -691,14 +669,12 @@ fn v11_pin_overlap_is_a_placer_bug() {
 /// V11 is a correctness invariant — KiCad merges any wire endpoint or
 /// wire-interior coincidence with a foreign pin into an electrical
 /// connection, which is a silent net short on schematic load. The
-/// per-fixture budget is therefore **zero** across the board; the only
-/// exception is fixtures with a placer-level pin overlap (two distinct
-/// nets land at the same world coord before the router ever runs).
-/// Those are tracked separately by
-/// [`v11_pin_overlap_is_a_placer_bug`] and excluded from this verifier
-/// via [`v11_fixture_placer_broken`]. A budget for a correctness
-/// invariant is a contradiction in terms — if we cannot fix it, it is
-/// not a "budget" but an `#[ignore]` test.
+/// per-fixture budget is therefore **zero** across the board, with no
+/// exceptions: the V14 power-pin-orientation fix removed the last
+/// placer-level pin overlap (`opamp_inverting_real`), so every fixture
+/// is now fully V11-enforced. A budget for a correctness invariant is a
+/// contradiction in terms — if we cannot fix it, it is not a "budget"
+/// but an `#[ignore]` test.
 fn v11_violation_budget(_name: &str) -> usize {
     0
 }
@@ -827,10 +803,6 @@ fn assign_island_nets(
 fn v11_no_foreign_pin_coincidence() {
     let mut hard_failures: Vec<String> = Vec::new();
     for name in SHEETS {
-        if v11_fixture_placer_broken(name) {
-            // Tracked separately by `v11_pin_overlap_is_a_placer_bug`.
-            continue;
-        }
         let mut failures: Vec<String> = Vec::new();
         let src = fixtures_dir().join(format!("{name}.cir"));
         let tmp = tempdir(name);
@@ -1168,18 +1140,16 @@ fn v13_labels_dont_overlap_symbol_body() {
     // text rendering crosses into the body is still a defect.
     let body_overlap_budget = |name: &str| -> usize {
         match name {
-            // TODO(placer): `b` label at R1's lower pin (rot 90,
-            // text extends downward = up on screen — that's the
-            // outward direction) overlaps VCC's body bbox, which the
-            // placer puts directly above R1. Outward-extending text
-            // is the correct rotation; the residue is the placer's
-            // VCC↔R1 stacking. Closing this needs a placer change to
-            // leave one extra grid cell between the VCC source and
-            // the resistor below it. 1 hit.
-            // Same placer-stacking class on opamp_inverting_real:
-            // `in` label at X1's `+` pin extends up into V1's body
-            // bbox. 1 hit.
-            "common_emitter" | "opamp_inverting_real" => 1,
+            // opamp_inverting_real: with X1 locked V14-correct (rot 0,
+            // V+ up / V- down), the `out` label at X1's output pin sits
+            // hard against the feedback resistor RF that the SA packs
+            // directly to its right, so the label text grazes RF's body
+            // bbox. Closing this needs a placer change to leave one more
+            // grid cell between X1's output and RF. 1 hit.
+            // (common_emitter ratcheted 1 → 0: the new label-rotation
+            // property-text avoidance also clears its former `b`↔VCC
+            // body graze.)
+            "opamp_inverting_real" => 1,
             _ => 0,
         }
     };

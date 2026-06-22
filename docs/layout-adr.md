@@ -91,12 +91,34 @@ heuristic is a local optimum.
 
 ## ADR-4 — Non-determinism with sidecar position file
 
+**Status: wired.** Implemented as `<basename>.layout.json` next to the
+emitted `.kicad_sch`. The schema and reader/writer live in
+`crates/spice-layout/src/sidecar.rs` (`Sidecar`, `SidecarEntry`,
+`sidecar_path_for`); the placer accepts the cache as a
+`spice_layout::Hint` via `place_with_hint`, reusing the same
+per-element `pinned` mask that `align` / `place` use (no parallel
+path). The CLI (`crates/spice2kicad/src/main.rs`) reads the sidecar
+before placement and rewrites it after, on every run; `--no-layout-cache`
+opts out. The acceptance test is
+`crates/spice2kicad/tests/layout_cache.rs` (add-one-element stability,
+round-trip, removal-drops-from-cache, opt-out). The design below was
+the intended plan and matches what shipped.
+
+This sidecar is a **position-cache artifact** for re-layout
+stability — *not* a configuration or annotation carrier. It does
+not describe user intent; the converter owns its contents and
+rewrites it on every run. It is therefore distinct from the
+YAML/TOML/JSON config sidecar that CLAUDE.md forbids: that rule
+bans encoding *annotations* outside the SPICE file, whereas this
+is derived geometry the tool caches for itself.
+
 **Decision.** SA is non-deterministic (RNG seeded from system
 entropy). To support incremental updates and preserve user edits,
-we write a **sidecar artifact** alongside the `.kicad_sch`:
-`<basename>.layout.json` (or similar — bikeshed in
-implementation), containing a stable mapping from
-SPICE-refdes → `(grid x, grid y, orientation, mirror)`.
+the converter writes a **sidecar artifact** alongside the
+`.kicad_sch`: `<basename>.layout.json`, containing a stable mapping
+from SPICE-refdes → `(grid x, grid y, rotation, mirror)`. (JSON via
+`serde` was chosen for the format; see "What we are not deciding
+now".)
 
 On re-conversion:
 
@@ -127,9 +149,10 @@ require diffing against our last emission and is fragile).
 - Long-term: the sidecar can also store user-overridden
   orientations, decisions about which pattern detector fired,
   etc. Don't design that now; just leave room.
-- This is a v0.1 feature, not deferred. The architecture has to
-  accommodate it from the start because retrofitting position
-  stability is a refactor.
+- The architecture had to accommodate this from the start because
+  retrofitting position stability is a refactor — which is why it
+  was designed before it was wired (now shipped; see the Status note
+  above).
 
 ---
 
@@ -154,9 +177,10 @@ strictly better.
   surface. Tests are property-based: generate constraint sets,
   check that satisfiable ones pass and unsatisfiable ones get
   diagnosed.
-- New diagnostic code(s): `E1xx` range for layout-policy
-  errors. Spec §7 needs to be extended when implementation
-  lands.
+- New diagnostic code(s) for layout-policy errors. As built these
+  landed in the `E0xx` range (`E006` directional `place` cycle,
+  `E007` layout-unresolved) rather than a separate `E1xx` range;
+  they are documented in annotation-spec §7.
 - The cost function still has soft `δ` for constraint
   violations as a defense-in-depth, but in practice that term
   should never fire — if it does, it's a bug in the policy
@@ -246,6 +270,17 @@ reachable by orthogonal wires. A handful of `examples/` get
 golden *placement* snapshots (not golden `.kicad_sch`) for
 regression.
 
+> **Reconciliation (see CLAUDE.md "Constraints vs. costs" — source
+> of truth).** "Hard constraints satisfied within tolerance" above
+> describes the soft-cost framing (cost.rs `constraint_violation`,
+> very high δ). That framing is acceptable only for *continuous*
+> preferences; a categorical placement constraint must be a
+> candidate-space filter (reject infeasible moves at the
+> `propose_move` boundary), because a finite-weight soft term can
+> still be undone by an SA move. The property test should therefore
+> assert categorical constraints hold *exactly* (a filter never
+> emits a violation), not merely "within tolerance".
+
 **Why.** Golden `.kicad_sch` is brittle — every weight tweak
 breaks it. Property tests track the things we actually care
 about; snapshots catch unintended global regressions.
@@ -298,16 +333,17 @@ real-world constraint instead of an arbitrary number.
 producing routed wires for `kicad-emitter` to render.
 
 **Why.** Routing is a different cost surface and a different
-algorithm class (Lee/maze, pattern routing). Mixing it into
+algorithm class (rectilinear Steiner trees). Mixing it into
 placement couples two unrelated tuning loops.
 
 **Implications.**
 
 - `kicad-emitter` depends on both `spice-layout` (positions) and
   `spice-route` (wires).
-- Routing is v0.2; v0.1 emits naïve wires and accepts ugly
-  routing. The crate boundary still gets defined now so the
-  emitter API doesn't churn later.
+- `spice-route` is implemented: a rectilinear-Steiner router
+  (Hwang-exact for N=3, RMST + Borah-Owens-Irwin Steinerization
+  for 4 ≤ N ≤ 9, plain RMST for N ≥ 10). Defining the crate
+  boundary up front kept the emitter API stable across this work.
 
 ---
 
@@ -341,8 +377,8 @@ clustering effect without forcing geometry.
 
 ## What we are not deciding now
 
-- Sidecar file format (JSON vs TOML vs custom). Pick during
-  implementation.
+- ~~Sidecar file format (JSON vs TOML vs custom). Pick during
+  implementation.~~ **Decided: JSON via `serde`** (see ADR-4 status).
 - Specific RNG (rand vs fastrand vs other). Pick during
   implementation.
 - Property-test framework (proptest vs quickcheck). Pick during

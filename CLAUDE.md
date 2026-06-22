@@ -184,8 +184,9 @@ For full grammar, examples, and diagnostics, see
   treated as part of the line. This matches ngspice
   (`inpcom.c:1864`) and means files using only `\r` would parse
   as a single physical line. Convert legacy files before feeding
-  them in. See `tests/edge_inputs.rs::bare_cr_line_endings` and
-  `tests/edge_inputs.rs::lone_cr_in_middle_of_line`.
+  them in. See
+  `crates/spice-parser/tests/lex_edges.rs::bare_cr_line_endings` and
+  `crates/spice-parser/tests/lex_edges.rs::lone_cr_in_middle_of_line`.
 - **Dangling `+` continuation at unusual positions.** A `+`
   continuation line with nothing to continue (e.g. as the first
   non-title line of a file, or immediately after a `*@` block
@@ -194,13 +195,14 @@ For full grammar, examples, and diagnostics, see
   Benign in practice but visible to downstream passes; emit
   error/warning diagnostics here once the parser has policy
   support for them. See
-  `tests/edge_inputs.rs::continuation_at_start_of_file` and
-  `tests/edge_inputs.rs::continuation_after_block_annotation_only`.
+  `crates/spice-parser/tests/lex_edges.rs::continuation_at_start_of_file`
+  and
+  `crates/spice-parser/tests/lex_edges.rs::continuation_after_block_annotation_only`.
 - **Numeric overflow is silent.** Values beyond `f64::MAX` parse
   to `Value::Number(f64::INFINITY)` (matching ngspice's
   `INPevaluate`). Downstream emitters should guard with
   `is_finite()` when serialising. See
-  `tests/edge_inputs.rs::number_overflow_input`.
+  `crates/spice-parser/tests/numbers.rs::number_overflow_input`.
 - **Tag span semantics.** Trailing-tag (`;@…`) spans cover the
   entire byte range from the leading `;@` marker through to the
   next `;` or end-of-line. When two `;@` tags share a line (e.g.
@@ -532,9 +534,18 @@ literals above.
   readable layout from net structure alone — without matching named
   topologies — via a three-stage pipeline:
     1. **Net classification.** Every net is labelled Power (connected
-       to a `*@power`-marked source or net `0`/`.global`), Ground
-       (net `0` and `.global`), or Signal. Classification requires
-       only the resolved netlist; no topology recognition.
+       to a `*@power`-marked source, or whose lowercased name matches
+       a canonical supply pattern `vcc`/`vdd`/`v+`/`vplus`), Ground
+       (net `0`, or a canonical ground name `gnd`/`vee`/`vss`/`v-`/
+       `vminus`), or Signal. Classification requires only the
+       resolved netlist; no topology recognition. Note the
+       name-match is applied to *every* net (any net name appearing
+       in an element's nodes), not just declared globals — so a
+       signal net the user happens to name `vss` is silently
+       classified Ground. The `*@power` tag and net `0` win over the
+       name-match (priority order in `classify_nets`, `net_class.rs`).
+       This name-based false positive is a tolerated quality risk;
+       the escape hatch is to not name signal nets after rails.
     2. **Y-band assignment.** Each element is assigned a vertical band
        (Top / Mid / Bot) based on which net classes touch it: elements
        exclusively on Power nets go to Top; elements exclusively on
@@ -551,8 +562,9 @@ literals above.
     4. **Cost-function refinement.** After band/layer seeding, an SA
        pass refines positions using a penalty function that includes
        band-misalignment, soft Y-position, layer-order, and crossing-
-       approximation terms. SA runs by default via
-       `LayoutOptions { refine: true, .. }`.
+       approximation terms. SA runs by default: both
+       `LayoutOptions::default()` and the CLI set `refine: true`
+       (pass `--no-refine` to disable).
   Like V5 this is a **quality** invariant, not a correctness one —
   a force-directed hairball is electrically valid but unreadable;
   V6 is what makes the output recognisable as the schematic an
@@ -617,21 +629,21 @@ literals above.
   `<subckt>.kicad_sch` file is written, and no `(sheet …)` block
   appears on the parent. The default behaviour for a `.subckt` with
   no `*@symbol` override on its instances is unchanged: each
-  top-level `X<n>` becomes a hierarchical sheet (commit `4a9f062`
-  feat(parser): wire pipeline end-to-end through placed-symbol
-  emitter). V8 is a *refinement* of that default — the user opts in
+  top-level `X<n>` becomes a hierarchical sheet (commit `e10e7e7`
+  feat(resolve): standard symbol mapping for subckt instances
+  (V8)). V8 is a *refinement* of that default — the user opts in
   per X instance (or per subckt definition via `for=`).
   Motivating fixture: `tests/fixtures/opamp_inverting.cir` today
   emits `OPAMP.kicad_sch` as a child sheet with a single VCVS inside;
   `tests/fixtures/opamp_inverting_real.cir` adds
   `*@symbol Amplifier_Operational:OPAMP for=X1 pinmap=…` and expects
   a real triangle symbol on the parent instead.
-  Today the resolver's `has_explicit_symbol_tag` only inspects
-  trailing `Tag::Symbol(_)` tags on the element itself
-  (`crates/spice-resolve/src/lib.rs`); block `*@symbol … for=X1`
-  matches the resolver's per-element symbol resolution but does
-  **not** suppress the `SheetInstance` routing decision that runs
-  before symbol resolution. Closing this gap is the V8 work.
+  The resolver suppresses the `SheetInstance` routing decision
+  for any X instance carrying a block `*@symbol … for=X1` override:
+  `has_block_symbol_override` guards the `SheetInstance` push
+  (`crates/spice-resolve/src/lib.rs:163`, defined at `lib.rs:234`),
+  so a block-form override is honoured alongside the trailing
+  `;@ symbol=…` tag path.
   Verifier: parse the resulting parent `.kicad_sch` and assert
   (a) a `(symbol …)` instance with the requested `lib_id` (e.g.
   `Amplifier_Operational:OPAMP`) at refdes `X1`; (b) NO
@@ -654,12 +666,12 @@ literals above.
   parsed as a numeric `f64` (i.e. `Value::Number(_)` from
   `spice_parser::ast`) MUST be rendered with the SI prefix that
   yields the shortest reasonable representation, not as a raw
-  decimal. Today's emitter writes `format!("{n}")` (see
-  `format_value` in `crates/spice-layout/src/lib.rs`, commit
-  `22cb630`), producing schematics where C1 = 100n shows up as
-  `0.0000001` and a 100 µF cap as `0.00009999999999999999`. Both
-  are unreadable and bear no relation to how SPICE source or KiCad
-  conventionally express the same value.
+  decimal. The emitter applies this in `format_value`
+  (`crates/spice-layout/src/lib.rs:134`), whose `Value::Number(n)`
+  arm calls `format_si` (`lib.rs:165`, commit `5163669`). Without
+  it C1 = 100n would show up as `0.0000001` and a 100 µF cap as
+  `0.00009999999999999999` — unreadable and unrelated to how SPICE
+  source or KiCad conventionally express the same value.
     - **Suffix table.** Pick the suffix whose multiplier brings the
       mantissa into `[1, 1000)`:
       `1e-15→f`, `1e-12→p`, `1e-9→n`, `1e-6→u` (ASCII; renderers
@@ -685,7 +697,7 @@ literals above.
       (`-0.015` → `"-15m"`).
       `NaN` / `±Inf` → emit the `format!("{n}")` text and raise a
       diagnostic (code TBD; reuse the overflow path from
-      `tests/edge_inputs.rs::number_overflow_input`).
+      `crates/spice-parser/tests/numbers.rs::number_overflow_input`).
       Non-numeric values (`Value::String`, `Value::Expr` — model
       names like `QGENERIC`, `DC 15`, brace expressions like
       `{2*RBASE}`) pass through verbatim. The formatter only
@@ -705,20 +717,19 @@ literals above.
       separate concerns — the canonicalizer already collapses
       `4k7`, `4.7k`, and `4700` into the same equivalence class
       for topology comparison.
-    - **Where to implement.** Replace the `Value::Number(n) =>
-      format!("{n}")` arm in
-      `crates/spice-layout/src/lib.rs::format_value`. That helper
-      is the single chokepoint between parser-side `f64` and
-      emitter-side string and already feeds every
-      `(property "Value" …)` write in
+    - **Chokepoint.** The `Value::Number(n) => format_si(*n)` arm
+      in `crates/spice-layout/src/lib.rs::format_value` is the
+      single point between parser-side `f64` and emitter-side
+      string, and feeds every `(property "Value" …)` write in
       `crates/kicad-emitter/src/schematic.rs`.
 
 - **V10 — Power-as-glyphs, Steiner-tree routing.** Power and
   Ground nets emit `power:VCC` / `power:GND` library symbol
   glyphs at each connected pin (no wires). Signal nets emit
-  rectilinear Steiner minimum trees (exact for N≤9 pins via
-  Hwang's median rule + Borah-Owens-Irwin Steinerization;
-  rectilinear MST for N≥10). Cross-net endpoint conflicts
+  rectilinear Steiner trees: N=3 is exact via Hwang's median
+  rule; 4≤N≤9 is heuristic (rectilinear MST + Borah-Owens-Irwin
+  Steinerization on the Hanan grid); N≥10 is plain rectilinear
+  MST. Cross-net endpoint conflicts
   resolved by 1-cell jog (cap 10 iterations). The router lives
   in `crates/spice-route/`, called from
   `crates/kicad-emitter/src/schematic.rs::route_nets`.
@@ -788,12 +799,13 @@ literals above.
   electrically valid"). V12 promotes the warning to a quality
   defect with a per-fixture crossing budget.
   Verifier: `crates/spice2kicad/tests/electrical_safety.rs::v12_*`.
-  Calibration: budget 0 on `rc_lowpass` and `multivibrator`;
-  fixture-specific cap on `common_emitter`, `diff_pair`, and
-  `opamp_inverting_real` until a v0.2 channel-rerouter closes the
-  residual cases. The budget is the **high-water mark we drive
-  down**, not a license to introduce new crossings — a regression
-  trips the test.
+  Calibration: `v12_crossing_budget`
+  (`electrical_safety.rs:311`) returns `0` for every fixture, so
+  the budget is `0` across all five (rc_lowpass / common_emitter /
+  multivibrator / diff_pair / opamp_inverting_real) — no wire may
+  cross a foreign body. The budget is the **high-water mark we
+  drive down**, not a license to introduce new crossings — a
+  regression trips the test.
 
 - **V13 — Labels do not overlap symbol bodies, property text, or
   foreign-net wires.** For every emitted `(label …)` /
@@ -806,12 +818,12 @@ literals above.
      `(wire …)` segment that belongs to a different net (V11 covers
      the foreign-pin subcase; V13 extends to wire-interior
      coincidence away from any pin).
-  v0.1 verifier in `crates/spice2kicad/tests/electrical_safety.rs`
-  enforces (1) only (body overlap) with a per-fixture allow-list;
-  (2) and (3) are tracked but not yet enforced — text-bbox sizing
-  needs a font-aware helper and the wire-interior-vs-label scan
-  needs a `(label, net_for_label)` map that today's emitter doesn't
-  expose. Both land alongside V13's full enforcement in a v0.2 pass.
+  Verifiers in `crates/spice2kicad/tests/electrical_safety.rs`
+  enforce all three: (1) body overlap with a per-fixture
+  allow-list; (2) `v13_labels_dont_overlap_property_text`
+  (`electrical_safety.rs:1212`); and (3)
+  `v13_label_anchor_not_on_foreign_wire_interior`
+  (`electrical_safety.rs:1246`).
 
 - **V14 — Power glyph orientation: GND down, VCC up.** Every
   `power:GND` instance emits with the rotation that draws the
@@ -881,7 +893,20 @@ just hooks         # install git pre-commit hooks
 cargo install --path crates/spice2kicad
 ```
 
-## Memory limits when running tests / conversion jobs
+## Committing during multi-agent / parallel work
+
+**Commit each green milestone before launching another agent (or
+workflow) that may touch git.** Subagents and workflow steps run shell
+commands freely, including `git stash` / `git checkout` / `git reset`
+to "clean up" or inspect prior work. When valuable changes are sitting
+*uncommitted* in the working tree, a later agent's git operation can
+revert or park them, leaving an inconsistent tree (e.g. test files
+referencing modules that got stashed away). Uncommitted work is the
+only thing at risk — once a milestone is committed (on a branch; see
+the default-branch rule), git ops can stash and reset around it
+without losing it, and recovery is a merge rather than a manual
+reconstruction. So: land step N (tests green, committed) *before*
+dispatching the agent for step N+1.
 
 A regression in the router (or placer) can produce unbounded segment
 growth and OOM-kill the host before any single test fails. To keep

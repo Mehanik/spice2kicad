@@ -229,11 +229,54 @@ fn eight_pin_runtime_under_100ms() {
     );
 }
 
+/// Rectilinear (Manhattan) MST length over `pins`, computed
+/// independently of the router so tests can assert the Steinerized
+/// tree is never longer than the spanning-tree baseline.
+fn rmst_length(pins: &[(f64, f64)]) -> f64 {
+    let n = pins.len();
+    if n <= 1 {
+        return 0.0;
+    }
+    let man = |a: (f64, f64), b: (f64, f64)| (a.0 - b.0).abs() + (a.1 - b.1).abs();
+    let mut in_tree = vec![false; n];
+    let mut best = vec![f64::INFINITY; n];
+    in_tree[0] = true;
+    for j in 1..n {
+        best[j] = man(pins[0], pins[j]);
+    }
+    let mut total = 0.0;
+    for _ in 1..n {
+        let mut pick = usize::MAX;
+        let mut pd = f64::INFINITY;
+        for j in 0..n {
+            if !in_tree[j] && best[j] < pd {
+                pick = j;
+                pd = best[j];
+            }
+        }
+        if pick == usize::MAX {
+            break;
+        }
+        in_tree[pick] = true;
+        total += pd;
+        for j in 0..n {
+            if !in_tree[j] {
+                let d = man(pins[pick], pins[j]);
+                if d < best[j] {
+                    best[j] = d;
+                }
+            }
+        }
+    }
+    total
+}
+
 #[test]
-fn ten_pin_falls_back_to_mst() {
-    // 10 pins → plain rectilinear MST path (no Steiner). The output
-    // is a valid spanning structure: at least N-1 = 9 segments
-    // (could be more with L-bends), and total length is finite.
+fn ten_pin_steiner_never_longer_than_mst() {
+    // 10 pins → Steinerized rectilinear tree. The Steiner pass may
+    // only shorten (or tie) the spanning-tree baseline; it must never
+    // produce a longer tree, and it must remain a valid connected
+    // structure (≥ N-1 segments, finite positive length).
     let pins: Vec<(f64, f64)> = (0..10_i32)
         .map(|i| {
             let f = f64::from(i);
@@ -249,7 +292,76 @@ fn ten_pin_falls_back_to_mst() {
         segs.len()
     );
     let len = total_len(&segs);
+    let mst = rmst_length(&pins);
     assert!(len.is_finite() && len > 0.0, "got total len {len}");
+    assert!(
+        len <= mst + EPS,
+        "Steinerized tree (len {len}) must not exceed MST baseline {mst}"
+    );
+}
+
+#[test]
+fn twelve_pin_steiner_strictly_beats_mst() {
+    // A double "plus" sign: two overlapping cross fixtures that share a
+    // common vertical spine. Each cross has four arm pins that pull
+    // toward a central median, so Hanan-grid Steiner points strictly
+    // shorten the spanning tree. With N = 12 this exercises the
+    // large-N (≥ 10) Steiner path, which previously fell back to plain
+    // RMST and therefore could NOT find these savings.
+    //
+    // Three independent "plus" crosses, each with four arm pins around
+    // an EMPTY centre. The optimal RSMT for each plus adds a Steiner
+    // point at the (empty) centre and runs four spokes to it; the
+    // spanning-tree baseline must instead chain the arms and is
+    // strictly longer. The three crosses are placed far apart so the
+    // saving is per-cross and unambiguous.
+    let plus = |cx: f64, cy: f64| {
+        [
+            (cx - 10.0, cy),
+            (cx + 10.0, cy),
+            (cx, cy - 10.0),
+            (cx, cy + 10.0),
+        ]
+    };
+    let mut pins: Vec<(f64, f64)> = Vec::new();
+    pins.extend_from_slice(&plus(0.0, 0.0));
+    pins.extend_from_slice(&plus(60.0, 0.0));
+    pins.extend_from_slice(&plus(120.0, 0.0));
+    let segs = route_n_pin(&pins);
+    let len = total_len(&segs);
+    let mst = rmst_length(&pins);
+    assert!(
+        len + EPS < mst,
+        "expected Steinerized tree strictly shorter than MST {mst}, got {len}"
+    );
+}
+
+#[test]
+fn large_n_steiner_completes_in_time() {
+    // ADR-8 perf floor: a single net with 60 pins must Steinerize in
+    // interactive time. A 60-pin net is already far beyond any real
+    // ngspice-tractable signal net (those rarely exceed a handful of
+    // pins); this guards the O() bound on the large-N Steiner path.
+    let pins: Vec<(f64, f64)> = (0..60_i32)
+        .map(|i| {
+            let f = f64::from(i);
+            ((f * 13.0) % 40.0, (f * 17.0) % 40.0)
+        })
+        .collect();
+    let start = std::time::Instant::now();
+    let segs = route_n_pin(&pins);
+    let dt = start.elapsed();
+    let len = total_len(&segs);
+    let mst = rmst_length(&pins);
+    assert!(!segs.is_empty(), "expected segments");
+    assert!(
+        len <= mst + EPS,
+        "Steiner tree (len {len}) must not exceed MST {mst}"
+    );
+    assert!(
+        dt < std::time::Duration::from_secs(2),
+        "60-pin route took {dt:?}, expected < 2s (ADR-8 interactive)"
+    );
 }
 
 #[test]

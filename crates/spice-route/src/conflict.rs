@@ -9,7 +9,8 @@
 //!    one of the colliding nets' affected endpoints by exactly one
 //!    grid cell (1.27 mm) along the axis that doesn't disturb its
 //!    other endpoint.
-//! 3. Repeat until no conflicts remain or 10 iterations elapse.
+//! 3. Repeat until no conflicts remain or a derived per-instance
+//!    convergence bound (one pass per routed net, + 1) elapses.
 //!
 //! This is *not* full Stage 3 rip-up & retry from the original spec —
 //! that lands later. The jog-once loop is sufficient for the small
@@ -19,35 +20,66 @@ use crate::types::{Bbox, Direction, RoutedNet, Segment};
 
 const GRID_MM: f64 = 1.27;
 const EPS: f64 = 1e-6;
-const MAX_ITERATIONS: usize = 10;
 
-/// Cap retry count for obstacle avoidance per segment. Each retry tries
-/// the alternate L corner (or shifts the bend by a grid cell). After
-/// the cap a warning is recorded and the offending segment is left
-/// alone — a body-crossing wire is ugly but still electrically valid.
-const OBSTACLE_RETRY_CAP: usize = 12;
-/// Convergence cap for `avoid_obstacles`'s outer priority-pass loop.
-const OBSTACLE_OUTER_CAP: usize = 8;
-/// Bend-penalty in millimetres for the Lee/BFS maze router. A bend
-/// costs `MAZE_BEND_PENALTY_MM` plus the segment length, so the
-/// router prefers fewer-bend paths over slightly shorter zig-zags.
-const MAZE_BEND_PENALTY_MM: f64 = 5.0;
-/// Half-cell margin around the union of pins used to size the maze
-/// router's working grid when the caller hasn't supplied explicit
-/// bounds. Picked to give the router a few cells of slack at each
-/// edge without blowing the grid up.
-const MAZE_GRID_MARGIN_MM: f64 = 12.7;
-/// Hard ceiling on grid cells the maze router will consider. A
-/// 200×200-cell grid (1.27 mm step ≈ 25 × 25 cm sheet) is well above
-/// any v0.1 fixture; beyond that the routing problem is no longer a
-/// single sheet and the maze pass bails out.
-const MAZE_CELL_CAP: usize = 200 * 200;
-/// Radius (in 1.27 mm grid cells) of the spiral search that
-/// `try_move_steiner_junction` walks when looking for a free cell to
-/// relocate a Steiner T-junction that sits inside an obstacle. The
-/// v0.1 fixtures need ≤ 2 cells of clearance; 8 is comfortable
-/// slack without producing absurdly long detours.
-const STEINER_MOVE_RADIUS_CELLS: i32 = 8;
+/// Bend penalty for the Lee/BFS maze router, in millimetres.
+///
+/// A path's Dijkstra cost is `length + bends · MAZE_BEND_PENALTY_MM`.
+/// The penalty is **strictly less than one grid step** (`GRID_MM`) so
+/// that total length always strictly dominates bend count: the router
+/// will never accept even one extra grid cell of wire to remove a
+/// bend, but among paths of *equal* length it prefers the one with
+/// fewer bends. Half a grid cell gives a clean tie-break margin
+/// (any length difference is a whole number of cells, ≥ `GRID_MM`,
+/// while the maximum bend-count swing over a fixed-length path is
+/// bounded and each bend is worth only `GRID_MM / 2`, so length wins).
+/// This is the textbook rectilinear length-then-bends ordering, not a
+/// tunable weight; raising it past `GRID_MM` would let the router
+/// lengthen wires (a V5/V10 regression).
+const MAZE_BEND_PENALTY_MM: f64 = GRID_MM / 2.0;
+/// Safety backstop on the maze router's grid size, in cells.
+///
+/// The grid is `cols · rows`; each cell costs a `bool` in three block
+/// vectors plus, in the search, a `u64` cost and an `Option<(usize,
+/// u8)>` parent per (cell × 5 directions) state — roughly 5 · (8 + 16)
+/// = 120 bytes/cell. At the cap below the search allocates on the order
+/// of `120 · 250_000 ≈ 30 MB`, which stays inside the per-test 4 GiB
+/// vsz ulimit with wide margin while bounding a single maze call's
+/// memory and the O(V log V) Dijkstra to a fixed worst case. 500 × 500
+/// cells is a 635 × 635 mm sheet — larger than any single KiCad A-series
+/// sheet — so a problem exceeding it is not a single sheet and the maze
+/// pass correctly bails rather than routing across a torn layout.
+const MAZE_CELL_CAP: usize = 500 * 500;
+
+/// Largest perpendicular detour, in grid cells, that the U-detour /
+/// L-pair retry loops will attempt for a given obstacle/foreign-pin
+/// set. A rectilinear detour never needs to swing wider than the
+/// blocking geometry's own extent plus one clearance cell on the far
+/// side: past that the segment is already clear of every box. We
+/// therefore derive the cap from the union extent of the boxes the
+/// segment must avoid (in cells), rather than guessing a fixed slack.
+/// `boxes` is whatever set the caller is routing around (obstacles or
+/// inflated foreign-pin bboxes); an empty set yields a cap of 1 (a
+/// single perpendicular nudge is always enough when nothing blocks).
+fn max_detour_cells(boxes: &[Bbox]) -> usize {
+    let mut lo_x = f64::INFINITY;
+    let mut hi_x = f64::NEG_INFINITY;
+    let mut lo_y = f64::INFINITY;
+    let mut hi_y = f64::NEG_INFINITY;
+    for b in boxes {
+        lo_x = lo_x.min(b.x0);
+        hi_x = hi_x.max(b.x1);
+        lo_y = lo_y.min(b.y0);
+        hi_y = hi_y.max(b.y1);
+    }
+    if !lo_x.is_finite() || !hi_x.is_finite() {
+        return 1;
+    }
+    let span_mm = (hi_x - lo_x).max(hi_y - lo_y).max(0.0);
+    // Cells spanned by the widest box dimension, + 1 clearance cell.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let cells = (span_mm / GRID_MM).ceil() as usize;
+    cells.saturating_add(1).max(1)
+}
 
 /// Resolve cross-net endpoint conflicts in place.
 ///
@@ -60,14 +92,24 @@ const STEINER_MOVE_RADIUS_CELLS: i32 = 8;
 /// attention, not router-level.
 ///
 /// Returns one warning per net that still has unresolved conflicts
-/// after `MAX_ITERATIONS` jog passes.
+/// after the derived per-instance convergence bound (one jog pass per
+/// routed net, + 1) elapses.
 pub fn resolve_conflicts<S: ::std::hash::BuildHasher>(
     routed: &mut [RoutedNet],
     net_pin_coords: &[std::collections::HashSet<(i64, i64), S>],
 ) -> Vec<String> {
     let net_pins = net_pin_coords;
     let mut warnings = Vec::new();
-    for _ in 0..MAX_ITERATIONS {
+    // Convergence bound. The real exit is `conflicts.is_empty()` (or
+    // `!acted`); this cap only bounds a pathological non-converging
+    // case. Each pass that does work jogs at least one net off a
+    // contested coord, and a conflict chain settles in at most one pass
+    // per participating net, so the count of routed nets (+1 for the
+    // confirming no-conflict pass) is a real dependency-depth bound —
+    // the same derivation `avoid_obstacles` / `avoid_foreign_pins`
+    // use, not arbitrary slack.
+    let max_iterations = routed.len().saturating_add(1).max(1);
+    for _ in 0..max_iterations {
         let conflicts = find_conflicts(routed);
         if conflicts.is_empty() {
             return warnings;
@@ -106,7 +148,7 @@ pub fn resolve_conflicts<S: ::std::hash::BuildHasher>(
     }
     for n in bad {
         warnings.push(format!(
-            "conflict: net index {n} has endpoint conflicts left after {MAX_ITERATIONS} resolve iterations"
+            "conflict: net index {n} has endpoint conflicts left after {max_iterations} resolve iterations"
         ));
     }
     warnings
@@ -312,12 +354,23 @@ pub fn avoid_foreign_pins<S: ::std::hash::BuildHasher>(
         key_b.cmp(&key_a).then(a.cmp(&b))
     });
     // Iterate the priority pass until convergence (no further net
-    // changes) or a small cap. Cross-net dependencies — net A's
-    // detour blocked because net B's pre-detour trunk collinearly
-    // overlaps — resolve themselves once B has moved on a later
-    // pass. The cap is defensive; the symmetric multivibrator /
-    // diff_pair fixtures converge in 2 passes in practice.
-    for _ in 0..MAX_ITERATIONS {
+    // changes). Cross-net dependencies — net A's detour blocked
+    // because net B's pre-detour trunk collinearly overlaps — resolve
+    // themselves once B has moved on a later pass. The real exit is the
+    // `!changed` fixed-point check below; the cap only bounds the
+    // pathological non-converging (oscillating) case. A settling
+    // dependency chain across `n` mutually-constraining nets reaches a
+    // fixed point in at most `n` passes, so the bound is the count of
+    // nets that actually have a foreign pin to avoid (+1 for the
+    // confirming no-change pass) — a real dependency-depth bound, the
+    // same derivation `avoid_obstacles` uses, not arbitrary slack.
+    let outer_cap = foreign
+        .iter()
+        .filter(|pins| !pins.is_empty())
+        .count()
+        .saturating_add(1)
+        .max(1);
+    for _ in 0..outer_cap {
         let pre_signatures: Vec<Vec<Segment>> = routed.iter().map(|n| n.segments.clone()).collect();
         for &i in &order {
             let pins = &foreign[i];
@@ -547,7 +600,7 @@ fn anchor_own_pin_endpoints<S: ::std::hash::BuildHasher>(
 /// Try to replace an L-pair containing the offending segment with a
 /// 3-segment U-detour anchored at the L pair's two far endpoints
 /// (which are typically pins and must stay put). The detour walks
-/// the intermediate corner offset `k ∈ 1..=OBSTACLE_RETRY_CAP` along
+/// the intermediate corner offset `k ∈ 1..=max_detour_cells(…)` along
 /// the axis perpendicular to the far-endpoint span, in both sign
 /// directions, taking the first variant that is V11-clean against
 /// every foreign-pin bbox AND doesn't collinearly overlap a sibling
@@ -569,6 +622,10 @@ fn try_u_detour_l_pair<S: ::std::hash::BuildHasher>(
     pin_outward: &PinOutwardMap,
 ) -> bool {
     let n = routed[target].segments.len();
+    // Widest perpendicular swing this detour needs: bounded by the
+    // extent of the geometry it must clear (foreign pins + obstacle
+    // bodies). Past that the detour is already outside every box.
+    let retry_cap = max_detour_cells(foreign_bboxes).max(max_detour_cells(obstacle_bboxes));
     for outward_strict in [true, false] {
         for j in 0..n {
             if j == idx {
@@ -599,7 +656,7 @@ fn try_u_detour_l_pair<S: ::std::hash::BuildHasher>(
             // (running parallel to original horizontal leg). Both axes
             // are tried.
             for axis in [Axis::HorizontalFirst, Axis::VerticalFirst] {
-                for k in 1..=OBSTACLE_RETRY_CAP {
+                for k in 1..=retry_cap {
                     for sign in [1.0_f64, -1.0_f64] {
                         #[allow(clippy::cast_precision_loss)]
                         let off = sign * GRID_MM * (k as f64);
@@ -834,7 +891,11 @@ fn try_detour_segment(
     if !horizontal && !vertical {
         return false;
     }
-    for k in 1..=OBSTACLE_RETRY_CAP {
+    // Widest perpendicular offset worth trying: bounded by the extent
+    // of the geometry the detour must clear; beyond it the detour is
+    // already clear of every box.
+    let retry_cap = max_detour_cells(foreign_bboxes).max(max_detour_cells(obstacle_bboxes));
+    for k in 1..=retry_cap {
         for sign in [1.0_f64, -1.0_f64] {
             #[allow(clippy::cast_precision_loss)]
             let off = sign * GRID_MM * (k as f64);
@@ -1040,8 +1101,10 @@ fn count_interior_hits(net: &RoutedNet, foreign_pins: &[(i64, i64)]) -> usize {
 /// crossing is not double-counted.
 ///
 /// Iterates the priority pass to convergence (segment-set
-/// signatures unchanged between iterations) or `OBSTACLE_OUTER_CAP`,
-/// then emits one warning per net that still has residual crossings.
+/// signatures unchanged between iterations) or the derived
+/// dependency-depth backstop, then emits one warning per net that
+/// still has residual crossings.
+#[allow(clippy::too_many_lines)]
 pub fn avoid_obstacles<S: ::std::hash::BuildHasher>(
     routed: &mut [RoutedNet],
     obstacles: &[Bbox],
@@ -1111,9 +1174,24 @@ pub fn avoid_obstacles<S: ::std::hash::BuildHasher>(
         key_b.cmp(&key_a).then(a.cmp(&b))
     });
 
+    // Convergence backstop for the outer priority pass. The loop's
+    // real exit is the `!changed` fixed-point check below; this cap
+    // only bounds the pathological non-converging (oscillating) case.
+    // Each pass lets every net react to the others' current geometry;
+    // a settling dependency chain across `n` mutually-constraining
+    // nets reaches a fixed point in at most `n` passes, so the bound is
+    // the count of nets that actually have a body to avoid (+1 for the
+    // confirming no-change pass). This is a real dependency-depth
+    // bound, not arbitrary slack.
+    let outer_cap = order
+        .iter()
+        .filter(|&&i| !placer_broken[i])
+        .count()
+        .saturating_add(1)
+        .max(1);
     // Maze-router blocked grid is rebuilt each outer pass (sibling
     // segments change as other nets reroute).
-    for _ in 0..OBSTACLE_OUTER_CAP {
+    for _ in 0..outer_cap {
         let pre_signatures: Vec<Vec<Segment>> = routed.iter().map(|n| n.segments.clone()).collect();
         for &i in &order {
             if placer_broken[i] {
@@ -1161,7 +1239,7 @@ pub fn avoid_obstacles<S: ::std::hash::BuildHasher>(
         }
         if remaining > 0 {
             warnings.push(format!(
-                "obstacle: net index {net_idx} has {remaining} segment(s) crossing a symbol body after {OBSTACLE_OUTER_CAP} outer passes"
+                "obstacle: net index {net_idx} has {remaining} segment(s) crossing a symbol body after {outer_cap} outer passes"
             ));
         }
     }
@@ -1319,20 +1397,41 @@ fn try_move_steiner_junction<S: ::std::hash::BuildHasher>(
         }
         // Only attempt this when `endpoint` is actually strictly
         // inside one of the obstacles — otherwise moving it isn't
-        // motivated by V12.
-        let endpoint_in_obstacle = obstacles.iter().any(|o| {
-            endpoint.0 > o.x0 + 0.1
-                && endpoint.0 < o.x1 - 0.1
-                && endpoint.1 > o.y0 + 0.1
-                && endpoint.1 < o.y1 - 0.1
-        });
-        if !endpoint_in_obstacle {
+        // motivated by V12. Capture the containing boxes so the search
+        // radius can be bounded by how far the junction must travel to
+        // escape them.
+        let containing: Vec<&Bbox> = obstacles
+            .iter()
+            .filter(|o| {
+                endpoint.0 > o.x0 + 0.1
+                    && endpoint.0 < o.x1 - 0.1
+                    && endpoint.1 > o.y0 + 0.1
+                    && endpoint.1 < o.y1 - 0.1
+            })
+            .collect();
+        if containing.is_empty() {
             continue;
         }
+        // A junction strictly inside a box escapes by moving at most
+        // the box's larger dimension (worst case: it sits against one
+        // edge and must reach just past the opposite edge), plus one
+        // clearance cell. Derive the spiral radius from the boxes the
+        // junction is actually inside rather than guessing a fixed
+        // slack; an unbounded layout can therefore never force an
+        // unbounded search.
+        let move_radius: i32 = containing
+            .iter()
+            .map(|o| {
+                let span = (o.x1 - o.x0).max(o.y1 - o.y0).max(0.0);
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let cells = (span / GRID_MM).ceil() as i32;
+                cells.saturating_add(1).max(1)
+            })
+            .max()
+            .unwrap_or(1);
         // Search landings on the 1.27 mm grid in a spiral around the
-        // original junction. `STEINER_MOVE_RADIUS_CELLS` is small —
-        // the v0.1 fixtures only ever need 1–2 cells of clearance.
-        for r in 1..=STEINER_MOVE_RADIUS_CELLS {
+        // original junction.
+        for r in 1..=move_radius {
             for dy in -r..=r {
                 for dx in -r..=r {
                     // Only the spiral perimeter at radius r.
@@ -1459,7 +1558,8 @@ fn try_move_steiner_junction<S: ::std::hash::BuildHasher>(
 ///
 /// The blocked grid is quantised at `GRID_MM` (1.27 mm) over a bbox
 /// derived from `bounds` (caller-supplied) or, when `None`, the pin
-/// union of `routed[target]` extended by `MAZE_GRID_MARGIN_MM`. A
+/// union of `routed` extended by a margin derived from the
+/// obstacle/foreign-pin extent (see [`compute_maze_bounds`]). A
 /// cell is blocked iff it strictly lies inside an obstacle bbox, on
 /// a foreign-pin coord, or on the interior of a sibling net's
 /// segment (segments belonging to the same net are not blocked —
@@ -1636,11 +1736,34 @@ impl MazeGrid {
     }
 }
 
-/// Compute the bounding box used to size the maze grid. Caller may
-/// supply explicit bounds; otherwise fall back to the union of every
-/// routed net's pin endpoints (i.e. the union of every segment
-/// endpoint), padded by `MAZE_GRID_MARGIN_MM`.
-fn compute_maze_bounds(routed: &[RoutedNet], explicit: Option<Bbox>) -> Option<Bbox> {
+/// Compute the bounding box used to size the maze grid.
+///
+/// The caller may supply explicit `bounds`; the unit tests do, but the
+/// production emitter passes `None` (see `kicad-emitter/src/
+/// schematic.rs::route_nets`, which flows through `spice-route::route`
+/// into `avoid_obstacles`), so the derived path below is the *normal*
+/// path on every real route. When `explicit` is `None` the bbox is the
+/// union of every routed net's segment endpoints, padded by a margin
+/// derived from the obstacle/foreign-pin geometry the router must
+/// detour around.
+///
+/// Margin rationale (a real bound, not slack): the only consumer of
+/// this grid is the V12 maze fallback, which replaces a body-crossing
+/// segment with a detour. A rectilinear detour never needs to swing
+/// wider than [`max_detour_cells`] of the geometry it avoids — past
+/// that extent the path is already clear of every box. We therefore
+/// size the margin as that per-instance cell count (over the union of
+/// obstacles and foreign pins) plus one clearance cell, so a detour
+/// terminating at a pin on the union boundary still has a free
+/// neighbour to bend into. This is the same extent bound the
+/// `try_detour_segment` / `try_u_detour_l_pair` loops already use, so
+/// the maze grid can express every detour those loops can.
+fn compute_maze_bounds(
+    routed: &[RoutedNet],
+    obstacles: &[Bbox],
+    foreign_bboxes: &[Bbox],
+    explicit: Option<Bbox>,
+) -> Option<Bbox> {
     if let Some(b) = explicit {
         return Some(b);
     }
@@ -1661,11 +1784,14 @@ fn compute_maze_bounds(routed: &[RoutedNet], explicit: Option<Bbox>) -> Option<B
     if !lo_x.is_finite() || !hi_x.is_finite() {
         return None;
     }
+    let margin_cells = max_detour_cells(obstacles).max(max_detour_cells(foreign_bboxes));
+    #[allow(clippy::cast_precision_loss)]
+    let margin_mm = (margin_cells.saturating_add(1) as f64) * GRID_MM;
     Some(Bbox {
-        x0: lo_x - MAZE_GRID_MARGIN_MM,
-        y0: lo_y - MAZE_GRID_MARGIN_MM,
-        x1: hi_x + MAZE_GRID_MARGIN_MM,
-        y1: hi_y + MAZE_GRID_MARGIN_MM,
+        x0: lo_x - margin_mm,
+        y0: lo_y - margin_mm,
+        x1: hi_x + margin_mm,
+        y1: hi_y + margin_mm,
     })
 }
 
@@ -1683,7 +1809,7 @@ fn build_maze_grid(
     foreign_bboxes: &[Bbox],
     explicit_bounds: Option<Bbox>,
 ) -> Option<MazeGrid> {
-    let bounds = compute_maze_bounds(routed, explicit_bounds)?;
+    let bounds = compute_maze_bounds(routed, obstacles, foreign_bboxes, explicit_bounds)?;
     let width = bounds.x1 - bounds.x0;
     let height = bounds.y1 - bounds.y0;
     if !(width.is_finite() && height.is_finite()) || width <= 0.0 || height <= 0.0 {

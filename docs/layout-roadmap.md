@@ -17,6 +17,18 @@ coordinate-assigned schematic. It runs after constraint resolution
   `power` are hard constraints in the cost (very high δ). The
   resolver may *drop* a constraint with a warning, but the placer
   never silently violates one it was given.
+  > **Reconciliation (see CLAUDE.md "Constraints vs. costs" — source
+  > of truth).** A large-delta soft cost term (e.g. cost.rs
+  > `constraint_violation`, δ ≈ 1000) is acceptable only for a
+  > *continuous* preference where any value is admissible and δ just
+  > biases the trade-off. It is **not** a substitute for a hard
+  > constraint: at any finite weight an SA move (notably the
+  > `rotate` move) can still undo it. Any *categorical* placement
+  > constraint — a yes/no geometric fact with one correct answer —
+  > must instead be enforced as a candidate-space filter (reject the
+  > infeasible move at the `propose_move` boundary), not a penalty
+  > term. Treat the "very high δ" wording above as a historical
+  > framing superseded by that rule.
 - **Grid-snapped, orthogonal-routable output.** Continuous
   positions are an internal detail. The emitter only ever sees
   integer grid coords.
@@ -75,7 +87,7 @@ Practical consequences:
 | Quadratic / analytical | Fast for HPWL | Poor with readability constraints | Not used in v0.1 |
 | Min-cut partitioning | Maps onto hierarchy | Needs a cut metric | Subsumed by `.subckt`/`.include` |
 | Sugiyama (layered) | Great for signal-flow chains | Breaks on feedback | Inspiration for left→right ordering, not the algorithm |
-| Symmetry / idiom templates | Produces "analog-looking" schematics | False positives are worse than no detection | v0.2, behind `align` |
+| Symmetry / idiom templates | Produces "analog-looking" schematics | False positives are worse than no detection | Structural-symmetry pass shipped (V7); idiom templates v0.2 |
 | ML / RL / LLM | Best aesthetics in published work | Opaque, needs training data | Out of scope |
 
 The t-SNE / UMAP analogy is real but loose: those minimize a
@@ -103,8 +115,9 @@ A hybrid pipeline, recursive over the cluster tree:
    constraint-violation terms.
 5. **Compose.** Place child cluster bounding boxes in the parent
    using the same machinery one level up.
-6. **Route.** Separate orthogonal-wire pass (Lee/maze or pattern
-   routing) on the final placement. Not blended into placement.
+6. **Route.** Separate orthogonal-wire pass (rectilinear Steiner
+   trees, `spice-route`) on the final placement. Not blended into
+   placement.
 
 Proposed crate split:
 
@@ -122,7 +135,8 @@ crates/
       patterns/      # v0.2: idiom detectors
       lib.rs         # Placed<Element> output type
   spice-route/       # power-symbol placement + per-net Steiner-tree routing
-                     # (Hwang exact for N≤9, RMST for N≥10); see CLAUDE.md V10
+                     # (Hwang exact N=3, RMST+BOI heuristic 4≤N≤9,
+                     # RMST N≥10); see CLAUDE.md V10
 ```
 
 `kicad-emitter` consumes `Placed<Element>`. It should not contain
@@ -164,21 +178,29 @@ boundary:
 
 - The host *symbol's* rotation is chosen by the placer. Whether a
   power/ground pin ends up facing up, down, or sideways is therefore a
-  **placement** concern, enforced as a *hard constraint* on the
-  orientation candidate set (see CLAUDE.md "Constraints vs. costs" —
-  V14 is Tier 1 and categorical, so it filters orientations in
-  `pick_orientations` and the SA rotate move, not as a soft cost).
+  **placement** concern. The *intended* design (see CLAUDE.md
+  "Constraints vs. costs", authoritative) makes this a *hard
+  constraint* on the orientation candidate set: because V14 is Tier 1
+  and categorical, the filter belongs in `pick_orientations` and the
+  SA rotate move, not as a soft cost. **This is the target, not
+  today's behaviour: V14 is currently unenforced at both stages —
+  `pick_orientations` does no power/VCC/GND filtering, and there is
+  deliberately no `power_pin_outward` weight in `cost.rs`.** The
+  filter is the work this roadmap entry describes, not a shipped
+  guarantee.
 - Given that fixed pin direction, the glyph's *attachment* — drawn
   directly at the pin vs. detached with a short stub wire — is a
   **decoration** concern, owned by the emitter/router. When the
-  placer is forced to leave a power pin sideways (the filtered
-  orientation set is empty), the decoration phase's escape is the
-  detached-glyph-with-stub-wire path, NOT a placement perturbation.
+  placer is forced to leave a power pin sideways (the intended
+  filtered orientation set is empty), the decoration phase's escape
+  is the detached-glyph-with-stub-wire path, NOT a placement
+  perturbation.
 
-So V14's "which way does the symbol face" half lives in `spice-layout`
-as a hard constraint, and its "how is the glyph attached" half lives
-in the decoration phase. The two halves compose without either feeding
-back into the other.
+So V14's "which way does the symbol face" half belongs in
+`spice-layout` as a hard constraint (the target design above, not yet
+implemented), and its "how is the glyph attached" half lives in the
+decoration phase. The two halves compose without either feeding back
+into the other.
 
 ## 5. Cost function
 
@@ -249,23 +271,34 @@ force-directed for that cluster.
   violation).
 - **Done (first cut):** FR seeding + SA refinement behind
   `LayoutOptions { refine: true, .. }`. Move set is jitter +
-  4-rotation; mirror moves and signal-flow / rail-direction cost
-  terms still deferred. Per-component cost logging via `log` at
-  `debug` level.
+  4-rotation; the SA mirror move is still deferred. The
+  signal-flow and rail-direction cost terms now ship (see
+  `cost.rs`: `signal_flow`, `rail_direction`). Per-component cost
+  logging via `log` at `debug` level.
 - **Done (structural layered placement):** classify nets →
   Y-band assignment (Top/Mid/Bot) → X-layer via Tarjan SCC +
   longest-path DAG → seed positions from band/layer grid →
   SA refinement with band-misalignment, soft-Y, layer-order,
   and crossing-approximation cost terms.
 - **Done (router):** `crates/spice-route/` — power-symbol glyphs
-  for Power/Ground nets, exact rectilinear Steiner trees for
-  signal nets (Hwang for N≤9 via Hanan-grid DP, RMST fallback
-  for N≥10), 1-cell-jog conflict resolution, collinear/junction
-  cleanup. Replaces the channel-and-trunk router previously
-  inlined in `kicad-emitter`. See CLAUDE.md V10.
-- **Next:** mirror-Y move in SA.
-- **v0.2:** symmetry detector (V7) composing with the
-  classify → bands → layers pipeline.
+  for Power/Ground nets, rectilinear Steiner trees for signal nets
+  (Hwang-exact for N=3, RMST + Borah-Owens-Irwin Steinerization
+  for 4 ≤ N ≤ 9, plain RMST for N ≥ 10), 1-cell-jog conflict
+  resolution, collinear/junction cleanup. Replaces the
+  channel-and-trunk router previously inlined in `kicad-emitter`.
+  See CLAUDE.md V10.
+- **Done (first cut, symmetry/V7):** structural-symmetry
+  detector + mirrored placement, wired into `place_with`
+  (`symmetry::detect_pairs` → `symmetry::apply`), composing with
+  the classify → bands → layers pipeline. Detection is name-driven
+  (`(Q1, Q2)`, `(RC1, RC2)`, …) and validated by an involutive net
+  permutation; paired elements are pinned at mirrored coordinates
+  about a common vertical axis with mirrored orientation. Known
+  incompleteness: the multivibrator common-axis verifier still
+  fails by roughly one cell per pair (RB/C pairs sit off the Q
+  axis); tracked under CLAUDE.md V7.
+- **Next:** mirror-Y move in SA (the deferred ADR-3 move;
+  `anneal.rs` `TODO(stage 5)`).
 
 ## 8. Open questions
 

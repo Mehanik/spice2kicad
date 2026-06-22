@@ -809,6 +809,8 @@ dependencies = [
  "kicad-symbols",
  "log",
  "proptest",
+ "serde",
+ "serde_json",
  "spice-diagnostics",
  "spice-parser",
  "spice-policy",

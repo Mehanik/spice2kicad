@@ -24,10 +24,10 @@ Verified against `crates/spice-parser/tests/*.rs`,
 |----------|-------------|------------|--------|
 | §2 | Block comment (`*@`) and trailing tag (`;@`) are the two annotation carriers | `tests/lex_edges.rs::block_annotation_top_level`, `tests/lex_edges.rs::prose_semicolon_comment_no_tags`, `src/lexer.rs::block_annotation_emits_block_line` | covered |
 | §2 | Whitespace between marker and directive name is optional (`;@symbol=` = `;@ symbol=`) | `tests/lex_edges.rs::tag_no_space_after_marker` | covered |
-| §2 (lexer) | Bare `\r` not treated as a line separator (matches ngspice `inpcom.c` `\r\n`-only zap) | `tests/edge_inputs.rs::bare_cr_line_endings` | covered |
-| §2.2 | Dangling `+` continuation at start of file becomes a bogus `Other` element (documented quirk) | `tests/edge_inputs.rs::continuation_at_start_of_file` | covered |
-| §3.1 | Number overflow (`1e500`) parses to `Value::Number(inf)` (matches ngspice `INPevaluate`) | `tests/edge_inputs.rs::number_overflow_input` | covered |
-| §2.3 | Tab-separated `=` in tag bodies parsed correctly | `tests/edge_inputs.rs::tab_inside_tag_body` | covered |
+| §2 (lexer) | Bare `\r` not treated as a line separator (matches ngspice `inpcom.c` `\r\n`-only zap) | `tests/lex_edges.rs::bare_cr_line_endings` | covered |
+| §2.2 | Dangling `+` continuation at start of file becomes a bogus `Other` element (documented quirk) | `tests/lex_edges.rs::continuation_at_start_of_file` | covered |
+| §3.1 | Number overflow (`1e500`) parses to `Value::Number(inf)` (matches ngspice `INPevaluate`) | `tests/numbers.rs::number_overflow_input` | covered |
+| §2.3 | Tab-separated `=` in tag bodies parsed correctly | `tests/lex_edges.rs::tab_inside_tag_body` | covered |
 | §2 | Directive names and bare keys are case-insensitive ASCII (dotted-directive case: covered; tag-directive keyword case: see §3 gap) | `tests/elements.rs::case_insensitive_refdes`, `tests/directives.rs::directive_names_case_insensitive`, `tests/numbers.rs::eng_suffixes_case_insensitive` | partial [^2] |
 | §2.1 | Refdes accepts bare SPICE refdes (`R1`, `Q3`, `XU2`) | `tests/fixtures.rs::pinmap_tag_parses`, `tests/fixtures.rs::diff_pair_align_and_place` | covered |
 | §2.1 | Refdes accepts dotted subcircuit path (`XU2.R5`) | `tests/lex_edges.rs::place_dotted_anchor` | covered |
@@ -113,7 +113,6 @@ Verified against `crates/spice-parser/tests/*.rs`,
 | `tests/fixtures.rs::mosfet_continuation` | §2.2, §3.1 | MOSFET with `+` continuation: nodes, model name, and params (L, W) all collected |
 | `tests/numbers.rs::plain_integers_and_decimals` | §3.1 (value parsing) | Integer and decimal SPICE number tokens parse to correct f64 |
 | `tests/numbers.rs::scientific_notation` | §3.1 | Scientific-notation number tokens parse correctly |
-| `tests/numbers.rs::scientific_no_exponent_digits_is_string` | §3.1 | (ignored) `1e` without exponent digits: both ngspice and our parser return 1.0; assertion documents wrong expectation |
 | `tests/numbers.rs::d_exponent_lowercase` | §3.1 | Fortran-style `d` exponent marker (lowercase): `1d3` = 1000 |
 | `tests/numbers.rs::d_exponent_uppercase` | §3.1 | Fortran-style `D` exponent marker (uppercase): `1D3` = 1000 |
 | `tests/numbers.rs::d_exponent_with_eng_suffix` | §3.1 | Fortran exponent combined with engineering suffix: `1.5d3k` = 1.5e6 |
@@ -158,12 +157,12 @@ Verified against `crates/spice-parser/tests/*.rs`,
 | `tests/elements.rs::jfet_basic` | §3.1 | J element: 3 nodes, model |
 | `tests/elements.rs::subckt_instance_variable_ports` | §3, §3.1 | X element: variable port count, model name as last token |
 | `tests/elements.rs::subckt_instance_with_params` | §3, §3.1 | X element: ports, model name, key=value params |
-| `tests/elements.rs::vcvs_e_basic_current_behaviour` | §3.1 | E element (VCVS, ElementKind::Other): 4 nodes, numeric gain as value |
+| `tests/elements.rs::vcvs_e_basic` | §3.1 | E element (VCVS, ElementKind::Vcvs): 4 nodes, numeric gain as value |
 | `tests/elements.rs::cccs_f_basic_ngspice_correct` | §3.1 | F element (CCCS): 2 output nodes, control vsrc refdes in params, numeric gain |
 | `tests/elements.rs::ccvs_h_basic` | §3.1 | H element (CCVS): same syntax as F; 2 nodes, control param, numeric value |
 | `tests/elements.rs::mutual_inductance_k_ngspice_correct` | §3.1 | K element: inductor refdes stored as nodes, coupling factor as value |
 | `tests/elements.rs::mutual_k_with_decimal_coupling` | §3.1 | K element: decimal coupling factor parsed as Number |
-| `tests/elements.rs::vccs_g_basic` | §3.1 | G element (VCCS, ElementKind::Other): 4 nodes, numeric transconductance as value |
+| `tests/elements.rs::vccs_g_basic` | §3.1 | G element (VCCS, ElementKind::Vccs): 4 nodes, numeric transconductance as value |
 | `tests/elements.rs::case_insensitive_refdes` | §2, §3.1 | Lower-case element prefix (`r1`) still maps to Resistor kind |
 | `tests/elements.rs::pinmap_numeric_pin` | §4.2 | `pinmap=1:1,2:2` produces PinRef::Number entries |
 | `tests/elements.rs::pinmap_mixed_number_and_name` | §4.2 | `pinmap=1:A,2:2` produces mixed PinRef::Name / PinRef::Number entries |
@@ -172,7 +171,7 @@ Verified against `crates/spice-parser/tests/*.rs`,
 | `tests/directives.rs::subckt_params_keyword` | §3 | (ignored) `.subckt params:` ngspice extension not yet parsed |
 | `tests/directives.rs::subckt_nested` | §3 | Nested `.subckt` definitions both land in `nl.subckts` |
 | `tests/directives.rs::subckt_unterminated_yields_warning_not_error` | §3 | Missing `.ends` yields a warning, not an error; subckt still lands |
-| `tests/directives.rs::ends_without_subckt_is_error` | §3 | Stray `.ends` emits E900 |
+| `tests/diagnostics.rs::e900_stray_ends` | §3 | Stray `.ends` emits E900 |
 | `tests/directives.rs::model_npn_parenless` | §3.1 | `.model` without parens: type and params parsed |
 | `tests/directives.rs::model_npn_paren_wrapped` | §3.1 | `.model` with `(…)` parens: type and params parsed |
 | `tests/directives.rs::model_continuation` | §3.1 | `.model` with `+` continuation: multi-line params merged |
@@ -310,8 +309,7 @@ Ordered by correctness impact on the round-trip pipeline:
 - **§2.3 comma-separated multi-directive rejection** — no negative test that a single tag containing a comma is treated as one malformed directive.
   Proposed test: `tests/lex_edges.rs::tag_no_comma_multi_directive` — `R1 a b 1k ;@ symbol=D:R, place=right-of V1`, assert only one tag is parsed (not two).
 
-- **§3 T (transmission line) element kind** — no test for the `T` element prefix; classified as `ElementKind::Other` by the current parser.
-  Proposed test: `tests/elements.rs::transmission_line_basic` — parse `T1 in 0 out 0 Z0=50` and assert `ElementKind::Other`.
+- **§3 T (transmission line) element kind** — out-of-scope per the ngspice coverage matrix (`docs/test-coverage-ngspice.md`), which marks T alongside the other passive-line / switch elements (O, S, W, U, P, Y, Z) out-of-scope. T has no test and is classified as `ElementKind::Other` by the current parser; no `transmission_line_basic` test is planned.
 
 - **§3.1 K (mutual inductance) schematic representation** — no canonical KiCad library symbol matches the SPICE concept of `K L1 L2 coupling` (a relationship, not a 2-pin component). The resolver therefore raises E003 unless the user supplies `;@ symbol=`. Choice between (a) require user-supplied symbol, (b) render as a layout-pass annotation between coupled L symbols, or (c) emit nothing with a warning is still open (see `/tmp/phase3-decisions.md` "Open questions"). No test exists for any of these paths.
 

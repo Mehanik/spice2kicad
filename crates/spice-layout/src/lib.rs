@@ -27,6 +27,8 @@ pub mod bands;
 pub mod cost;
 pub mod layers;
 pub mod net_class;
+pub mod orient;
+pub mod sidecar;
 mod solver;
 mod symmetry;
 
@@ -120,6 +122,24 @@ pub struct Placement {
     pub elements: Vec<PlacedElement>,
     // Future: cluster bounding boxes, sheet hierarchy. Stage 1 carries
     // only the per-element list.
+}
+
+/// A set of pinned positions seeded from the position-stability sidecar
+/// (ADR-4). Each entry maps a SPICE refdes to a saved `(origin,
+/// orientation)`.
+///
+/// The hint is a **seed**, not a hard constraint: a refdes present here
+/// is placed at its saved position and marked pinned so the SA refiner
+/// leaves it put (reusing the exact same `pinned` mask that `align` /
+/// `place` use). But hard constraints still win: an element fixed by
+/// `align` / `place` keeps its constraint-solved position. New refdeses
+/// absent from the hint fall through to normal seeding and are placed
+/// (and de-overlapped) by SA; removed refdeses simply never appear in
+/// the next rewrite.
+#[derive(Debug, Clone, Default)]
+pub struct Hint {
+    /// refdes → (saved grid origin, saved orientation).
+    pub pins: std::collections::HashMap<String, (GridPoint, Orientation)>,
 }
 
 /// Render a parsed SPICE [`Value`] back to its source-equivalent token.
@@ -298,7 +318,27 @@ pub fn place_with(
     library: &Library,
     opts: &LayoutOptions,
 ) -> Result<Placement, Vec<Diagnostic>> {
+    place_with_hint(checked, library, opts, &Hint::default())
+}
+
+/// Run the placer with a position-stability hint (ADR-4).
+///
+/// Identical to [`place_with`] except that any refdes present in `hint`
+/// is seeded at its saved `(origin, orientation)` and pinned, so the SA
+/// refiner leaves it put. This reuses the same per-element `pinned` mask
+/// that `align` / `place` constraints use — no parallel path. Hard
+/// constraints win over a stale hint: an `align` / `place`-fixed element
+/// keeps its constraint-solved coordinate (the hint never overwrites an
+/// already-pinned element).
+#[allow(clippy::needless_pass_by_value)]
+pub fn place_with_hint(
+    checked: CheckedNetlist,
+    library: &Library,
+    opts: &LayoutOptions,
+    hint: &Hint,
+) -> Result<Placement, Vec<Diagnostic>> {
     let (mut placement, mut pinned) = place_seed(&checked)?;
+    apply_hint(&mut placement, &mut pinned, hint);
     // V7: detect structural symmetry in the netlist and mirror paired
     // elements about a common vertical axis. Runs after V6 archetype
     // seeding so the axis is computed from a topology-aware base
@@ -308,11 +348,48 @@ pub fn place_with(
     if let Some(plan) = symmetry::detect_pairs(&checked) {
         symmetry::apply(&mut placement, &mut pinned, &plan);
     }
-    pick_orientations(&mut placement, &pinned, &checked);
+    // V14: per-element allowed-orientation set (power pin up / ground
+    // pin down). A *hard* candidate-space filter, threaded into both
+    // the V5 seed chooser below and the SA refiner so the constraint is
+    // hard at *every* stage that can move an element (CLAUDE.md
+    // "consistency requirement").
+    let allowed = orient::allowed_orientations(&checked);
+    pick_orientations(&mut placement, &pinned, &checked, &allowed);
     if !opts.refine {
         return Ok(placement);
     }
-    Ok(solver::refine(placement, &pinned, &checked, library, opts))
+    Ok(solver::refine(
+        placement, &pinned, &checked, library, opts, &allowed,
+    ))
+}
+
+/// Apply a position-stability [`Hint`] (ADR-4) over a seeded placement.
+///
+/// For each placed element whose refdes appears in the hint **and which
+/// is not already pinned by a hard constraint** (`align` / `place`,
+/// applied in [`place_seed`] before this runs), overwrite its origin and
+/// orientation with the saved values and mark it pinned. Pinning it via
+/// the same `pinned` mask the constraint solver uses means the SA refiner
+/// treats it as immovable.
+///
+/// Elements absent from the hint keep their fresh seed coordinates and
+/// stay unpinned, so SA places them and resolves any overlap. Hard
+/// constraints win: an already-pinned element is skipped, so a stale hint
+/// never overrides an `align` / `place` directive.
+fn apply_hint(placement: &mut Placement, pinned: &mut [bool], hint: &Hint) {
+    if hint.pins.is_empty() {
+        return;
+    }
+    for (i, elem) in placement.elements.iter_mut().enumerate() {
+        if pinned[i] {
+            continue;
+        }
+        if let Some(&(origin, orient)) = hint.pins.get(&elem.refdes) {
+            elem.origin = origin;
+            elem.orientation = orient;
+            pinned[i] = true;
+        }
+    }
 }
 
 /// V5: pin-facing orientation pass.
@@ -331,7 +408,13 @@ pub fn place_with(
 /// changing it would invalidate the pin-anchored math in
 /// [`solve_place`].
 #[allow(clippy::similar_names)] // ox_i/oy_i, ox_j/oy_j: i/j identify the two elements in a pair.
-fn pick_orientations(placement: &mut Placement, pinned: &[bool], checked: &CheckedNetlist) {
+#[allow(clippy::too_many_lines)] // adjacency build + V14-filtered scorer read clearer inline.
+fn pick_orientations(
+    placement: &mut Placement,
+    pinned: &[bool],
+    checked: &CheckedNetlist,
+    allowed: &[Vec<Orientation>],
+) {
     let n = placement.elements.len();
     if n == 0 {
         return;
@@ -397,8 +480,17 @@ fn pick_orientations(placement: &mut Placement, pinned: &[bool], checked: &Check
                 continue;
             }
 
+            // V14 hard filter: only score orientations in this
+            // element's allowed set (power pin up / ground pin down).
+            // `rank` is the index in the *full* `Orientation::ALL`
+            // order so the identity tie-break stays stable across the
+            // filtered subset.
             let mut best: Option<(i64, usize, Orientation)> = None;
-            for (rank, &orient) in Orientation::ALL.iter().enumerate() {
+            for &orient in &allowed[i] {
+                let rank = Orientation::ALL
+                    .iter()
+                    .position(|o| *o == orient)
+                    .unwrap_or(0);
                 let pins_i = symbol_i.pins_in(orient);
                 let (ox_i, oy_i) = placement.elements[i].origin.to_mm();
                 let mut score: f64 = 0.0;

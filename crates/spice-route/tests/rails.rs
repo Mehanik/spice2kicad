@@ -146,11 +146,81 @@ fn power_symbol_rotation_always_zero_v14() {
             .map(std::string::ToString::to_string)
             .find(|s| s.contains("power:GND"))
             .expect("power:GND present");
+        // V14: rotation is always 0. The glyph's *anchor* sits on the
+        // pin in every case except the *forced-sideways* one (a GND pin
+        // pointing screen-up, into the host body), where it is offset
+        // one grid cell along the pin's outward direction (Up → file-Y
+        // 20.32 - 1.27 = 19.05). Horizontal pins keep the on-pin anchor
+        // (the glyph hangs off to the side, clear of the body). The
+        // trailing rotation token is `0` in every case.
+        let expected_anchor = if dir == Direction::Up {
+            "10.16 19.05 0)" // forced-sideways: offset up along outward
+        } else {
+            "10.16 20.32 0)" // on-pin (Down / Left / Right)
+        };
         assert!(
-            s.contains("10.16 20.32 0)"),
-            "outward {dir:?}: expected rot 0; got: {s}",
+            s.contains(expected_anchor),
+            "outward {dir:?}: expected anchor `{expected_anchor}` at rot 0; got: {s}",
         );
     }
+}
+
+#[test]
+fn forced_sideways_ground_glyph_offsets_with_stub_wire() {
+    // V14 forced-sideways fallback: a GND pin facing *up* (into the
+    // host body) gets its glyph offset one cell along the pin's outward
+    // direction (up → file-Y 19.05) plus a one-cell stub wire, so the
+    // rot-0 triangle clears the host body and the stub doubles as the
+    // pin's V5 outward first segment.
+    let lib = fixture_library();
+    let net = NetSpec {
+        name: "0".into(),
+        class: NetClass::Ground,
+        pins: vec![pin(0, 1, 10.16, 20.32, Direction::Up)],
+    };
+    let r = route(RouteRequest {
+        nets: &[net],
+        scope: "root",
+        library: Some(&lib),
+        sheet_uuid: "test-uuid",
+        project_name: "test",
+        obstacles: &[],
+        bounds: None,
+    });
+    // Exactly one stub wire from (10.16, 20.32) to (10.16, 19.05).
+    assert_eq!(count_wires(&r.sexprs), 1, "expected one stub wire");
+    let wire = r
+        .sexprs
+        .iter()
+        .map(std::string::ToString::to_string)
+        .find(|s| s.trim_start_matches('(').starts_with("wire"))
+        .expect("stub wire present");
+    assert!(
+        wire.contains("10.16 20.32") && wire.contains("10.16 19.05"),
+        "stub wire endpoints: {wire}",
+    );
+}
+
+#[test]
+fn canonical_ground_glyph_has_no_stub_wire() {
+    // A GND pin facing down (canonical) needs no stub: the glyph sits
+    // on the pin coordinate.
+    let lib = fixture_library();
+    let net = NetSpec {
+        name: "0".into(),
+        class: NetClass::Ground,
+        pins: vec![pin(0, 1, 10.16, 20.32, Direction::Down)],
+    };
+    let r = route(RouteRequest {
+        nets: &[net],
+        scope: "root",
+        library: Some(&lib),
+        sheet_uuid: "test-uuid",
+        project_name: "test",
+        obstacles: &[],
+        bounds: None,
+    });
+    assert_eq!(count_wires(&r.sexprs), 0, "canonical glyph emits no stub");
 }
 
 #[test]
