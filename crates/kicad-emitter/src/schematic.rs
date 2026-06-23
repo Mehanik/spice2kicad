@@ -2088,12 +2088,19 @@ fn instance_uuid(el: &PlacedElement) -> String {
 /// `Sexpr` tree it cannot miss a category that other passes generate from
 /// constants (hierarchical labels at `-25.4`, sheet blocks, …).
 ///
-/// Two subtrees are deliberately excluded:
-///   * `(lib_symbols …)` — its `(at …)`/`(xy …)` are symbol-DEFINITION
-///     -local geometry that must not move with the instance layout.
-///   * hidden `(property … (hide yes))` nodes — emitted at a fixed
-///     `(0 0 0)` and not visible content; translating them would skew
-///     the bounding box.
+/// `(lib_symbols …)` is deliberately excluded from BOTH passes: its
+/// `(at …)`/`(xy …)` are symbol-DEFINITION-local geometry that must not
+/// move with the instance layout.
+///
+/// Hidden `(property … (hide yes))` instance-section nodes are handled
+/// asymmetrically: they are EXCLUDED from the min-bbox collection (a
+/// hidden Sim/Footprint/Datasheet prop parked at `(0 0 0)` must not drag
+/// the content bbox toward the origin and skew the margin) but are still
+/// TRANSLATED, so a hidden prop carrying a real page coordinate — e.g. a
+/// power glyph's `#PWRn` Reference, emitted glyph-relative in
+/// `spice-route`'s `rails.rs` — rides the same uniform shift as its
+/// symbol and stays co-located with it. Net rule: hidden instance props
+/// are translated but do not vote on the min.
 ///
 /// Uniform translation only: no scaling, no per-element moves, so every
 /// relative-geometry invariant (V5–V7, V10–V14) is preserved by
@@ -2130,6 +2137,9 @@ fn collect_translatable_min(node: &Sexpr, min: &mut (f64, f64)) {
     };
     match sexpr_head(items) {
         Some("lib_symbols") => return,
+        // Hidden instance props (e.g. a prop parked at `(0 0 0)`) must not
+        // vote on the content min — they are still translated by
+        // `apply_translation`, just excluded from the bbox here.
         Some("property") if property_node_hidden(items) => return,
         Some("at" | "xy") => {
             if let Some((x, y)) = coord_pair(items) {
@@ -2149,15 +2159,25 @@ fn collect_translatable_min(node: &Sexpr, min: &mut (f64, f64)) {
     }
 }
 
-/// Recurse, adding `(dx, dy)` to every translatable coordinate node
-/// (same exclusion rules as [`collect_translatable_min`]).
+/// Recurse, adding `(dx, dy)` to every translatable coordinate node.
+/// `(lib_symbols …)` is excluded — its geometry is definition-local. A
+/// hidden property anchored at exactly `(0, 0)` is also skipped: that is
+/// KiCad's "unplaced placeholder" anchor (Sim/Footprint/Datasheet instance
+/// props the emitter parks at the origin), not a page coordinate;
+/// translating it would strand it at `(dx, dy)`, possibly off the top/left
+/// margin. Every OTHER hidden instance prop — notably a power glyph's
+/// `#PWRn` Reference, emitted glyph-relative at a real coordinate — IS
+/// translated, so it keeps the same offset as its symbol rather than being
+/// stranded at its pre-translation coord.
 fn apply_translation(node: &mut Sexpr, dx: f64, dy: f64) {
     let Sexpr::List(items) = node else {
         return;
     };
     match sexpr_head(items) {
         Some("lib_symbols") => return,
-        Some("property") if property_node_hidden(items) => return,
+        Some("property") if property_node_hidden(items) && property_anchor_at_origin(items) => {
+            return;
+        }
         Some("at" | "xy") => {
             // items[0] = head, items[1] = x, items[2] = y, [3..] = rot etc.
             if let Some(Sexpr::Atom(s)) = items.get(1) {
@@ -2202,6 +2222,25 @@ fn coord_pair(items: &[Sexpr]) -> Option<(f64, f64)> {
 }
 
 /// True when a `(property …)` list carries `(effects … (hide yes))`.
+/// True when a `(property …)` node's own `(at x y …)` anchor is the
+/// origin `(0, 0)` — KiCad's "unplaced placeholder" convention. Such
+/// anchors carry no meaningful page coordinate and must not be translated
+/// (doing so would move them to `(dx, dy)`, off the content area).
+fn property_anchor_at_origin(items: &[Sexpr]) -> bool {
+    items.iter().any(|child| {
+        let Sexpr::List(at) = child else {
+            return false;
+        };
+        if sexpr_head(at) != Some("at") {
+            return false;
+        }
+        let zero = |i: usize| {
+            matches!(at.get(i), Some(Sexpr::Atom(s)) if s.parse::<f64>().is_ok_and(|v| v == 0.0))
+        };
+        zero(1) && zero(2)
+    })
+}
+
 fn property_node_hidden(items: &[Sexpr]) -> bool {
     items.iter().any(|child| {
         let Sexpr::List(effects) = child else {

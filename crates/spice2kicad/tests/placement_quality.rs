@@ -230,6 +230,14 @@ const V5_RC_LOWPASS_OUT_MAX_MM: f64 = 30.0;
 
 #[test]
 fn v5_rc_lowpass_short_out_wire() {
+    // Coordinate-source note: this verifier reads pin/wire coordinates
+    // from the *emitted* file (post-`translate_into_page`), whereas the
+    // placer reasons in pre-translation placement coordinates. The two
+    // frames differ by the uniform V15 page offset, but V5 measures a
+    // wire *length* — a coordinate difference — which is invariant under
+    // a uniform translation, so the two agree. (Latent drift surface: any
+    // future V5-style metric that compares an emitted *absolute* coord
+    // against a placer coord would NOT be translation-invariant.)
     let sch = emit("rc_lowpass");
     let root = parse_sch(&sch);
     let total = total_wire_length_for_net(&root, "out");
@@ -1206,6 +1214,46 @@ fn property_is_hidden(prop: &Value) -> bool {
         .any(|h| list_iter(h).nth(1).and_then(as_str) == Some("yes"))
 }
 
+/// Recursively collect the `(at …)` anchor of every HIDDEN instance-section
+/// `(property …)` node under `v`, EXCLUDING the `(lib_symbols …)` subtree
+/// (whose `(at …)` are symbol-definition-local geometry, not page
+/// coordinates). Unlike [`collect_instance_coords`], which drops hidden
+/// props entirely, this returns precisely those anchors — so the verifier
+/// can assert that a hidden property (e.g. a power glyph's `#PWRn`
+/// Reference) is translated into the page alongside its symbol, not left
+/// behind at its pre-translation (often negative) coordinate.
+fn collect_hidden_instance_prop_coords(v: &Value, out: &mut Vec<Pt>) {
+    let Some(name) = head(v) else {
+        if let Some(it) = v.list_iter() {
+            for child in it {
+                collect_hidden_instance_prop_coords(child, out);
+            }
+        }
+        return;
+    };
+
+    // Definition-local geometry never carries page coordinates.
+    if name == "lib_symbols" {
+        return;
+    }
+
+    if name == "property" && property_is_hidden(v) {
+        if let Some(at) = find_child(v, "at") {
+            let mut it = list_iter(at);
+            it.next(); // head
+            if let (Some(x), Some(y)) = (it.next().and_then(as_f64), it.next().and_then(as_f64)) {
+                out.push((x, y));
+            }
+        }
+        // A property has no nested instance-section coords to recurse into.
+        return;
+    }
+
+    for child in list_iter(v) {
+        collect_hidden_instance_prop_coords(child, out);
+    }
+}
+
 /// Every V15 fixture: the five v0.1 reference fixtures, the
 /// hierarchical-sheet opamp (`opamp_inverting`, which exercises sheet
 /// blocks + hierarchical labels + no_connect anchors), and the
@@ -1449,6 +1497,49 @@ fn v15_content_within_page_bounds() {
                 "{name} ({}): max_y = {max_y:.3} exceeds A4 height {V15_A4_H_MM}",
                 file.display(),
             );
+
+            // Hidden instance-section property anchors (e.g. a power
+            // glyph's `#PWRn` Reference) carry real page coordinates and
+            // must ride the same uniform V15 translation as their symbol —
+            // they must not be left at their pre-translation (negative)
+            // coordinate. They do NOT vote on the content min above (a
+            // hidden prop parked at (0 0 0) must not drag the bbox toward
+            // the origin), but every one that *does* carry a coordinate
+            // must still land on the page.
+            //
+            // The bound here is non-negative + in-page, not `>= margin`: a
+            // co-located prop (a Reference emitted glyph-relative at
+            // `y - 1.27`) can legitimately sit up to one symbol's extent
+            // above/left of its glyph, just as a Reference label sits
+            // outside a symbol body. The bug this catches is the anchor
+            // stranded at its *pre-translation* coordinate (e.g. `#PWRn`
+            // at `x = -2.54`), which goes strongly negative — `>= 0` (with
+            // a one-cell tolerance for a glyph parked exactly at the
+            // margin) isolates it precisely.
+            let mut hidden = Vec::new();
+            collect_hidden_instance_prop_coords(&root, &mut hidden);
+            for (hx, hy) in &hidden {
+                // `(0, 0)` is KiCad's "unplaced placeholder" anchor
+                // (Sim/Footprint/Datasheet instance props); it is left
+                // untranslated by design and carries no page coordinate.
+                if *hx == 0.0 && *hy == 0.0 {
+                    continue;
+                }
+                assert!(
+                    *hx >= -1.27 - 1e-6 && *hy >= -1.27 - 1e-6,
+                    "{name} ({}): hidden instance property anchor \
+                     ({hx:.3}, {hy:.3}) is negative — it was stranded at \
+                     its pre-translation coordinate instead of riding the \
+                     V15 translation with its symbol",
+                    file.display(),
+                );
+                assert!(
+                    *hx <= V15_A4_W_MM + 1e-6 && *hy <= V15_A4_H_MM + 1e-6,
+                    "{name} ({}): hidden instance property anchor \
+                     ({hx:.3}, {hy:.3}) lies outside the A4 page",
+                    file.display(),
+                );
+            }
         }
     }
 }
