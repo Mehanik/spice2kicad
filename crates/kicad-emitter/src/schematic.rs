@@ -111,6 +111,13 @@ pub fn emit_root(
     items.push(lib_symbols_with_extra(placement, library, &extra_refs));
 
     for el in &placement.elements {
+        // V10 / annotation-spec §4.5: a `*@power` / `;@ power=` source
+        // is a power *rail*, not a drawn component. Suppress its
+        // `(symbol …)` instance; the consuming components' `power:*`
+        // glyphs carry the rail connectivity.
+        if el.is_power_source {
+            continue;
+        }
         items.push(symbol_instance(el));
     }
 
@@ -208,6 +215,10 @@ pub fn emit_child_sheet(child: &ChildSheet<'_>, library: &Library) -> Result<Str
     }
 
     for el in &child.placement.elements {
+        // V10 / annotation-spec §4.5: power-rail sources are not drawn.
+        if el.is_power_source {
+            continue;
+        }
         items.push(child_symbol_instance(el, &child.instance_refdeses));
     }
 
@@ -618,6 +629,11 @@ fn lib_symbols_with_extra(
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut entries: Vec<Sexpr> = vec![atom("lib_symbols")];
     for el in &placement.elements {
+        // A suppressed power-rail source emits no instance, so its
+        // lib symbol would be a dangling, unreferenced entry.
+        if el.is_power_source {
+            continue;
+        }
         if !seen.insert(el.lib_id.clone()) {
             continue;
         }
@@ -864,6 +880,13 @@ fn collect_net_pins(
     let mut nets: std::collections::BTreeMap<String, Vec<(f64, f64, u16)>> =
         std::collections::BTreeMap::new();
     for el in &placement.elements {
+        // V10 / annotation-spec §4.5: a power-rail source contributes
+        // no pins of its own — dropping them drops only ITS two
+        // `power:*` glyphs. Every circuit component's pin on the rail
+        // net still emits a glyph, so the rail stays connected.
+        if el.is_power_source {
+            continue;
+        }
         let Some(symbol) = library.lookup(&el.lib_id) else {
             continue;
         };
@@ -1021,6 +1044,11 @@ fn placement_obstacles(placement: &Placement, library: &Library) -> Vec<spice_ro
         .iter()
         .filter_map(|el| {
             if el.lib_id.starts_with("power:") {
+                return None;
+            }
+            // A suppressed power-rail source draws nothing, so it is
+            // not an obstacle (V10 / annotation-spec §4.5).
+            if el.is_power_source {
                 return None;
             }
             let (ox, oy) = el.origin.to_mm();
@@ -1366,6 +1394,11 @@ fn text_bbox(text: &str, anchor: (f64, f64), rot_deg: u16) -> TextBbox {
 fn placement_property_bboxes(placement: &Placement) -> Vec<TextBbox> {
     let mut out = Vec::new();
     for el in &placement.elements {
+        // A suppressed power-rail source draws no Reference/Value text
+        // (V10 / annotation-spec §4.5), so it reserves no bbox.
+        if el.is_power_source {
+            continue;
+        }
         let (ox, oy) = el.origin.to_mm();
         let (rx, ry) = property_anchor(ox, oy, el.orientation, 2.54, -2.54);
         out.push(text_bbox(&el.refdes, (rx, ry), 0));
@@ -1682,6 +1715,7 @@ mod tests {
                 nodes: Vec::new(),
                 pin_mapping: Vec::new(),
                 value: None,
+                is_power_source: false,
             }],
         }
     }
@@ -1727,6 +1761,7 @@ mod tests {
                     nodes: Vec::new(),
                     pin_mapping: Vec::new(),
                     value: None,
+                    is_power_source: false,
                 },
                 PlacedElement {
                     refdes: "R2".into(),
@@ -1736,6 +1771,7 @@ mod tests {
                     nodes: Vec::new(),
                     pin_mapping: Vec::new(),
                     value: None,
+                    is_power_source: false,
                 },
             ],
         };
@@ -1762,6 +1798,7 @@ mod tests {
                 nodes: Vec::new(),
                 pin_mapping: Vec::new(),
                 value: None,
+                is_power_source: false,
             }],
         };
         let out = emit(&placement, &fixture_library()).expect("emit");
@@ -1799,6 +1836,7 @@ mod tests {
                 nodes: Vec::new(),
                 pin_mapping: Vec::new(),
                 value: None,
+                is_power_source: false,
             }],
         };
         let out = emit(&placement, &fixture_library()).expect("emit");

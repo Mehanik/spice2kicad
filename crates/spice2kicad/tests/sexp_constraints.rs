@@ -63,12 +63,11 @@ fn rc_lowpass_constraints() {
 
 fn common_emitter_constraints() {
     let sch = emit_sch("common_emitter");
-    assert_has_components(
-        &sch,
-        &["VCC", "R1", "R2", "RC", "RE", "CE", "CIN", "COUT", "Q1"],
-    );
-    // ;@ ignore must drop these:
-    assert_lacks_components(&sch, &["VIN", "RL"]);
+    assert_has_components(&sch, &["R1", "R2", "RC", "RE", "CE", "CIN", "COUT", "Q1"]);
+    // ;@ ignore must drop these; the `;@ power=` source VCC is a rail,
+    // not a drawn component (V10 / annotation-spec §4.5), so it too is
+    // absent from the schematic.
+    assert_lacks_components(&sch, &["VIN", "RL", "VCC"]);
     // *@symbol overrides:
     assert_lib_id(&sch, "R1", "Device:R_US");
     assert_lib_id(&sch, "RC", "Device:R_US");
@@ -79,8 +78,9 @@ fn common_emitter_constraints() {
 #[test]
 fn opamp_inverting_constraints() {
     let sch = emit_sch("opamp_inverting");
-    assert_has_components(&sch, &["VCC", "VEE", "RIN", "RF", "X1"]);
-    assert_lacks_components(&sch, &["VIN"]);
+    assert_has_components(&sch, &["RIN", "RF", "X1"]);
+    // VIN is `;@ ignore`d; VCC/VEE are `;@ power=` rails, not drawn.
+    assert_lacks_components(&sch, &["VIN", "VCC", "VEE"]);
     assert_lib_id(&sch, "RIN", "Device:R_US");
     assert_lib_id(&sch, "RF", "Device:R_US");
     // X1 lands on its own hierarchical sheet — its body element E1 must
@@ -91,10 +91,9 @@ fn opamp_inverting_constraints() {
 #[test]
 fn multivibrator_constraints() {
     let sch = emit_sch("multivibrator");
-    assert_has_components(
-        &sch,
-        &["VCC", "RC1", "RC2", "RB1", "RB2", "C1", "C2", "Q1", "Q2"],
-    );
+    assert_has_components(&sch, &["RC1", "RC2", "RB1", "RB2", "C1", "C2", "Q1", "Q2"]);
+    // VCC is a `;@ power=` rail, not a drawn component.
+    assert_lacks_components(&sch, &["VCC"]);
     assert_lib_id(&sch, "Q1", "Device:Q_NPN_BCE");
     assert_lib_id(&sch, "Q2", "Device:Q_NPN_BCE");
     // *@align horizontal Q1 Q2
@@ -106,8 +105,9 @@ fn multivibrator_constraints() {
 #[test]
 fn diff_pair_constraints() {
     let sch = emit_sch("diff_pair");
-    assert_has_components(&sch, &["VCC", "VEE", "RC1", "RC2", "RTAIL", "Q1", "Q2"]);
-    assert_lacks_components(&sch, &["VIN1", "VIN2"]);
+    assert_has_components(&sch, &["RC1", "RC2", "RTAIL", "Q1", "Q2"]);
+    // VIN1/VIN2 are `;@ ignore`d; VCC/VEE are `;@ power=` rails.
+    assert_lacks_components(&sch, &["VIN1", "VIN2", "VCC", "VEE"]);
     // Two horizontal-align groups from *@align:
     assert_aligned_horizontal(&sch, &["Q1", "Q2"]);
     assert_aligned_horizontal(&sch, &["RC1", "RC2"]);

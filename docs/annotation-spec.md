@@ -339,8 +339,10 @@ Block-form only:
 ```
 
 Marks a SPICE voltage source as the source of a power rail. The
-source itself is not drawn; instead, every reference to the named
-net renders as a KiCad power flag.
+source itself is not drawn — it contributes no `(symbol …)` instance
+and no pins of its own; instead, every reference to the named net by
+a *consuming* component renders as a KiCad power flag, and those
+glyphs carry the rail connectivity.
 
 ```
 Vcc vcc 0 12   ;@ power=vcc

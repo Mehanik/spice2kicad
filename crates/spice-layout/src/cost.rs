@@ -1159,6 +1159,7 @@ mod tests {
                 nodes: e.nodes.clone(),
                 pin_mapping: e.pin_mapping.clone(),
                 value: None,
+                is_power_source: matches!(e.role, ElementRole::Power(_)),
             })
             .collect();
         Placement { elements }

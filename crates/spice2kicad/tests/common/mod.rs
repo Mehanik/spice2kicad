@@ -48,7 +48,13 @@ impl Canonical {
         let logical = join_continuations(source);
 
         for line in &logical {
-            if has_ignore_tag(line) {
+            // `;@ ignore` and `;@ power=` / `*@power` sources both
+            // vanish from the emitted schematic — the former is hidden,
+            // the latter is a power *rail* drawn as glyphs, not a
+            // component (V10 / annotation-spec §4.5). Neither survives
+            // the SPICE→KiCad→SPICE round-trip, so exclude both from
+            // the topology comparison.
+            if has_ignore_tag(line) || has_power_tag(line) {
                 if let Some(refdes) = first_token(strip_comment(line)) {
                     ignored.insert(refdes.to_ascii_uppercase());
                 }
@@ -359,6 +365,24 @@ fn has_ignore_tag(line: &str) -> bool {
     };
     let tail = &line[idx + 2..];
     tail.split_whitespace().next() == Some("ignore")
+}
+
+/// True when a trailing `;@ power=<rail>` tag marks this element line
+/// as a power-rail source. The block-form `*@power for=<ref>` carrier
+/// targets a *different* line, so callers that gate on the element's
+/// own line only need the trailing form here.
+fn has_power_tag(line: &str) -> bool {
+    let mut rest = line;
+    while let Some(idx) = rest.find(";@") {
+        let tail = &rest[idx + 2..];
+        if let Some(tok) = tail.split_whitespace().next()
+            && tok.to_ascii_lowercase().starts_with("power=")
+        {
+            return true;
+        }
+        rest = tail;
+    }
+    false
 }
 
 /// Normalize SPICE value tokens so `1k`, `1K`, `1000` compare equal.

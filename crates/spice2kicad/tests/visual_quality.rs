@@ -183,6 +183,13 @@ fn component_count(name: &str) -> usize {
         if line.contains(";@") && line.contains("ignore") {
             continue;
         }
+        // A `;@ power=` / `*@power` source is a power rail, not a drawn
+        // component (V10 / annotation-spec §4.5): it contributes no
+        // `(symbol …)` instance, so it must not count toward the V1
+        // glyph-path floor.
+        if line.contains(";@") && lower.contains("power=") {
+            continue;
+        }
         n += 1;
     }
     n.max(1)

@@ -766,6 +766,7 @@ mod tests {
             nodes: Vec::new(),
             pin_mapping: Vec::new(),
             value: None,
+            is_power_source: false,
         }
     }
 

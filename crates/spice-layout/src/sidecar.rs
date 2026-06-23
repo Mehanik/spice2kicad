@@ -181,6 +181,7 @@ mod tests {
                     nodes: vec!["in".to_string(), "out".to_string()],
                     pin_mapping: vec!["1".to_string(), "2".to_string()],
                     value: Some("1k".to_string()),
+                    is_power_source: false,
                 },
                 PlacedElement {
                     refdes: "C1".to_string(),
@@ -190,6 +191,7 @@ mod tests {
                     nodes: vec!["out".to_string(), "0".to_string()],
                     pin_mapping: vec!["1".to_string(), "2".to_string()],
                     value: Some("100n".to_string()),
+                    is_power_source: false,
                 },
             ],
         }

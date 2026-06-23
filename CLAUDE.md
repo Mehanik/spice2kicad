@@ -741,6 +741,23 @@ literals above.
   opamp_inverting_real) at R7. Open items: PWR_FLAG-style
   driver emission for `power_pin_not_driven` ERC suppression
   (currently filtered in `tests/visual_quality.rs::run_v2`).
+  **A `*@power` / `;@ power=` source is a power *rail*, not a drawn
+  component:** the emitter suppresses its `(symbol …)` instance and
+  its own pins entirely (annotation-spec §4.5). The rail's
+  connectivity is carried solely by the `power:*` glyphs emitted at
+  the *consuming* components' rail pins; the source itself
+  contributes no symbol, no `power:*` glyph of its own, no obstacle,
+  and no property text. The chokepoint is `is_power_source` on
+  `PlacedElement` (set from `ElementRole::Power(_)` in
+  `spice-layout::place_seed`), which gates the `(symbol …)`,
+  `lib_symbols`, `collect_net_pins`, obstacle, and property-bbox
+  loops in `kicad-emitter/src/schematic.rs`.
+  Verifier: `tests/power_source_suppression.rs` derives the
+  power-tagged source refdes *generally* from each fixture's `.cir`
+  (scanning the `;@ power=` trailing tag and `*@power for=` block —
+  never a hardcoded refdes/fixture list) and asserts zero drawn
+  `Simulation_SPICE:V…` instances carry any of them. Ratchet floor:
+  0 drawn power-source symbols, across all fixtures.
 
 - **V11 — Wire/label–pin coincidence is electrical.** KiCad's
   connectivity engine treats geometric coincidence as electrical

@@ -39,7 +39,7 @@ use std::collections::{HashMap, HashSet};
 use kicad_symbols::{Library, Orientation, Symbol};
 use spice_diagnostics::{Diagnostic, Label, Span};
 use spice_policy::CheckedNetlist;
-use spice_resolve::{Axis, Relation, Value};
+use spice_resolve::{Axis, ElementRole, Relation, Value};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -95,6 +95,14 @@ pub struct PlacedElement {
     /// emitter can populate the symbol's `Value` property and the
     /// round-trip through kicad-cli preserves component values.
     pub value: Option<String>,
+    /// True when this element is a voltage source flagged as a power
+    /// rail (`ElementRole::Power`, set via `;@ power=` / `*@power`).
+    /// Such sources are a power *rail*, not a drawn component: the
+    /// emitter suppresses their `(symbol …)` instance and their own
+    /// pins (annotation-spec §4.5, V10). The element is still placed
+    /// (so parallel index arrays and the negative-rail Y hint stay in
+    /// sync); only its rendering is suppressed.
+    pub is_power_source: bool,
 }
 
 impl PlacedElement {
@@ -673,6 +681,7 @@ fn place_seed(checked: &CheckedNetlist) -> Result<(Placement, Vec<bool>), Vec<Di
             nodes: e.nodes.clone(),
             pin_mapping: e.pin_mapping.clone(),
             value: e.value.as_ref().map(format_value),
+            is_power_source: matches!(e.role, ElementRole::Power(_)),
         });
     }
 
