@@ -161,6 +161,12 @@ pub fn emit_root(
         ]),
     ]));
 
+    // DECORATION-phase text-nudge: move colliding Reference / Value
+    // property text off mutual / power-glyph collisions (V13 part 4).
+    // Runs after routing + labels (so it sees the final geometry) and
+    // before page translation. Moves TEXT only — never a symbol pose.
+    nudge_property_text(&mut items, placement, library);
+
     let mut root = Sexpr::List(items);
     translate_into_page(&mut root);
     Ok(root.to_pretty())
@@ -256,6 +262,9 @@ pub fn emit_child_sheet(child: &ChildSheet<'_>, library: &Library) -> Result<Str
         ]));
     }
     items.push(Sexpr::List(sheet_instances_items));
+
+    // DECORATION-phase text-nudge (V13 part 4) — see `emit_root`.
+    nudge_property_text(&mut items, child.placement, library);
 
     let mut root = Sexpr::List(items);
     translate_into_page(&mut root);
@@ -1597,6 +1606,357 @@ pub(crate) fn placement_property_bboxes(placement: &Placement) -> Vec<TextBbox> 
         out.push(text_bbox(value_text, (vx, vy), 0));
     }
     out
+}
+
+/// Convert a [`spice_route::Bbox`] (world AABB) into a [`TextBbox`] so
+/// the nudge pass can intersection-test symbol bodies against text.
+fn bbox_as_text(b: spice_route::Bbox) -> TextBbox {
+    TextBbox {
+        x0: b.x0,
+        y0: b.y0,
+        x1: b.x1,
+        y1: b.y1,
+    }
+}
+
+/// True if `t`'s text bbox strictly intersects the axis-aligned wire
+/// segment `(a, b)` (interior overlap). Mirrors the V13(3) verifier's
+/// strict-interior test so a nudged property anchor is never dropped
+/// onto a wire's interior.
+fn text_crosses_segment(t: TextBbox, a: (f64, f64), b: (f64, f64)) -> bool {
+    let eps = 1e-3;
+    let (xlo, xhi, ylo, yhi) = (t.x0 + eps, t.x1 - eps, t.y0 + eps, t.y1 - eps);
+    if xlo >= xhi || ylo >= yhi {
+        return false;
+    }
+    let (x1, y1) = a;
+    let (x2, y2) = b;
+    if x1.max(x2) <= xlo || x1.min(x2) >= xhi || y1.max(y2) <= ylo || y1.min(y2) >= yhi {
+        return false;
+    }
+    if (x1 - x2).abs() < f64::EPSILON {
+        x1 > xlo && x1 < xhi && y1.min(y2) < yhi && y1.max(y2) > ylo
+    } else if (y1 - y2).abs() < f64::EPSILON {
+        y1 > ylo && y1 < yhi && x1.min(x2) < xhi && x1.max(x2) > xlo
+    } else {
+        false
+    }
+}
+
+/// Candidate local property-text offsets, default first. The default
+/// `(2.54, base_dy)` (Reference `base_dy = -2.54`, Value `+2.54`) is
+/// emitted byte-for-byte whenever it does not collide, so every clean
+/// fixture is unchanged. Fallbacks keep the property on the same
+/// vertical side of the origin (Reference stays above, Value below) so
+/// Reference and Value never swap places; they widen the horizontal
+/// offset and push further away from the body along the same axis.
+/// Purely geometric — no fixture constants.
+fn property_offset_candidates(base_dy: f64) -> Vec<(f64, f64)> {
+    // Same vertical side as the default (sign of base_dy). Sweep the
+    // far horizontal side first (left of the body) at the default
+    // vertical distance, then increase vertical distance, then widen
+    // horizontally. Sorted implicitly by "least surprising first".
+    let dy1 = base_dy; // 2.54 magnitude
+    let dy2 = base_dy * 2.0; // 5.08
+    let dy3 = base_dy * 3.0; // 7.62
+    vec![
+        (2.54, dy1),  // default
+        (-2.54, dy1), // left of body, same height
+        (5.08, dy1),  // further right
+        (2.54, dy2),  // further out vertically
+        (-2.54, dy2),
+        (5.08, dy2),
+        (2.54, dy3),
+        (-2.54, dy3),
+        (5.08, dy3),
+        (-5.08, dy1),
+        (-5.08, dy2),
+    ]
+}
+
+/// DECORATION-phase pass: nudge visible Reference / Value property text
+/// off mutual collisions (V13 part 4 — host text ↔ host text and host
+/// text ↔ power-glyph net-name text). Reads the already-emitted power
+/// glyphs, labels and wires from `items`; computes host-symbol body
+/// bboxes from `placement` + `library`. For each host Reference/Value
+/// it keeps the default anchor when clean, else picks the first
+/// candidate offset (see [`property_offset_candidates`]) that collides
+/// with no occupied text bbox, no symbol body, no label, and no wire
+/// interior. Rewrites only the property `(at …)` token — never the
+/// symbol's own `(at …)` (the decoration contract: text may move,
+/// symbols may not).
+///
+/// General by construction: drives entirely off the measured
+/// `text_bbox` model and the candidate grid; zero fixture/refdes
+/// special-casing.
+fn nudge_property_text(items: &mut [Sexpr], placement: &Placement, library: &Library) {
+    // ---- Build the fixed obstacle sets from already-emitted items. ----
+    // Power-glyph net-name Value text (visible), label text, wires.
+    let mut occupied: Vec<TextBbox> = Vec::new();
+    let mut labels: Vec<TextBbox> = Vec::new();
+    let mut wires: Vec<((f64, f64), (f64, f64))> = Vec::new();
+    for item in items.iter() {
+        let Sexpr::List(parts) = item else { continue };
+        match head_of(item) {
+            Some("symbol") => {
+                // Power glyph? (refdes starting with `#PWR`). Add its
+                // visible Value (net-name) text bbox to `occupied`.
+                if sexpr_symbol_refdes(item).is_some_and(|r| r.starts_with("#PWR")) {
+                    if let Some(b) = power_glyph_value_bbox(item) {
+                        occupied.push(b);
+                    }
+                }
+            }
+            Some("label" | "global_label") => {
+                if let Some(b) = label_text_bbox(item) {
+                    labels.push(b);
+                }
+            }
+            Some("wire") => {
+                if let Some(seg) = wire_seg_from_sexpr(parts) {
+                    wires.push(seg);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Symbol body bboxes (world) for every visible host symbol — a
+    // nudged property must not land on any body (V13.1 analogue).
+    let bodies: Vec<TextBbox> = placement
+        .elements
+        .iter()
+        .filter(|el| !el.is_power_source && !el.lib_id.starts_with("power:"))
+        .map(|el| {
+            let (ox, oy) = el.origin.to_mm();
+            let world = library
+                .lookup(&el.lib_id)
+                .and_then(Symbol::body_bbox)
+                .map_or(
+                    spice_route::Bbox {
+                        x0: ox - 2.54,
+                        y0: oy - 2.54,
+                        x1: ox + 2.54,
+                        y1: oy + 2.54,
+                    },
+                    |local| body_bbox_to_world(local, ox, oy, el.orientation),
+                );
+            bbox_as_text(world)
+        })
+        .collect();
+
+    // ---- Decide and rewrite each host symbol's Reference & Value. ----
+    // Greedy, deterministic: iterate placement order; each chosen text
+    // bbox becomes occupied for subsequent decisions.
+    for el in &placement.elements {
+        if el.is_power_source || el.lib_id.starts_with("power:") {
+            continue;
+        }
+        let (ox, oy) = el.origin.to_mm();
+        let value_text = el.value.as_deref().unwrap_or(&el.refdes);
+        // (property key, text, default base_dy)
+        for (key, text, base_dy) in [
+            ("Reference", el.refdes.as_str(), -2.54_f64),
+            ("Value", value_text, 2.54_f64),
+        ] {
+            let candidates = property_offset_candidates(base_dy);
+            let mut chosen = candidates[0];
+            let mut chosen_bbox = {
+                let (ax, ay) = property_anchor(ox, oy, el.orientation, chosen.0, chosen.1);
+                text_bbox(text, (ax, ay), 0)
+            };
+            for cand in &candidates {
+                let (ax, ay) = property_anchor(ox, oy, el.orientation, cand.0, cand.1);
+                let b = text_bbox(text, (ax, ay), 0);
+                let collides = occupied.iter().any(|o| b.intersects(*o))
+                    || labels.iter().any(|o| b.intersects(*o))
+                    || bodies.iter().any(|o| b.intersects(*o))
+                    || wires.iter().any(|&(a, w)| text_crosses_segment(b, a, w));
+                if !collides {
+                    chosen = *cand;
+                    chosen_bbox = b;
+                    break;
+                }
+            }
+            occupied.push(chosen_bbox);
+            // Rewrite the matching property's `(at …)` in `items`.
+            let (ax, ay) = property_anchor(ox, oy, el.orientation, chosen.0, chosen.1);
+            set_property_anchor(items, &el.refdes, key, ax, ay);
+        }
+    }
+}
+
+/// Head symbol of a `Sexpr::List`, if any.
+fn head_of(s: &Sexpr) -> Option<&str> {
+    match s {
+        Sexpr::List(items) => sexpr_head(items),
+        _ => None,
+    }
+}
+
+/// The `Reference` property string of a `(symbol …)` sexpr.
+fn sexpr_symbol_refdes(sym: &Sexpr) -> Option<&str> {
+    let Sexpr::List(items) = sym else {
+        return None;
+    };
+    for it in items {
+        if let Sexpr::List(p) = it {
+            if matches!(p.first(), Some(Sexpr::Atom(a)) if a == "property")
+                && matches!(p.get(1), Some(Sexpr::QString(k)) if k == "Reference")
+            {
+                if let Some(Sexpr::QString(v)) = p.get(2) {
+                    return Some(v.as_str());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Visible net-name `Value` text bbox of a power-glyph `(symbol …)`.
+/// Returns `None` if the Value property is hidden.
+fn power_glyph_value_bbox(sym: &Sexpr) -> Option<TextBbox> {
+    let Sexpr::List(items) = sym else {
+        return None;
+    };
+    for it in items {
+        if let Sexpr::List(p) = it {
+            if matches!(p.first(), Some(Sexpr::Atom(a)) if a == "property")
+                && matches!(p.get(1), Some(Sexpr::QString(k)) if k == "Value")
+            {
+                if sexpr_property_hidden(it) {
+                    return None;
+                }
+                let Some(Sexpr::QString(text)) = p.get(2) else {
+                    return None;
+                };
+                let (x, y, rot) = sexpr_at(it)?;
+                return Some(text_bbox(text, (x, y), rot));
+            }
+        }
+    }
+    None
+}
+
+/// True if a `(property …)` sexpr is hidden via `(effects … (hide yes))`.
+fn sexpr_property_hidden(prop: &Sexpr) -> bool {
+    let Sexpr::List(items) = prop else {
+        return false;
+    };
+    for it in items {
+        if head_of(it) == Some("effects") {
+            if let Sexpr::List(eff) = it {
+                for e in eff {
+                    if head_of(e) == Some("hide") {
+                        if let Sexpr::List(h) = e {
+                            return !matches!(h.get(1), Some(Sexpr::Atom(a)) if a == "no");
+                        }
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Extract `(at x y rot)` from a sexpr that has one as a direct child.
+fn sexpr_at(node: &Sexpr) -> Option<(f64, f64, u16)> {
+    let Sexpr::List(items) = node else {
+        return None;
+    };
+    for it in items {
+        if head_of(it) == Some("at") {
+            if let Sexpr::List(a) = it {
+                let x = sexpr_num(a.get(1)?)?;
+                let y = sexpr_num(a.get(2)?)?;
+                let rot = a.get(3).and_then(sexpr_num).unwrap_or(0.0);
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let r = ((rot.round() as i64).rem_euclid(360)) as u16;
+                return Some((x, y, r));
+            }
+        }
+    }
+    None
+}
+
+/// Parse a numeric atom (the emitter writes coords as `Atom`).
+fn sexpr_num(s: &Sexpr) -> Option<f64> {
+    match s {
+        Sexpr::Atom(a) => a.parse().ok(),
+        _ => None,
+    }
+}
+
+/// Text bbox of a `(label …)` / `(global_label …)` sexpr (name at idx 1).
+fn label_text_bbox(node: &Sexpr) -> Option<TextBbox> {
+    let Sexpr::List(items) = node else {
+        return None;
+    };
+    let name = match items.get(1) {
+        Some(Sexpr::QString(s) | Sexpr::Atom(s)) => s.as_str(),
+        _ => return None,
+    };
+    let (x, y, rot) = sexpr_at(node)?;
+    Some(text_bbox(name, (x, y), rot))
+}
+
+/// Extract `((x1,y1),(x2,y2))` from a `(wire (pts (xy …) (xy …)))`
+/// emitter `Sexpr`.
+fn wire_seg_from_sexpr(parts: &[Sexpr]) -> Option<((f64, f64), (f64, f64))> {
+    let pts = parts.iter().find_map(|node| match node {
+        Sexpr::List(inner) if matches!(inner.first(), Some(Sexpr::Atom(a)) if a == "pts") => {
+            Some(inner)
+        }
+        _ => None,
+    })?;
+    let mut coords: Vec<(f64, f64)> = Vec::new();
+    for xy in pts.iter().skip(1) {
+        if let Sexpr::List(inner) = xy {
+            if matches!(inner.first(), Some(Sexpr::Atom(a)) if a == "xy") {
+                let x = sexpr_num(inner.get(1)?)?;
+                let y = sexpr_num(inner.get(2)?)?;
+                coords.push((x, y));
+            }
+        }
+    }
+    (coords.len() >= 2).then(|| (coords[0], coords[1]))
+}
+
+/// Rewrite the `(at x y rot)` of the named property (`Reference` /
+/// `Value`) on the host symbol whose Reference equals `refdes`. Only
+/// touches the property's anchor — never the symbol's own `(at …)`.
+fn set_property_anchor(items: &mut [Sexpr], refdes: &str, key: &str, x: f64, y: f64) {
+    for item in items.iter_mut() {
+        if head_of(item) != Some("symbol") {
+            continue;
+        }
+        if sexpr_symbol_refdes(item) != Some(refdes) {
+            continue;
+        }
+        let Sexpr::List(parts) = item else { continue };
+        for it in parts.iter_mut() {
+            let Sexpr::List(p) = it else { continue };
+            let is_target = matches!(p.first(), Some(Sexpr::Atom(a)) if a == "property")
+                && matches!(p.get(1), Some(Sexpr::QString(k)) if k == key);
+            if !is_target {
+                continue;
+            }
+            for sub in p.iter_mut() {
+                if head_of(sub) == Some("at") {
+                    let rot = match sub {
+                        Sexpr::List(a) => a.get(3).cloned(),
+                        _ => None,
+                    };
+                    let mut new_at =
+                        vec![atom("at"), atom(&format_coord(x)), atom(&format_coord(y))];
+                    new_at.push(rot.unwrap_or_else(|| atom("0")));
+                    *sub = Sexpr::List(new_at);
+                }
+            }
+        }
+        return;
+    }
 }
 
 /// Pick a label rotation that does not collide with any property-text

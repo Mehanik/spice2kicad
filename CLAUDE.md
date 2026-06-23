@@ -839,6 +839,12 @@ literals above.
   opamp_inverting_real) at R7. Open items: PWR_FLAG-style
   driver emission for `power_pin_not_driven` ERC suppression
   (currently filtered in `tests/visual_quality.rs::run_v2`).
+  **Each `power:*` glyph's `#PWRn` Reference is emitted hidden**
+  (`(effects … (hide yes))` in `spice-route/src/rails.rs`
+  `power_symbol_sexpr`) — KiCad convention; the glyph and net-name
+  Value carry all reader-visible info, so a drawn `#PWRn` is pure
+  bookkeeping that only collides with neighbouring property text
+  (V13(4)).
   **A `*@power` / `;@ power=` source is a power *rail*, not a drawn
   component:** the emitter suppresses its `(symbol …)` instance and
   its own pins entirely (annotation-spec §4.5). The rail's
@@ -934,12 +940,27 @@ literals above.
      `(wire …)` segment that belongs to a different net (V11 covers
      the foreign-pin subcase; V13 extends to wire-interior
      coincidence away from any pin).
+  4. No two VISIBLE on-sheet text bboxes overlap — every host
+     `(property "Reference" …)` / `(property "Value" …)` vs each
+     other AND vs every `power:*` glyph's net-name `(property
+     "Value" …)`, using the same `text_bbox` model. This closes the
+     property-text↔property-text / property-text↔power-glyph gap
+     (ISSUE-5) that parts (1)–(3), being label-anchored, did not
+     cover. Two mechanisms enforce it in the DECORATION phase: the
+     `#PWRn` Reference is emitted hidden (see V10/V14 note), and a
+     `nudge_property_text` pass (`kicad-emitter/src/schematic.rs`,
+     after routing/labels, before page translation) moves a
+     colliding host Reference/Value to the first alternative anchor
+     offset that clears all visible text, the symbol body, labels,
+     and wire interiors — driven purely off the measured `text_bbox`
+     model (no fixture constants), and moving TEXT only, never a
+     symbol pose.
   Verifiers in `crates/spice2kicad/tests/electrical_safety.rs`
-  enforce all three: (1) body overlap with a per-fixture
-  allow-list; (2) `v13_labels_dont_overlap_property_text`
-  (`electrical_safety.rs:1212`); and (3)
-  `v13_label_anchor_not_on_foreign_wire_interior`
-  (`electrical_safety.rs:1246`).
+  enforce all four: (1) body overlap with a per-fixture
+  allow-list; (2) `v13_labels_dont_overlap_property_text`; (3)
+  `v13_label_anchor_not_on_foreign_wire_interior`; and (4)
+  `v13_property_text_no_mutual_overlap` (per-fixture ratchet
+  literals, all `0` today). V13 stays Tier 1.
 
 - **V14 — Power glyph orientation: GND down, VCC up.** Every
   `power:GND` instance emits with the rotation that draws the

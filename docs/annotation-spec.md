@@ -352,6 +352,13 @@ glyphs carry the rail connectivity.
 Vcc vcc 0 12   ;@ power=vcc
 ```
 
+Each emitted power-flag glyph carries a unique `#PWRn` reference
+designator for KiCad's bookkeeping, but that reference is rendered
+**hidden** (per KiCad's own power-symbol convention) — only the
+glyph and its net-name label are drawn. The visible net name is the
+connectivity carrier; the `#PWRn` text would otherwise merely clutter
+the sheet and collide with neighbouring component property text.
+
 ### 4.6 `ignore` — hide from schematic
 
 ```

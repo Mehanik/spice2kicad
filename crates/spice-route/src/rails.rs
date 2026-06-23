@@ -196,8 +196,12 @@ fn power_symbol_sexpr(
     let (x, y, rot) = symbol_pose(pin, class);
     // Use the same pattern as the existing emitter: nested `(symbol …)`
     // with `lib_id`, `at`, `unit`, properties. Reference is a unique
-    // `#PWR<n>`, Value is the net name (which is what wires the global
-    // power net together). The sibling `(instances …)` block is
+    // `#PWR<n>` and is *hidden* (KiCad convention for power symbols:
+    // the bookkeeping refdes is never drawn — the glyph and net-name
+    // Value carry all reader-visible information; a drawn `#PWRn`
+    // merely collides with neighbouring property text, V13(4)). Value
+    // is the net name (which is what wires the global power net
+    // together). The sibling `(instances …)` block is
     // mandatory: kicad-cli's netlist export skips any symbol instance
     // that doesn't appear in such a block.
     let txt = format!(
@@ -206,7 +210,8 @@ fn power_symbol_sexpr(
             (at {x:.2} {y:.2} {rot}) \
             (unit 1) \
             (in_bom no) (on_board no) \
-            (property \"Reference\" \"{refdes}\" (at {rx:.2} {ry:.2} 0)) \
+            (property \"Reference\" \"{refdes}\" (at {rx:.2} {ry:.2} 0) \
+                (effects (font (size 1.27 1.27)) (hide yes))) \
             (property \"Value\" \"{net_name}\" (at {vx:.2} {vy:.2} 0)) \
             (instances (project \"{project_name}\" \
                 (path \"/{sheet_uuid}\" \

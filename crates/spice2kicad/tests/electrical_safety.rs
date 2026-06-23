@@ -1284,6 +1284,99 @@ fn v13_label_anchor_not_on_foreign_wire_interior() {
     );
 }
 
+/// Collect every VISIBLE on-sheet text bbox that V13 part (4) governs:
+///  * each placed component's visible `(property "Reference" …)` and
+///    `(property "Value" …)` text, AND
+///  * each `power:*` glyph's `(property "Value" …)` (the net-name text)
+///    when it is visible.
+///
+/// Unlike [`property_bboxes`] this does NOT skip `#PWR` symbols — the
+/// power-glyph net-name text is exactly the dominant collision class
+/// (host Reference/Value ↔ power-glyph net name) ISSUE-5 targets. A
+/// hidden property (`#PWR` Reference once hidden, or any `(hide yes)`)
+/// reserves no bbox.
+fn visible_text_bboxes(root: &Value) -> Vec<(String, Bbox)> {
+    let mut out = Vec::new();
+    for sym in children(root, "symbol") {
+        let mut refdes = String::new();
+        for prop in children(sym, "property") {
+            let mut it = list_iter(prop);
+            it.next();
+            if it.next().and_then(as_str) == Some("Reference") {
+                it.next()
+                    .and_then(as_str)
+                    .unwrap_or_default()
+                    .clone_into(&mut refdes);
+                break;
+            }
+        }
+        for prop in children(sym, "property") {
+            if property_hidden(prop) {
+                continue;
+            }
+            let mut it = list_iter(prop);
+            it.next();
+            let key = it.next().and_then(as_str).unwrap_or("");
+            let val = it.next().and_then(as_str).unwrap_or("");
+            let tkind = match key {
+                "Reference" => TextKind::PropertyReference,
+                "Value" => TextKind::PropertyValue,
+                _ => continue,
+            };
+            let Some((px, py, prot)) = at_xy_rot(prop) else {
+                continue;
+            };
+            let size = effects_font_size(prop).unwrap_or(1.27);
+            let bbox = text_bbox(val, (px, py), size, prot, tkind);
+            out.push((format!("{refdes}.{key}"), bbox));
+        }
+    }
+    out
+}
+
+#[test]
+fn v13_property_text_no_mutual_overlap() {
+    // V13 part (4): no two VISIBLE on-sheet text bboxes may overlap —
+    // host Reference/Value vs each other AND vs power-glyph net-name
+    // Value text. (V13 parts 1–3 are label-anchored; this part closes
+    // the property-text ↔ property-text / power-glyph gap, ISSUE-5.)
+    //
+    // Budget is a ratchet: per-fixture literals record the measured
+    // post-fix high-water mark and only ever go down. After hiding the
+    // `#PWRn` Reference and the decoration-phase text-nudge pass, every
+    // fixture routes clean — 0 across the board. A regression here is a
+    // defect, never a budget to bump.
+    let budget = |_name: &str| -> usize { 0 };
+    let mut failures: Vec<String> = Vec::new();
+    for name in SHEETS {
+        let src = fixtures_dir().join(format!("{name}.cir"));
+        let tmp = tempdir(name);
+        let sch = spice_to_kicad(&src, &tmp).expect("spice2kicad");
+        let root = parse(&sch);
+        let texts = visible_text_bboxes(&root);
+        let mut hits = 0;
+        for i in 0..texts.len() {
+            for j in (i + 1)..texts.len() {
+                if texts[i].1.intersects(&texts[j].1) {
+                    eprintln!("{name}: text {} overlaps text {}", texts[i].0, texts[j].0,);
+                    hits += 1;
+                }
+            }
+        }
+        let b = budget(name);
+        if hits > b {
+            failures.push(format!(
+                "{name}: {hits} visible-text mutual overlaps > V13(4) budget {b}"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "V13(4) regressions:\n  {}",
+        failures.join("\n  "),
+    );
+}
+
 /// Per-fixture V5 violation budget. The first wire segment at a pin
 /// should extend in the pin's outward direction (V5). The router's
 /// Steiner stage emits an outward stub at each pin whenever no L
