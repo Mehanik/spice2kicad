@@ -879,7 +879,7 @@ type PinPos = (String, f64, f64, u16);
 /// direction; `extra_pins` are given a default angle of 0
 /// (right-pointing) since they sit at hierarchical-label positions
 /// where the label itself extends rightward.
-fn collect_net_pins(
+pub(crate) fn collect_net_pins(
     placement: &Placement,
     library: &Library,
     extra_pins: &[(String, f64, f64)],
@@ -1021,6 +1021,117 @@ fn route_nets(
     Ok(result.sexprs.iter().map(lexpr_to_sexpr).collect())
 }
 
+/// Outcome of trial-routing a placement: the world-frame wire segments
+/// the *real* router emitted (after every conflict-resolution and
+/// cleanup pass — the stages where V5 violations are born), plus the
+/// count of unresolved `v11:` foreign-pin coincidences. Used by the
+/// routing-aware orientation-refinement phase ([`crate::refine`]) to
+/// measure the actual V5 / V11 consequence of a candidate orientation.
+pub(crate) struct TrialRoute {
+    /// Each wire's two endpoints in world mm: `((x1, y1), (x2, y2))`.
+    pub segments: Vec<crate::v5::WireSegment>,
+    /// Number of `v11:` warnings (router could not detour off a foreign
+    /// pin). Must not increase under a candidate orientation.
+    pub v11_count: usize,
+}
+
+/// Run the *real* router over `placement` and return its wire segments
+/// plus V11-warning count. This is the same routing path
+/// [`emit_root`] runs (`collect_net_pins` → `placement_obstacles` →
+/// `spice_route::route`), minus hierarchical-sheet `extra_pins` (the
+/// refinement targets body-pin orientation, which sheet labels do not
+/// affect). Routing errors collapse to an empty result so the caller
+/// simply declines the candidate.
+pub(crate) fn trial_route(placement: &Placement, library: &Library) -> TrialRoute {
+    use spice_route::{NetSpec, PinRef, RouteRequest};
+
+    let net_pins = collect_net_pins(placement, library, &[]);
+    let obstacles = placement_obstacles(placement, library);
+
+    let mut specs: Vec<NetSpec> = Vec::with_capacity(net_pins.len());
+    for (name, pins) in &net_pins {
+        let mut uniq: Vec<(f64, f64, u16)> = Vec::new();
+        for &(x, y, a) in pins {
+            if !uniq
+                .iter()
+                .any(|&(ux, uy, _)| approx_eq(ux, x) && approx_eq(uy, y))
+            {
+                uniq.push((x, y, a));
+            }
+        }
+        let class = classify_net_by_name(name);
+        let pin_refs: Vec<PinRef> = uniq
+            .into_iter()
+            .map(|(x, y, angle)| PinRef {
+                element_idx: 0,
+                pin_number: 0,
+                x_mm: x,
+                y_mm: y,
+                outward: angle_to_direction(angle),
+            })
+            .collect();
+        specs.push(NetSpec {
+            name: name.clone(),
+            class,
+            pins: pin_refs,
+        });
+    }
+
+    let suuid = sheet_uuid();
+    let result = spice_route::route(RouteRequest {
+        nets: &specs,
+        scope: "refine",
+        library: Some(library),
+        sheet_uuid: &suuid,
+        project_name: GENERATOR,
+        obstacles: &obstacles,
+        bounds: None,
+    });
+    let v11_count = result
+        .warnings
+        .iter()
+        .filter(|w| w.starts_with("v11:"))
+        .count();
+    let segments = result
+        .sexprs
+        .iter()
+        .filter_map(wire_segment_from_lexpr)
+        .collect();
+    TrialRoute {
+        segments,
+        v11_count,
+    }
+}
+
+/// Extract `((x1,y1),(x2,y2))` from a `(wire (pts (xy …) (xy …)))`
+/// lexpr value emitted by `spice_route`. Returns `None` for any other
+/// node kind (junctions, power glyphs, labels) or a malformed wire.
+fn wire_segment_from_lexpr(v: &lexpr::Value) -> Option<crate::v5::WireSegment> {
+    // lexpr renders `(wire (pts (xy a b) (xy c d)))` as a proper list.
+    let items: Vec<&lexpr::Value> = v.list_iter()?.collect();
+    if items.first().map(|h| h.as_symbol()) != Some(Some("wire")) {
+        return None;
+    }
+    let pts = items.iter().skip(1).find_map(|node| {
+        let inner: Vec<&lexpr::Value> = node.list_iter()?.collect();
+        (inner.first().map(|h| h.as_symbol()) == Some(Some("pts"))).then_some(inner)
+    })?;
+    let mut coords: Vec<(f64, f64)> = Vec::new();
+    for xy in pts.iter().skip(1) {
+        let inner: Vec<&lexpr::Value> = xy.list_iter()?.collect();
+        if inner.first().map(|h| h.as_symbol()) != Some(Some("xy")) {
+            continue;
+        }
+        let x = inner.get(1)?.as_f64()?;
+        let y = inner.get(2)?.as_f64()?;
+        coords.push((x, y));
+    }
+    if coords.len() < 2 {
+        return None;
+    }
+    Some((coords[0], coords[1]))
+}
+
 /// Build the set of symbol-body bounding boxes the router should
 /// avoid for V12 (wires do not cross foreign symbol bodies).
 ///
@@ -1042,7 +1153,10 @@ fn route_nets(
 ///
 /// Power-rail glyphs are filtered out explicitly by `lib_id` prefix
 /// just in case a caller has injected one into the placement.
-fn placement_obstacles(placement: &Placement, library: &Library) -> Vec<spice_route::Bbox> {
+pub(crate) fn placement_obstacles(
+    placement: &Placement,
+    library: &Library,
+) -> Vec<spice_route::Bbox> {
     /// Half-extent (mm) fallback for symbols whose body bbox is
     /// unavailable (sheet stubs, missing libraries).
     const SYM_HALF_MM: f64 = 2.54;
@@ -1126,7 +1240,7 @@ fn body_bbox_to_world(
 
 /// Heuristic Power/Ground classification from the net name alone.
 /// Mirrors rules 1 and 3 of `spice_layout::net_class::classify_nets`.
-fn classify_net_by_name(name: &str) -> spice_layout::net_class::NetClass {
+pub(crate) fn classify_net_by_name(name: &str) -> spice_layout::net_class::NetClass {
     use spice_layout::net_class::NetClass;
     if name == "0" {
         return NetClass::Ground;
@@ -1144,7 +1258,7 @@ fn classify_net_by_name(name: &str) -> spice_layout::net_class::NetClass {
 /// Convert a KiCad pin angle (in `.kicad_sym` library frame) to the
 /// outward direction in the world (Y-down schematic) frame. Matches
 /// the convention in the previous router: angle 270 → visually upward.
-fn angle_to_direction(angle: u16) -> spice_route::Direction {
+pub(crate) fn angle_to_direction(angle: u16) -> spice_route::Direction {
     use spice_route::Direction;
     match angle % 360 {
         90 => Direction::Down,
@@ -1163,10 +1277,27 @@ fn lexpr_to_sexpr(v: &lexpr::Value) -> Sexpr {
     Sexpr::from(RawSexpr::from_lexpr(v))
 }
 
-/// Emit plain `(label …)` markers naming each signal net. The label
-/// carries the SPICE net name (e.g. `b`, `in`, `out`); KiCad's
-/// SPICE netlist exporter preserves the original net name only if
-/// at least one label of that name appears on the schematic.
+/// One label the emitter will plant: its net name, world anchor,
+/// rotation (CCW degrees, world frame), and whether it is a
+/// `(global_label …)` (vs a plain `(label …)`). Factored out of
+/// [`dangling_pin_labels`] so the routing-aware refinement phase can
+/// measure the exact same label geometry (V13) the emitter writes —
+/// shared, never re-derived.
+#[derive(Debug, Clone)]
+pub(crate) struct LabelSpec {
+    pub net: String,
+    pub x: f64,
+    pub y: f64,
+    pub rot: u16,
+    pub is_global: bool,
+}
+
+/// Build the structured [`LabelSpec`] list naming each signal net. The
+/// label carries the SPICE net name (e.g. `b`, `in`, `out`); KiCad's
+/// SPICE netlist exporter preserves the original net name only if at
+/// least one label of that name appears on the schematic. The Sexpr
+/// emitter ([`dangling_pin_labels`]) and the refinement V13 metric both
+/// consume this, so their label geometry can never drift.
 ///
 /// V4 hard rules enforced here:
 /// - **Plain `(label …)`, not `(global_label …)`.** Global labels
@@ -1186,12 +1317,12 @@ fn lexpr_to_sexpr(v: &lexpr::Value) -> Sexpr {
 /// - The label anchor must not coincide with a foreign-net pin
 ///   coordinate (V11 silent-short guard) or with a port marker
 ///   (`extra_pins`) that already names the net at that coord.
-fn dangling_pin_labels(
+#[allow(clippy::cast_possible_truncation)]
+pub(crate) fn label_specs(
     nets: &std::collections::BTreeMap<String, Vec<(f64, f64, u16)>>,
-    scope: &str,
     extra_pins: &[(String, f64, f64)],
     property_bboxes: &[TextBbox],
-) -> Vec<Sexpr> {
+) -> Vec<LabelSpec> {
     // Coordinates already carrying a port marker (sheet pin position
     // on the parent, hierarchical_label on a child) name the net by
     // themselves. Adding a `(label …)` on top is redundant and worse,
@@ -1309,32 +1440,84 @@ fn dangling_pin_labels(
             let k = key_of(x, y);
             port_coords.contains(&k)
         });
+        let _ = idx;
         let (fx, fy, fang) = uniq[0];
         if uniq.len() == 1 && !net_touches_port {
             // Global labels carry a chevron; their bbox differs from a
             // plain label, so we keep the body-clearing rotation as-is
             // (the property-text avoidance below targets plain labels,
             // where the regression appears).
-            out.push(global_label_simple(
-                net,
-                fx,
-                fy,
-                label_rot(fang),
-                scope,
-                idx,
-            ));
+            out.push(LabelSpec {
+                net: net.clone(),
+                x: fx,
+                y: fy,
+                rot: label_rot(fang),
+                is_global: true,
+            });
         } else {
             // V13: prefer the body-clearing outward rotation, but if that
             // makes the label text overlap a Reference/Value bbox (e.g.
             // the inverting-amp `out` label landing on the feedback
             // resistor's Value), rotate the label to a clear direction.
             let rot = label_rotation_avoiding(net, (fx, fy), label_rot(fang), property_bboxes);
-            out.push(label_simple(net, fx, fy, rot, scope, idx * 2));
+            out.push(LabelSpec {
+                net: net.clone(),
+                x: fx,
+                y: fy,
+                rot,
+                is_global: false,
+            });
             if net_touches_port && uniq.len() >= 2 {
                 let (lx, ly, lang) = uniq[uniq.len() - 1];
                 let rot2 = label_rotation_avoiding(net, (lx, ly), label_rot(lang), property_bboxes);
-                out.push(label_simple(net, lx, ly, rot2, scope, idx * 2 + 1));
+                out.push(LabelSpec {
+                    net: net.clone(),
+                    x: lx,
+                    y: ly,
+                    rot: rot2,
+                    is_global: false,
+                });
             }
+        }
+    }
+    out
+}
+
+/// Emit the `(label …)` / `(global_label …)` Sexpr nodes for a sheet,
+/// thin wrapper over [`label_specs`] that assigns each spec a stable
+/// per-net UUID seed. Used by [`emit_root`] / [`emit_child_sheet`].
+fn dangling_pin_labels(
+    nets: &std::collections::BTreeMap<String, Vec<(f64, f64, u16)>>,
+    scope: &str,
+    extra_pins: &[(String, f64, f64)],
+    property_bboxes: &[TextBbox],
+) -> Vec<Sexpr> {
+    let specs = label_specs(nets, extra_pins, property_bboxes);
+    // Reproduce the previous per-net UUID-seed scheme: globals seeded by
+    // net order index; plain labels by `idx*2` (+1 for the second of a
+    // name-jump pair). Net order matches `label_specs` since both walk
+    // `nets` in BTreeMap order; we re-derive the index per net.
+    let mut out = Vec::with_capacity(specs.len());
+    let mut net_idx: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for (i, n) in nets.keys().enumerate() {
+        net_idx.insert(n.as_str(), i);
+    }
+    // Track how many plain labels we've emitted per net (0 → first /
+    // leftmost, 1 → second / rightmost) for the name-jump seed offset.
+    let mut plain_seen: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for spec in &specs {
+        let idx = net_idx.get(spec.net.as_str()).copied().unwrap_or(0);
+        if spec.is_global {
+            out.push(global_label_simple(
+                &spec.net, spec.x, spec.y, spec.rot, scope, idx,
+            ));
+        } else {
+            let nth = plain_seen.entry(spec.net.as_str()).or_insert(0);
+            let seed = idx * 2 + *nth;
+            *nth += 1;
+            out.push(label_simple(
+                &spec.net, spec.x, spec.y, spec.rot, scope, seed,
+            ));
         }
     }
     out
@@ -1348,15 +1531,15 @@ fn approx_eq(a: f64, b: f64) -> bool {
 /// V13 verifier uses so the emitter can pre-empt a label↔property-text
 /// overlap before it is written.
 #[derive(Debug, Clone, Copy)]
-struct TextBbox {
-    x0: f64,
-    y0: f64,
-    x1: f64,
-    y1: f64,
+pub(crate) struct TextBbox {
+    pub x0: f64,
+    pub y0: f64,
+    pub x1: f64,
+    pub y1: f64,
 }
 
 impl TextBbox {
-    fn intersects(self, o: TextBbox) -> bool {
+    pub(crate) fn intersects(self, o: TextBbox) -> bool {
         let eps = 1e-3;
         self.x0 + eps < o.x1 && o.x0 + eps < self.x1 && self.y0 + eps < o.y1 && o.y0 + eps < self.y1
     }
@@ -1366,7 +1549,7 @@ impl TextBbox {
 /// `rot_deg` CCW on screen. Matches the V13 verifier's `text_bbox`
 /// (size 1.27 mm, width = 0.6·n·size + 0.8·size, height = 1.4·size) so
 /// the emitter's collision check agrees with the test that grades it.
-fn text_bbox(text: &str, anchor: (f64, f64), rot_deg: u16) -> TextBbox {
+pub(crate) fn text_bbox(text: &str, anchor: (f64, f64), rot_deg: u16) -> TextBbox {
     let size = 1.27_f64;
     #[allow(clippy::cast_precision_loss)]
     let chars = text.chars().count() as f64;
@@ -1398,7 +1581,7 @@ fn text_bbox(text: &str, anchor: (f64, f64), rot_deg: u16) -> TextBbox {
 /// (Reference at local `(2.54, -2.54)`, Value at `(2.54, 2.54)`, both
 /// left-justified, rot 0). Hidden properties are excluded — the
 /// resistor/cap/opamp Reference & Value are the only visible ones.
-fn placement_property_bboxes(placement: &Placement) -> Vec<TextBbox> {
+pub(crate) fn placement_property_bboxes(placement: &Placement) -> Vec<TextBbox> {
     let mut out = Vec::new();
     for el in &placement.elements {
         // A suppressed power-rail source draws no Reference/Value text

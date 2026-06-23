@@ -331,6 +331,10 @@ Block-form only:
   to the symbol centers. For uniformly-oriented parts the
   distinction is invisible; for mixed orientations the behaviour
   is currently under-specified — see §9.
+- Spacing along the alignment axis is the engine's concern, not
+  yours: the layout engine derives the gap between adjacent
+  aligned elements from their resolved symbol geometry, so no two
+  symbols (or their pin stubs) overlap, whatever parts you align.
 
 ### 4.5 `power` — voltage source as power symbol
 
@@ -385,6 +389,15 @@ override constraints from earlier phases.
    members of each mirrored pair are co-positioned about a common
    axis with mirrored orientation. The classic case is the
    symmetric astable multivibrator (CLAUDE.md invariant V7).
+4.5. **Routing-aware orientation refinement** — a final placement
+   sub-step that trial-routes candidate orientations of at-risk,
+   non-pinned, non-symmetry elements with the real wire router and
+   keeps the orientation minimising the router's measured
+   first-segment-outward (V5) violations, without regressing any
+   higher-/equal-priority invariant. It adjusts orientation only,
+   never position, and finishes *before* decoration begins, so the
+   decoration phase still sees a fully-fixed layout (CLAUDE.md
+   invariant V5; ADR-11).
 5. **Decoration** — once every symbol's position and orientation are
    final, a decoration pass emits the remaining geometry: `(wire …)`
    routing, power/ground glyphs, plain and global labels, and
@@ -402,9 +415,19 @@ fixed: for each pair of adjacent elements that share a net, it picks
 the orientation pair that minimises the Manhattan distance between
 the two pin positions on that net (CLAUDE.md invariant V5). The
 search space is the eight rotation-and-mirror states of each symbol;
-ties are broken by source order. A future `;@ orientation=…`
+ties are broken by source order. Because the final V5 outcome depends
+on how the wire router resolves conflicts, phase 4.5 then re-checks
+the at-risk elements by trial-routing each candidate orientation with
+the real router and keeping whichever minimises the router's measured
+outward-stub violations (ADR-11). A future `;@ orientation=…`
 directive (§9 deferred) would override the auto-choice when the
 heuristic picks a poor orientation.
+
+Across all of phases 2–4 the engine derives every element's spacing
+from its resolved symbol geometry, so the chosen layout never places
+two symbols (or their pin stubs) on top of each other — whatever parts
+and orientations are involved. You describe *intent*; the engine owns
+the geometry that keeps the result legible.
 
 A constraint that references an unknown refdes is a **hard error**
 (E001), not a warning, because silent typos defeat the purpose of the

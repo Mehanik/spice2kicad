@@ -1138,21 +1138,12 @@ fn v13_labels_dont_overlap_symbol_body() {
     // body bbox. Stricter than the previous point-in-bbox check —
     // a label whose anchor sits just outside the body but whose
     // text rendering crosses into the body is still a defect.
-    let body_overlap_budget = |name: &str| -> usize {
-        match name {
-            // opamp_inverting_real: with X1 locked V14-correct (rot 0,
-            // V+ up / V- down), the `out` label at X1's output pin sits
-            // hard against the feedback resistor RF that the SA packs
-            // directly to its right, so the label text grazes RF's body
-            // bbox. Closing this needs a placer change to leave one more
-            // grid cell between X1's output and RF. 1 hit.
-            // (common_emitter ratcheted 1 → 0: the new label-rotation
-            // property-text avoidance also clears its former `b`↔VCC
-            // body graze.)
-            "opamp_inverting_real" => 1,
-            _ => 0,
-        }
-    };
+    // Zero label↔body overlaps on every fixture. The routing-aware
+    // orientation-refinement phase (Layout phase 4.5) re-oriented
+    // opamp_inverting_real's X1/RIN/RF so the `out` label no longer
+    // grazes RF's body (ratcheted 1 → 0); common_emitter was already 0.
+    // A regression here is a defect, not a budget to bump.
+    let body_overlap_budget = |_name: &str| -> usize { 0 };
     for name in SHEETS {
         let src = fixtures_dir().join(format!("{name}.cir"));
         let tmp = tempdir(name);
@@ -1312,10 +1303,15 @@ fn v13_label_anchor_not_on_foreign_wire_interior() {
 /// regression trips the test.
 fn v5_violation_budget(name: &str) -> usize {
     match name {
-        "common_emitter" => 3,
+        // Ratcheted high-water marks (current measured count on master).
+        // The routing-aware orientation-refinement phase (Layout phase
+        // 4.5) drove common_emitter (3→0), diff_pair (2→0), and
+        // opamp_inverting_real (3→1) down to these values; the budgets
+        // follow the ratchet-down policy. A regression trips the test.
         "multivibrator" => 4,
-        "diff_pair" | "opamp_inverting_real" => 2,
-        // "rc_lowpass" and any other fixture: zero violations expected.
+        "opamp_inverting_real" => 1,
+        // common_emitter, diff_pair, rc_lowpass, and any other fixture:
+        // zero violations.
         _ => 0,
     }
 }
@@ -1332,8 +1328,6 @@ fn v5_violation_budget(name: &str) -> usize {
 /// budget in [`v5_violation_budget`].
 #[test]
 fn v5_first_segment_extends_outward() {
-    // Outward step in micrometres, one grid cell.
-    const STEP: i64 = 1270;
     let mut hard_failures: Vec<String> = Vec::new();
     for name in SHEETS {
         let src = fixtures_dir().join(format!("{name}.cir"));
@@ -1343,73 +1337,36 @@ fn v5_first_segment_extends_outward() {
         let pins = world_pins_for_sheet(&src, &root);
         let wires = wire_segments(&root);
 
-        let mut violations: Vec<String> = Vec::new();
-        for p in &pins {
-            // Skip power glyphs (synthetic; no symbol-body outward).
-            if p.angle == u16::MAX {
-                continue;
-            }
-            let pk = qkey(p.x_mm, p.y_mm);
-            let (dx, dy) = match p.angle % 360 {
-                0 => (STEP, 0),    // Right
-                90 => (0, STEP),   // Down (file-y +)
-                180 => (-STEP, 0), // Left
-                270 => (0, -STEP), // Up (file-y -)
-                _ => continue,     // Non-cardinal: skip (out of scope).
-            };
-            // Find every wire segment incident on this pin, plus any
-            // wire whose interior passes through the pin.
-            let mut endpoint_dirs: Vec<(i64, i64)> = Vec::new();
-            let mut interior_through = false;
-            for (a, b) in &wires {
-                let ka = qkey(a.0, a.1);
-                let kb = qkey(b.0, b.1);
-                if ka == pk {
-                    endpoint_dirs.push((kb.0 - ka.0, kb.1 - ka.1));
-                } else if kb == pk {
-                    endpoint_dirs.push((ka.0 - kb.0, ka.1 - kb.1));
-                } else {
-                    // Interior coincidence: axis-parallel only.
-                    if interior_grid_coords(&(*a, *b)).contains(&pk) {
-                        interior_through = true;
-                    }
-                }
-            }
-            if endpoint_dirs.is_empty() && !interior_through {
-                // Pin has no wire connection (e.g. one-pin net handled
-                // by a global label, or unconnected). Skip.
-                continue;
-            }
-            // Normalise endpoint directions to unit grid steps.
-            let outward_ok = endpoint_dirs.iter().any(|&(ex, ey)| {
-                let nx = ex.signum() * STEP;
-                let ny = ey.signum() * STEP;
-                // Axis-aligned segments only — the router's invariant.
-                if ex != 0 && ey != 0 {
-                    return false;
-                }
-                (nx, ny) == (dx, dy)
-            });
-            if outward_ok {
-                continue;
-            }
-            // No incident wire extends outward. Pin-on-trunk-interior
-            // is recorded as a known limitation; everything else is a
-            // hard regression.
-            if interior_through && endpoint_dirs.is_empty() {
-                // Pure interior: report but don't fail (tracked as
-                // v0.2 placer/router work).
-                eprintln!(
-                    "{name}: V5 interior-trunk pin {}.{} at ({:.2}, {:.2}) sits on a coalesced trunk; outward stub would split the trunk",
-                    p.refdes, p.pin_number, p.x_mm, p.y_mm,
-                );
-                continue;
-            }
-            violations.push(format!(
-                "{}.{} at ({:.2}, {:.2}) angle={} has no outward-extending wire (incident dirs={:?}, interior_through={})",
-                p.refdes, p.pin_number, p.x_mm, p.y_mm, p.angle, endpoint_dirs, interior_through,
-            ));
-        }
+        // The V5 first-segment-outward rule lives in
+        // `kicad_emitter::v5::count_outward_violations`, the SAME
+        // function the routing-aware orientation-refinement phase
+        // (Layout phase 4.5) uses as its router-in-the-loop oracle.
+        // Calling it here binds verifier and refinement to one
+        // measurement — they can never drift. (The interior-trunk
+        // "report but don't fail" bucket is folded into that function:
+        // pure interior-trunk pins are excluded from the returned
+        // violations.)
+        let probes: Vec<kicad_emitter::v5::PinProbe> = pins
+            .iter()
+            .map(|p| kicad_emitter::v5::PinProbe {
+                refdes: p.refdes.clone(),
+                pin_number: p.pin_number.clone(),
+                x_mm: p.x_mm,
+                y_mm: p.y_mm,
+                angle: p.angle,
+            })
+            .collect();
+        let segments: Vec<((f64, f64), (f64, f64))> = wires.iter().map(|&(a, b)| (a, b)).collect();
+        let violations: Vec<String> =
+            kicad_emitter::v5::count_outward_violations(&probes, &segments)
+                .into_iter()
+                .map(|v| {
+                    format!(
+                        "{}.{} at ({:.2}, {:.2}) angle={} has no outward-extending wire",
+                        v.refdes, v.pin_number, v.x_mm, v.y_mm, v.angle,
+                    )
+                })
+                .collect();
         let budget = v5_violation_budget(name);
         if violations.len() > budget {
             hard_failures.push(format!(

@@ -303,6 +303,112 @@ pub(crate) const CELL_H: i32 = 6;
 /// next, so clusters do not pile up at the origin.
 const CLUSTER_GAP: i32 = 1;
 
+/// Minimum clear gap (mm) the placer keeps between two adjacent
+/// elements' *resolved* extents (body bbox ∪ pin reach ∪ value-text
+/// estimate). This is a hard spacing floor applied at the
+/// candidate-generation boundary, NOT a soft cost — derived spacing
+/// makes body/pin/text overlap infeasible by construction. One grid
+/// cell (1.27 mm) of breathing room reads as a clean gap.
+const MIN_CLEARANCE_MM: f64 = GridPoint::STEP_MM;
+
+/// Estimated per-character advance (mm) of the value/property text the
+/// emitter renders next to a symbol, at the default 1.27 mm text size.
+/// Used so neighbouring elements clear each other's value text too.
+/// (Mirrors the emitter's `text_bbox` width estimate ≈ chars*0.6*size;
+/// rounded up for margin.)
+const VALUE_CHAR_MM: f64 = 0.76;
+
+/// World-frame offset (mm) from a symbol origin at which the emitter
+/// left-justifies the value text. The text occupies
+/// `[VALUE_TEXT_OFFSET_MM, VALUE_TEXT_OFFSET_MM + width]` on the +X
+/// side of the origin.
+const VALUE_TEXT_OFFSET_MM: f64 = 0.0;
+
+/// Resolved world-frame extents of an element relative to its origin,
+/// in millimetres. `min_x`/`max_x` are signed offsets from the origin
+/// along +X (right) and -X (left); `min_y`/`max_y` along the world Y
+/// axis. The extent unions the orientation-transformed body bbox, the
+/// reach of every pin stem, and (on +X) an estimate of the value-text
+/// width so neighbours clear it.
+#[derive(Debug, Clone, Copy)]
+struct WorldExtent {
+    min_x: f64,
+    max_x: f64,
+    min_y: f64,
+    max_y: f64,
+}
+
+/// Compute the resolved world extent of `symbol` placed at the origin
+/// in the given `orientation`, with an optional `value` text whose
+/// estimated width pads the +X side. World frame matches the emitter:
+/// a local point `(lx, ly)` maps to `(rx, -ry)` where
+/// `(rx, ry) = orientation.apply_point(lx, ly)` (eeschema y-flip).
+fn world_extent(symbol: &Symbol, orientation: Orientation, value: Option<&str>) -> WorldExtent {
+    let mut min_x = 0.0_f64;
+    let mut max_x = 0.0_f64;
+    let mut min_y = 0.0_f64;
+    let mut max_y = 0.0_f64;
+    let mut grow = |dx: f64, dy: f64| {
+        min_x = min_x.min(dx);
+        max_x = max_x.max(dx);
+        min_y = min_y.min(dy);
+        max_y = max_y.max(dy);
+    };
+
+    if let Some(b) = symbol.body_bbox() {
+        for (lx, ly) in [(b.x0, b.y0), (b.x0, b.y1), (b.x1, b.y0), (b.x1, b.y1)] {
+            let (rx, ry) = orientation.apply_point(lx, ly);
+            grow(rx, -ry);
+        }
+    }
+    for p in symbol.pins_in(orientation) {
+        // `pins_in` already applies the orientation; eeschema y-flip on
+        // top of that gives the world-relative offset.
+        grow(p.x, -p.y);
+    }
+    if let Some(v) = value {
+        let chars = v.chars().count();
+        if chars > 0 {
+            #[allow(clippy::cast_precision_loss)]
+            let w = VALUE_TEXT_OFFSET_MM + (chars as f64) * VALUE_CHAR_MM;
+            grow(w, 0.0);
+        }
+    }
+    WorldExtent {
+        min_x,
+        max_x,
+        min_y,
+        max_y,
+    }
+}
+
+/// Number of whole grid cells needed to separate two adjacent
+/// elements' origins along a horizontal row so their resolved extents
+/// (plus `MIN_CLEARANCE_MM`) do not intersect. `left` is the
+/// element on the smaller-X side; `right` on the larger-X side. The
+/// required centre-to-centre distance is `left.max_x - right.min_x +
+/// clearance`, snapped UP to the grid.
+fn horizontal_stride_cells(left: &WorldExtent, right: &WorldExtent) -> i32 {
+    let need_mm = left.max_x + (-right.min_x) + MIN_CLEARANCE_MM;
+    mm_up_to_cells(need_mm)
+}
+
+/// As [`horizontal_stride_cells`] but for a vertical column. `upper`
+/// is the element on the smaller-world-Y side, `lower` on the larger.
+fn vertical_stride_cells(upper: &WorldExtent, lower: &WorldExtent) -> i32 {
+    let need_mm = upper.max_y + (-lower.min_y) + MIN_CLEARANCE_MM;
+    mm_up_to_cells(need_mm)
+}
+
+/// Round a millimetre distance UP to a whole number of grid cells
+/// (>= 1), so the result always lands on the schematic grid.
+fn mm_up_to_cells(mm: f64) -> i32 {
+    let cells = (mm / GridPoint::STEP_MM).ceil();
+    #[allow(clippy::cast_possible_truncation)]
+    let c = cells as i32;
+    c.max(1)
+}
+
 // ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
@@ -371,6 +477,48 @@ pub fn place_with_hint(
     Ok(solver::refine(
         placement, &pinned, &checked, library, opts, &allowed,
     ))
+}
+
+/// Per-element refinement metadata for the routing-aware orientation
+/// refinement phase (CLAUDE.md "Layout phase 4.5"). Recomputed from the
+/// same seed → hint → symmetry sequence [`place_with_hint`] runs, so the
+/// `pinned` mask and `allowed` orientation sets are identical to the ones
+/// the placer used. The downstream refinement (in `kicad-emitter`, the
+/// only crate that can see both the placer and the real router) reads
+/// these to decide which elements it may rotate and to which orientations.
+#[derive(Debug, Clone)]
+pub struct RefinementMeta {
+    /// `true` for an element whose orientation/position is fixed by a
+    /// hard constraint (`align` / `place`), by V7 symmetry, or by a
+    /// position-stability hint. The refinement phase must not touch it.
+    pub pinned: Vec<bool>,
+    /// Per-element V14-allowed orientation set (the same hard
+    /// candidate-space filter [`orient::allowed_orientations`] feeds the
+    /// V5 seed chooser and the SA refiner). The refinement phase may only
+    /// pick orientations from this set — it never widens V14.
+    pub allowed: Vec<Vec<Orientation>>,
+}
+
+/// Compute the [`RefinementMeta`] for a netlist + hint, mirroring exactly
+/// the pinned/allowed state [`place_with_hint`] establishes before the SA
+/// refiner. Used by the routing-aware orientation-refinement phase so it
+/// honours the same constraints (user `align`/`place`, V7 symmetry, hint
+/// pins) and the same V14 candidate filter as the placer itself.
+///
+/// This deliberately recomputes (rather than threading extra return
+/// values out of `place_with_hint`) so the existing entry-point signature
+/// stays unchanged; the seed pass is cheap and side-effect-free.
+pub fn refinement_meta(
+    checked: &CheckedNetlist,
+    hint: &Hint,
+) -> Result<RefinementMeta, Vec<Diagnostic>> {
+    let (mut placement, mut pinned) = place_seed(checked)?;
+    apply_hint(&mut placement, &mut pinned, hint);
+    if let Some(plan) = symmetry::detect_pairs(checked) {
+        symmetry::apply(&mut placement, &mut pinned, &plan);
+    }
+    let allowed = orient::allowed_orientations(checked);
+    Ok(RefinementMeta { pinned, allowed })
 }
 
 /// Apply a position-stability [`Hint`] (ADR-4) over a seeded placement.
@@ -586,21 +734,60 @@ fn place_seed(checked: &CheckedNetlist) -> Result<(Placement, Vec<bool>), Vec<Di
     use crate::layers::assign_x_layers;
     use crate::net_class::classify_nets;
 
-    // Geometry constants in grid cells (1.27 mm each). Strides are
-    // chosen so two adjacent columns/rows cannot horizontally clip
-    // each other given typical KiCad symbol body half-extents
-    // (~2.54 mm = 2 cells) plus ~1 cell of padding for label glyphs
-    // and refdes/value text. A 12-cell stride leaves ~7.6 mm of
-    // clear space between symbol bodies on the same row, comfortably
-    // wider than any symbol body in the fixtures.
-    const X_STRIDE: i32 = 12; // grid cells per layer column
+    // Geometry constants in grid cells (1.27 mm each).
     const Y_BAND_GAP: i32 = 6; // gap from rail edge into Mid band
     const Y_RANK_STRIDE: i32 = 5; // vertical step per rank within layer
+    // Bound on the per-bucket left/right jitter (cells). Adjacent
+    // layers' X positions must clear each other even after both layers
+    // jitter toward one another, so the layer-spacing derivation adds
+    // `2 * MAX_JITTER` cells of margin.
+    const MAX_JITTER: i32 = 2;
+    // Historical fixed per-layer stride (cells). Used as a *floor* so
+    // all-small-symbol fixtures keep their previous spacing exactly;
+    // the geometry derivation only widens layers that need more room.
+    const X_STRIDE_FLOOR: i32 = 12;
 
     let n = checked.elements.len();
     let classes = classify_nets(checked);
     let band_asg = assign_y_bands(checked, &classes);
     let layer_asg = assign_x_layers(checked, &classes);
+
+    // Per-layer X positions, geometry-derived (HARD, at the spacing
+    // boundary). Each element's resolved world extent (identity
+    // orientation — the seed default; `pick_orientations` may later
+    // rotate movable elements, and the SA overlap gate guards that)
+    // gives the layer its max left/right reach. Adjacent layers are
+    // then spaced so the right reach of the left layer plus the left
+    // reach of the right layer plus MIN_CLEARANCE_MM (plus jitter
+    // margin) never lets two bodies clip — replacing the old fixed
+    // 12-cell X_STRIDE that ignored the opamp triangle's 15 mm width.
+    let max_layer = layer_asg.layers.iter().copied().max().unwrap_or(0);
+    let mut layer_max_right = vec![0.0_f64; max_layer as usize + 1];
+    let mut layer_max_left = vec![0.0_f64; max_layer as usize + 1];
+    for (i, e) in checked.elements.iter().enumerate() {
+        // Layer spacing uses body ∪ pin reach only (no value-text
+        // pad): value text is justify-left and V13's concern, and
+        // padding it here would shove a whole layer asymmetrically.
+        // The align path *does* include value text (tighter, pinned
+        // rows where text genuinely abuts a neighbour).
+        let ext = world_extent(&e.symbol, Orientation::IDENTITY, None);
+        let l = layer_asg.layers[i] as usize;
+        layer_max_right[l] = layer_max_right[l].max(ext.max_x);
+        layer_max_left[l] = layer_max_left[l].max(-ext.min_x);
+    }
+    let jitter_margin_mm = f64::from(MAX_JITTER) * GridPoint::STEP_MM;
+    let mut layer_x = vec![0_i32; max_layer as usize + 1];
+    for l in 1..=max_layer as usize {
+        let gap_mm =
+            layer_max_right[l - 1] + layer_max_left[l] + MIN_CLEARANCE_MM + 2.0 * jitter_margin_mm;
+        // Floor at the historical fixed stride (X_STRIDE_FLOOR) so
+        // all-small-symbol layers keep their previous, well-tuned
+        // spacing (no V12/V13/V5 perturbation); only an oversized
+        // layer (e.g. an opamp triangle) widens beyond it. The
+        // derivation only ever *widens*, never narrows below baseline.
+        let stride = mm_up_to_cells(gap_mm).max(X_STRIDE_FLOOR);
+        layer_x[l] = layer_x[l - 1] + stride;
+    }
 
     // Group elements per (layer, band) for band-aware Y stacking.
     // Within a layer, Top elements stack tightly at the top, Bot at
@@ -642,7 +829,7 @@ fn place_seed(checked: &CheckedNetlist) -> Result<(Placement, Vec<bool>), Vec<Di
     let mut bucket_rank: HashMap<(u32, Slot), i32> = HashMap::new();
     let mut placed: Vec<PlacedElement> = Vec::with_capacity(n);
     for (i, e) in checked.elements.iter().enumerate() {
-        let layer = i32::try_from(layer_asg.layers[i]).unwrap_or(i32::MAX);
+        let layer = layer_asg.layers[i] as usize;
         let slot = element_slot[i];
         let rank = bucket_rank
             .entry((layer_asg.layers[i], slot))
@@ -652,16 +839,15 @@ fn place_seed(checked: &CheckedNetlist) -> Result<(Placement, Vec<bool>), Vec<Di
         // Within a (layer, slot) bucket, alternate elements left/
         // right of the layer column so multiple elements at the
         // same Y target don't pile on the same X. The jitter is
-        // bounded to ±2 cells (well under X_STRIDE/2) to keep
-        // adjacent columns from clipping into each other.
-        let max_jitter = (X_STRIDE / 4).max(1);
+        // bounded to ±MAX_JITTER cells; the per-layer X spacing above
+        // reserves matching margin so adjacent columns never clip.
         let raw_jitter = if rank % 2 == 0 {
             -(rank / 2)
         } else {
             (rank + 1) / 2
         };
-        let x_jitter = raw_jitter.clamp(-max_jitter, max_jitter);
-        let x = layer * X_STRIDE + x_jitter;
+        let x_jitter = raw_jitter.clamp(-MAX_JITTER, MAX_JITTER);
+        let x = layer_x[layer] + x_jitter;
 
         // Reserve three sub-rows in Mid: upper / centre / lower.
         let mid_span = (y_mid_bot - y_mid_top).max(1);
@@ -754,28 +940,57 @@ fn apply_user_constraints(
         };
         let anchor_x_seed = placed[anchor_idx].origin.x;
         let row_y_seed = placed[anchor_idx].origin.y;
-        // Stride: one cluster gap per cluster, biased away from
-        // other clusters by `cluster_index` so they don't collide
-        // when seeds happen to coincide.
-        let stride = CELL_W + CLUSTER_GAP;
         let row_offset = cluster_index_i32 * (CELL_H + CLUSTER_GAP);
-        for (member_index, refdes) in spec.refdes.iter().enumerate() {
-            let member_index_i32 = i32::try_from(member_index).unwrap_or(i32::MAX);
+        // Spread members along the cluster axis. The stride between
+        // each adjacent pair is *geometry-derived* (HARD, at the
+        // spacing boundary): the gap covers both elements' resolved
+        // extents (orientation-transformed body bbox ∪ pin reach ∪
+        // value-text estimate) plus MIN_CLEARANCE_MM, snapped up to
+        // the grid. Align-pinned members keep identity orientation
+        // (`pick_orientations` skips pinned elements), so we compute
+        // extents in `Orientation::IDENTITY`.
+        //
+        // `cursor` is the running offset (in grid cells) from the
+        // anchor along the cluster axis; the first member sits at the
+        // anchor coord.
+        let mut cursor: i32 = 0;
+        let mut prev_extent: Option<WorldExtent> = None;
+        for refdes in &spec.refdes {
             let Some(&idx) = refdes_to_index.get(refdes.as_str()) else {
                 continue;
             };
-            if fixed[idx] {
-                continue;
+            let extent = world_extent(
+                &elements[idx].symbol,
+                Orientation::IDENTITY,
+                placed[idx].value.as_deref(),
+            );
+            if let Some(prev) = prev_extent {
+                let geom = match spec.axis {
+                    Axis::Horizontal => horizontal_stride_cells(&prev, &extent),
+                    Axis::Vertical => vertical_stride_cells(&prev, &extent),
+                };
+                // Floor at the historical fixed cluster stride so
+                // all-small-symbol clusters (e.g. diff_pair's RC1/RC2)
+                // keep their previous, well-tuned spacing; only a
+                // cluster with a wide member (a BJT) widens beyond it.
+                // The derivation only ever widens, never narrows below
+                // baseline (no V13 label/body perturbation on the
+                // small-symbol clusters).
+                let step = geom.max(CELL_W + CLUSTER_GAP);
+                cursor += step;
             }
-            let (x, y) = match spec.axis {
-                Axis::Horizontal => (anchor_x_seed + member_index_i32 * stride, row_y_seed),
-                Axis::Vertical => (
-                    anchor_x_seed + row_offset, // small per-cluster X bias
-                    row_y_seed + member_index_i32 * stride,
-                ),
-            };
-            placed[idx].origin = GridPoint::new(x, y);
-            fixed[idx] = true;
+            prev_extent = Some(extent);
+            if !fixed[idx] {
+                let (x, y) = match spec.axis {
+                    Axis::Horizontal => (anchor_x_seed + cursor, row_y_seed),
+                    Axis::Vertical => (
+                        anchor_x_seed + row_offset, // small per-cluster X bias
+                        row_y_seed + cursor,
+                    ),
+                };
+                placed[idx].origin = GridPoint::new(x, y);
+                fixed[idx] = true;
+            }
         }
     }
 

@@ -31,6 +31,7 @@ mod common;
 use std::path::{Path, PathBuf};
 
 use common::spice_to_kicad;
+use kicad_symbols::{Library, Orientation, Rotation};
 use lexpr::Value;
 
 // --- driver bits ---------------------------------------------------------
@@ -537,13 +538,6 @@ fn fixtures() -> Vec<(&'static str, PathBuf)> {
         .collect()
 }
 
-/// Approximate symbol footprint as a square `±half_mm` around its
-/// origin. We do not have access to the kicad-symbols library here,
-/// so we use a half-extent that covers the body of the largest
-/// fixture symbol (BJT/opamp body ≈ 2.54 mm radius from origin —
-/// pins extend further but they are *expected* to touch labels).
-const SYM_HALF_MM: f64 = 2.54;
-
 #[derive(Debug, Clone, Copy)]
 struct Bbox {
     x0: f64,
@@ -609,38 +603,145 @@ fn placed_symbols(root: &Value) -> Vec<(String, Pt)> {
     out
 }
 
-fn symbol_bbox(pos: Pt) -> Bbox {
-    // No padding: SYM_HALF_MM (2.54 mm) already covers a typical
-    // resistor / cap body; two adjacent symbols 5.08 mm apart on
-    // the same row are normal practice and must not flag as
-    // overlap. We only flag *true* body intersection (centres
-    // closer than `2 * SYM_HALF_MM`).
-    Bbox {
-        x0: pos.0 - SYM_HALF_MM,
-        y0: pos.1 - SYM_HALF_MM,
-        x1: pos.0 + SYM_HALF_MM,
-        y1: pos.1 + SYM_HALF_MM,
+/// Load the standard fixture libraries used by every test fixture.
+fn load_test_library() -> Library {
+    let libs_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("workspace root")
+        .join("crates/kicad-symbols/tests/fixtures");
+    let device =
+        Library::from_file(libs_dir.join("Device.kicad_sym")).expect("parse Device.kicad_sym");
+    let sim = Library::from_file(libs_dir.join("Simulation_SPICE.kicad_sym"))
+        .expect("parse Simulation_SPICE.kicad_sym");
+    let amp = Library::from_file(libs_dir.join("Amplifier_Operational.kicad_sym"))
+        .expect("parse Amplifier_Operational.kicad_sym");
+    let power =
+        Library::from_file(libs_dir.join("power.kicad_sym")).expect("parse power.kicad_sym");
+    device.merge(sim).merge(amp).merge(power)
+}
+
+/// Decode a placed `(symbol …)` instance's `(at x y rot)` plus
+/// optional `(mirror x|y)` token into an [`Orientation`] and translation.
+fn placed_symbol_pose(sym: &Value) -> Option<(f64, f64, Orientation)> {
+    let at = find_child(sym, "at")?;
+    let mut it = list_iter(at);
+    it.next();
+    let x = it.next().and_then(as_f64)?;
+    let y = it.next().and_then(as_f64)?;
+    let rot_deg = it.next().and_then(as_f64).unwrap_or(0.0);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let rot_u = ((rot_deg.round() as i64).rem_euclid(360)) as u16;
+    let rotation = match rot_u {
+        0 => Rotation::R0,
+        90 => Rotation::R90,
+        180 => Rotation::R180,
+        270 => Rotation::R270,
+        _ => return None,
+    };
+    let mirror_y = find_child(sym, "mirror")
+        .and_then(|m| list_iter(m).nth(1).and_then(as_str))
+        .is_some_and(|s| s == "y");
+    Some((x, y, Orientation { rotation, mirror_y }))
+}
+
+fn placed_symbol_refdes_and_lib_id(sym: &Value) -> Option<(String, String)> {
+    let mut lib_id = None;
+    if let Some(lid) = find_child(sym, "lib_id")
+        && let Some(s) = list_iter(lid).nth(1).and_then(as_str)
+    {
+        lib_id = Some(s.to_string());
+    }
+    let mut refdes = None;
+    for prop in children(sym, "property") {
+        let mut it = list_iter(prop);
+        it.next();
+        let key = it.next().and_then(as_str);
+        let val = it.next().and_then(as_str);
+        if key == Some("Reference") {
+            refdes = val.map(str::to_owned);
+            break;
+        }
+    }
+    Some((refdes?, lib_id?))
+}
+
+/// Resolved world extent of a placed `(symbol …)` instance: the AABB
+/// of the orientation-transformed body bbox unioned with the reach of
+/// every pin (pin stem endpoint). This is the *real* geometry the
+/// placer must keep non-overlapping — a blind fixed square (the old
+/// `SYM_HALF_MM` model) hides body/pin-stub overlap of wide parts
+/// like `Device:Q_NPN_BCE`.
+///
+/// Value-text width is deliberately excluded here: label/value-text
+/// overlap is V13's scope. The placer still pads its spacing for text
+/// (a separate clearance term), but this verifier only enforces the
+/// body+pin no-overlap clause (V6, Tier-1 readability).
+fn resolved_world_extent(library: &Library, sym: &Value) -> Option<(String, Bbox)> {
+    let (refdes, lib_id) = placed_symbol_refdes_and_lib_id(sym)?;
+    if refdes.starts_with("#PWR") || lib_id.starts_with("power:") {
+        return None;
+    }
+    let (ox, oy, orient) = placed_symbol_pose(sym)?;
+    let lib_sym = library.lookup(&lib_id)?;
+
+    let mut x0 = f64::INFINITY;
+    let mut y0 = f64::INFINITY;
+    let mut x1 = f64::NEG_INFINITY;
+    let mut y1 = f64::NEG_INFINITY;
+    let mut grow = |wx: f64, wy: f64| {
+        x0 = x0.min(wx);
+        y0 = y0.min(wy);
+        x1 = x1.max(wx);
+        y1 = y1.max(wy);
+    };
+
+    // Body bbox, orientation-transformed into world coords
+    // (rotate/mirror via apply_point, then eeschema y-flip).
+    if let Some(local) = lib_sym.body_bbox() {
+        for (lx, ly) in [
+            (local.x0, local.y0),
+            (local.x0, local.y1),
+            (local.x1, local.y0),
+            (local.x1, local.y1),
+        ] {
+            let (rx, ry) = orient.apply_point(lx, ly);
+            grow(ox + rx, oy - ry);
+        }
+    }
+    // Pin reach: each pin's endpoint extends the extent.
+    for tp in lib_sym.pins_in(orient) {
+        grow(ox + tp.x, oy - tp.y);
+    }
+
+    if x0.is_finite() && x1.is_finite() && y0.is_finite() && y1.is_finite() {
+        Some((refdes, Bbox { x0, y0, x1, y1 }))
+    } else {
+        None
     }
 }
 
+/// No two placed symbols' *resolved* extents (orientation-transformed
+/// body bbox ∪ pin reach) may intersect. Budget 0, ratchet (CLAUDE.md
+/// V6 no-overlap clause — Tier-1 readability). Replaces the old blind
+/// 2.54 mm fixed-square model, which could not see wide parts'
+/// body/pin-stub overlap.
 #[test]
 fn no_symbol_symbol_overlap_across_fixtures() {
+    let library = load_test_library();
     for (name, path) in fixtures() {
         let tmp = tempdir(name);
         let sch = common::spice_to_kicad(&path, &tmp).expect("spice2kicad");
         let root = parse_sch(&sch);
-        let placed = placed_symbols(&root);
-        // Filter out the lib_symbols entries: those have no `(at …)`
-        // here because we walk top-level only via `children(root, …)`.
-        let bboxes: Vec<(String, Bbox)> = placed
-            .iter()
-            .map(|(r, p)| (r.clone(), symbol_bbox(*p)))
+        let bboxes: Vec<(String, Bbox)> = children(&root, "symbol")
+            .into_iter()
+            .filter_map(|sym| resolved_world_extent(&library, sym))
             .collect();
         for i in 0..bboxes.len() {
             for j in (i + 1)..bboxes.len() {
                 assert!(
                     !bboxes[i].1.intersects(&bboxes[j].1),
-                    "{}: symbols {} and {} overlap (bboxes {:?} / {:?})",
+                    "{}: symbols {} and {} overlap (resolved extents {:?} / {:?})",
                     name,
                     bboxes[i].0,
                     bboxes[j].0,

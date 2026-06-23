@@ -375,6 +375,72 @@ clustering effect without forcing geometry.
 
 ---
 
+## ADR-11 — Routing-aware orientation refinement uses the real router
+
+**Status: wired.** Implemented as a placement-stage pass in
+`crates/kicad-emitter/src/refine.rs` (`refine_orientations`), called
+from the CLI orchestrator (`crates/spice2kicad/src/main.rs`) after
+`spice_layout::place_with_hint` and before `kicad_emitter::emit_root`.
+It is Layout phase 4.5 in CLAUDE.md.
+
+**Context.** V5 ("the first wire segment at every pin extends outward")
+is a *quality* invariant the placer is supposed to satisfy by choosing
+good orientations. But a V5 violation is not visible to any
+placement-side model: it is **born in the router's post-construction
+conflict-resolution passes** (`spice_route::conflict::{avoid_foreign_pins,
+avoid_obstacles}`), which re-route the locally-ideal stub away from a
+foreign pin or a body to keep V11/V12. A pre-route orientation scorer
+(the V5 seed heuristic in `pick_orientations`, the SA) cannot see that
+rewrite, so it cannot reliably minimise the *real* V5. A prior
+investigation confirmed that trialling allowed orientations and routing
+them *for real* reaches the optimum (e.g. `opamp_inverting_real`'s
+RIN=R0, RF=R0, X1 un-mirrored → V5 1, down from 3) where a placement-only
+model stalls.
+
+**Decision.** Select orientations with the real router in the loop.
+Because the measurement requires routing, the pass must live where both
+the placer's `Placement` and `spice_route::route` are visible.
+`spice-layout` *cannot* depend on `spice-route` (that edge would close a
+cycle — `spice-route` already depends on `spice-layout`); `kicad-emitter`
+depends on both, so the pass lives there. It runs as a **placement**
+phase (before decoration), so the decoration contract ("decoration never
+moves/rotates a placed symbol") is untouched: orientation is finalised
+before the final `route_nets`/glyph/label pass begins.
+
+**Mechanism.**
+
+1. For each at-risk, non-pinned, non-symmetry element (those producing a
+   real V5 violation, plus their shared-signal-net neighbours), trial
+   each orientation in the element's V14-allowed set
+   (`spice_layout::orient::allowed_orientations` — never widened),
+   geometrically deduped so a symmetric resistor's eight orientations
+   collapse to the few distinct pin layouts.
+2. For each candidate, run the real router (`trial_route`) and measure
+   the router's real V5 via the **shared** `kicad_emitter::v5::
+   count_outward_violations`. That same function is called by the V5
+   verifier (`spice2kicad/tests/electrical_safety.rs`), so the oracle and
+   the grader can never drift.
+3. Accept a candidate only if it *strictly* reduces total real V5 AND
+   does not increase V11 residue, symbol-body overlap, V12 foreign-body
+   crossings, or V13 label overlaps. Higher-/equal-tier invariants are
+   thus never traded for the V5 gain (CLAUDE.md tier rule).
+4. A cheap greedy single-element descent runs first (each accepted step
+   strictly lowers V5); a bounded combinatorial joint search over the
+   active set (cartesian product capped) handles violations only
+   removable by rotating several elements together, early-exiting on the
+   first zero-V5 combination. Deterministic throughout (no clock/RNG;
+   stable iteration order), so the layout cache stays reproducible.
+
+**Why not a placer-side V5 cost or seed heuristic instead.** Tried and
+insufficient: the violation does not exist until the router's conflict
+passes run, so no pre-route term can score it faithfully. V5 remains a
+soft seed heuristic in `pick_orientations` for the common case; this
+phase is the router-in-the-loop refinement that closes the cases the
+seed heuristic and SA cannot see. There is deliberately still **no V5 SA
+cost term** (see CLAUDE.md "Constraints vs. costs").
+
+---
+
 ## What we are not deciding now
 
 - ~~Sidecar file format (JSON vs TOML vs custom). Pick during

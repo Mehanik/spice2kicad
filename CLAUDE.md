@@ -144,6 +144,18 @@ Layout phases (later phases never override earlier):
 2. Aligned (`align`)
 3. Placed (`place`)
 4. Auto-fill (force-directed within parent cluster)
+4.5. **Routing-aware orientation refinement** — a *placement-stage*
+   pass (lives in `kicad-emitter`, the one crate that can see both the
+   placer and the real router; `spice-layout` cannot depend on
+   `spice-route` without forming a cycle). After phases 1–4 and BEFORE
+   Decoration, it trial-routes candidate orientations of at-risk,
+   non-pinned, non-symmetry elements with the **real router** and keeps
+   the orientation minimising the router's *measured* first-segment-
+   outward (V5) violations — subject to no V11 / V12 / symbol-overlap /
+   V13 regression. It changes element *orientation* only, never
+   position, and **never runs during or after decoration**. This is
+   placement, not decoration: it owns orientation; decoration consumes
+   it. See ADR-11.
 5. **Decoration** — routing (wires), power/ground glyphs, labels,
    junctions. Reads final symbol positions; never moves them.
 
@@ -157,8 +169,13 @@ with, **not** emitted at a hardcoded page coordinate. See V6's
 Decoration is a strict consumer of placement output: it may add wire
 stubs, detached glyphs, junctions, and labels, but must never feed a
 position or orientation change back into an already-placed symbol.
-This is the contract the V14 glyph-direction work and the upcoming RC
-fix must respect.
+This contract is unchanged. The routing-aware orientation refinement
+(phase 4.5) is **placement**, not decoration: it may change orientation
+because it runs *before* decoration begins. Once decoration starts —
+the final `route_nets` / glyph / label pass — no symbol moves or
+rotates. The V14 glyph-direction work and the routing-aware refinement
+both respect this: refinement reorients during placement; decoration
+only reads the result.
 
 For full grammar, examples, and diagnostics, see
 `docs/annotation-spec.md`.
@@ -304,18 +321,26 @@ safe weights does nothing). V14 belongs in the candidate filter.
 | V11 wire/pin coincidence | hard (router conflict resolution)    |
 | V14 power-glyph orient.  | hard + detached-glyph stub fallback  |
 | V12 obstacle avoidance   | hard with budgeted-fallback (logs)   |
-| V5 pin-facing            | soft (seed heuristic; no SA term*)   |
+| V5 pin-facing            | soft seed + routing-aware refine*    |
 | V6 bands/layers          | soft seed + soft cost terms          |
 | V7 symmetry              | soft (mirror move, deferred)         |
 
-*Discrepancies vs. the original guess.* (a) **V5 is not an SA cost
-term** — `cost.rs` has no `pin_facing`/orientation term; V5 is a
-*seed-time heuristic* in `pick_orientations`, and the SA `rotate`
-move can override it (consistent with V5 being Tier-2 quality).
-(b) **There is no `power_pin_outward` term** in `CostWeights` — the
-"soft cost" Attempt A described is not in the current tree. (c) V14
-is currently *unenforced* at both stages; the table row states the
-target design, not today's behaviour.
+*Discrepancies vs. the original guess.* (a) **V5 is still not an SA
+cost term** — `cost.rs` has no `pin_facing`/orientation term. V5 is
+enforced in two non-SA stages: a *seed-time heuristic* in
+`pick_orientations` (the SA `rotate` move may override it), AND the
+**routing-aware orientation-refinement phase** (Layout phase 4.5,
+ADR-11) — a placement-stage pass in `kicad-emitter` that uses the
+*real router* as an oracle to pick the orientation minimising the
+router's measured first-segment-outward count, subject to no
+V11/V12/overlap/V13 regression. This is correct precisely because a
+V5 violation is born in the router's conflict-resolution passes,
+invisible to any placement-side cost. (b) **There is no
+`power_pin_outward` term** in `CostWeights` — the "soft cost" Attempt
+A described is not in the current tree. (c) V14 is enforced as a hard
+candidate filter (`orient::allowed_orientations`) at both the seed
+chooser and the SA rotate move; the refinement phase only ever
+selects from that same allowed set, so it cannot break V14.
 
 ## Visual quality invariants
 
@@ -589,6 +614,36 @@ literals above.
   `common_emitter_signal_flows_left_to_right`.
   Thresholds are calibrated per fixture. The channel-router floor
   on crossing counts remains a v0.2 improvement target.
+
+  **No-overlap clause (Tier-1, budget 0, ratchet).** The
+  `no_symbol_symbol_overlap_across_fixtures` verifier compares each
+  placed symbol's *real resolved extent* — the orientation-transformed
+  `body_bbox` unioned with its pin-stub reach, in world coords (via
+  `placed_symbol_pose` + `Library::lookup` + `pins_in`) — and asserts
+  **no two resolved extents intersect** (budget 0, drive down never up).
+  It is no longer the old blind fixed 2.54 mm half-square, which could
+  not see a wide part's body/pin-stub overlap (a `Device:Q_NPN_BCE`
+  spans roughly -10.8…+13 mm once pins and value text are counted, far
+  past a 8.89 mm neighbour stride). The placer guarantees this by
+  *deriving adjacent-element spacing from geometry*: the gap between any
+  two adjacent elements is `≥ left.right_extent + right.left_extent +
+  CLEARANCE`, snapped up to the grid, where each extent =
+  orientation-transformed `body_bbox` ∪ pin-stub reach ∪ value-text-width
+  estimate. This is a **hard constraint at the spacing/candidate boundary**
+  (the align-cluster stride and the seed per-layer X positions in
+  `crates/spice-layout/src/lib.rs`; both floor at the historical fixed
+  stride so well-behaved small-symbol clusters keep their tuned spacing
+  and only oversized parts widen), plus a matching SA "never-increase"
+  hard gate (`symbol_overlap_count` in `solver/anneal.rs`, whose
+  overlap measure now uses the full footprint = body ∪ pin reach). It is
+  **not** a soft cost (no clearance weight in `cost.rs` — that would
+  recreate the documented Attempt-A failure). Unlike V6's other metrics
+  (band/layer placement, signal-flow), which are Tier-2 aesthetic
+  refinements, this non-overlap clause is tiered **Tier-1 readability**:
+  a symbol body or pin stub spearing a neighbour is a legibility defect
+  a reader flags on sight, exactly the V12/V13 precedent (a wire through
+  a body, a label over a body). Tier-0/1/2 ordering still applies — the
+  no-overlap clause may never be regressed to improve a Tier-2 metric.
 
   **Hierarchical-sheet instances are placeable units.** A default-path
   `.subckt` instance (no `*@symbol` override) lowered to a KiCad

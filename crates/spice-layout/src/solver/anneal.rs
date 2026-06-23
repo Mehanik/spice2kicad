@@ -365,26 +365,37 @@ fn foreign_pin_coincidences(placement: &Placement, checked: &CheckedNetlist) -> 
     at.values().filter(|nets| nets.len() >= 2).count()
 }
 
-/// World-frame half-extents (`half_w`, `half_h`, mm) of an element's
-/// graphical body in a given orientation.
-///
-/// Uses the symbol's real `body_bbox`: an oversized part (an opamp
-/// triangle, ~5 mm half-extent) is spaced apart while a small part (a
-/// ~1 mm resistor body) is left free to pack tightly, so this gate
-/// perturbs only the layouts that genuinely collide. A 90°/270°
-/// rotation swaps the width and height extents. A symbol with no
-/// graphical body contributes zero extent (it can never collide).
+/// World-frame *body* half-extents (`half_w`, `half_h`, mm) of an
+/// element's graphical body in a given orientation. Used only to
+/// decide whether a part is "oversized vs the cost cell" — the gate's
+/// activation key. Body-only (excludes pin stems) so the activation
+/// set stays exactly as before: only a genuinely large body (an opamp
+/// triangle) trips the gate, leaving every all-small-symbol fixture's
+/// SA trajectory byte-identical.
 fn body_half_extents(el: &spice_resolve::ResolvedElement, orient: Orientation) -> (f64, f64) {
-    let (mut hw, mut hh) = el.symbol.body_bbox().map_or((0.0, 0.0), |b| {
-        // Half-extents from the symbol origin (0,0): the body may be
-        // off-centre, so take the larger absolute reach on each axis
-        // — that is the distance the body can collide outward.
-        let hw = b.x0.abs().max(b.x1.abs());
-        let hh = b.y0.abs().max(b.y1.abs());
-        (hw, hh)
-    });
-    if matches!(orient.rotation, Rotation::R90 | Rotation::R270) {
-        std::mem::swap(&mut hw, &mut hh);
+    let mut hw = 0.0_f64;
+    let mut hh = 0.0_f64;
+    if let Some(b) = el.symbol.body_bbox() {
+        for (lx, ly) in [(b.x0, b.y0), (b.x0, b.y1), (b.x1, b.y0), (b.x1, b.y1)] {
+            let (rx, ry) = orient.apply_point(lx, ly);
+            hw = hw.max(rx.abs());
+            hh = hh.max(ry.abs());
+        }
+    }
+    (hw, hh)
+}
+
+/// World-frame *footprint* half-extents (`half_w`, `half_h`, mm): the
+/// orientation-transformed body bbox unioned with the reach of every
+/// pin stem. Matches the `no_symbol_symbol_overlap` verifier so that,
+/// once the gate is active for a pair, it forbids exactly the overlaps
+/// that verifier flags — including a body that merely kisses a
+/// neighbour but whose pin stem then spears it.
+fn footprint_half_extents(el: &spice_resolve::ResolvedElement, orient: Orientation) -> (f64, f64) {
+    let (mut hw, mut hh) = body_half_extents(el, orient);
+    for p in el.symbol.pins_in(orient) {
+        hw = hw.max(p.x.abs());
+        hh = hh.max(p.y.abs());
     }
     (hw, hh)
 }
@@ -425,10 +436,15 @@ fn symbol_overlap_count(placement: &Placement, checked: &CheckedNetlist) -> usiz
         .iter()
         .zip(&placement.elements)
         .map(|(el, placed)| {
-            let (hw, hh) = body_half_extents(el, placed.orientation);
+            // Activation key: body-only (unchanged set — only a large
+            // body trips the gate). Overlap measure: full footprint
+            // (body ∪ pin reach) so a pin stub spearing a neighbour is
+            // caught.
+            let (bhw, bhh) = body_half_extents(el, placed.orientation);
+            let (fhw, fhh) = footprint_half_extents(el, placed.orientation);
             let (ox, oy) = placed.origin.to_mm();
-            let oversized = hw > cell_hw + 1e-6 || hh > cell_hh + 1e-6;
-            (ox, oy, hw, hh, oversized)
+            let oversized = bhw > cell_hw + 1e-6 || bhh > cell_hh + 1e-6;
+            (ox, oy, fhw, fhh, oversized)
         })
         .collect();
     let eps = 1e-3;

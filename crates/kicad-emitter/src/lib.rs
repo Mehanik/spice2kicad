@@ -8,8 +8,10 @@
 
 pub mod mapping;
 pub mod netlist;
+pub mod refine;
 pub mod schematic;
 pub mod sexpr;
+pub mod v5;
 
 use kicad_symbols::Library;
 use spice_layout::Placement;
@@ -47,4 +49,5 @@ pub fn emit_schematic(placement: &Placement, library: &Library) -> Result<String
     schematic::emit(placement, library)
 }
 
+pub use refine::refine_orientations;
 pub use schematic::{ChildSheet, SheetBlock, SheetPort, emit_child_sheet, emit_root};

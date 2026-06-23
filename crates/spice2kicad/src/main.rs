@@ -204,13 +204,37 @@ fn emit_schematic_target(
     // (`place_sheets` needs net classification); `place_with_hint`
     // consumes the original by value.
     let checked_for_sheets = checked.clone();
-    let placement = match spice_layout::place_with_hint(checked, &library, &opts, &hint) {
+    // `refinement_meta` recomputes the placer's pinned/allowed state for
+    // the routing-aware orientation-refinement phase below; it needs the
+    // same `CheckedNetlist`, so compute it before `place_with_hint`
+    // consumes `checked` by value.
+    let refine_meta = match spice_layout::refinement_meta(&checked, &hint) {
+        Ok(m) => m,
+        Err(diags) => {
+            surface_diags(&diags, sources);
+            std::process::exit(1);
+        }
+    };
+    let mut placement = match spice_layout::place_with_hint(checked, &library, &opts, &hint) {
         Ok(p) => p,
         Err(diags) => {
             surface_diags(&diags, sources);
             std::process::exit(1);
         }
     };
+
+    // Layout phase 4.5 — routing-aware orientation refinement (CLAUDE.md
+    // "Layout phases"). Runs AFTER placement and BEFORE the emitter's
+    // route_nets/decoration: trial-routes V14-allowed candidate
+    // orientations with the *real* router and selects the one minimising
+    // the router's measured first-segment-outward (V5) violations,
+    // without regressing V11/V12/symbol-overlap. It changes orientation
+    // only (never position); decoration remains a strict consumer. Skip
+    // when refinement is disabled (`--no-refine`), keeping the un-refined
+    // SA path unchanged.
+    if opts.refine {
+        kicad_emitter::refine_orientations(&mut placement, &library, &refine_meta);
+    }
 
     // V6: position each hierarchical-sheet instance adjacent to the
     // circuitry it shares signal nets with, rather than at a fixed
