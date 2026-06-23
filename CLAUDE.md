@@ -147,6 +147,13 @@ Layout phases (later phases never override earlier):
 5. **Decoration** — routing (wires), power/ground glyphs, labels,
    junctions. Reads final symbol positions; never moves them.
 
+A default-path `.subckt` instance — one lowered to a KiCad
+hierarchical `(sheet …)` block — participates in placement like any
+other element: it is positioned by the structural pipeline
+(classify→bands→layers, V6) adjacent to the elements it shares nets
+with, **not** emitted at a hardcoded page coordinate. See V6's
+"Hierarchical-sheet instances are placeable units" clause.
+
 Decoration is a strict consumer of placement output: it may add wire
 stubs, detached glyphs, junctions, and labels, but must never feed a
 position or orientation change back into an already-placed symbol.
@@ -583,6 +590,37 @@ literals above.
   Thresholds are calibrated per fixture. The channel-router floor
   on crossing counts remains a v0.2 improvement target.
 
+  **Hierarchical-sheet instances are placeable units.** A default-path
+  `.subckt` instance (no `*@symbol` override) lowered to a KiCad
+  `(sheet …)` block is a first-class placeable unit fed through the
+  same V6 pipeline as any symbol: its ports' parent nets are its
+  `nodes`, its body bbox is the sheet rectangle (~30.48 mm wide), and
+  its port pins are the sheet-edge pins. It is positioned **adjacent
+  to the elements it shares Signal nets with**, NOT at a hardcoded page
+  coordinate, so its port trunk wires are bounded like any other net.
+  (Power/Ground ports become `power:*` glyphs at the sheet pin per V10,
+  so they carry no trunk wire and don't pull the sheet.) The sheet does
+  **not** flow through the V5/V14 orientation or SA passes — those index
+  real symbol pin geometry; the sheet has identity orientation and a
+  fixed rectangle, so it is placed by `spice_layout::place_sheets`
+  (`crates/spice-layout/src/sheets.rs`) after the real-element placer
+  runs, from the *final* neighbour positions, then de-overlapped against
+  every real symbol body and every other sheet. Multi-sheet files get
+  distinct non-overlapping rectangles (replacing the old `idx*60`
+  page-column stacking). Like the rest of V6 this is a **Tier 2**
+  quality property.
+  Verifier: `hierarchical_sheet_placed_near_circuit`
+  (`crates/spice2kicad/tests/placement_quality.rs`) — for every
+  emitted parent `(sheet …)` block, asserts its `(at …)` lands within
+  the circuit's symbol-bbox expanded by a small geometry-derived margin
+  (so a sheet flung off-page fails), AND the longest emitted
+  `(wire …)` segment stays under a per-fixture sheet-port trunk-wire
+  budget (`SHEET_TRUNK_WIRE_BUDGET_MM`, a recorded high-water-mark
+  ratchet driven down, never up). The verifier derives everything from
+  the emitted geometry — no fixture name or magic coordinate is
+  hardcoded. Plus `crates/spice-layout/src/sheets.rs::tests`:
+  single-sheet proximity, multi-sheet non-overlap, grid-snap.
+
 - **V7 — Symmetry-aware placement.** When the placer detects a
   structural symmetry in the netlist — a refdes pairing under which
   the resolved netlist is graph-isomorphic, modulo node renames —
@@ -657,7 +695,12 @@ literals above.
   Interaction with V6 (structural placement): the V6 net-class and
   signal-flow pipeline places X-instances in the correct band and
   layer using only structural information; V8 controls whether that
-  instance is rendered as a flat symbol or a hierarchical sheet. V8
+  instance is rendered as a flat symbol or a hierarchical sheet.
+  Either way the instance is V6-placed near the circuit: the
+  `*@symbol`-override (flat-symbol) path places it as an ordinary
+  element; the default (sheet) path positions the `(sheet …)` block
+  via `spice_layout::place_sheets` — see V6's "Hierarchical-sheet
+  instances are placeable units" clause. V8
   is the explicit-override floor; a future auto-promotion heuristic
   (e.g. recognising a canonical opamp port-name pattern) is the
   zero-annotation ceiling and belongs in a v0.2 pass.

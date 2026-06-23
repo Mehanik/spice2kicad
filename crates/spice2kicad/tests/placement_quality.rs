@@ -1129,6 +1129,153 @@ fn v15_fixtures() -> Vec<(&'static str, PathBuf)> {
     out
 }
 
+// --- V6: hierarchical sheets are placeable units -------------------------
+//
+// A default-path `.subckt` instance becomes a KiCad `(sheet …)` block. It
+// must be positioned by the structural placer (classify→bands→layers),
+// landing adjacent to the symbols it shares nets with — NOT at a fixed
+// off-circuit page coordinate that forces ~180 mm trunk wires.
+//
+// The verifier is fully general: it derives the circuit bbox from the
+// emitted top-level `(symbol …)` `(at …)` coordinates and asserts every
+// `(sheet …)` `(at …)` lands within that bbox expanded by a small margin.
+// No fixture name or magic coordinate is hardcoded. The sheet-port
+// trunk-wire budget is a recorded high-water mark (ratchet), driven down,
+// never up.
+
+/// `(at x y …)` of every top-level `(symbol …)` instance (the placed
+/// circuit components). Excludes `(lib_symbols …)` definition geometry.
+fn symbol_instance_origins(root: &Value) -> Vec<Pt> {
+    let mut out = Vec::new();
+    for sym in children(root, "symbol") {
+        if let Some(at) = find_child(sym, "at") {
+            let mut it = list_iter(at);
+            it.next(); // head
+            if let (Some(x), Some(y)) = (it.next().and_then(as_f64), it.next().and_then(as_f64)) {
+                out.push((x, y));
+            }
+        }
+    }
+    out
+}
+
+/// `(refdes, (at x y))` of every top-level `(sheet …)` block. The refdes
+/// is read from the `Sheetname` property the emitter stamps with the
+/// SPICE instance designator.
+fn sheet_origins(root: &Value) -> Vec<(String, Pt)> {
+    let mut out = Vec::new();
+    for sheet in children(root, "sheet") {
+        let Some(at) = find_child(sheet, "at") else {
+            continue;
+        };
+        let mut it = list_iter(at);
+        it.next(); // head
+        let (Some(x), Some(y)) = (it.next().and_then(as_f64), it.next().and_then(as_f64)) else {
+            continue;
+        };
+        let mut refdes = String::from("?");
+        for prop in children(sheet, "property") {
+            let mut pit = list_iter(prop);
+            pit.next(); // head "property"
+            if pit.next().and_then(as_str) == Some("Sheetname") {
+                if let Some(v) = pit.next().and_then(as_str) {
+                    refdes = v.to_string();
+                }
+            }
+        }
+        out.push((refdes, (x, y)));
+    }
+    out
+}
+
+/// Per-fixture longest sheet-port trunk-wire budget (mm). RATCHET —
+/// recorded high-water mark from the post-fix run; only ever lowered.
+/// Before the structural-sheet fix `opamp_inverting`'s longest sheet
+/// trunk wire was ~182 mm (sheet pinned at x=200 mm, circuit near the
+/// origin). After it the sheet lands adjacent to the circuit.
+const SHEET_TRUNK_WIRE_BUDGET_MM: &[(&str, f64)] = &[("opamp_inverting", 60.0)];
+
+/// Slack (mm) around the circuit bbox within which a sheet `(at …)` must
+/// land to count as "near the circuit". A sheet is a ~30 mm box; one
+/// symbol-pitch of slack lets a sheet abutting the circuit still pass,
+/// while a sheet flung to x≈200 mm fails by a wide margin.
+const SHEET_NEAR_MARGIN_MM: f64 = 40.0;
+
+/// Longest single `(wire …)` segment length (Manhattan) on the schematic.
+/// Sheet-port trunk wires are by far the longest segments when a sheet is
+/// flung across the page, so the global max is a faithful proxy.
+fn longest_wire_segment(root: &Value) -> f64 {
+    wire_segments(root)
+        .into_iter()
+        .map(|(a, b)| manhattan(a, b))
+        .fold(0.0_f64, f64::max)
+}
+
+#[test]
+fn hierarchical_sheet_placed_near_circuit() {
+    // Fixtures that emit a default-path `(sheet …)` block.
+    let cases: &[(&str, PathBuf)] = &[(
+        "opamp_inverting",
+        fixtures_dir().join("opamp_inverting.cir"),
+    )];
+
+    for (name, path) in cases {
+        let tmp = tempdir(name);
+        let sch = spice_to_kicad(path, &tmp).expect("spice2kicad");
+        let root = parse_sch(&sch);
+
+        let symbols = symbol_instance_origins(&root);
+        assert!(
+            !symbols.is_empty(),
+            "{name}: no top-level symbols emitted; cannot derive circuit bbox",
+        );
+        let sheets = sheet_origins(&root);
+        assert!(
+            !sheets.is_empty(),
+            "{name}: expected at least one (sheet …) block",
+        );
+
+        // Circuit bounding box from the placed symbol origins.
+        let min_x = symbols.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
+        let min_y = symbols.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
+        let max_x = symbols
+            .iter()
+            .map(|c| c.0)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let max_y = symbols
+            .iter()
+            .map(|c| c.1)
+            .fold(f64::NEG_INFINITY, f64::max);
+
+        // A sheet is a ~30 mm box; allow one symbol-pitch of slack around
+        // the circuit bbox so a sheet abutting the circuit still counts as
+        // "near". This is geometry-derived, not a magic coordinate: a
+        // sheet flung to x=200 mm with the circuit near the origin fails
+        // by a wide margin.
+        for (refdes, (sx, sy)) in &sheets {
+            assert!(
+                *sx >= min_x - SHEET_NEAR_MARGIN_MM
+                    && *sx <= max_x + SHEET_NEAR_MARGIN_MM
+                    && *sy >= min_y - SHEET_NEAR_MARGIN_MM
+                    && *sy <= max_y + SHEET_NEAR_MARGIN_MM,
+                "{name}: sheet {refdes} at ({sx:.2}, {sy:.2}) is outside the \
+                 circuit bbox [{min_x:.2}..{max_x:.2}] x [{min_y:.2}..{max_y:.2}] \
+                 expanded by {SHEET_NEAR_MARGIN_MM} mm — sheet flung off the circuit",
+            );
+        }
+
+        // Sheet-port trunk-wire budget (ratchet).
+        if let Some(&(_, budget)) = SHEET_TRUNK_WIRE_BUDGET_MM.iter().find(|(n, _)| n == name) {
+            let longest = longest_wire_segment(&root);
+            assert!(
+                longest <= budget + 1e-6,
+                "{name}: longest wire segment {longest:.2} mm > budget {budget:.2} mm \
+                 (ratchet high-water mark) — sheet trunk wire regressed",
+            );
+        }
+    }
+}
+
 #[test]
 fn v15_content_within_page_bounds() {
     for (name, path) in v15_fixtures() {

@@ -200,6 +200,10 @@ fn emit_schematic_target(
         .map(|s| s.to_hint())
         .unwrap_or_default();
 
+    // Keep a copy of the checked netlist for structural sheet placement
+    // (`place_sheets` needs net classification); `place_with_hint`
+    // consumes the original by value.
+    let checked_for_sheets = checked.clone();
     let placement = match spice_layout::place_with_hint(checked, &library, &opts, &hint) {
         Ok(p) => p,
         Err(diags) => {
@@ -207,6 +211,18 @@ fn emit_schematic_target(
             std::process::exit(1);
         }
     };
+
+    // V6: position each hierarchical-sheet instance adjacent to the
+    // circuitry it shares signal nets with, rather than at a fixed
+    // off-circuit page coordinate. Returns refdes → world origin (mm).
+    let sheet_origins: std::collections::HashMap<String, (f64, f64)> = spice_layout::place_sheets(
+        &checked_for_sheets,
+        &placement,
+        &library,
+        &top_sheet_instances,
+    )
+    .into_iter()
+    .collect();
 
     // Rewrite the sidecar from the freshly-computed placement on every
     // run. Removed refdeses simply do not appear in the new snapshot, so
@@ -274,6 +290,7 @@ fn emit_schematic_target(
                 refdes: inst.refdes.clone(),
                 sheet_file: format!("{}.kicad_sch", inst.subckt_name),
                 ports,
+                origin: sheet_origins.get(&inst.refdes).copied(),
             })
         })
         .collect();

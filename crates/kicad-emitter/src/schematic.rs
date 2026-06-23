@@ -69,6 +69,12 @@ pub struct SheetBlock {
     /// Port name → SPICE net name on the parent. Order matches the
     /// child sheet's port list.
     pub ports: Vec<SheetPort>,
+    /// World origin `(x_mm, y_mm)` of the sheet's top-left `(at …)`,
+    /// computed by the structural placer (`spice_layout::place_sheets`).
+    /// When `None` the emitter falls back to a fixed off-circuit
+    /// coordinate (used by callers that don't run the placer, e.g. the
+    /// in-crate unit tests).
+    pub origin: Option<(f64, f64)>,
 }
 
 /// One port of a [`SheetBlock`] — the port name visible on the sheet
@@ -259,13 +265,14 @@ pub fn emit_child_sheet(child: &ChildSheet<'_>, library: &Library) -> Result<Str
 /// Render a `(sheet …)` block plus the `(global_label …)` pieces that
 /// pin its port symbols to the parent net coordinates.
 fn sheet_block(block: &SheetBlock, idx: usize) -> (Sexpr, Vec<Sexpr>, Vec<(String, f64, f64)>) {
-    // Lay out sheets one above the next, leftmost column. Coordinates
-    // are arbitrary; KiCad's connectivity engine matches by sheet pin
-    // name + colocated label, not by geometry.
+    // Origin is supplied by the structural placer
+    // (`spice_layout::place_sheets`) so the sheet lands adjacent to the
+    // circuitry it shares nets with (V6). Without a placer-supplied
+    // origin (e.g. callers that bypass layout), fall back to a fixed
+    // off-circuit column stacked by index.
     #[allow(clippy::cast_precision_loss)]
-    let origin_x: f64 = 200.0;
-    #[allow(clippy::cast_precision_loss)]
-    let origin_y: f64 = 50.0 + (idx as f64) * 60.0;
+    let (origin_x, origin_y): (f64, f64) =
+        block.origin.unwrap_or((200.0, 50.0 + (idx as f64) * 60.0));
     let pin_count = block.ports.len();
     #[allow(clippy::cast_precision_loss)]
     let height = (pin_count as f64).max(2.0) * 5.08 + 5.08;

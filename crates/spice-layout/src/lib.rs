@@ -28,10 +28,12 @@ pub mod cost;
 pub mod layers;
 pub mod net_class;
 pub mod orient;
+pub mod sheets;
 pub mod sidecar;
 mod solver;
 mod symmetry;
 
+pub use sheets::place_sheets;
 pub use solver::LayoutOptions;
 
 use std::collections::{HashMap, HashSet};
