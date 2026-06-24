@@ -193,6 +193,7 @@ pub fn emit_root(
     // Runs after routing + labels (so it sees the final geometry) and
     // before page translation. Moves TEXT only — never a symbol pose.
     nudge_property_text(&mut items, placement, library);
+    nudge_power_glyph_value_text(&mut items, placement, library);
 
     let mut root = Sexpr::List(items);
     translate_into_page(&mut root);
@@ -313,6 +314,7 @@ pub fn emit_child_sheet(child: &ChildSheet<'_>, library: &Library) -> Result<Str
 
     // DECORATION-phase text-nudge (V13 part 4) — see `emit_root`.
     nudge_property_text(&mut items, child.placement, library);
+    nudge_power_glyph_value_text(&mut items, child.placement, library);
 
     let mut root = Sexpr::List(items);
     translate_into_page(&mut root);
@@ -2076,6 +2078,244 @@ fn nudge_property_text(items: &mut [Sexpr], placement: &Placement, library: &Lib
             // Rewrite the matching property's `(at …)` in `items`.
             let (ax, ay) = property_anchor(ox, oy, el.orientation, chosen.0, chosen.1);
             set_property_anchor(items, &el.refdes, key, ax, ay);
+        }
+    }
+}
+
+/// Centred text bbox (no `(justify …)` → KiCad centres the field
+/// horizontally about its anchor). Power-glyph net-name `Value` text is
+/// emitted without a justify, so it renders centred; modelling it
+/// left-anchored would over-estimate its rightward reach. Height and
+/// per-char advance match [`text_bbox`].
+fn centered_text_bbox(text: &str, anchor: (f64, f64)) -> TextBbox {
+    let size = 1.27_f64;
+    #[allow(clippy::cast_precision_loss)]
+    let chars = text.chars().count() as f64;
+    let width = chars * 0.6 * size + 0.8 * size;
+    let height = 1.4 * size;
+    TextBbox {
+        x0: anchor.0 - width / 2.0,
+        y0: anchor.1 - height / 2.0,
+        x1: anchor.0 + width / 2.0,
+        y1: anchor.1 + height / 2.0,
+    }
+}
+
+/// World-frame bboxes of every hierarchical-sheet port-NAME text already
+/// serialised into `items` (a `(sheet … (pin "name" … (at x y rot)))`).
+/// KiCad draws the port label reading outward from the pin; we model it
+/// with the same left-anchored [`text_bbox`] used elsewhere (a
+/// conservative over-estimate of its reach). Used as an obstacle class
+/// the power-glyph value-text nudge must clear (V13 — issue [4]).
+fn sheet_port_name_bboxes(items: &[Sexpr]) -> Vec<TextBbox> {
+    let mut out = Vec::new();
+    for item in items {
+        if head_of(item) != Some("sheet") {
+            continue;
+        }
+        let Sexpr::List(parts) = item else { continue };
+        for p in parts {
+            if head_of(p) != Some("pin") {
+                continue;
+            }
+            let Sexpr::List(pin) = p else { continue };
+            let name = match pin.get(1) {
+                Some(Sexpr::QString(s) | Sexpr::Atom(s)) => s.as_str(),
+                _ => continue,
+            };
+            if let Some((x, y, rot)) = sexpr_at(p) {
+                out.push(text_bbox(name, (x, y), rot));
+            }
+        }
+    }
+    out
+}
+
+/// DECORATION-phase pass: nudge each `power:*` glyph's visible net-name
+/// `Value` text off collisions with host symbol bodies, host
+/// pin-name/number text, and hierarchical-sheet port-name text (V13 —
+/// the power-glyph-text-vs-body class, issue [1]/[4] residuals).
+///
+/// The default anchor (set by the router on the glyph's *outward* side,
+/// see `spice_route::rails::value_text_anchor`) is kept whenever clean —
+/// so every glyph not crowded against a neighbour is byte-identical.
+/// When it collides, the pass sweeps cardinal offsets about the glyph
+/// anchor and picks the first clear one (least-overlap as a tie-break),
+/// rewriting only the glyph's Value `(at …)`. The glyph body, its anchor
+/// pin, and the symbol pose are never touched — strictly a text move
+/// (decoration contract). General by construction: drives off the
+/// measured `centered_text_bbox` model and a fixed candidate grid; no
+/// fixture or refdes constants.
+///
+/// PWR_FLAG glyphs are skipped (their Value text is hidden).
+fn nudge_power_glyph_value_text(items: &mut [Sexpr], placement: &Placement, library: &Library) {
+    // Candidate offsets from the glyph anchor (default first → byte
+    // identical when clean). The default keeps the value at whatever
+    // outward offset the router chose; fallbacks sweep the four cardinal
+    // directions at one and two glyph-clearing distances. All centred
+    // horizontally on the offset point.
+    const OFFSETS: &[(f64, f64)] = &[
+        (0.0, 3.81),
+        (0.0, -3.81),
+        (-3.81, 0.0),
+        (3.81, 0.0),
+        (-5.08, 0.0),
+        (5.08, 0.0),
+        (0.0, 5.08),
+        (0.0, -5.08),
+    ];
+
+    // Obstacle sets (fixed for the whole pass): host bodies, host
+    // pin-text, sheet-port names. Power-glyph bodies are NOT obstacles
+    // for each other's text (they sit on their own pins by design).
+    let bodies: Vec<TextBbox> = placement
+        .elements
+        .iter()
+        .filter(|el| !el.is_power_source && !el.lib_id.starts_with("power:"))
+        .filter_map(|el| {
+            let (ox, oy) = el.origin.to_mm();
+            library
+                .lookup(&el.lib_id)
+                .and_then(Symbol::body_bbox)
+                .map(|local| bbox_as_text(body_bbox_to_world(local, ox, oy, el.orientation)))
+        })
+        .collect();
+    let pin_texts = host_pin_text_bboxes(placement, library);
+    let port_names = sheet_port_name_bboxes(items);
+
+    // Anchors already chosen by this pass become obstacles for later
+    // glyphs so two glyph labels never stack.
+    let mut chosen_text: Vec<TextBbox> = Vec::new();
+
+    for item in items.iter_mut() {
+        if head_of(item) != Some("symbol") {
+            continue;
+        }
+        let Some(refdes) = sexpr_symbol_refdes(item) else {
+            continue;
+        };
+        if !refdes.starts_with("#PWR") {
+            continue;
+        }
+        // Glyph anchor + current Value text.
+        let Some((gx, gy, _)) = sexpr_at(item) else {
+            continue;
+        };
+        let Some(value) = power_glyph_value_text(item) else {
+            continue; // hidden / absent → nothing to place
+        };
+        // Current default Value anchor (relative to the glyph anchor).
+        let Some((val_x, val_y, _)) = power_glyph_value_at(item) else {
+            continue;
+        };
+        let default_off = (val_x - gx, val_y - gy);
+
+        let overlap_cost = |b: &TextBbox| -> f64 {
+            let area = |o: &TextBbox| -> f64 {
+                let w = (b.x1.min(o.x1) - b.x0.max(o.x0)).max(0.0);
+                let h = (b.y1.min(o.y1) - b.y0.max(o.y0)).max(0.0);
+                w * h
+            };
+            bodies.iter().map(area).sum::<f64>()
+                + pin_texts.iter().map(area).sum::<f64>()
+                + port_names.iter().map(area).sum::<f64>()
+                + chosen_text.iter().map(area).sum::<f64>()
+        };
+
+        // Default first, then the candidate sweep.
+        let mut best_off = default_off;
+        let mut best_bbox = centered_text_bbox(&value, (gx + default_off.0, gy + default_off.1));
+        let mut best_cost = overlap_cost(&best_bbox);
+        if best_cost > 0.0 {
+            for &(dx, dy) in OFFSETS {
+                let bb = centered_text_bbox(&value, (gx + dx, gy + dy));
+                let cost = overlap_cost(&bb);
+                if cost < best_cost {
+                    best_cost = cost;
+                    best_off = (dx, dy);
+                    best_bbox = bb;
+                    if cost == 0.0 {
+                        break;
+                    }
+                }
+            }
+        }
+        chosen_text.push(best_bbox);
+        let (ax, ay) = (gx + best_off.0, gy + best_off.1);
+        set_property_anchor_in(item, "Value", ax, ay);
+    }
+}
+
+/// `(at x y rot)` of a power-glyph's visible `Value` property, or `None`
+/// when hidden / absent.
+fn power_glyph_value_at(sym: &Sexpr) -> Option<(f64, f64, u16)> {
+    let Sexpr::List(items) = sym else {
+        return None;
+    };
+    for it in items {
+        if let Sexpr::List(p) = it
+            && matches!(p.first(), Some(Sexpr::Atom(a)) if a == "property")
+            && matches!(p.get(1), Some(Sexpr::QString(k)) if k == "Value")
+        {
+            if sexpr_property_hidden(it) {
+                return None;
+            }
+            return sexpr_at(it);
+        }
+    }
+    None
+}
+
+/// The visible `Value` property string of a power-glyph `(symbol …)`.
+fn power_glyph_value_text(sym: &Sexpr) -> Option<String> {
+    let Sexpr::List(items) = sym else {
+        return None;
+    };
+    for it in items {
+        if let Sexpr::List(p) = it
+            && matches!(p.first(), Some(Sexpr::Atom(a)) if a == "property")
+            && matches!(p.get(1), Some(Sexpr::QString(k)) if k == "Value")
+        {
+            if sexpr_property_hidden(it) {
+                return None;
+            }
+            if let Some(Sexpr::QString(v)) = p.get(2) {
+                return Some(v.clone());
+            }
+        }
+    }
+    None
+}
+
+/// Rewrite the `(at x y …)` of the named property within a single
+/// `(symbol …)` sexpr, preserving the rotation token. Used by the
+/// power-glyph value-text nudge (the glyph is addressed by `&mut Sexpr`,
+/// not by refdes scan, since `#PWR` refdes are not globally unique under
+/// the scan ordering this pass relies on).
+fn set_property_anchor_in(sym: &mut Sexpr, key: &str, x: f64, y: f64) {
+    let Sexpr::List(parts) = sym else { return };
+    for it in parts.iter_mut() {
+        let Sexpr::List(p) = it else { continue };
+        let is_target = matches!(p.first(), Some(Sexpr::Atom(a)) if a == "property")
+            && matches!(p.get(1), Some(Sexpr::QString(k)) if k == key);
+        if !is_target {
+            continue;
+        }
+        for sub in p.iter_mut() {
+            if head_of(sub) == Some("at") {
+                if let Sexpr::List(a) = sub {
+                    let rot = a.get(3).cloned();
+                    let mut new_at = vec![
+                        atom("at"),
+                        atom(&format!("{x:.2}")),
+                        atom(&format!("{y:.2}")),
+                    ];
+                    if let Some(r) = rot {
+                        new_at.push(r);
+                    }
+                    *sub = Sexpr::List(new_at);
+                }
+            }
         }
     }
 }

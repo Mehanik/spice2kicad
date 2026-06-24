@@ -28,7 +28,7 @@
 use lexpr::Value as Sexpr;
 use spice_layout::net_class::NetClass;
 
-use crate::types::{Direction, NetSpec, PinRef, RouteResult};
+use crate::types::{NetSpec, PinRef, RouteResult};
 
 /// Scope name the root sheet is routed under (see
 /// `kicad_emitter::schematic::emit_root`). Power/Ground nets are global
@@ -105,8 +105,21 @@ pub fn emit(
         }
         *flg_counter += 1;
         let refdes = format!("#FLG{flg_counter}");
-        out.sexprs
-            .push(pwr_flag_sexpr(anchor, &refdes, sheet_uuid, project_name));
+        // The rail glyph at this anchor draws its body on one vertical
+        // side: a `power:GND` triangle hangs *down* (world +Y); every
+        // other rail glyph (VCC / VDD / +NV chevron, VEE marker) rises
+        // *up* (world −Y). The flag is co-located on the same pin and
+        // points the *opposite* way, so its chevron clears the glyph
+        // body (V13 — issue [2]) without a separating stub wire (which
+        // would read as a non-outward first segment at the host pin, V5).
+        let glyph_down = matches!(net.class, NetClass::Ground) && !net.negative_rail;
+        out.sexprs.push(pwr_flag_sexpr(
+            anchor,
+            glyph_down,
+            &refdes,
+            sheet_uuid,
+            project_name,
+        ));
     }
 }
 
@@ -124,35 +137,52 @@ fn pick_anchor(pins: &[PinRef]) -> Option<&PinRef> {
     })
 }
 
-/// Rotation (degrees) that makes the PWR_FLAG body extend in the host
-/// pin's outward direction. The symbol body is drawn local-+Y (screen
-/// up at rot 0, matching the `power:VCC` chevron — see
-/// `crates/spice-route/src/rails.rs`). KiCad rotates counter-clockwise
-/// in screen coordinates.
-fn outward_rotation(dir: Direction) -> u16 {
-    match dir {
-        Direction::Up => 0,
-        Direction::Down => 180,
-        Direction::Left => 90,
-        Direction::Right => 270,
-    }
+/// PWR_FLAG rotation (degrees) that points the chevron *away* from the
+/// co-located rail glyph's body, so the two graphics never overlap (V13 —
+/// issue [2]) without any separating stub wire.
+///
+/// The flag and the rail glyph share the host pin (their connection pins
+/// both sit at the symbol origin). The glyph body occupies one vertical
+/// side of that origin — `glyph_down` (a `power:GND` triangle) hangs down
+/// (screen, world +Y); every other rail glyph rises up (world −Y). The
+/// PWR_FLAG body is drawn local-+Y (screen up at rot 0). So:
+///   * glyph hangs down → flag points up (rot 0), chevron above the pin,
+///     clear of the triangle below;
+///   * glyph rises up → flag points down (rot 180), chevron below the
+///     pin, clear of the chevron above.
+///
+/// Co-locating with no stub keeps the host pin's wiring identical to the
+/// pre-flag layout: no spurious non-outward first segment (V5) and no new
+/// wire to cross a body (V12).
+fn flag_rotation(glyph_down: bool) -> u16 {
+    if glyph_down { 0 } else { 180 }
 }
 
-fn pwr_flag_sexpr(pin: &PinRef, refdes: &str, sheet_uuid: &str, project_name: &str) -> Sexpr {
+fn pwr_flag_sexpr(
+    pin: &PinRef,
+    glyph_down: bool,
+    refdes: &str,
+    sheet_uuid: &str,
+    project_name: &str,
+) -> Sexpr {
     // A flag anchored on a hierarchical-sheet port pin rides the same
     // outward offset as the `power:*` glyph it drives (see
-    // `rails::sheet_edge_offset`), so it clears the sheet port label and
-    // body and stays coincident with the offset glyph on the same net
-    // (V11/V12/V13). For a non-sheet pin the offset is zero.
+    // `rails::sheet_edge_offset`), so it stays co-located with the offset
+    // glyph on the same net (V11). For a non-sheet pin the offset is zero.
     let (ox, oy) = crate::rails::sheet_edge_offset(pin);
     let (x, y) = (pin.x_mm + ox, pin.y_mm + oy);
-    let rot = outward_rotation(pin.outward);
+    let rot = flag_rotation(glyph_down);
     // The PWR_FLAG anchor pin sits at the symbol origin, so the pin tip
     // stays at (x, y) for any rotation — the connection point is stable
-    // and coincident with the host net pin (V11). Reference is hidden
-    // (a drawn `#FLGn` would collide with neighbouring property text,
-    // V13); Value is "PWR_FLAG" (the visible glyph label). The
-    // `(instances …)` block is mandatory for kicad-cli netlist export.
+    // and coincident with the host net pin (V11). Reference and Value are
+    // both hidden (a drawn `#FLGn` / "PWR_FLAG" would collide with
+    // neighbouring text, V13). The `(instances …)` block is mandatory for
+    // kicad-cli netlist export.
+    //
+    // The hidden Reference/Value anchors track the flag's own rotation so
+    // they never reserve text geometry on the host side; both are hidden,
+    // so their exact `(at)` is cosmetic, but we keep them on the chevron
+    // side for tidiness.
     let txt = format!(
         "(symbol \
             (lib_id \"{PWR_FLAG_LIB_ID}\") \

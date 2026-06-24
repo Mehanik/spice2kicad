@@ -256,6 +256,35 @@ fn stub_wire(pin: &PinRef, canon: Direction) -> Option<Sexpr> {
     Some(lexpr::from_str(&txt).expect("stub wire s-expr parses"))
 }
 
+/// Offset (mm) past the glyph tip for the net-name Value text, one grid
+/// cell beyond the ≈2.54 mm glyph body extent.
+const VALUE_TEXT_OFFSET_MM: f64 = 3.81;
+
+/// World anchor `(x, y)` for a power glyph's Value (net-name) text,
+/// placed on the *outward* side of the glyph — the side the host pin
+/// points, which is also the side the glyph body and any forced-sideways
+/// / sheet-edge offset run along (see [`glyph_offset`]). This is the side
+/// *away* from the host symbol body the anchor pin attaches to, so the
+/// label never hangs into the host (V13 — issue [1]).
+///
+/// Keying on the host pin's outward direction (not the glyph's fixed
+/// rot-0 graphic direction) is what makes this correct in every case:
+///   * a VCC chevron on an up-facing pin → name above (outward);
+///   * a GND triangle on a down-facing pin → name below (outward);
+///   * a *forced-sideways* GND glyph (pin faces up, glyph offset up away
+///     from the host below) → name above, clear of the host (the
+///     graphic-direction rule would put it below, back into the host);
+///   * a sheet-edge glyph (pin faces left, glyph offset left) → name
+///     further left, clear of both the sheet body and the sheet's
+///     port-name text to the right (V13 — issue [4]).
+fn value_text_anchor(x: f64, y: f64, outward: Direction) -> (f64, f64) {
+    let (dx, dy) = outward_delta(outward);
+    // `outward_delta` returns one grid cell; scale to the glyph-clearing
+    // offset.
+    let scale = VALUE_TEXT_OFFSET_MM / GRID_MM;
+    (x + dx * scale, y + dy * scale)
+}
+
 fn power_symbol_sexpr(
     lib_id: &str,
     net_name: &str,
@@ -278,6 +307,18 @@ fn power_symbol_sexpr(
     } else {
         net_name.to_ascii_uppercase()
     };
+    // Anchor the Value (net-name) text on the *outward* side of the
+    // glyph — the side the glyph graphic points, away from the host
+    // body the glyph attaches to. A GND triangle hangs *below* its
+    // anchor pin (body local y < 0), so its name reads below; a VCC /
+    // VEE chevron rises *above* its anchor pin (body local y > 0), so
+    // its name reads above. Placing the name on the body side (the old
+    // fixed `y + 1.27`) made a VCC label hang *down* into the host
+    // resistor it sits atop (V13 — issue [1]). The offset clears the
+    // glyph graphic itself: each glyph body extends ≈2.54 mm from the
+    // anchor, so a 3.81 mm offset places the text one cell beyond the
+    // tip.
+    let (vx, vy) = value_text_anchor(x, y, pin.outward);
     // Use the same pattern as the existing emitter: nested `(symbol …)`
     // with `lib_id`, `at`, `unit`, properties. Reference is a unique
     // `#PWR<n>` and is *hidden* (KiCad convention for power symbols:
@@ -302,8 +343,6 @@ fn power_symbol_sexpr(
                     (reference \"{refdes}\") (unit 1)))))",
         rx = x,
         ry = y - 1.27,
-        vx = x,
-        vy = y + 1.27,
     );
     lexpr::from_str(&txt).expect("power symbol s-expr parses")
 }

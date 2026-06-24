@@ -977,6 +977,13 @@ enum TextKind {
     PropertyReference,
     /// `(property "Value" …)` text — same anchor rules as Reference.
     PropertyValue,
+    /// A `(property "Value" …)` with NO `(justify …)` token — KiCad
+    /// centres such a field horizontally about its anchor. Power-glyph
+    /// net-name labels (`GND`/`VCC`/`VEE`) are emitted without a justify,
+    /// so they render centred, not left-anchored. Modelling them as
+    /// left-anchored over-estimates their rightward reach (a sliver into
+    /// a neighbour to the right that KiCad never actually draws).
+    CenteredValue,
 }
 
 /// Approximate the rendered text bbox of a label or property string.
@@ -1011,6 +1018,7 @@ fn text_bbox(text: &str, anchor: Pt, size_mm: f64, orientation_deg: u16, kind: T
         TextKind::PlainLabel | TextKind::PropertyReference | TextKind::PropertyValue => {
             (-0.0, width, -height / 2.0, height / 2.0)
         }
+        TextKind::CenteredValue => (-width / 2.0, width / 2.0, -height / 2.0, height / 2.0),
         TextKind::GlobalLabel => (
             -chevron_lead,
             width + chevron_lead,
@@ -1372,7 +1380,9 @@ fn power_glyph_bboxes(root: &Value) -> Vec<(String, Bbox)> {
             let size = effects_font_size(prop).unwrap_or(1.27);
             out.push((
                 format!("{refdes}({lib_id}).Value"),
-                text_bbox(val, (px, py), size, prot, TextKind::PropertyValue),
+                // Power-glyph Value text carries no justify → KiCad
+                // centres it horizontally (see `TextKind::CenteredValue`).
+                text_bbox(val, (px, py), size, prot, TextKind::CenteredValue),
             ));
         }
     }
@@ -1606,6 +1616,218 @@ fn v13_property_text_no_mutual_overlap() {
     assert!(
         failures.is_empty(),
         "V13(4) regressions:\n  {}",
+        failures.join("\n  "),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// V13 part (6) — power-glyph Value text and PWR_FLAG/glyph graphic overlap.
+//
+// The label-anchored V13 parts (1)–(3) and the property-text parts (4)–(5)
+// never measure a `power:*` glyph's *own* Value text against a host body /
+// pin text, and never measure the PWR_FLAG chevron against the power-glyph
+// triangle it sits on. These were verifier-blind overlaps:
+//   [1] power-glyph Value text (e.g. "VCC") hangs into the host/neighbour
+//       body or its pin-number/name text;
+//   [2] each PWR_FLAG graphic is stacked at the identical coordinate as a
+//       power glyph, so its chevron overprints the GND/VCC/VEE triangle;
+//   [4] a sheet-port glyph's Value text overlaps the sheet's own port-NAME
+//       text (`inp`/`vcc`/`vee`).
+// ---------------------------------------------------------------------------
+
+/// World-frame `(tag, bbox)` of every visible `power:*` glyph Value text
+/// (the net-name label). `PWR_FLAG` is excluded — its Value text is
+/// hidden — so this collects exactly the rail-name labels (`GND`/`VCC`/
+/// `VEE`/…).
+fn power_glyph_value_text_bboxes(root: &Value) -> Vec<(String, Bbox)> {
+    power_glyph_bboxes(root)
+        .into_iter()
+        .filter(|(name, _)| name.ends_with(".Value"))
+        .collect()
+}
+
+/// World-frame `(tag, bbox)` of every `power:*` glyph *graphic* body
+/// (the drawn triangle / chevron / VEE marker), `PWR_FLAG` excluded.
+#[allow(clippy::case_sensitive_file_extension_comparisons)] // `.body` is a tag suffix, not a file extension
+fn power_glyph_graphic_bboxes(root: &Value) -> Vec<(String, Bbox)> {
+    power_glyph_bboxes(root)
+        .into_iter()
+        .filter(|(name, _)| name.ends_with(".body"))
+        .collect()
+}
+
+/// World-frame `(tag, bbox)` of every `power:PWR_FLAG` graphic body. The
+/// chevron polyline is the only drawn graphic; transform it through the
+/// placed pose exactly like [`power_glyph_bboxes`] does for rail glyphs.
+fn pwr_flag_graphic_bboxes(root: &Value) -> Vec<(String, Bbox)> {
+    let library = load_test_library();
+    let mut out = Vec::new();
+    for sym in children(root, "symbol") {
+        let Some((refdes, lib_id)) = placed_symbol_refdes_and_lib_id(sym) else {
+            continue;
+        };
+        if lib_id != "power:PWR_FLAG" {
+            continue;
+        }
+        let Some((gx, gy, grot)) = at_xy_rot(sym) else {
+            continue;
+        };
+        let mirror_y = find_child(sym, "mirror")
+            .and_then(|m| list_iter(m).nth(1).and_then(as_str))
+            .is_some_and(|t| t.eq_ignore_ascii_case("y"));
+        if let Some(local) = library
+            .lookup(&lib_id)
+            .and_then(kicad_symbols::Symbol::body_bbox)
+        {
+            out.push((
+                format!("{refdes}({lib_id}).body"),
+                body_bbox_to_world(local, gx, gy, f64::from(grot), mirror_y),
+            ));
+        }
+    }
+    out
+}
+
+/// World-frame `(tag, bbox)` of every hierarchical-sheet port-NAME text.
+/// KiCad draws the port label at the pin coordinate, justified away from
+/// the sheet body (a left-edge pin, `(at … 180)`, draws its name to the
+/// left). We model it as left-anchored text growing in the pin's outward
+/// direction, matching the renderer's placement closely enough for a
+/// collision check.
+fn sheet_port_name_bboxes(root: &Value) -> Vec<(String, Bbox)> {
+    let mut out = Vec::new();
+    for sheet in children(root, "sheet") {
+        for pin in children(sheet, "pin") {
+            let Some(name) = list_iter(pin).nth(1).and_then(as_str) else {
+                continue;
+            };
+            let Some((px, py, prot)) = at_xy_rot(pin) else {
+                continue;
+            };
+            // The port text is anchored at the pin and reads outward
+            // (away from the sheet body). A `(at … 180)` pin reads to
+            // the left, so its text occupies x < px; model that by
+            // rotating the left-anchored box 180° about the pin.
+            let bbox = text_bbox(name, (px, py), 1.27, prot, TextKind::PlainLabel);
+            out.push((format!("port.{name}"), bbox));
+        }
+    }
+    out
+}
+
+/// Per-fixture budget for power-glyph Value text overlapping a foreign
+/// symbol body / pin text / sheet-port-name text. Ratchet: the measured
+/// post-fix high-water mark, driven toward 0. A regression is a defect
+/// to diagnose, never a budget to bump.
+fn v13_power_glyph_text_budget(_name: &str) -> usize {
+    // 0 across every fixture. The decoration-phase power-glyph value-text
+    // nudge (`nudge_power_glyph_value_text` in `kicad-emitter`) moves a
+    // colliding net-name label off any host body / pin text / sheet-port
+    // name, so even the glyph-adjacent-to-large-body cases (GND beside a
+    // transistor; the issue-[3] VEE beside RIN) clear by relocating the
+    // *text* — never the symbol. A regression is a defect to diagnose,
+    // never a budget to bump.
+    0
+}
+
+#[test]
+fn v13_power_glyph_value_text_clear_of_bodies_and_pintext() {
+    // V13 part (6a): a `power:*` glyph's visible Value text (its rail
+    // name) must not overlap any non-power symbol body, any visible
+    // pin-number/name text, or any hierarchical-sheet port-NAME text.
+    // Issues [1] (text hanging into a host/neighbour body) and [4]
+    // (sheet-port glyph text on the port name) live here.
+    let mut failures: Vec<String> = Vec::new();
+    let with_sheets: Vec<&str> = {
+        let mut v: Vec<&str> = SHEETS.to_vec();
+        v.push("opamp_inverting");
+        v
+    };
+    for name in with_sheets {
+        let src = fixtures_dir().join(format!("{name}.cir"));
+        let tmp = tempdir(name);
+        let sch = spice_to_kicad(&src, &tmp).expect("spice2kicad");
+        let root = parse(&sch);
+        let glyph_text = power_glyph_value_text_bboxes(&root);
+        let bodies = placed_symbol_bboxes(&root);
+        let pintexts = pin_text_bboxes(&root);
+        let port_names = sheet_port_name_bboxes(&root);
+        let mut hits = 0;
+        for (gname, gbbox) in &glyph_text {
+            for (bname, bbox) in &bodies {
+                if gbbox.intersects(bbox) {
+                    eprintln!("{name}: glyph text {gname} overlaps body {bname}");
+                    hits += 1;
+                }
+            }
+            for (tname, tbbox) in &pintexts {
+                if gbbox.intersects(tbbox) {
+                    eprintln!("{name}: glyph text {gname} overlaps pin-text {tname}");
+                    hits += 1;
+                }
+            }
+            for (pname, pbbox) in &port_names {
+                if gbbox.intersects(pbbox) {
+                    eprintln!("{name}: glyph text {gname} overlaps sheet-port name {pname}");
+                    hits += 1;
+                }
+            }
+        }
+        let b = v13_power_glyph_text_budget(name);
+        if hits > b {
+            failures.push(format!(
+                "{name}: {hits} power-glyph-text overlaps > V13(6a) budget {b}"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "V13(6a) regressions:\n  {}",
+        failures.join("\n  "),
+    );
+}
+
+#[test]
+fn v13_pwr_flag_graphic_clear_of_power_glyphs() {
+    // V13 part (6b): a `power:PWR_FLAG` chevron graphic must not overlap
+    // any `power:*` rail-glyph graphic. Issue [2] — PWR_FLAGs stacked at
+    // the identical coordinate as the glyph they drive, so the chevron
+    // overprints the GND/VCC/VEE triangle. Budget 0 across the board: a
+    // flag need only be wire-coincident on the same net, not at the
+    // identical point.
+    let budget = |_name: &str| -> usize { 0 };
+    let mut failures: Vec<String> = Vec::new();
+    let with_sheets: Vec<&str> = {
+        let mut v: Vec<&str> = SHEETS.to_vec();
+        v.push("opamp_inverting");
+        v
+    };
+    for name in with_sheets {
+        let src = fixtures_dir().join(format!("{name}.cir"));
+        let tmp = tempdir(name);
+        let sch = spice_to_kicad(&src, &tmp).expect("spice2kicad");
+        let root = parse(&sch);
+        let flags = pwr_flag_graphic_bboxes(&root);
+        let glyphs = power_glyph_graphic_bboxes(&root);
+        let mut hits = 0;
+        for (fname, fbbox) in &flags {
+            for (gname, gbbox) in &glyphs {
+                if fbbox.intersects(gbbox) {
+                    eprintln!("{name}: PWR_FLAG {fname} overlaps power glyph {gname}");
+                    hits += 1;
+                }
+            }
+        }
+        let b = budget(name);
+        if hits > b {
+            failures.push(format!(
+                "{name}: {hits} PWR_FLAG↔power-glyph graphic overlaps > V13(6b) budget {b}"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "V13(6b) regressions:\n  {}",
         failures.join("\n  "),
     );
 }
