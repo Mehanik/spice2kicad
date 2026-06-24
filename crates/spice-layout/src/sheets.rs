@@ -39,6 +39,18 @@ const SHEET_PIN_PITCH_MM: f64 = 5.08;
 /// port pin (matches the emitter's `height` computation).
 const SHEET_PIN_PAD_MM: f64 = 5.08;
 
+/// Outward reach (mm) of a `power:*` glyph that the emitter hangs off a
+/// sheet *port pin* (left edge): the glyph anchor is offset
+/// `SHEET_EDGE_GLYPH_OFFSET_CELLS` (= 2) cells outward and its body
+/// extends a further cell, so the glyph zone reaches three grid cells to
+/// the LEFT of the sheet's left edge. The sheet's de-overlap footprint
+/// must include this zone so a power/ground port glyph never lands on a
+/// neighbouring symbol body (the RF-vs-glyph overlap the V6/V13 fix
+/// targets). Mirrors `spice_route::rails::SHEET_EDGE_GLYPH_OFFSET_CELLS`
+/// plus one body cell; kept in lock-step here (the two crates do not
+/// share a constant, but the geometry is the same grid).
+const SHEET_GLYPH_REACH_MM: f64 = 3.0 * STEP_MM;
+
 /// A sheet's computed world rectangle, in millimetres.
 #[derive(Debug, Clone, Copy)]
 struct Rect {
@@ -244,15 +256,22 @@ pub fn place_sheets(
         // downstream sinks in the usual left-to-right flow).
         let mut origin_y = base_origin_y;
         let mut guard = 0;
+        // De-overlap against a *footprint* rectangle that extends the
+        // sheet body leftward by the power-glyph reach. The sheet's
+        // left-edge port pins hang `power:*` glyphs that far outward
+        // (see `SHEET_GLYPH_REACH_MM`); folding that zone into the
+        // obstacle test pushes the sheet right until both the body and
+        // its glyphs clear every neighbouring symbol — without it a
+        // glyph spears an adjacent body (RF, V6/V13).
         loop {
-            let rect = Rect {
-                x0: origin_x,
+            let footprint = Rect {
+                x0: origin_x - SHEET_GLYPH_REACH_MM,
                 y0: origin_y,
                 x1: origin_x + SHEET_W_MM,
                 y1: origin_y + height,
             };
-            if !occupied.iter().any(|o| o.overlaps(&rect)) {
-                occupied.push(rect);
+            if !occupied.iter().any(|o| o.overlaps(&footprint)) {
+                occupied.push(footprint);
                 break;
             }
             origin_x = snap(origin_x + STEP_MM);
@@ -264,13 +283,13 @@ pub fn place_sheets(
                 let stack = out.len() as f64 + 1.0;
                 origin_x = snap(circuit_right + SHEET_W_MM);
                 origin_y = snap(circuit_bot + height * stack);
-                let rect = Rect {
-                    x0: origin_x,
+                let footprint = Rect {
+                    x0: origin_x - SHEET_GLYPH_REACH_MM,
                     y0: origin_y,
                     x1: origin_x + SHEET_W_MM,
                     y1: origin_y + height,
                 };
-                occupied.push(rect);
+                occupied.push(footprint);
                 break;
             }
         }

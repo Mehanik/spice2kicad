@@ -13,6 +13,7 @@ fn pin(idx: usize, n: u16, x: f64, y: f64, out: Direction) -> PinRef {
         outward: out,
         drives: false,
         requires_driver: false,
+        on_sheet_edge: false,
     }
 }
 

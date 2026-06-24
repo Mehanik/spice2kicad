@@ -22,6 +22,16 @@ use crate::types::{Direction, NetSpec, PinRef};
 /// without a stem wire.
 const GRID_MM: f64 = 1.27;
 
+/// Grid-cell offset applied to a power glyph anchored on a
+/// hierarchical-sheet port pin. The glyph (and its net-name label) are
+/// pushed this many cells *outward* (away from the sheet body) so the
+/// glyph body and label clear both the sheet body and the sheet's port
+/// label, which KiCad draws at the port-pin coordinate. Two cells: the
+/// glyph body extends ±1 cell about its anchor, so a 2-cell offset puts
+/// the inner glyph edge one full cell clear of the sheet edge. A stub
+/// wire bridges the port pin to the offset anchor.
+const SHEET_EDGE_GLYPH_OFFSET_CELLS: f64 = 2.0;
+
 /// Append power-symbol (or fallback global-label) S-exprs for every
 /// pin on a Power/Ground net. Signal nets are ignored.
 ///
@@ -65,13 +75,11 @@ pub fn emit(
                 sheet_uuid,
                 project_name,
             ));
-            // V14 forced-sideways fallback: when the host pin does not
-            // face the glyph's canonical axis (power → up, ground →
-            // down), the glyph — locked at rot 0 — would extend into
-            // the host body. Offset it one grid cell along the
-            // canonical axis and bridge the gap with a one-cell stub
-            // wire so the glyph body never overlaps the host body while
-            // the rotation stays the conventional 0.
+            // V14 forced-sideways fallback (host-body case) and the
+            // sheet-edge fallback (sheet-port case): offset the glyph
+            // outward and bridge the gap with a stub wire so the glyph
+            // body never overlaps the host / sheet body while the
+            // rotation stays the conventional rot-0.
             if let Some(stub) = stub_wire(pin, canon) {
                 out.push(stub);
             }
@@ -156,6 +164,22 @@ fn is_forced_sideways(pin: &PinRef, canon: Direction) -> bool {
     pin.outward == opposite
 }
 
+/// Outward offset (mm) for a glyph / driver marker anchored on a
+/// hierarchical-sheet port pin, or `(0, 0)` when the pin is not on a
+/// sheet edge. Shared by Stage 1 (`power:*` glyphs) and the PWR_FLAG
+/// stage so the driver marker rides the same offset as the glyph it
+/// drives, keeping both off the sheet port label.
+pub(crate) fn sheet_edge_offset(pin: &PinRef) -> (f64, f64) {
+    if !pin.on_sheet_edge {
+        return (0.0, 0.0);
+    }
+    let (ux, uy) = outward_delta(pin.outward);
+    (
+        ux * SHEET_EDGE_GLYPH_OFFSET_CELLS,
+        uy * SHEET_EDGE_GLYPH_OFFSET_CELLS,
+    )
+}
+
 /// One grid-cell file-coordinate delta along a pin's outward direction.
 /// File Y increases downward, so `Up` is a negative Y delta.
 fn outward_delta(dir: Direction) -> (f64, f64) {
@@ -183,23 +207,46 @@ fn outward_delta(dir: Direction) -> (f64, f64) {
 /// the pin extends outward, satisfying V5). Otherwise the anchor sits
 /// exactly on the pin (no stub).
 fn symbol_pose(pin: &PinRef, canon: Direction) -> (f64, f64, u16) {
-    if is_forced_sideways(pin, canon) {
-        let (dx, dy) = outward_delta(pin.outward);
+    if let Some((dx, dy)) = glyph_offset(pin, canon) {
         (pin.x_mm + dx, pin.y_mm + dy, 0)
     } else {
         (pin.x_mm, pin.y_mm, 0)
     }
 }
 
-/// One-cell stub wire from the host pin to the offset glyph anchor,
-/// emitted only in the V14 forced-sideways case. The stub extends along
-/// the pin's outward direction, so it doubles as the pin's outward first
-/// segment (V5). Returns `None` when the glyph sits on the pin.
-fn stub_wire(pin: &PinRef, canon: Direction) -> Option<Sexpr> {
-    if !is_forced_sideways(pin, canon) {
-        return None;
+/// Outward offset (mm) applied to a glyph anchor, or `None` when the
+/// glyph sits exactly on the pin. Two cases need an offset:
+///
+/// * **V14 forced-sideways** — the host pin points opposite the glyph's
+///   canonical body direction; offset one cell outward so the rot-0
+///   glyph body clears the host symbol body.
+/// * **Sheet-edge** — the pin is a hierarchical-sheet port pin (see
+///   [`PinRef::on_sheet_edge`]); offset
+///   [`SHEET_EDGE_GLYPH_OFFSET_CELLS`] cells outward (away from the
+///   sheet body) so the glyph body and net-name label clear the sheet
+///   body and its port label.
+///
+/// Both offsets run along the pin's outward direction, so the bridging
+/// stub doubles as the pin's outward first segment (V5). The sheet-edge
+/// case takes precedence (its larger offset subsumes the V14 one cell).
+fn glyph_offset(pin: &PinRef, canon: Direction) -> Option<(f64, f64)> {
+    if pin.on_sheet_edge {
+        return Some(sheet_edge_offset(pin));
     }
-    let (dx, dy) = outward_delta(pin.outward);
+    if is_forced_sideways(pin, canon) {
+        let (ux, uy) = outward_delta(pin.outward);
+        return Some((ux, uy));
+    }
+    None
+}
+
+/// Stub wire from the host pin to the offset glyph anchor, emitted
+/// whenever the glyph is offset (V14 forced-sideways or sheet-edge). The
+/// stub extends along the pin's outward direction, so it doubles as the
+/// pin's outward first segment (V5). Returns `None` when the glyph sits
+/// on the pin.
+fn stub_wire(pin: &PinRef, canon: Direction) -> Option<Sexpr> {
+    let (dx, dy) = glyph_offset(pin, canon)?;
     let (x0, y0) = (pin.x_mm, pin.y_mm);
     let (x1, y1) = (pin.x_mm + dx, pin.y_mm + dy);
     let txt = format!(

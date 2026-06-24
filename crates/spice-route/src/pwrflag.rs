@@ -139,7 +139,13 @@ fn outward_rotation(dir: Direction) -> u16 {
 }
 
 fn pwr_flag_sexpr(pin: &PinRef, refdes: &str, sheet_uuid: &str, project_name: &str) -> Sexpr {
-    let (x, y) = (pin.x_mm, pin.y_mm);
+    // A flag anchored on a hierarchical-sheet port pin rides the same
+    // outward offset as the `power:*` glyph it drives (see
+    // `rails::sheet_edge_offset`), so it clears the sheet port label and
+    // body and stays coincident with the offset glyph on the same net
+    // (V11/V12/V13). For a non-sheet pin the offset is zero.
+    let (ox, oy) = crate::rails::sheet_edge_offset(pin);
+    let (x, y) = (pin.x_mm + ox, pin.y_mm + oy);
     let rot = outward_rotation(pin.outward);
     // The PWR_FLAG anchor pin sits at the symbol origin, so the pin tip
     // stays at (x, y) for any rotation — the connection point is stable

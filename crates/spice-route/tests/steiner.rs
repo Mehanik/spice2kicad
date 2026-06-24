@@ -114,6 +114,7 @@ fn signal_net(name: &str, pins: &[(f64, f64)]) -> NetSpec {
                 outward: Direction::Right,
                 drives: false,
                 requires_driver: false,
+                on_sheet_edge: false,
             })
             .collect(),
         negative_rail: false,

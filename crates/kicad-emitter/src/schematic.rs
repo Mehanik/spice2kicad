@@ -138,6 +138,11 @@ pub fn emit_root(
     // location on the parent canvas; pin coordinates are derived from
     // the block's origin.
     let mut extra_pins: Vec<(String, f64, f64)> = Vec::new();
+    // Coordinates of every hierarchical-sheet port pin. A `power:*`
+    // glyph landing on one of these would overprint the sheet's port
+    // label and overlap the sheet body, so the router offsets it
+    // outward with a stub (V12/V13/V14 detached-glyph fallback).
+    let mut sheet_edge_pins: Vec<(f64, f64)> = Vec::new();
     for (idx, block) in sheets.iter().enumerate() {
         let (sheet_node, pin_labels, sheet_pin_pos) = sheet_block(block, idx);
         items.push(sheet_node);
@@ -146,6 +151,9 @@ pub fn emit_root(
         }
         // Sheet pin positions become extra "pins" on the parent net so
         // wire routing connects body pins to the sheet block.
+        for (_, px, py) in &sheet_pin_pos {
+            sheet_edge_pins.push((*px, *py));
+        }
         extra_pins.extend(sheet_pin_pos);
     }
 
@@ -162,6 +170,7 @@ pub fn emit_root(
         &driven,
         &requires_driver,
         &negative_rails,
+        &sheet_edge_pins,
     )? {
         items.push(routed);
     }
@@ -274,6 +283,7 @@ pub fn emit_child_sheet(child: &ChildSheet<'_>, library: &Library) -> Result<Str
         &driven,
         &requires_driver,
         &negative_rails,
+        &[],
     )? {
         items.push(routed);
     }
@@ -1118,7 +1128,7 @@ fn net_set_where(
 /// `library` is consulted by Stage 1 so a missing `power:*` lib_id
 /// gracefully falls back to a `(global_label …)` instead of emitting
 /// an unresolvable instance.
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn route_nets(
     nets: &std::collections::BTreeMap<String, Vec<(f64, f64, u16)>>,
     scope: &str,
@@ -1127,8 +1137,15 @@ fn route_nets(
     driven: &std::collections::BTreeSet<String>,
     requires_driver: &std::collections::BTreeSet<String>,
     negative_rails: &std::collections::BTreeSet<String>,
+    sheet_edge_pins: &[(f64, f64)],
 ) -> Result<Vec<Sexpr>, EmitError> {
     use spice_route::{NetSpec, PinRef, RouteRequest};
+
+    let is_sheet_edge = |x: f64, y: f64| {
+        sheet_edge_pins
+            .iter()
+            .any(|&(sx, sy)| approx_eq(sx, x) && approx_eq(sy, y))
+    };
 
     // Build the per-net pin list expected by spice_route. Net class
     // is derived from the net name with the same heuristic
@@ -1153,14 +1170,29 @@ fn route_nets(
         let net_requires = requires_driver.contains(name);
         let pin_refs: Vec<PinRef> = uniq
             .into_iter()
-            .map(|(x, y, angle)| PinRef {
-                element_idx: 0,
-                pin_number: 0,
-                x_mm: x,
-                y_mm: y,
-                outward: angle_to_direction(angle),
-                drives: net_driven,
-                requires_driver: net_requires,
+            .map(|(x, y, angle)| {
+                let on_sheet_edge = is_sheet_edge(x, y);
+                // A sheet port pin's glyph must hang *outward* — away from
+                // the sheet body, which lies to the right of its left-edge
+                // port column. `collect_net_pins` stamps `extra_pins` with
+                // a default rightward angle; override it to Left so the
+                // offset+stub escapes the sheet body rather than diving
+                // into it.
+                let outward = if on_sheet_edge {
+                    spice_route::Direction::Left
+                } else {
+                    angle_to_direction(angle)
+                };
+                PinRef {
+                    element_idx: 0,
+                    pin_number: 0,
+                    x_mm: x,
+                    y_mm: y,
+                    outward,
+                    drives: net_driven,
+                    requires_driver: net_requires,
+                    on_sheet_edge,
+                }
             })
             .collect();
         specs.push(NetSpec {
@@ -1269,6 +1301,7 @@ pub(crate) fn trial_route(placement: &Placement, library: &Library) -> TrialRout
                 outward: angle_to_direction(angle),
                 drives: false,
                 requires_driver: false,
+                on_sheet_edge: false,
             })
             .collect();
         specs.push(NetSpec {

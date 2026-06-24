@@ -31,6 +31,16 @@ pub struct PinRef {
     /// (e.g. only `passive` resistor/cap terminals) imposes no ERC
     /// driver requirement and must NOT receive a spurious `PWR_FLAG`.
     pub requires_driver: bool,
+    /// True when this pin sits on a hierarchical-sheet *port* edge — its
+    /// coordinate coincides with a `(sheet …)` block's port pin, where
+    /// KiCad draws the sheet's port label. A `power:*` glyph placed
+    /// directly here would overprint that label and overlap the sheet
+    /// body. Stage 1 therefore offsets the glyph outward (along
+    /// [`PinRef::outward`], away from the sheet body) by enough grid
+    /// cells to clear both, bridging the gap with a stub wire — the
+    /// documented detached-glyph-with-stub-wire fallback (CLAUDE.md
+    /// V12/V13/V14).
+    pub on_sheet_edge: bool,
 }
 
 /// Cardinal direction the pin's stem points away from its symbol body.

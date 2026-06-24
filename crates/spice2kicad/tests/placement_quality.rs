@@ -1436,6 +1436,205 @@ fn hierarchical_sheet_placed_near_circuit() {
     }
 }
 
+// --- V6 / V12 / V13: sheets participate in no-overlap --------------------
+//
+// A hierarchical `(sheet …)` block is a first-class drawable rectangle on
+// the parent sheet. Two defects motivate these verifiers:
+//   1. A neighbouring symbol's resolved extent (body + pin reach) must not
+//      overlap the sheet body bbox — the sheet is an obstacle the placer
+//      must clear (mirrors `no_symbol_symbol_overlap_across_fixtures`).
+//   2. A `power:*` glyph emitted on a sheet *port pin* must not land on the
+//      sheet body / port label: KiCad draws the sheet's port label at the
+//      port-pin coordinate, and a glyph anchored there overprints it. The
+//      documented fix is the detached-glyph-with-stub-wire offset (the
+//      glyph hangs outside the sheet edge, connected by a short stub).
+//
+// Fully general: no fixture name or magic coordinate is hardcoded; the
+// sheet body bbox and port-pin coordinates are read from the emitted file.
+
+/// Sheet body bbox `(x0,y0,x1,y1)` from a `(sheet (at x y) (size w h) …)`.
+fn sheet_body_bbox(sheet: &Value) -> Option<Bbox> {
+    let at = find_child(sheet, "at")?;
+    let mut ait = list_iter(at);
+    ait.next();
+    let x = as_f64(ait.next()?)?;
+    let y = as_f64(ait.next()?)?;
+    let size = find_child(sheet, "size")?;
+    let mut sit = list_iter(size);
+    sit.next();
+    let w = as_f64(sit.next()?)?;
+    let h = as_f64(sit.next()?)?;
+    Some(Bbox {
+        x0: x,
+        y0: y,
+        x1: x + w,
+        y1: y + h,
+    })
+}
+
+/// Every `(sheet …)` block's body bbox on the parent sheet.
+fn sheet_bboxes(root: &Value) -> Vec<Bbox> {
+    children(root, "sheet")
+        .into_iter()
+        .filter_map(sheet_body_bbox)
+        .collect()
+}
+
+/// Every `(pin "name" … (at x y rot))` of a `(sheet …)` block, as
+/// `(name, x, y)`. These are the sheet's port pins; KiCad renders the
+/// port label at this coordinate.
+fn sheet_port_pins(sheet: &Value) -> Vec<(String, f64, f64)> {
+    let mut out = Vec::new();
+    for pin in children(sheet, "pin") {
+        let mut it = list_iter(pin);
+        it.next(); // head "pin"
+        let Some(name) = it.next().and_then(as_str) else {
+            continue;
+        };
+        let Some(at) = find_child(pin, "at") else {
+            continue;
+        };
+        let mut ait = list_iter(at);
+        ait.next();
+        let (Some(x), Some(y)) = (ait.next().and_then(as_f64), ait.next().and_then(as_f64)) else {
+            continue;
+        };
+        out.push((name.to_string(), x, y));
+    }
+    out
+}
+
+/// Resolved world extent (body ∪ pin reach) of a placed `power:*` glyph
+/// instance, plus its refdes. The glyph's body bbox is taken from its
+/// inlined library symbol, orientation-transformed exactly like
+/// [`resolved_world_extent`].
+fn glyph_world_extent(library: &Library, sym: &Value) -> Option<(String, Bbox)> {
+    let (refdes, lib_id) = placed_symbol_refdes_and_lib_id(sym)?;
+    if !lib_id.starts_with("power:") {
+        return None;
+    }
+    let (ox, oy, orient) = placed_symbol_pose(sym)?;
+    let lib_sym = library.lookup(&lib_id)?;
+    let mut x0 = f64::INFINITY;
+    let mut y0 = f64::INFINITY;
+    let mut x1 = f64::NEG_INFINITY;
+    let mut y1 = f64::NEG_INFINITY;
+    let mut grow = |wx: f64, wy: f64| {
+        x0 = x0.min(wx);
+        y0 = y0.min(wy);
+        x1 = x1.max(wx);
+        y1 = y1.max(wy);
+    };
+    if let Some(local) = lib_sym.body_bbox() {
+        for (lx, ly) in [
+            (local.x0, local.y0),
+            (local.x0, local.y1),
+            (local.x1, local.y0),
+            (local.x1, local.y1),
+        ] {
+            let (rx, ry) = orient.apply_point(lx, ly);
+            grow(ox + rx, oy - ry);
+        }
+    }
+    for tp in lib_sym.pins_in(orient) {
+        grow(ox + tp.x, oy - tp.y);
+    }
+    if x0.is_finite() && x1.is_finite() && y0.is_finite() && y1.is_finite() {
+        Some((refdes, Bbox { x0, y0, x1, y1 }))
+    } else {
+        None
+    }
+}
+
+/// No placed symbol's resolved extent (body + pin reach) and no power
+/// glyph's body may overlap a `(sheet …)` body bbox. Budget 0, ratchet
+/// (CLAUDE.md V6 no-overlap clause extended to sheets — Tier-1
+/// readability). Sheets that emit no `(sheet …)` block are a no-op.
+#[test]
+fn no_symbol_sheet_overlap_across_fixtures() {
+    let library = load_test_library();
+    let cases: &[(&str, PathBuf)] = &[(
+        "opamp_inverting",
+        fixtures_dir().join("opamp_inverting.cir"),
+    )];
+    for (name, path) in cases {
+        let tmp = tempdir(name);
+        let sch = common::spice_to_kicad(path, &tmp).expect("spice2kicad");
+        let root = parse_sch(&sch);
+        let sheets = sheet_bboxes(&root);
+        assert!(
+            !sheets.is_empty(),
+            "{name}: expected at least one (sheet …)"
+        );
+
+        // Real placed symbols.
+        let sym_boxes: Vec<(String, Bbox)> = children(&root, "symbol")
+            .into_iter()
+            .filter_map(|sym| resolved_world_extent(&library, sym))
+            .collect();
+        // Power glyphs.
+        let glyph_boxes: Vec<(String, Bbox)> = children(&root, "symbol")
+            .into_iter()
+            .filter_map(|sym| glyph_world_extent(&library, sym))
+            .collect();
+
+        for (i, sheet) in sheets.iter().enumerate() {
+            for (refdes, b) in sym_boxes.iter().chain(glyph_boxes.iter()) {
+                assert!(
+                    !b.intersects(sheet),
+                    "{name}: {refdes} extent {b:?} overlaps sheet #{i} body {sheet:?}",
+                );
+            }
+        }
+    }
+}
+
+/// A `power:*` glyph anchored on a sheet *port pin* overprints the port
+/// label KiCad draws at that coordinate. The fix offsets the glyph
+/// outward (detached-glyph-with-stub-wire); after it, no glyph anchor
+/// coincides with a sheet port pin. Budget 0, ratchet.
+#[test]
+fn power_glyph_not_on_sheet_port_pin() {
+    let cases: &[(&str, PathBuf)] = &[(
+        "opamp_inverting",
+        fixtures_dir().join("opamp_inverting.cir"),
+    )];
+    for (name, path) in cases {
+        let tmp = tempdir(name);
+        let sch = common::spice_to_kicad(path, &tmp).expect("spice2kicad");
+        let root = parse_sch(&sch);
+
+        // All sheet port-pin coordinates on the parent sheet.
+        let mut port_pins: Vec<(String, f64, f64)> = Vec::new();
+        for sheet in children(&root, "sheet") {
+            port_pins.extend(sheet_port_pins(sheet));
+        }
+        assert!(!port_pins.is_empty(), "{name}: no sheet port pins found");
+
+        // Power-glyph anchor coordinates.
+        for sym in children(&root, "symbol") {
+            let Some((refdes, lib_id)) = placed_symbol_refdes_and_lib_id(sym) else {
+                continue;
+            };
+            if !lib_id.starts_with("power:") {
+                continue;
+            }
+            let Some((gx, gy, _)) = placed_symbol_pose(sym) else {
+                continue;
+            };
+            for (pname, px, py) in &port_pins {
+                let coincident = (gx - px).abs() < 1e-3 && (gy - py).abs() < 1e-3;
+                assert!(
+                    !coincident,
+                    "{name}: power glyph {refdes} ({lib_id}) at ({gx:.2},{gy:.2}) \
+                     sits exactly on sheet port pin '{pname}' — overprints the \
+                     port label (use detached-glyph-with-stub-wire offset)",
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn v15_content_within_page_bounds() {
     for (name, path) in v15_fixtures() {

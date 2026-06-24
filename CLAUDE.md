@@ -689,10 +689,17 @@ literals above.
   fixed rectangle, so it is placed by `spice_layout::place_sheets`
   (`crates/spice-layout/src/sheets.rs`) after the real-element placer
   runs, from the *final* neighbour positions, then de-overlapped against
-  every real symbol body and every other sheet. Multi-sheet files get
-  distinct non-overlapping rectangles (replacing the old `idx*60`
-  page-column stacking). Like the rest of V6 this is a **Tier 2**
-  quality property.
+  every real symbol body and every other sheet. **The de-overlap
+  footprint extends the sheet rectangle leftward by the power-glyph
+  reach** (`SHEET_GLYPH_REACH_MM` = 3 grid cells): the sheet's left-edge
+  port pins hang `power:*` glyphs that far outward (see V13 below), so a
+  sheet jammed against a neighbour would spear it with a *glyph* even
+  when the bare body clears — folding the glyph zone into the obstacle
+  test pushes the sheet right until both body and glyphs clear. Sheets
+  therefore participate in the symbol-vs-symbol no-overlap clause, not
+  just symbol-vs-symbol. Multi-sheet files get distinct non-overlapping
+  rectangles (replacing the old `idx*60` page-column stacking). Like the
+  rest of V6 this is a **Tier 2** quality property.
   Verifier: `hierarchical_sheet_placed_near_circuit`
   (`crates/spice2kicad/tests/placement_quality.rs`) — for every
   emitted parent `(sheet …)` block, asserts its `(at …)` lands within
@@ -700,10 +707,15 @@ literals above.
   (so a sheet flung off-page fails), AND the longest emitted
   `(wire …)` segment stays under a per-fixture sheet-port trunk-wire
   budget (`SHEET_TRUNK_WIRE_BUDGET_MM`, a recorded high-water-mark
-  ratchet driven down, never up). The verifier derives everything from
-  the emitted geometry — no fixture name or magic coordinate is
-  hardcoded. Plus `crates/spice-layout/src/sheets.rs::tests`:
-  single-sheet proximity, multi-sheet non-overlap, grid-snap.
+  ratchet driven down, never up). Plus
+  `no_symbol_sheet_overlap_across_fixtures` (no symbol's resolved extent
+  and no `power:*` glyph body overlaps a `(sheet …)` body bbox) and
+  `power_glyph_not_on_sheet_port_pin` (no glyph anchor coincides with a
+  sheet port pin — it would overprint the port label). Both budget 0,
+  ratchet. The verifiers derive everything from the emitted geometry —
+  no fixture name or magic coordinate is hardcoded. Plus
+  `crates/spice-layout/src/sheets.rs::tests`: single-sheet proximity,
+  multi-sheet non-overlap, grid-snap.
 
 - **V7 — Symmetry-aware placement.** When the placer detects a
   structural symmetry in the netlist — a refdes pairing under which
@@ -1013,6 +1025,25 @@ literals above.
   `v13_label_anchor_not_on_foreign_wire_interior`; and (4)
   `v13_property_text_no_mutual_overlap` (per-fixture ratchet
   literals, all `0` today). V13 stays Tier 1.
+
+  **Power glyphs on hierarchical-sheet port pins.** KiCad draws a
+  `(sheet …)` block's port label at the port-pin coordinate. A
+  `power:*` glyph anchored there overprints that label and overlaps
+  the sheet body — so a glyph (and the PWR_FLAG driving it) on a
+  sheet-edge pin uses the **detached-glyph-with-stub-wire** path: it
+  is offset `SHEET_EDGE_GLYPH_OFFSET_CELLS` (= 2) grid cells *outward*
+  from the sheet (away from the body, along the port pin's outward
+  direction — Left for a left-edge port column) and bridged to the
+  pin by a one-segment stub wire (same net, V11-safe). This is the
+  same mechanism as the V14 forced-sideways fallback, keyed instead on
+  `PinRef::on_sheet_edge` (set by the emitter for the sheet-port
+  `extra_pins`); both the glyph and its PWR_FLAG share
+  `rails::sheet_edge_offset`. The placer-side companion is the V6
+  glyph-reach de-overlap footprint above — together they keep the
+  glyph clear of *both* the sheet body and any neighbouring symbol.
+  Verifiers: `power_glyph_not_on_sheet_port_pin` and
+  `no_symbol_sheet_overlap_across_fixtures`
+  (`crates/spice2kicad/tests/placement_quality.rs`), budget 0.
 
 - **V14 — Power glyph orientation: GND down, VCC up.** Every
   `power:GND` instance emits with the rotation that draws the
