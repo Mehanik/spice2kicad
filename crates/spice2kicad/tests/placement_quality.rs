@@ -1302,6 +1302,140 @@ fn common_emitter_signal_flows_left_to_right() {
     );
 }
 
+/// V14 (rail-pin facing) — every directional rail glyph must sit on the
+/// *correct screen side* of the body it connects to: a positive-rail
+/// glyph (`power:VCC` / `power:VDD` / `power:+…`) above its host body
+/// (anchor Y ≤ host body-centre Y, screen Y growing downward), and a
+/// negative-rail / ground glyph (`power:GND` / `power:VEE`) below it
+/// (anchor Y ≥ host body-centre Y).
+///
+/// This is the R-5 defect: a 2-pin rail consumer (e.g. `RC vcc c`) whose
+/// rail pin points *into* the body, dropping its VCC glyph below the
+/// resistor. The host is associated to a glyph by the non-power symbol
+/// whose pin coincides with the glyph anchor (glyphs carry a single pin
+/// at their `(at …)` origin). Budget 0 across all fixtures, ratchet.
+///
+/// One placed non-power-symbol pin, in world coords, with its host body
+/// centre and screen-vertical facing — used to bind each rail glyph to
+/// the host pin it connects to.
+struct HostPin {
+    refdes: String,
+    body_cy: f64,
+    px: f64,
+    py: f64,
+    /// World-frame vertical-facing of this pin (matches
+    /// `orient::ScreenFacing`): `Some(true)`=up, `Some(false)`=down,
+    /// `None`=horizontal. A glyph on a horizontal pin is the
+    /// detached-glyph case (no above/below expectation).
+    vertical_up: Option<bool>,
+}
+
+#[test]
+fn v14_rail_pin_faces_rail() {
+    let library = load_test_library();
+    for (name, path) in fixtures() {
+        let tmp = tempdir(name);
+        let sch = common::spice_to_kicad(&path, &tmp).expect("spice2kicad");
+        let root = parse_sch(&sch);
+
+        // World pins of every NON-power placed symbol: (refdes, body-centre
+        // Y, pin world x, pin world y). Used to bind each glyph to its host.
+        let mut host_pins: Vec<HostPin> = Vec::new();
+        for sym in children(&root, "symbol") {
+            let Some((refdes, lib_id)) = placed_symbol_refdes_and_lib_id(sym) else {
+                continue;
+            };
+            if refdes.starts_with("#PWR") || lib_id.starts_with("power:") {
+                continue;
+            }
+            let Some((ox, oy, orient)) = placed_symbol_pose(sym) else {
+                continue;
+            };
+            let Some(lib_sym) = library.lookup(&lib_id) else {
+                continue;
+            };
+            let Some((_, bbox)) = resolved_body_bbox(&library, sym) else {
+                continue;
+            };
+            let body_cy = f64::midpoint(bbox.y0, bbox.y1);
+            for tp in lib_sym.pins_in(orient) {
+                // The emitter passes the library-frame pin angle straight
+                // through and negates world Y, so library angle 270 renders
+                // screen-up and 90 screen-down (see orient::screen_facing).
+                let vertical_up = match tp.angle % 360 {
+                    270 => Some(true),
+                    90 => Some(false),
+                    _ => None,
+                };
+                host_pins.push(HostPin {
+                    refdes: refdes.clone(),
+                    body_cy,
+                    px: ox + tp.x,
+                    py: oy - tp.y,
+                    vertical_up,
+                });
+            }
+        }
+
+        for sym in children(&root, "symbol") {
+            let Some((refdes, lib_id)) = placed_symbol_refdes_and_lib_id(sym) else {
+                continue;
+            };
+            if !lib_id.starts_with("power:") || lib_id == "power:PWR_FLAG" {
+                continue;
+            }
+            // VertPref::Up for positive rails (VCC/VDD/+…); Down for
+            // ground / negative rails (GND/VEE).
+            let want_up =
+                lib_id == "power:VCC" || lib_id == "power:VDD" || lib_id.starts_with("power:+");
+            let want_down = lib_id == "power:GND" || lib_id == "power:VEE";
+            if !(want_up || want_down) {
+                continue; // not a directional rail glyph
+            }
+            let Some((ax, ay, _)) = placed_symbol_pose(sym) else {
+                continue;
+            };
+            // Host = nearest non-power pin to the glyph anchor (the glyph's
+            // single pin sits at its `(at …)` origin and is wired to a host
+            // pin; allow a short stub by taking the nearest).
+            let Some(host) = host_pins.iter().min_by(|a, b| {
+                let da = (a.px - ax).hypot(a.py - ay);
+                let db = (b.px - ax).hypot(b.py - ay);
+                da.partial_cmp(&db).unwrap()
+            }) else {
+                continue;
+            };
+            // A glyph attached to a *horizontally-drawn* host pin (e.g. an
+            // opamp `+` input wired to ground) is the documented
+            // detached-glyph-stub case: V14 governs supply-style
+            // (native-vertical) pins only, so it carries no above/below
+            // expectation. Mirrors `orient::satisfies_v14`'s
+            // `native_vertical` gate — assert facing only for vertical
+            // host pins.
+            if host.vertical_up.is_none() {
+                continue;
+            }
+            if want_up {
+                assert!(
+                    ay <= host.body_cy + f64::EPSILON,
+                    "{name}: positive-rail glyph {refdes} ({lib_id}) at y={ay} is BELOW its \
+                     host {}'s body centre y={} — rail pin faces into the body (V14/R-5)",
+                    host.refdes,
+                    host.body_cy,
+                );
+            } else {
+                assert!(
+                    ay >= host.body_cy - f64::EPSILON,
+                    "{name}: ground/negative-rail glyph {refdes} ({lib_id}) at y={ay} is ABOVE \
+                     its host {}'s body centre y={} — rail pin faces into the body (V14/R-5)",
+                    host.refdes,
+                    host.body_cy,
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn v14_power_glyphs_have_canonical_orientation() {
     // V14 — every `power:GND` instance is emitted at rot 0 (triangle

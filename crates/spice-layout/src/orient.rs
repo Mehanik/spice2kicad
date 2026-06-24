@@ -113,17 +113,31 @@ pub fn allowed_orientations(checked: &CheckedNetlist) -> Vec<Vec<Orientation>> {
         .elements
         .iter()
         .map(|elem| {
-            // A ≤2-terminal element (a 2-pin rail source: VCC/VEE/VDC)
-            // has *no signal pins* — only rail/ground pins, whose glyphs
-            // are placed and oriented entirely by the rails decoration
-            // stub (V14's documented detached-glyph fallback). Locking
-            // its symbol orientation would needlessly reshuffle the
-            // surrounding layout for zero V14 benefit, since the glyph,
-            // not the source body, carries the rail's screen direction.
-            // V14's orientation lock is therefore scoped to multi-pin
-            // *active* devices (the opamp), whose signal pins must keep
-            // facing their neighbours while the rail pins point out.
-            if elem.nodes.len() <= 2 {
+            // The ≤2-terminal exemption is scoped to elements for which
+            // V14 carries no orientation information:
+            //
+            //   * A 2-pin *power source* (`VCC vcc 0`, `VEE vee 0`): its
+            //     body is replaced by a rail glyph entirely placed and
+            //     oriented by the rails decoration stub (V14's documented
+            //     detached-glyph fallback). Locking the source body's
+            //     orientation reshuffles the layout for zero V14 benefit.
+            //   * A 2-pin element with *no rail pin at all* (a pure
+            //     signal element like `CIN in b`): nothing to orient
+            //     against a rail, so all eight survive trivially anyway —
+            //     `satisfies_v14` would return `true` for every
+            //     orientation, but short-circuiting keeps the seed
+            //     candidate set the full eight (matching prior behaviour
+            //     exactly, so signal-only placement is byte-identical).
+            //
+            // A 2-pin *rail consumer* (`RC vcc c`, `R1 vcc b`) is NOT
+            // exempt: one pin is a real rail pin whose V14 facing applies
+            // (rail pin out toward its band → glyph on the body exterior),
+            // and its signal pin is then forced opposite, toward the Mid
+            // band where its neighbour lives. It must flow into the
+            // `satisfies_v14` filter below so the rail pin faces its band.
+            let is_power_source = matches!(elem.role, spice_resolve::ElementRole::Power(_));
+            let has_rail_pin = elem.nodes.iter().any(|n| prefs.contains_key(n));
+            if elem.nodes.len() <= 2 && (is_power_source || !has_rail_pin) {
                 return Orientation::ALL.to_vec();
             }
             let filtered: Vec<Orientation> = Orientation::ALL
@@ -198,22 +212,76 @@ mod tests {
     }
 
     #[test]
-    fn two_pin_rail_element_is_not_orientation_filtered() {
-        // A ≤2-terminal element (here R1 with a vcc rail pin and a
-        // signal pin) is *not* orientation-locked by V14: it has no
-        // signal pins to keep facing neighbours, and its rail pin's glyph
-        // is placed and oriented entirely by the rails decoration stub
-        // (V14's documented detached-glyph fallback). Locking its
-        // orientation would needlessly reshuffle the surrounding layout
-        // for zero V14 benefit. So all eight orientations survive.
+    fn two_pin_rail_consumer_is_orientation_filtered() {
+        // A 2-pin rail *consumer* (R1 with a vcc rail pin + a signal pin)
+        // IS orientation-locked by V14 (R-5 fix): its real rail pin must
+        // face its band (vcc → screen-up) so the VCC glyph lands on the
+        // body *exterior*, not buried under the resistor. The filtered set
+        // is therefore a strict subset of the eight, and every survivor
+        // satisfies V14.
         let (refdes, allowed) =
             allowed_str("test\nV1 vcc 0 12 ;@ power=vcc\nR1 vcc out 1k\n.end\n");
+        let prefs = {
+            let file_id = FileId(0);
+            let parsed = spice_parser::parse(
+                "test\nV1 vcc 0 12 ;@ power=vcc\nR1 vcc out 1k\n.end\n",
+                file_id,
+            )
+            .expect("parse")
+            .netlist;
+            let resolved =
+                spice_resolve::resolve(&parsed, fixture_library()).expect("resolve failed");
+            let (checked, _w) = check(resolved).expect("policy check failed");
+            vertical_prefs(&checked)
+        };
         let i = idx_of(&refdes, "R1");
-        assert_eq!(
-            allowed[i].len(),
-            8,
-            "a 2-pin rail element must keep the full orientation set"
+        assert!(
+            allowed[i].len() < 8 && !allowed[i].is_empty(),
+            "a 2-pin rail consumer must be V14-filtered to a non-empty subset, got {}",
+            allowed[i].len()
         );
+        // Reconstruct R1 to assert every survivor satisfies V14.
+        let file_id = FileId(0);
+        let parsed = spice_parser::parse(
+            "test\nV1 vcc 0 12 ;@ power=vcc\nR1 vcc out 1k\n.end\n",
+            file_id,
+        )
+        .expect("parse")
+        .netlist;
+        let resolved = spice_resolve::resolve(&parsed, fixture_library()).expect("resolve failed");
+        let (checked, _w) = check(resolved).expect("policy check failed");
+        let r1 = checked
+            .elements
+            .iter()
+            .find(|e| e.refdes == "R1")
+            .expect("R1");
+        for &o in &allowed[i] {
+            assert!(
+                satisfies_v14(r1, &prefs, o),
+                "filtered orientation {o:?} does not satisfy V14"
+            );
+        }
+    }
+
+    #[test]
+    fn two_pin_signal_only_element_keeps_full_set() {
+        // A 2-pin element with NO rail pin (pure signal) keeps all eight
+        // orientations — V14 carries no information for it, and the seed
+        // candidate set must stay byte-identical to prior behaviour.
+        let (refdes, allowed) =
+            allowed_str("test\nV1 in 0 AC 1\nR1 in out 1k\nC1 out mid 1u\n.end\n");
+        let i = idx_of(&refdes, "C1");
+        assert_eq!(allowed[i].len(), 8);
+    }
+
+    #[test]
+    fn two_pin_power_source_keeps_full_set() {
+        // A 2-pin power SOURCE stays exempt: its body is replaced by a
+        // glyph oriented by the rails decoration stub.
+        let (refdes, allowed) =
+            allowed_str("test\nV1 vcc 0 12 ;@ power=vcc\nR1 vcc out 1k\n.end\n");
+        let i = idx_of(&refdes, "V1");
+        assert_eq!(allowed[i].len(), 8);
     }
 
     #[test]
