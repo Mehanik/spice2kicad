@@ -594,6 +594,20 @@ literals above.
        name-match (priority order in `classify_nets`, `net_class.rs`).
        This name-based false positive is a tolerated quality risk;
        the escape hatch is to not name signal nets after rails.
+       **Ground vs. negative-rail (glyph-only) distinction.** The
+       `Ground` class lumps *true ground* (net `0`, name `gnd`) and
+       *negative supply rails* (`vee`/`v-`/`vminus`, or any net carrying
+       a `*@power=-…` negative-voltage tag) into one class — this is
+       correct for *layout* (both share the bottom Y-band). But it is
+       *not* correct for the **glyph** (V10): a ground triangle on a
+       -12 V rail is electrically misleading. So a finer
+       `negative_rail_nets(placement)` distinction (in `net_class.rs`,
+       keyed off `PlacedElement::power_rail` polarity — the `*@power`
+       tag wins — and the canonical negative-rail names, never net `0`)
+       selects `power:VEE` instead of `power:GND` for those nets. The
+       band placement is unchanged; only the drawn symbol differs.
+       `vss` is treated conservatively as ground (commonly 0 V digital
+       ground) unless an explicit `*@power=-…` tag promotes it.
     2. **Y-band assignment.** Each element is assigned a vertical band
        (Top / Mid / Bot) based on which net classes touch it: elements
        exclusively on Power nets go to Top; elements exclusively on
@@ -839,7 +853,15 @@ literals above.
 
 - **V10 — Power-as-glyphs, Steiner-tree routing.** Power and
   Ground nets emit `power:VCC` / `power:GND` library symbol
-  glyphs at each connected pin (no wires). Signal nets emit
+  glyphs at each connected pin (no wires). A **negative supply rail**
+  (a Ground-class net flagged by `negative_rail_nets`; see V6) emits
+  the distinct `power:VEE` glyph instead of `power:GND` — a ground
+  triangle on a -12 V rail is electrically misleading. The VEE glyph
+  is attached exactly like a GND glyph (canonical axis Down, so no
+  forced-sideways stub) — only the drawn symbol differs. The
+  `NetSpec::negative_rail` flag carries this through `rails::emit`;
+  `power_lib_id_for_net` mirrors it so the `power:VEE` lib_symbol
+  inlines verbatim (V3). Signal nets emit
   rectilinear Steiner trees: N=3 is exact via Hwang's median
   rule; 4≤N≤9 is heuristic (rectilinear MST + Borah-Owens-Irwin
   Steinerization on the Hanan grid); N≥10 is plain rectilinear
@@ -995,13 +1017,15 @@ literals above.
 - **V14 — Power glyph orientation: GND down, VCC up.** Every
   `power:GND` instance emits with the rotation that draws the
   triangle below the connection point (KiCad lib convention: rot 0).
-  Every `power:+...` / `power:VCC` / `power:VDD` instance emits with
-  the rotation that draws the chevron above the connection point
-  (rot 0). The host pin's outward direction does *not* alter the
-  glyph rotation — the previous per-pin rotation match
-  (commit `b4838ee`) produced GND glyphs at any of {0, 90, 180, 270}
-  depending on which pin they attached to, which is not how
-  schematics are conventionally drawn.
+  Every `power:+...` / `power:VCC` / `power:VDD` / `power:VEE`
+  instance emits at rot 0 as well — for `VEE`, that is the KiCad lib
+  convention (its pin sits at lib-angle 90 like VCC). A negative rail
+  (`power:VEE`) is *attached* like ground (canonical axis Down, see
+  V10), so it never triggers the forced-sideways stub. The host
+  pin's outward direction does *not* alter the glyph rotation — the
+  previous per-pin rotation match (commit `b4838ee`) produced GND
+  glyphs at any of {0, 90, 180, 270} depending on which pin they
+  attached to, which is not how schematics are conventionally drawn.
   Consequence: when the host pin's outward direction conflicts with
   the locked orientation (e.g. a GND glyph attached to a pin that
   sticks upward into the body's empty space), the glyph body may
@@ -1010,8 +1034,12 @@ literals above.
   pin-choice improvement (tracked separately). V14's contract is
   purely "no surprising rotations".
   Verifier: `crates/spice2kicad/tests/placement_quality.rs::v14_*`
-  asserts every `power:GND` and `power:VCC` symbol's `(at … rot)`
-  has `rot == 0`.
+  asserts every directional rail glyph (`power:GND` / `power:VCC` /
+  `power:VEE` / variants; `power:PWR_FLAG` excepted) has `rot == 0`.
+  A companion verifier
+  (`electrical_safety.rs::negative_rails_render_as_vee_not_gnd`)
+  asserts negative rails use `power:VEE`, true ground uses
+  `power:GND`.
 
 - **V15 — Content lands within the page's usable area.** Every
   emitted coordinate (symbol / property / wire / label / glyph /

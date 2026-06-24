@@ -160,6 +160,65 @@ fn matches_ground_name(lower: &str) -> bool {
     matches!(lower, "gnd" | "vee" | "vss" | "v-" | "vminus")
 }
 
+/// True when a net's lowercased name is a canonical *negative-rail*
+/// name. This is a strict subset of [`matches_ground_name`]: it
+/// excludes `gnd` (true ground) and, deliberately, `vss` (commonly a
+/// digital *ground* at 0 V — see CLAUDE.md V6; promote `vss` to a
+/// negative rail only via an explicit `*@power=-…` tag, never by name).
+///
+/// Used only for **glyph selection** ([`crate::PlacedElement`] →
+/// `power:VEE` vs `power:GND`), not for [`classify_nets`]: a negative
+/// rail stays [`NetClass::Ground`] for layout (it shares the bottom
+/// Y-band with ground), but its glyph must visually distinguish it from
+/// true ground.
+#[must_use]
+pub fn matches_negative_rail_name(lower: &str) -> bool {
+    matches!(lower, "vee" | "v-" | "vminus")
+}
+
+/// The set of net names that are *negative supply rails* (e.g. a
+/// `-12 V` rail), derived **generally** from a placed netlist — never
+/// from fixture or refdes names.
+///
+/// Two independent signals (the `*@power` tag wins over the name, per
+/// CLAUDE.md V6):
+///   1. A power source ([`crate::PlacedElement::power_rail`]) whose rail
+///      string begins with `-` (a negative voltage like `-12V`) marks
+///      *all* its nodes as negative rails — this is the authoritative
+///      signal and promotes even a non-canonically-named net.
+///   2. A canonical negative-rail net name (`vee` / `v-` / `vminus`)
+///      via [`matches_negative_rail_name`].
+///
+/// A negative rail is still [`NetClass::Ground`] for layout (bottom
+/// band); this set drives only the glyph choice (`power:VEE`).
+#[must_use]
+pub fn negative_rail_nets(placement: &crate::Placement) -> std::collections::BTreeSet<String> {
+    let mut out: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for el in &placement.elements {
+        // Signal 1: explicit negative `*@power=` voltage on a source.
+        // Only the *positive terminal* (`nodes[0]`) is the rail — the
+        // second terminal of `VEE vee 0 DC -15` is ground (`0`), which
+        // must stay true ground, never a VEE glyph. (Mirrors
+        // `classify_nets` rule 2, which keys off `nodes.first()`.)
+        if let Some(rail) = &el.power_rail
+            && rail.trim_start().starts_with('-')
+            && let Some(node) = el.nodes.first()
+        {
+            out.insert(node.clone());
+        }
+        // Signal 2: canonical negative-rail net names on any element.
+        for n in &el.nodes {
+            if matches_negative_rail_name(&n.to_ascii_lowercase()) {
+                out.insert(n.clone());
+            }
+        }
+    }
+    // A true-ground net (`0`) is never a negative rail, even if it was
+    // a return terminal of a negative source above.
+    out.remove("0");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,6 +307,57 @@ mod tests {
         // but belongs at the bottom (VertPref::Down).
         let p = prefs_str("test\nVEE vee 0 DC -15 ;@ power=-15V\nR1 vee out 1k\n.end\n");
         assert_eq!(p.get("vee"), Some(&VertPref::Down));
+    }
+
+    fn placement_str(src: &str) -> crate::Placement {
+        use kicad_symbols::Library;
+        let file_id = FileId(0);
+        let parsed = spice_parser::parse(src, file_id)
+            .expect("parse failed")
+            .netlist;
+        let resolved = spice_resolve::resolve(&parsed, fixture_library()).expect("resolve failed");
+        let (checked, _warns) = check(resolved).expect("policy check failed");
+        let lib: &Library = fixture_library();
+        let opts = crate::LayoutOptions {
+            refine: false,
+            ..crate::LayoutOptions::default()
+        };
+        crate::place_with(checked, lib, &opts).expect("placement")
+    }
+
+    #[test]
+    fn negative_power_tag_marks_positive_terminal_not_ground() {
+        // `VEE vee 0 DC -12 ;@ power=-12V`: `vee` is the negative rail,
+        // `0` must stay true ground (never a VEE glyph).
+        let p = placement_str("test\nVEE vee 0 DC -12 ;@ power=-12V\nRT tail vee 2k\n.end\n");
+        let neg = negative_rail_nets(&p);
+        assert!(neg.contains("vee"), "vee should be a negative rail");
+        assert!(!neg.contains("0"), "ground `0` must not be a negative rail");
+    }
+
+    #[test]
+    fn positive_power_tag_is_not_negative_rail() {
+        let p = placement_str("test\nVCC vcc 0 DC 12 ;@ power=+12V\nR1 vcc out 1k\n.end\n");
+        let neg = negative_rail_nets(&p);
+        assert!(neg.is_empty(), "no negative rail expected, got {neg:?}");
+    }
+
+    #[test]
+    fn vss_is_not_negative_rail_by_name() {
+        // `vss` is commonly digital ground (0 V); not a negative rail
+        // unless an explicit `*@power=-…` tag says so.
+        let p = placement_str("test\nV1 vss 0 DC 0 ;@ power=vss\nR1 vss out 1k\n.end\n");
+        let neg = negative_rail_nets(&p);
+        assert!(!neg.contains("vss"), "vss must not be negative by name");
+    }
+
+    #[test]
+    fn canonical_vee_name_is_negative_rail() {
+        // Even without a negative voltage tag, the canonical `vee` name
+        // is a negative rail for glyph purposes.
+        let p = placement_str("test\nV1 vee 0 DC 5 ;@ power=vee\nR1 vee out 1k\n.end\n");
+        let neg = negative_rail_nets(&p);
+        assert!(neg.contains("vee"), "canonical vee name → negative rail");
     }
 
     #[test]

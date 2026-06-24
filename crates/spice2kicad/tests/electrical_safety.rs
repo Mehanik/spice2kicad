@@ -1481,3 +1481,139 @@ fn v5_first_segment_extends_outward() {
         hard_failures.join("\n  "),
     );
 }
+
+// --- R-1 (V6/V10) — negative rails render as power:VEE, not power:GND ----
+
+/// A negative supply rail (e.g. `VEE vee 0 DC -12 ;@ power=-12V`) must
+/// render with a *negative-rail* glyph (`power:VEE`), never the
+/// ground-triangle (`power:GND`). A reader who sees a ground symbol on a
+/// -12 V rail is electrically misled.
+///
+/// Negative rails are derived **generally** from the SPICE source — never
+/// from fixture or refdes names. Two independent signals (mirroring
+/// `spice_layout::net_class`):
+///   * a `;@ power=<rail>` / `*@power` tag whose rail string begins with
+///     `-` (a negative voltage) — the strongest signal, and
+///   * a canonical negative-rail net name (`vee` / `v-` / `vminus`).
+///
+/// `vss` is *not* treated as negative by name alone (commonly digital
+/// ground at 0 V); it would only qualify via a negative `power=` tag.
+///
+/// True ground (net `0`, or canonical `gnd`) must stay `power:GND`.
+///
+/// Scans every fixture's `.cir`, builds the set of negative-rail and
+/// true-ground net names, then asserts each emitted `power:*` glyph's
+/// `lib_id` matches the class of the net in its `Value` property.
+fn negative_and_ground_nets(
+    cir_src: &str,
+) -> (
+    std::collections::BTreeSet<String>,
+    std::collections::BTreeSet<String>,
+) {
+    let mut negative = std::collections::BTreeSet::new();
+    let mut ground = std::collections::BTreeSet::new();
+    ground.insert("0".to_string());
+    for raw in cir_src.lines() {
+        let line = raw.trim();
+        // First whitespace-separated tokens are nodes; the `;@ power=`
+        // tag (if any) carries the rail polarity.
+        let code = line.split(";@").next().unwrap_or("").trim();
+        let mut toks = code.split_whitespace();
+        // Node names: positions 1.. up to the value; for a 2-terminal
+        // voltage source `V<n> n+ n- …` the first two tokens after the
+        // refdes are nets. We don't need to be precise — we just collect
+        // every token that looks like a net and classify by name; the
+        // power tag handles the source's own nets.
+        let nodes: Vec<&str> = toks.by_ref().skip(1).collect();
+        for n in &nodes {
+            let lower = n.to_ascii_lowercase();
+            match lower.as_str() {
+                "vee" | "v-" | "vminus" => {
+                    negative.insert((*n).to_string());
+                }
+                "gnd" => {
+                    ground.insert((*n).to_string());
+                }
+                _ => {}
+            }
+        }
+        // `;@ power=<rail>` with a negative voltage → the source's first
+        // node (positive terminal) is a negative rail.
+        if let Some(tag) = line.split(";@").nth(1) {
+            let tag = tag.trim();
+            if let Some(rest) = tag.strip_prefix("power=") {
+                let rail = rest.split_whitespace().next().unwrap_or("");
+                if rail.trim_start().starts_with('-') {
+                    if let Some(first_node) = nodes.first() {
+                        negative.insert((*first_node).to_string());
+                        // A negative rail is not ground.
+                        ground.remove(*first_node);
+                    }
+                }
+            }
+        }
+    }
+    // Canonical-name negatives are not ground.
+    for n in &negative {
+        ground.remove(n);
+    }
+    (negative, ground)
+}
+
+#[test]
+fn negative_rails_render_as_vee_not_gnd() {
+    for name in SHEETS {
+        let src = fixtures_dir().join(format!("{name}.cir"));
+        let cir = std::fs::read_to_string(&src).expect("read .cir");
+        let (negative, ground) = negative_and_ground_nets(&cir);
+        if negative.is_empty() {
+            continue; // fixture has no negative rail
+        }
+        let tmp = tempdir(name);
+        let sch = spice_to_kicad(&src, &tmp).expect("spice2kicad");
+        let root = parse(&sch);
+        let mut saw_negative = false;
+        for sym in children(&root, "symbol") {
+            let Some(lib_id) = find_child(sym, "lib_id")
+                .and_then(|n| list_iter(n).nth(1))
+                .and_then(as_str)
+            else {
+                continue;
+            };
+            if !lib_id.starts_with("power:") || lib_id == "power:PWR_FLAG" {
+                continue;
+            }
+            // The glyph's `Value` property carries the net name.
+            let mut net = String::new();
+            for prop in children(sym, "property") {
+                let mut pit = list_iter(prop);
+                pit.next();
+                if pit.next().and_then(as_str) == Some("Value") {
+                    if let Some(v) = pit.next().and_then(as_str) {
+                        net = v.to_string();
+                    }
+                }
+            }
+            if negative.contains(&net) {
+                saw_negative = true;
+                assert_eq!(
+                    lib_id, "power:VEE",
+                    "{name}: negative rail '{net}' rendered with glyph '{lib_id}'; \
+                     must be 'power:VEE' (a ground triangle on a negative rail is \
+                     electrically misleading)",
+                );
+            } else if ground.contains(&net) {
+                assert_eq!(
+                    lib_id, "power:GND",
+                    "{name}: true-ground net '{net}' rendered with glyph '{lib_id}'; \
+                     must be 'power:GND'",
+                );
+            }
+        }
+        assert!(
+            saw_negative,
+            "{name}: expected at least one power:VEE glyph for negative rail(s) {negative:?}, \
+             but no negative-rail glyph was emitted",
+        );
+    }
+}

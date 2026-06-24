@@ -66,6 +66,10 @@ fn manual_placement(checked: &CheckedNetlist, origins: &[(i32, i32)]) -> Placeme
             pin_mapping: e.pin_mapping.clone(),
             value: None,
             is_power_source: matches!(e.role, ElementRole::Power(_)),
+            power_rail: match &e.role {
+                ElementRole::Power(rail) => Some(rail.clone()),
+                ElementRole::Normal => None,
+            },
         })
         .collect();
     Placement { elements }

@@ -48,6 +48,14 @@ pub struct NetSpec {
     pub name: String,
     pub class: spice_layout::net_class::NetClass,
     pub pins: Vec<PinRef>,
+    /// True when this net is a *negative supply rail* (e.g. a `-12 V`
+    /// rail). Such nets stay [`spice_layout::net_class::NetClass::Ground`]
+    /// for layout (bottom band) but their Stage-1 glyph must be the
+    /// distinct `power:VEE` symbol, not the ground triangle `power:GND`
+    /// — a ground symbol on a negative rail is electrically misleading
+    /// (CLAUDE.md V10). Derived generally upstream via
+    /// [`spice_layout::net_class::negative_rail_nets`].
+    pub negative_rail: bool,
 }
 
 /// Input to [`crate::route`].

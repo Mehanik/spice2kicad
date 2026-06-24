@@ -783,6 +783,7 @@ mod tests {
             pin_mapping: Vec::new(),
             value: None,
             is_power_source: false,
+            power_rail: None,
         }
     }
 

@@ -116,6 +116,7 @@ fn signal_net(name: &str, pins: &[(f64, f64)]) -> NetSpec {
                 requires_driver: false,
             })
             .collect(),
+        negative_rail: false,
     }
 }
 

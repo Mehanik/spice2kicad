@@ -38,10 +38,19 @@ pub fn emit(
     warnings: &mut Vec<String>,
 ) {
     let lib_id = match net.class {
+        // A negative supply rail is classed Ground for layout but must
+        // render with the distinct `power:VEE` glyph (V10), regardless
+        // of its NetClass. The negative-rail flag is the authoritative
+        // signal here.
+        _ if net.negative_rail => "power:VEE",
         NetClass::Power => power_lib_id(&net.name),
         NetClass::Ground => ground_lib_id(&net.name),
         NetClass::Signal => return,
     };
+    // The glyph's canonical attachment axis (the host-pin direction that
+    // needs no offset). Computed once per net; a negative rail attaches
+    // like ground (Down) regardless of its `power:VEE` body geometry.
+    let canon = canonical_axis(net.class, net.negative_rail);
     let resolved = library.is_none_or(|lib| lib.lookup(lib_id).is_some());
     for pin in &net.pins {
         if resolved {
@@ -51,7 +60,7 @@ pub fn emit(
                 lib_id,
                 &net.name,
                 pin,
-                net.class,
+                canon,
                 &refdes,
                 sheet_uuid,
                 project_name,
@@ -63,7 +72,7 @@ pub fn emit(
             // canonical axis and bridge the gap with a one-cell stub
             // wire so the glyph body never overlaps the host body while
             // the rotation stays the conventional 0.
-            if let Some(stub) = stub_wire(pin, net.class) {
+            if let Some(stub) = stub_wire(pin, canon) {
                 out.push(stub);
             }
         } else {
@@ -95,12 +104,29 @@ fn ground_lib_id(_net_name: &str) -> &'static str {
     "power:GND"
 }
 
-/// The canonical screen-vertical direction a rot-0 glyph of `class`
-/// extends its body away from its anchor pin.
+/// The canonical screen-vertical direction a rot-0 glyph's *attachment
+/// side* faces — i.e. the host-pin outward direction for which the glyph
+/// needs no forced-sideways offset.
 ///
-/// * Power → up (chevron above the anchor).
-/// * Ground → down (triangle below the anchor).
-fn canonical_axis(class: NetClass) -> Direction {
+/// * Positive supply (`power:VCC`/`VDD`/`+NV`) → up (chevron above the
+///   anchor; attaches to an up-facing pin).
+/// * True ground (`power:GND`) → down (triangle below the anchor;
+///   attaches to a down-facing pin).
+/// * Negative rail (`power:VEE`) → **down**, like ground. A negative
+///   rail sits in the bottom band and its host pins face screen-down
+///   (its `VertPref` is `Down`), so the glyph attaches to a down-facing
+///   pin exactly as a GND glyph does. Treating it as `Down` here keeps
+///   the glyph at the host pin with no offset and no stub — identical
+///   geometry to the GND glyph it replaces, only the `lib_id` (and thus
+///   the drawn symbol: a `V-` marker, not a ground triangle) differs.
+///   Using `Up` (the VEE symbol's body geometry) would force a sideways
+///   offset whose stub wire dives back through the host circuitry (a
+///   V12 foreign-body crossing); the body-direction mismatch is a
+///   pre-existing V13 quality concern, not a wiring defect to create.
+fn canonical_axis(class: NetClass, negative_rail: bool) -> Direction {
+    if negative_rail {
+        return Direction::Down;
+    }
     match class {
         NetClass::Power => Direction::Up,
         // Ground (the only other class that reaches here; Signal is
@@ -120,8 +146,7 @@ fn canonical_axis(class: NetClass) -> Direction {
 /// body, so it keeps the on-pin placement with no stub (matching the
 /// pre-V14 behaviour and avoiding a spurious vertical stub that would
 /// otherwise read as a V5 non-outward first segment).
-fn is_forced_sideways(pin: &PinRef, class: NetClass) -> bool {
-    let canon = canonical_axis(class);
+fn is_forced_sideways(pin: &PinRef, canon: Direction) -> bool {
     let opposite = match canon {
         Direction::Up => Direction::Down,
         Direction::Down => Direction::Up,
@@ -157,8 +182,8 @@ fn outward_delta(dir: Direction) -> (f64, f64) {
 /// anchor along that same outward direction (so the first segment from
 /// the pin extends outward, satisfying V5). Otherwise the anchor sits
 /// exactly on the pin (no stub).
-fn symbol_pose(pin: &PinRef, class: NetClass) -> (f64, f64, u16) {
-    if is_forced_sideways(pin, class) {
+fn symbol_pose(pin: &PinRef, canon: Direction) -> (f64, f64, u16) {
+    if is_forced_sideways(pin, canon) {
         let (dx, dy) = outward_delta(pin.outward);
         (pin.x_mm + dx, pin.y_mm + dy, 0)
     } else {
@@ -170,8 +195,8 @@ fn symbol_pose(pin: &PinRef, class: NetClass) -> (f64, f64, u16) {
 /// emitted only in the V14 forced-sideways case. The stub extends along
 /// the pin's outward direction, so it doubles as the pin's outward first
 /// segment (V5). Returns `None` when the glyph sits on the pin.
-fn stub_wire(pin: &PinRef, class: NetClass) -> Option<Sexpr> {
-    if !is_forced_sideways(pin, class) {
+fn stub_wire(pin: &PinRef, canon: Direction) -> Option<Sexpr> {
+    if !is_forced_sideways(pin, canon) {
         return None;
     }
     let (dx, dy) = outward_delta(pin.outward);
@@ -188,12 +213,12 @@ fn power_symbol_sexpr(
     lib_id: &str,
     net_name: &str,
     pin: &PinRef,
-    class: NetClass,
+    canon: Direction,
     refdes: &str,
     sheet_uuid: &str,
     project_name: &str,
 ) -> Sexpr {
-    let (x, y, rot) = symbol_pose(pin, class);
+    let (x, y, rot) = symbol_pose(pin, canon);
     // Use the same pattern as the existing emitter: nested `(symbol …)`
     // with `lib_id`, `at`, `unit`, properties. Reference is a unique
     // `#PWR<n>` and is *hidden* (KiCad convention for power symbols:

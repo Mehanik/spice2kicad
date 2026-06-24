@@ -182,6 +182,7 @@ mod tests {
                     pin_mapping: vec!["1".to_string(), "2".to_string()],
                     value: Some("1k".to_string()),
                     is_power_source: false,
+                    power_rail: None,
                 },
                 PlacedElement {
                     refdes: "C1".to_string(),
@@ -192,6 +193,7 @@ mod tests {
                     pin_mapping: vec!["1".to_string(), "2".to_string()],
                     value: Some("100n".to_string()),
                     is_power_source: false,
+                    power_rail: None,
                 },
             ],
         }

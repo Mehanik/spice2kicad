@@ -153,6 +153,7 @@ pub fn emit_root(
     let obstacles = placement_obstacles(placement, library);
     let driven = collect_driven_nets(placement, library);
     let requires_driver = collect_driver_required_nets(placement, library);
+    let negative_rails = spice_layout::net_class::negative_rail_nets(placement);
     for routed in route_nets(
         &net_pins,
         "root",
@@ -160,6 +161,7 @@ pub fn emit_root(
         &obstacles,
         &driven,
         &requires_driver,
+        &negative_rails,
     )? {
         items.push(routed);
     }
@@ -263,6 +265,7 @@ pub fn emit_child_sheet(child: &ChildSheet<'_>, library: &Library) -> Result<Str
     // sheet-local child nets receive a child PWR_FLAG.
     driven.extend(port_driven.iter().cloned());
     let requires_driver = collect_driver_required_nets(child.placement, library);
+    let negative_rails = spice_layout::net_class::negative_rail_nets(child.placement);
     for routed in route_nets(
         &net_pins,
         &child.name,
@@ -270,6 +273,7 @@ pub fn emit_child_sheet(child: &ChildSheet<'_>, library: &Library) -> Result<Str
         &obstacles,
         &driven,
         &requires_driver,
+        &negative_rails,
     )? {
         items.push(routed);
     }
@@ -634,9 +638,14 @@ fn power_lib_ids_for_placement(
     is_root: bool,
 ) -> Vec<String> {
     let mut out: BTreeSet<String> = BTreeSet::new();
+    // Negative-rail nets render with `power:VEE` (not `power:GND`),
+    // derived generally from `*@power` polarity / canonical names. Must
+    // match the router's per-net glyph choice so the right lib_symbol
+    // (and only that one) inlines (V3).
+    let negative_rails = spice_layout::net_class::negative_rail_nets(placement);
     for el in &placement.elements {
         for node in &el.nodes {
-            if let Some(id) = power_lib_id_for_net(node) {
+            if let Some(id) = power_lib_id_for_net(node, &negative_rails) {
                 out.insert(id.to_string());
             }
         }
@@ -645,7 +654,7 @@ fn power_lib_ids_for_placement(
     // exposed only through a hierarchical sheet pin still gets a
     // `power:*` glyph). Reflect those lib_ids so they inline as well.
     for net in extra_pin_nets {
-        if let Some(id) = power_lib_id_for_net(net) {
+        if let Some(id) = power_lib_id_for_net(net, &negative_rails) {
             out.insert(id.to_string());
         }
     }
@@ -703,8 +712,20 @@ fn placement_has_undriven_net(
     })
 }
 
-fn power_lib_id_for_net(net_name: &str) -> Option<&'static str> {
-    use spice_layout::net_class::NetClass;
+fn power_lib_id_for_net(
+    net_name: &str,
+    negative_rails: &std::collections::BTreeSet<String>,
+) -> Option<&'static str> {
+    use spice_layout::net_class::{NetClass, matches_negative_rail_name};
+    // A negative supply rail renders with the distinct `power:VEE`
+    // glyph, regardless of NetClass (it is Ground-class for layout).
+    // Honour both the upstream-derived set (which captures `*@power`
+    // negative-voltage polarity) and a canonical-name fallback.
+    if negative_rails.contains(net_name)
+        || matches_negative_rail_name(&net_name.to_ascii_lowercase())
+    {
+        return Some("power:VEE");
+    }
     let class = match () {
         () if net_name == "0" => NetClass::Ground,
         () => {
@@ -713,7 +734,7 @@ fn power_lib_id_for_net(net_name: &str) -> Option<&'static str> {
                 "vcc" | "vdd" | "v+" | "vplus" | "+5v" | "5v" | "+12v" | "12v" | "+3v3" | "3v3" => {
                     NetClass::Power
                 }
-                "gnd" | "vee" | "vss" | "v-" | "vminus" => NetClass::Ground,
+                "gnd" | "vss" => NetClass::Ground,
                 _ => return None,
             }
         }
@@ -1105,6 +1126,7 @@ fn route_nets(
     obstacles: &[spice_route::Bbox],
     driven: &std::collections::BTreeSet<String>,
     requires_driver: &std::collections::BTreeSet<String>,
+    negative_rails: &std::collections::BTreeSet<String>,
 ) -> Result<Vec<Sexpr>, EmitError> {
     use spice_route::{NetSpec, PinRef, RouteRequest};
 
@@ -1145,6 +1167,7 @@ fn route_nets(
             name: name.clone(),
             class,
             pins: pin_refs,
+            negative_rail: negative_rails.contains(name),
         });
     }
 
@@ -1252,6 +1275,14 @@ pub(crate) fn trial_route(placement: &Placement, library: &Library) -> TrialRout
             name: name.clone(),
             class,
             pins: pin_refs,
+            // Negative-rail VEE-vs-GND glyph selection is a *decoration*
+            // concern (glyph identity), not a wire-geometry one. The
+            // refinement phase measures only V5/V11 wire consequences,
+            // so the flag would only perturb orientation choice without
+            // changing any wire it measures — keep it `false` so glyph
+            // selection never feeds back into placement (CLAUDE.md:
+            // "Decoration is a strict consumer of placement output").
+            negative_rail: false,
         });
     }
 
@@ -2474,6 +2505,7 @@ mod tests {
                 pin_mapping: Vec::new(),
                 value: None,
                 is_power_source: false,
+                power_rail: None,
             }],
         }
     }
@@ -2520,6 +2552,7 @@ mod tests {
                     pin_mapping: Vec::new(),
                     value: None,
                     is_power_source: false,
+                    power_rail: None,
                 },
                 PlacedElement {
                     refdes: "R2".into(),
@@ -2530,6 +2563,7 @@ mod tests {
                     pin_mapping: Vec::new(),
                     value: None,
                     is_power_source: false,
+                    power_rail: None,
                 },
             ],
         };
@@ -2557,6 +2591,7 @@ mod tests {
                 pin_mapping: Vec::new(),
                 value: None,
                 is_power_source: false,
+                power_rail: None,
             }],
         };
         let out = emit(&placement, &fixture_library()).expect("emit");
@@ -2595,6 +2630,7 @@ mod tests {
                 pin_mapping: Vec::new(),
                 value: None,
                 is_power_source: false,
+                power_rail: None,
             }],
         };
         let out = emit(&placement, &fixture_library()).expect("emit");

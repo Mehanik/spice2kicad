@@ -105,6 +105,14 @@ pub struct PlacedElement {
     /// (so parallel index arrays and the negative-rail Y hint stay in
     /// sync); only its rendering is suppressed.
     pub is_power_source: bool,
+    /// The raw `;@ power=<rail>` / `*@power` rail string when this
+    /// element is a power source (`ElementRole::Power(rail)`), else
+    /// `None`. Carried so the emitter can distinguish a *negative* rail
+    /// (rail string begins with `-`, e.g. `-12V`) from a positive one
+    /// without re-deriving from the checked netlist — the single source
+    /// of truth for negative-rail glyph selection (`power:VEE` vs
+    /// `power:VCC`/`power:GND`). See `net_class::negative_rail_nets`.
+    pub power_rail: Option<String>,
 }
 
 impl PlacedElement {
@@ -870,6 +878,10 @@ fn place_seed(checked: &CheckedNetlist) -> Result<(Placement, Vec<bool>), Vec<Di
             pin_mapping: e.pin_mapping.clone(),
             value: e.value.as_ref().map(format_value),
             is_power_source: matches!(e.role, ElementRole::Power(_)),
+            power_rail: match &e.role {
+                ElementRole::Power(rail) => Some(rail.clone()),
+                ElementRole::Normal => None,
+            },
         });
     }
 

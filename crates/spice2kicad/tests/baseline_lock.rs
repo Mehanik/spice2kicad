@@ -300,7 +300,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
     ),
     ("diff_pair", "#PWR1", "power:VCC", 30.48, 26.67, 0.0, ""),
     ("diff_pair", "#PWR2", "power:VCC", 39.37, 26.67, 0.0, ""),
-    ("diff_pair", "#PWR3", "power:GND", 25.4, 39.37, 0.0, ""),
+    ("diff_pair", "#PWR3", "power:VEE", 25.4, 39.37, 0.0, ""),
     ("diff_pair", "Q1", "Device:Q_NPN_BCE", 45.72, 44.45, 0.0, ""),
     (
         "diff_pair",
@@ -444,7 +444,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
     (
         "opamp_inverting",
         "#PWR3",
-        "power:GND",
+        "power:VEE",
         59.69,
         52.07,
         0.0,
@@ -525,7 +525,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
     (
         "opamp_inverting_real",
         "#PWR3",
-        "power:GND",
+        "power:VEE",
         30.48,
         41.91,
         0.0,

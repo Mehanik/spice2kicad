@@ -44,6 +44,7 @@ fn vcc_pin_emits_power_vcc_symbol() {
         name: "vcc".into(),
         class: NetClass::Power,
         pins: vec![pin(0, 1, 10.16, 20.32, Direction::Up)],
+        negative_rail: false,
     };
     let r = route(RouteRequest {
         nets: &[net],
@@ -70,6 +71,7 @@ fn ground_pin_emits_power_gnd_symbol() {
         name: "0".into(),
         class: NetClass::Ground,
         pins: vec![pin(0, 2, 10.16, 40.64, Direction::Down)],
+        negative_rail: false,
     };
     let r = route(RouteRequest {
         nets: &[net],
@@ -86,6 +88,41 @@ fn ground_pin_emits_power_gnd_symbol() {
 }
 
 #[test]
+fn negative_rail_emits_power_vee_not_gnd() {
+    // A negative supply rail (Ground-class for layout, but flagged
+    // `negative_rail`) must render with the distinct `power:VEE` glyph,
+    // never the ground triangle `power:GND` (V10). The pin faces down
+    // (a negative rail sits in the bottom band like ground); the VEE
+    // glyph attaches just like a GND glyph (canonical axis Down), so a
+    // down-facing pin is *not* forced-sideways — same geometry as the
+    // GND glyph it replaces, only the lib_id differs.
+    let lib = fixture_library();
+    let net = NetSpec {
+        name: "vee".into(),
+        class: NetClass::Ground,
+        pins: vec![pin(0, 1, 10.16, 40.64, Direction::Down)],
+        negative_rail: true,
+    };
+    let r = route(RouteRequest {
+        nets: &[net],
+        scope: "root",
+        library: Some(&lib),
+        sheet_uuid: "test-uuid",
+        project_name: "test",
+        obstacles: &[],
+        bounds: None,
+    });
+    assert_eq!(count_substring(&r.sexprs, "power:VEE"), 1, "{:?}", r.sexprs);
+    assert_eq!(
+        count_substring(&r.sexprs, "power:GND"),
+        0,
+        "negative rail must not emit a ground glyph: {:?}",
+        r.sexprs
+    );
+    assert!(r.warnings.is_empty(), "no warnings: {:?}", r.warnings);
+}
+
+#[test]
 fn signal_net_does_not_emit_power_symbol() {
     let lib = fixture_library();
     let net = NetSpec {
@@ -95,6 +132,7 @@ fn signal_net_does_not_emit_power_symbol() {
             pin(0, 1, 0.0, 0.0, Direction::Right),
             pin(1, 1, 10.16, 0.0, Direction::Left),
         ],
+        negative_rail: false,
     };
     let r = route(RouteRequest {
         nets: &[net],
@@ -132,6 +170,7 @@ fn power_symbol_rotation_always_zero_v14() {
             name: "0".into(),
             class: NetClass::Ground,
             pins: vec![pin(0, 1, 10.16, 20.32, dir)],
+            negative_rail: false,
         };
         let r = route(RouteRequest {
             nets: &[net],
@@ -179,6 +218,7 @@ fn forced_sideways_ground_glyph_offsets_with_stub_wire() {
         name: "0".into(),
         class: NetClass::Ground,
         pins: vec![pin(0, 1, 10.16, 20.32, Direction::Up)],
+        negative_rail: false,
     };
     let r = route(RouteRequest {
         nets: &[net],
@@ -212,6 +252,7 @@ fn canonical_ground_glyph_has_no_stub_wire() {
         name: "0".into(),
         class: NetClass::Ground,
         pins: vec![pin(0, 1, 10.16, 20.32, Direction::Down)],
+        negative_rail: false,
     };
     let r = route(RouteRequest {
         nets: &[net],
@@ -233,6 +274,7 @@ fn unknown_lib_id_falls_back_to_global_label() {
         name: "vcc".into(),
         class: NetClass::Power,
         pins: vec![pin(0, 1, 10.16, 20.32, Direction::Up)],
+        negative_rail: false,
     };
     let r = route(RouteRequest {
         nets: &[net],
