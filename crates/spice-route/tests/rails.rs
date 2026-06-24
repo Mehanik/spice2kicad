@@ -308,3 +308,111 @@ fn unknown_lib_id_falls_back_to_global_label() {
         r.warnings
     );
 }
+
+/// Extract the `(property "Value" "<text>" …)` argument from the first
+/// power-symbol s-expr containing `lib_id`.
+fn power_glyph_value(sexprs: &[lexpr::Value], lib_id: &str) -> String {
+    let s = sexprs
+        .iter()
+        .map(std::string::ToString::to_string)
+        .find(|s| s.contains(lib_id) && s.contains("(symbol"))
+        .unwrap_or_else(|| panic!("no power symbol with {lib_id}: {sexprs:?}"));
+    let marker = "(property \"Value\" \"";
+    let start = s.find(marker).expect("Value property present") + marker.len();
+    let rest = &s[start..];
+    let end = rest.find('"').expect("closing quote");
+    rest[..end].to_string()
+}
+
+#[test]
+fn power_glyph_value_is_uppercase_rail_name() {
+    // R-6: a power glyph's Value IS its KiCad net name. Render the
+    // canonical UPPERCASE rail name so the schematic reads `VCC`/`VEE`,
+    // not the raw lowercase SPICE token, while preserving net identity
+    // (distinct rails stay distinct).
+    let lib = fixture_library();
+    let net = NetSpec {
+        name: "vcc".into(),
+        class: NetClass::Power,
+        pins: vec![pin(0, 1, 10.16, 20.32, Direction::Up)],
+        negative_rail: false,
+    };
+    let r = route(RouteRequest {
+        nets: &[net],
+        scope: "root",
+        library: Some(&lib),
+        sheet_uuid: "test-uuid",
+        project_name: "test",
+        obstacles: &[],
+        bounds: None,
+    });
+    assert_eq!(power_glyph_value(&r.sexprs, "power:VCC"), "VCC");
+}
+
+#[test]
+fn negative_rail_glyph_value_is_uppercase() {
+    let lib = fixture_library();
+    let net = NetSpec {
+        name: "vee".into(),
+        class: NetClass::Ground,
+        pins: vec![pin(0, 1, 10.16, 40.64, Direction::Down)],
+        negative_rail: true,
+    };
+    let r = route(RouteRequest {
+        nets: &[net],
+        scope: "root",
+        library: Some(&lib),
+        sheet_uuid: "test-uuid",
+        project_name: "test",
+        obstacles: &[],
+        bounds: None,
+    });
+    assert_eq!(power_glyph_value(&r.sexprs, "power:VEE"), "VEE");
+}
+
+#[test]
+fn ground_net_zero_glyph_value_is_gnd() {
+    // The SPICE ground net is named "0"; conventionally its glyph Value
+    // is `GND` (ground is a single net, so the rename is safe).
+    let lib = fixture_library();
+    let net = NetSpec {
+        name: "0".into(),
+        class: NetClass::Ground,
+        pins: vec![pin(0, 2, 10.16, 40.64, Direction::Down)],
+        negative_rail: false,
+    };
+    let r = route(RouteRequest {
+        nets: &[net],
+        scope: "root",
+        library: Some(&lib),
+        sheet_uuid: "test-uuid",
+        project_name: "test",
+        obstacles: &[],
+        bounds: None,
+    });
+    assert_eq!(power_glyph_value(&r.sexprs, "power:GND"), "GND");
+}
+
+#[test]
+fn plus_rail_name_preserves_distinct_identity() {
+    // `v+` uppercases to `V+` (distinct from VCC) — net identity must
+    // survive the case fold.
+    let lib = fixture_library();
+    let net = NetSpec {
+        name: "v+".into(),
+        class: NetClass::Power,
+        pins: vec![pin(0, 1, 10.16, 20.32, Direction::Up)],
+        negative_rail: false,
+    };
+    let r = route(RouteRequest {
+        nets: &[net],
+        scope: "root",
+        library: Some(&lib),
+        sheet_uuid: "test-uuid",
+        project_name: "test",
+        obstacles: &[],
+        bounds: None,
+    });
+    // lib_id maps to VCC (default positive), but Value preserves "V+".
+    assert_eq!(power_glyph_value(&r.sexprs, "power:VCC"), "V+");
+}

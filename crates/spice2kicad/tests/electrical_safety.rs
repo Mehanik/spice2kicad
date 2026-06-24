@@ -435,6 +435,26 @@ fn placed_symbol_refdes_and_lib_id(sym: &Value) -> Option<(String, String)> {
     Some((refdes?, lib_id?))
 }
 
+/// Canonical net identity for V11 coincidence comparison.
+///
+/// A KiCad `power:*` glyph connects globally by its `Value` text, and the
+/// emitter renders that Value as the *canonical* rail name (R-6): the
+/// SPICE ground net `"0"` → `GND`, every other rail uppercased
+/// (`vcc`→`VCC`, `vee`→`VEE`). The resolved SPICE netlist still carries
+/// the raw lowercase token, so the verifier must apply the same
+/// canonicalization to *both* sides before comparing net identity — a
+/// pure case difference (`vcc` vs `VCC`) is the same net, not a foreign
+/// short. This is the single normalization point that keeps V11's
+/// string-equality model aligned with KiCad's by-Value power-net
+/// connectivity.
+fn canonical_net(net: &str) -> String {
+    if net == "0" {
+        "GND".to_string()
+    } else {
+        net.to_ascii_uppercase()
+    }
+}
+
 /// Build the world-pin → net map for one fixture by:
 ///  1. Re-running `spice_resolve::resolve` on the SPICE source to
 ///     recover `(refdes, kicad_pin_number) → spice_net` for every
@@ -492,7 +512,7 @@ fn world_pins_for_sheet(spice_path: &std::path::Path, root: &Value) -> Vec<World
             let wx = ox + tp.x;
             let wy = oy - tp.y;
             let net = match pin_to_net.get(tp.number.as_str()) {
-                Some(n) => (*n).to_string(),
+                Some(n) => canonical_net(n),
                 None => continue,
             };
             out.push(WorldPin {
@@ -534,6 +554,7 @@ fn world_pins_for_sheet(spice_path: &std::path::Path, root: &Value) -> Vec<World
             }
         }
         let Some(net) = net else { continue };
+        let net = canonical_net(&net);
         let _ = lib_id;
         out.push(WorldPin {
             refdes,
@@ -901,6 +922,7 @@ fn v11_no_foreign_pin_coincidence() {
 
         // Phase D — label anchors coincident with a pin must agree on net.
         for (lname, pos) in label_positions(&root) {
+            let lname = canonical_net(&lname);
             let k = qkey(pos.0, pos.1);
             if let Some(pins_at) = pin_index.get(&k) {
                 for (refdes, pin_no, pin_net) in pins_at {
@@ -1232,6 +1254,7 @@ fn v13_label_anchor_not_on_foreign_wire_interior() {
         let labels = label_positions(&root);
         let mut hits = 0;
         for (lname, pos) in &labels {
+            let lname = canonical_net(lname);
             let lk = qkey(pos.0, pos.1);
             for (a, b) in &wires {
                 let ka = qkey(a.0, a.1);
@@ -1240,7 +1263,7 @@ fn v13_label_anchor_not_on_foreign_wire_interior() {
                 let Some(wnet) = comp_net.get(&ra) else {
                     continue;
                 };
-                if wnet == lname {
+                if wnet == &lname {
                     continue;
                 }
                 let kb = qkey(b.0, b.1);
@@ -1642,6 +1665,12 @@ fn negative_rails_render_as_vee_not_gnd() {
         let src = fixtures_dir().join(format!("{name}.cir"));
         let cir = std::fs::read_to_string(&src).expect("read .cir");
         let (negative, ground) = negative_and_ground_nets(&cir);
+        // The emitted glyph `Value` is the *canonical* rail name (R-6),
+        // so compare on canonical identity (`vee`→`VEE`, `0`→`GND`).
+        let negative: std::collections::BTreeSet<String> =
+            negative.iter().map(|n| canonical_net(n)).collect();
+        let ground: std::collections::BTreeSet<String> =
+            ground.iter().map(|n| canonical_net(n)).collect();
         if negative.is_empty() {
             continue; // fixture has no negative rail
         }

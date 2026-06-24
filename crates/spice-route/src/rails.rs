@@ -266,6 +266,18 @@ fn power_symbol_sexpr(
     project_name: &str,
 ) -> Sexpr {
     let (x, y, rot) = symbol_pose(pin, canon);
+    // A KiCad power symbol's Value *is* its net name (power symbols
+    // connect globally by Value), so the rendered text must preserve net
+    // identity: distinct rails stay distinct. Uppercase the raw SPICE
+    // token to the canonical rail label (`vcc`→`VCC`, `vee`→`VEE`,
+    // `v+`→`V+`), and rename the SPICE ground net `"0"` to the
+    // conventional `GND` (ground is a single net, so this rename cannot
+    // merge two distinct nets).
+    let value = if net_name == "0" {
+        "GND".to_string()
+    } else {
+        net_name.to_ascii_uppercase()
+    };
     // Use the same pattern as the existing emitter: nested `(symbol …)`
     // with `lib_id`, `at`, `unit`, properties. Reference is a unique
     // `#PWR<n>` and is *hidden* (KiCad convention for power symbols:
@@ -284,7 +296,7 @@ fn power_symbol_sexpr(
             (in_bom no) (on_board no) \
             (property \"Reference\" \"{refdes}\" (at {rx:.2} {ry:.2} 0) \
                 (effects (font (size 1.27 1.27)) (hide yes))) \
-            (property \"Value\" \"{net_name}\" (at {vx:.2} {vy:.2} 0)) \
+            (property \"Value\" \"{value}\" (at {vx:.2} {vy:.2} 0)) \
             (instances (project \"{project_name}\" \
                 (path \"/{sheet_uuid}\" \
                     (reference \"{refdes}\") (unit 1)))))",
