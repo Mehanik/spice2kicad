@@ -763,6 +763,198 @@ fn no_symbol_symbol_overlap_across_fixtures() {
     }
 }
 
+/// World-frame AABB of a placed symbol's *body* only (no pin reach),
+/// orientation-transformed. The value-text crowding check measures
+/// against the drawn body, not pin stems: a pin is a connection point
+/// that wires legitimately land on, so value text clearing the body —
+/// not the pin stems — is what a reader perceives as a clean gap.
+fn resolved_body_bbox(library: &Library, sym: &Value) -> Option<(String, Bbox)> {
+    let (refdes, lib_id) = placed_symbol_refdes_and_lib_id(sym)?;
+    if refdes.starts_with("#PWR") || lib_id.starts_with("power:") {
+        return None;
+    }
+    let (ox, oy, orient) = placed_symbol_pose(sym)?;
+    let lib_sym = library.lookup(&lib_id)?;
+    let local = lib_sym.body_bbox()?;
+    let mut x0 = f64::INFINITY;
+    let mut y0 = f64::INFINITY;
+    let mut x1 = f64::NEG_INFINITY;
+    let mut y1 = f64::NEG_INFINITY;
+    for (lx, ly) in [
+        (local.x0, local.y0),
+        (local.x0, local.y1),
+        (local.x1, local.y0),
+        (local.x1, local.y1),
+    ] {
+        let (rx, ry) = orient.apply_point(lx, ly);
+        x0 = x0.min(ox + rx);
+        y0 = y0.min(oy - ry);
+        x1 = x1.max(ox + rx);
+        y1 = y1.max(oy - ry);
+    }
+    Some((refdes, Bbox { x0, y0, x1, y1 }))
+}
+
+/// Estimated rendered width (mm) of a left-justified value text at the
+/// default 1.27 mm size. Mirrors the emitter's `text_bbox` width
+/// formula (`chars * 0.6 * size + 0.8 * size`) so the verifier measures
+/// the same box the renderer draws.
+fn value_text_width_mm(text: &str) -> f64 {
+    let size = 1.27_f64;
+    #[allow(clippy::cast_precision_loss)]
+    let chars = text.chars().count() as f64;
+    chars * 0.6 * size + 0.8 * size
+}
+
+/// World-frame AABB of a placed element's `(property "Value" …)` text,
+/// left-justified at its `(at vx vy …)` anchor (rotation 0 for every
+/// fixture's value property). Height mirrors the emitter's `text_bbox`
+/// (`1.4 * size`, centred on the anchor Y). Returns `None` for elements
+/// with no value property (power glyphs are filtered upstream anyway).
+fn value_text_bbox(sym: &Value) -> Option<Bbox> {
+    for prop in children(sym, "property") {
+        let mut it = list_iter(prop);
+        it.next();
+        if it.next().and_then(as_str) != Some("Value") {
+            continue;
+        }
+        let val = it.next().and_then(as_str)?;
+        let at = find_child(prop, "at")?;
+        let mut ait = list_iter(at);
+        ait.next();
+        let vx = ait.next().and_then(as_f64)?;
+        let vy = ait.next().and_then(as_f64)?;
+        let width = value_text_width_mm(val);
+        let half_h = 0.7 * 1.27; // 1.4 * size / 2
+        return Some(Bbox {
+            x0: vx,
+            y0: vy - half_h,
+            x1: vx + width,
+            y1: vy + half_h,
+        });
+    }
+    None
+}
+
+/// Read every `*@align horizontal <refdes>...` cluster from a fixture's
+/// SPICE source. Returns each cluster as the list of refdes named on
+/// the directive line — membership is derived generally from the spec,
+/// not hard-coded per fixture.
+fn horizontal_align_clusters(cir: &Path) -> Vec<Vec<String>> {
+    let src = std::fs::read_to_string(cir).expect("read .cir");
+    let mut out = Vec::new();
+    for line in src.lines() {
+        let Some(rest) = line.trim().strip_prefix("*@align") else {
+            continue;
+        };
+        let mut toks = rest.split_whitespace();
+        if toks.next() != Some("horizontal") {
+            continue;
+        }
+        let members: Vec<String> = toks.map(str::to_owned).collect();
+        if members.len() >= 2 {
+            out.push(members);
+        }
+    }
+    out
+}
+
+/// V13 (Tier-1 readability): within a horizontal `*@align` cluster,
+/// consecutive members must leave a clear horizontal gap between the
+/// left member's rendered value-text box and the right member's nearest
+/// left feature (drawn body or its own value text), measured only
+/// across features that overlap in Y (so a value text drawn clear above
+/// a wide neighbour's body is not counted as crowding). The align
+/// stride is a HARD spacing floor at the candidate boundary
+/// (`crates/spice-layout/src/lib.rs`), so this gap is a derived
+/// consequence of that floor, not a tunable cost.
+///
+/// Ratchet: the per-fixture minimum gap is a recorded high-water mark
+/// driven UP, never lowered. The literal below is the current measured
+/// minimum across the fixture's clusters; a fix that widens the gap
+/// raises it, a regression that narrows it trips the assert.
+#[test]
+fn value_text_clear_gap_in_align_clusters() {
+    // Minimum clear horizontal gap (mm) between a left member's
+    // value-text box and the right member's nearest left feature,
+    // across Y-overlapping features. Per fixture with a horizontal
+    // align cluster. Ratchet: drive UP, never lower.
+    //
+    // diff_pair's clusters after the align-stride text-gap floor:
+    //   RC1↔RC2 (small resistors): 2.54 mm — a clean two-cell gap, and
+    //     the fixture minimum (Q1↔Q2 clears by 7.06 mm). Before this
+    //     fix the placer's value-text model under-reached by 2.54 mm,
+    //     so RC1's "4.7k" sat one bare grid cell (1.27 mm) from RC2's
+    //     body. 2.54 mm is the new high-water mark and the ratchet
+    //     floor — zero slack; raise it on improvement only, never lower.
+    const MIN_GAP_MM: &[(&str, f64)] = &[("diff_pair", 2.54)];
+
+    let library = load_test_library();
+    for (name, path) in fixtures() {
+        let clusters = horizontal_align_clusters(&path);
+        if clusters.is_empty() {
+            continue;
+        }
+        let Some(&(_, budget)) = MIN_GAP_MM.iter().find(|(n, _)| *n == name) else {
+            continue;
+        };
+
+        let tmp = tempdir(name);
+        let sch = common::spice_to_kicad(&path, &tmp).expect("spice2kicad");
+        let root = parse_sch(&sch);
+
+        // Index placed symbols by refdes → (body bbox, value-text bbox).
+        // Body excludes pin stems. Value text defaults to the body bbox
+        // when a member carries no value property.
+        let mut by_refdes: std::collections::HashMap<String, (Bbox, Bbox)> =
+            std::collections::HashMap::new();
+        for sym in children(&root, "symbol") {
+            let Some((refdes, bbox)) = resolved_body_bbox(&library, sym) else {
+                continue;
+            };
+            let vbox = value_text_bbox(sym).unwrap_or(bbox);
+            by_refdes.insert(refdes, (bbox, vbox));
+        }
+
+        // Two bboxes overlap in Y (open intervals, 1 µm tolerance).
+        let y_overlap = |a: &Bbox, b: &Bbox| a.y0 + 1e-3 < b.y1 && b.y0 + 1e-3 < a.y1;
+
+        for cluster in clusters {
+            // Members present in the schematic, ordered left-to-right by
+            // body x0 so "consecutive" is geometric.
+            let mut members: Vec<(String, Bbox, Bbox)> = cluster
+                .iter()
+                .filter_map(|r| by_refdes.get(r).map(|&(b, v)| (r.clone(), b, v)))
+                .collect();
+            members.sort_by(|a, b| a.1.x0.partial_cmp(&b.1.x0).unwrap());
+            for w in members.windows(2) {
+                let (lref, lbody, ltext) = &w[0];
+                let (rref, rbody, rtext) = &w[1];
+                // For each (left feature, right feature) pair sharing a
+                // Y band, the horizontal clearance must meet the floor:
+                // the left value text crowding the right body/text, plus
+                // the symmetric cases.
+                let mut min_gap = f64::INFINITY;
+                for left_feat in [ltext, lbody] {
+                    for right_feat in [rbody, rtext] {
+                        if y_overlap(left_feat, right_feat) {
+                            min_gap = min_gap.min(right_feat.x0 - left_feat.x1);
+                        }
+                    }
+                }
+                if !min_gap.is_finite() {
+                    continue; // no Y-overlapping features → no crowding
+                }
+                assert!(
+                    min_gap + 1e-6 >= budget,
+                    "{name}: align value-text gap between {lref} and {rref} is {min_gap:.3} mm, \
+                     below the {budget:.3} mm ratchet floor (drive UP, never lower)",
+                );
+            }
+        }
+    }
+}
+
 /// Iterate every `(global_label …)` / `(label …)`: returns `(name, pos)`.
 fn all_labels(root: &Value) -> Vec<(String, Pt)> {
     let mut out = Vec::new();

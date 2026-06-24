@@ -329,8 +329,22 @@ const VALUE_CHAR_MM: f64 = 0.76;
 /// World-frame offset (mm) from a symbol origin at which the emitter
 /// left-justifies the value text. The text occupies
 /// `[VALUE_TEXT_OFFSET_MM, VALUE_TEXT_OFFSET_MM + width]` on the +X
-/// side of the origin.
-const VALUE_TEXT_OFFSET_MM: f64 = 0.0;
+/// side of the origin. Matches the emitter's value-property anchor,
+/// which it places at local `(2.54, 2.54)` (see
+/// `kicad-emitter/src/schematic.rs`'s `property_anchor(.., 2.54, 2.54)`
+/// call) — modelling it at 0 underestimated the text's right reach by a
+/// full 2.54 mm, so align-clustered members crowded their neighbour.
+const VALUE_TEXT_OFFSET_MM: f64 = 2.54;
+
+/// Guaranteed clear horizontal gap (mm) between a left align-cluster
+/// member's rendered value text and the right member's *drawn body*
+/// (pins excluded — a pin is a connection point a wire lands on). Two
+/// grid cells reads as a clean separation rather than the bare
+/// one-cell grid-snap kiss the old stride produced. Applied as a HARD
+/// spacing floor at the align-stride candidate boundary only — the seed
+/// layer-stride (which deliberately excludes value-text width) is left
+/// untouched. Not a soft cost.
+const ALIGN_TEXT_GAP_MM: f64 = 2.0 * GridPoint::STEP_MM;
 
 /// Resolved world-frame extents of an element relative to its origin,
 /// in millimetres. `min_x`/`max_x` are signed offsets from the origin
@@ -390,19 +404,32 @@ fn world_extent(symbol: &Symbol, orientation: Orientation, value: Option<&str>) 
     }
 }
 
-/// Number of whole grid cells needed to separate two adjacent
-/// elements' origins along a horizontal row so their resolved extents
-/// (plus `MIN_CLEARANCE_MM`) do not intersect. `left` is the
-/// element on the smaller-X side; `right` on the larger-X side. The
-/// required centre-to-centre distance is `left.max_x - right.min_x +
-/// clearance`, snapped UP to the grid.
-fn horizontal_stride_cells(left: &WorldExtent, right: &WorldExtent) -> i32 {
-    let need_mm = left.max_x + (-right.min_x) + MIN_CLEARANCE_MM;
-    mm_up_to_cells(need_mm)
+/// World-frame left reach (mm, as a non-negative magnitude) of a
+/// symbol's *body* alone — orientation-transformed body bbox, pins
+/// excluded. `0.0` if the symbol has no body bbox. Used by the align
+/// stride's text-clearance term: a pin is a connection point a wire
+/// lands on, so value text need only clear the neighbour's drawn body,
+/// not its pin stems.
+fn body_left_reach(symbol: &Symbol, orientation: Orientation) -> f64 {
+    let Some(b) = symbol.body_bbox() else {
+        return 0.0;
+    };
+    let mut min_x = 0.0_f64;
+    for (lx, ly) in [(b.x0, b.y0), (b.x0, b.y1), (b.x1, b.y0), (b.x1, b.y1)] {
+        let (rx, _ry) = orientation.apply_point(lx, ly);
+        min_x = min_x.min(rx);
+    }
+    -min_x
 }
 
-/// As [`horizontal_stride_cells`] but for a vertical column. `upper`
-/// is the element on the smaller-world-Y side, `lower` on the larger.
+/// Number of whole grid cells needed to separate two adjacent
+/// elements' origins along a vertical column so their resolved extents
+/// (plus `MIN_CLEARANCE_MM`) do not intersect. `upper` is the element
+/// on the smaller-world-Y side, `lower` on the larger. The required
+/// centre-to-centre distance is `upper.max_y - lower.min_y +
+/// clearance`, snapped UP to the grid. (The horizontal counterpart is
+/// inlined in the align loop, which combines a body/pin no-overlap term
+/// with a value-text clear-gap term.)
 fn vertical_stride_cells(upper: &WorldExtent, lower: &WorldExtent) -> i32 {
     let need_mm = upper.max_y + (-lower.min_y) + MIN_CLEARANCE_MM;
     mm_up_to_cells(need_mm)
@@ -966,7 +993,7 @@ fn apply_user_constraints(
         // anchor along the cluster axis; the first member sits at the
         // anchor coord.
         let mut cursor: i32 = 0;
-        let mut prev_extent: Option<WorldExtent> = None;
+        let mut prev_ext: Option<WorldExtent> = None;
         for refdes in &spec.refdes {
             let Some(&idx) = refdes_to_index.get(refdes.as_str()) else {
                 continue;
@@ -976,10 +1003,31 @@ fn apply_user_constraints(
                 Orientation::IDENTITY,
                 placed[idx].value.as_deref(),
             );
-            if let Some(prev) = prev_extent {
+            if let Some(prev_ext) = prev_ext {
                 let geom = match spec.axis {
-                    Axis::Horizontal => horizontal_stride_cells(&prev, &extent),
-                    Axis::Vertical => vertical_stride_cells(&prev, &extent),
+                    Axis::Horizontal => {
+                        // Two independent hard spacing requirements; the
+                        // stride is the larger. Both monotone-widen the
+                        // gap, never shrink it.
+                        //
+                        // (1) Body/pin no-overlap: the left member's
+                        //     full resolved extent (body ∪ pin ∪ value
+                        //     text) plus MIN_CLEARANCE must clear the
+                        //     right member's full extent.
+                        let overlap_mm = prev_ext.max_x + (-extent.min_x) + MIN_CLEARANCE_MM;
+                        // (2) Value-text clear gap: the left member's
+                        //     value text must clear the right member's
+                        //     *body* (pins excluded — a pin is a
+                        //     connection point) by ALIGN_TEXT_GAP_MM. The
+                        //     text reach is `prev_ext.max_x` (value width
+                        //     folded in by `world_extent`); the right
+                        //     body's left reach uses the body bbox only.
+                        let text_gap_mm = prev_ext.max_x
+                            + body_left_reach(&elements[idx].symbol, Orientation::IDENTITY)
+                            + ALIGN_TEXT_GAP_MM;
+                        mm_up_to_cells(overlap_mm.max(text_gap_mm))
+                    }
+                    Axis::Vertical => vertical_stride_cells(&prev_ext, &extent),
                 };
                 // Floor at the historical fixed cluster stride so
                 // all-small-symbol clusters (e.g. diff_pair's RC1/RC2)
@@ -991,7 +1039,7 @@ fn apply_user_constraints(
                 let step = geom.max(CELL_W + CLUSTER_GAP);
                 cursor += step;
             }
-            prev_extent = Some(extent);
+            prev_ext = Some(extent);
             if !fixed[idx] {
                 let (x, y) = match spec.axis {
                     Axis::Horizontal => (anchor_x_seed + cursor, row_y_seed),
