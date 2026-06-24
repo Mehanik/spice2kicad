@@ -72,3 +72,54 @@ fn body_bbox_q_npn_bce_x_excludes_base_pin_stem() {
         bb.x0,
     );
 }
+
+#[test]
+fn pin_text_headers_parsed() {
+    // Q_NPN_BCE: names + numbers shown, offset 0 (over the pin).
+    let lib = dev_library();
+    let q = lib.lookup("Device:Q_NPN_BCE").expect("Q_NPN_BCE");
+    assert!(q.show_pin_names);
+    assert!(q.show_pin_numbers);
+    assert!((q.pin_name_offset - 0.0).abs() < 1e-9);
+
+    // R_US: `(pin_numbers (hide yes)) (pin_names (offset 0))` — numbers
+    // hidden, names shown but `~` (no glyph), offset 0.
+    let r = lib.lookup("Device:R_US").expect("R_US");
+    assert!(r.show_pin_names);
+    assert!(!r.show_pin_numbers);
+    assert!((r.pin_name_offset - 0.0).abs() < 1e-9);
+
+    // C: `(pin_names (offset 0.254))`, no pin_numbers token → names
+    // shown (offset 0.254, inside; but `~`), numbers shown.
+    let c = lib.lookup("Device:C").expect("C");
+    assert!(c.show_pin_names);
+    assert!(c.show_pin_numbers);
+    assert!((c.pin_name_offset - 0.254).abs() < 1e-9);
+}
+
+#[test]
+fn pin_text_local_bboxes_skip_tilde_names_and_hidden_classes() {
+    let lib = dev_library();
+
+    // C: names are `~` (no glyph) but numbers "1"/"2" are shown → two
+    // boxes (one per pin number), none for the tilde names.
+    let c = lib.lookup("Device:C").expect("C");
+    assert_eq!(c.pin_text_local_bboxes().len(), 2);
+
+    // R_US: numbers hidden, names `~` (no glyph) → zero boxes.
+    let r = lib.lookup("Device:R_US").expect("R_US");
+    assert_eq!(r.pin_text_local_bboxes().len(), 0);
+
+    // Q_NPN_BCE: 3 pins, names {B,C,E} + numbers {1,2,3} all visible →
+    // six boxes. The base pin (tip -5.08, angle 0, length 5.715) puts
+    // its name/number near the shaft midpoint (x ≈ -2.22), well clear
+    // of the connection tip.
+    let q = lib.lookup("Device:Q_NPN_BCE").expect("Q_NPN_BCE");
+    let boxes = q.pin_text_local_bboxes();
+    assert_eq!(boxes.len(), 6);
+    // At least one box should straddle x ≈ -2.22 (base pin shaft mid).
+    assert!(
+        boxes.iter().any(|b| b.x0 < -2.0 && b.x1 > -2.4),
+        "expected a base-pin text box near shaft midpoint x≈-2.22: {boxes:?}",
+    );
+}

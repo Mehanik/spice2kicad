@@ -1019,11 +1019,30 @@ literals above.
      and wire interiors — driven purely off the measured `text_bbox`
      model (no fixture constants), and moving TEXT only, never a
      symbol pose.
+  5. No host `(property "Reference" …)` / `(property "Value" …)`
+     overlaps a symbol's VISIBLE internal pin-name / pin-number text
+     (its own symbol's or a neighbour's) — e.g. the transistor
+     `QGENERIC` Value must not sit on the `B`/`C`/`E` pin names or
+     the `1`/`2`/`3` pin numbers (R-4). Pin-text world bboxes are
+     computed from the lib-symbol definition:
+     `Symbol::pin_text_local_bboxes` returns one local box per
+     *visible* label (skipping `(pin_names (hide yes))`,
+     `(pin_numbers (hide yes))`, and `~`/empty names KiCad draws as
+     nothing), riding the pin shaft; the caller transforms each
+     through the placed pose with the same orientation + eeschema
+     y-flip used for body bboxes. The same `nudge_property_text`
+     pass enforces it by adding those pin-text bboxes as one more
+     obstacle class alongside bodies, labels, wires, and other
+     visible text; when no candidate anchor clears every obstacle
+     (a dense symbol) it keeps the least-overlap position rather
+     than the colliding default. General by construction — no
+     fixture/refdes constants.
   Verifiers in `crates/spice2kicad/tests/electrical_safety.rs`
-  enforce all four: (1) body overlap with a per-fixture
+  enforce all five: (1) body overlap with a per-fixture
   allow-list; (2) `v13_labels_dont_overlap_property_text`; (3)
-  `v13_label_anchor_not_on_foreign_wire_interior`; and (4)
-  `v13_property_text_no_mutual_overlap` (per-fixture ratchet
+  `v13_label_anchor_not_on_foreign_wire_interior`; (4)
+  `v13_property_text_no_mutual_overlap`; and (5)
+  `v13_property_text_no_pin_text_overlap` (per-fixture ratchet
   literals, all `0` today). V13 stays Tier 1.
 
   **Power glyphs on hierarchical-sheet port pins.** KiCad draws a

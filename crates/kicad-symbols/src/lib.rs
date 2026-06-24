@@ -241,6 +241,9 @@ pub struct Pin {
     pub y: f64,
     /// Direction the pin points outward, in degrees. Always a multiple of 90.
     pub angle: u16,
+    /// Pin shaft length (mm) from the connection point to the body
+    /// root. KiCad `(length L)`; defaults to 0 when absent.
+    pub length: f64,
     /// KiCad electrical type (`(pin <electrical> …)`).
     pub electrical: PinElectrical,
 }
@@ -306,6 +309,16 @@ pub struct Symbol {
     /// Bare symbol name (without library prefix).
     pub name: String,
     pub pins: Vec<Pin>,
+    /// Whether pin *names* are drawn (`(pin_names (hide yes))` → false;
+    /// default true). Drives [`Symbol::pin_text_local_bboxes`].
+    pub show_pin_names: bool,
+    /// Whether pin *numbers* are drawn (`(pin_numbers (hide yes))` →
+    /// false; default true). Resistors/caps typically hide numbers.
+    pub show_pin_numbers: bool,
+    /// `(pin_names (offset N))` value in mm. `> 0` draws names *inside*
+    /// the body next to the pin root; `0` (the default for transistors)
+    /// draws them *over* the pin shaft.
+    pub pin_name_offset: f64,
     /// Raw `(symbol …)` body captured at parse time, used by the
     /// emitter for verbatim `lib_symbols` passthrough. The second
     /// element is the bare symbol name; emitters rewrite it to the
@@ -397,6 +410,94 @@ impl Symbol {
             })
             .collect()
     }
+
+    /// Axis-aligned bboxes of every *visible* pin-name and pin-number
+    /// text, in the symbol-local frame (millimetres). The caller
+    /// transforms each into world coordinates with the same
+    /// orientation + eeschema y-flip used for [`Symbol::body_bbox`], so
+    /// the emitter's text-nudge pass and the V13 verifier agree on
+    /// where pin text sits.
+    ///
+    /// Model (deliberately the same approximate grade as the project's
+    /// other `text_bbox` boxes — size 1.27 mm, width ≈ 0.6·n·size,
+    /// height ≈ 1.4·size): pin text rides the pin *shaft* (the segment
+    /// from the connection point inward to the body root). For
+    /// `pin_names (offset 0)` and pin numbers the text is drawn over
+    /// the shaft, centred near its midpoint; for `pin_names (offset >
+    /// 0)` the name is drawn just inside the body root. Either way the
+    /// box is centred on the shaft midpoint and inflated by half the
+    /// text extent in each axis — a single conservative box per visible
+    /// label that covers both the over-shaft and just-inside-root
+    /// placements KiCad uses.
+    ///
+    /// Hidden classes (`pin_names (hide yes)` / `pin_numbers (hide
+    /// yes)`) contribute nothing. General by construction: drives off
+    /// the parsed header flags and pin geometry, no per-symbol
+    /// constants.
+    #[must_use]
+    pub fn pin_text_local_bboxes(&self) -> Vec<LocalBbox> {
+        const SIZE: f64 = 1.27;
+        const HEIGHT: f64 = 1.4 * SIZE;
+        let mut out = Vec::new();
+        for p in &self.pins {
+            // Shaft unit vector, connection point → body root. KiCad
+            // pin `(at x y angle)`: the shaft extends from the
+            // connection point in the `angle` direction (0→+x, 90→+y,
+            // 180→−x, 270→−y) for length `p.length`.
+            let (ux, uy) = match p.angle % 360 {
+                0 => (1.0, 0.0),
+                90 => (0.0, 1.0),
+                180 => (-1.0, 0.0),
+                270 => (0.0, -1.0),
+                _ => continue,
+            };
+            // Number rides over the shaft midpoint; the name rides the
+            // midpoint too when `offset == 0` (over the pin) or sits
+            // just inside the body root when `offset > 0`.
+            let mid = p.length / 2.0;
+            for (show, text, along) in [
+                (
+                    self.show_pin_names,
+                    &p.name,
+                    if self.pin_name_offset > 0.0 {
+                        p.length + self.pin_name_offset
+                    } else {
+                        mid
+                    },
+                ),
+                (self.show_pin_numbers, &p.number, mid),
+            ] {
+                // KiCad's `GetShownName()` renders `~` (and the empty
+                // string) as no text at all — such a pin draws no name
+                // glyph, so it reserves no bbox.
+                if !show || text.is_empty() || text == "~" {
+                    continue;
+                }
+                #[allow(clippy::cast_precision_loss)]
+                let chars = text.chars().count() as f64;
+                let twidth = chars * 0.6 * SIZE + 0.8 * SIZE;
+                let cx = p.x + ux * along;
+                let cy = p.y + uy * along;
+                // Long axis of the text lies along the shaft (KiCad
+                // rotates names/numbers to read along vertical pins),
+                // short axis perpendicular. Build the AABB accordingly.
+                let half_long = twidth / 2.0;
+                let half_short = HEIGHT / 2.0;
+                let (hx, hy) = if ux.abs() > 0.5 {
+                    (half_long, half_short)
+                } else {
+                    (half_short, half_long)
+                };
+                out.push(LocalBbox {
+                    x0: cx - hx,
+                    y0: cy - hy,
+                    x1: cx + hx,
+                    y1: cy + hy,
+                });
+            }
+        }
+        out
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -453,6 +554,8 @@ impl Library {
                 })?
                 .to_owned();
             let pins = collect_pins(child, path)?;
+            let (show_pin_names, pin_name_offset) = parse_pin_names_header(child);
+            let show_pin_numbers = parse_pin_numbers_header(child);
             let body = RawSexpr::from_lexpr(child);
             let lib_id = format!("{prefix}:{name}");
             by_lib_id.insert(
@@ -461,6 +564,9 @@ impl Library {
                     lib_id,
                     name,
                     pins,
+                    show_pin_names,
+                    show_pin_numbers,
+                    pin_name_offset,
                     body,
                 },
             );
@@ -523,6 +629,51 @@ fn collect_pins(symbol: &Value, path: &Path) -> Result<Vec<Pin>, LoadError> {
     let mut out = Vec::new();
     walk_pins(symbol, path, &mut out)?;
     Ok(out)
+}
+
+/// True when an `(effects … (hide yes))` or `(hide yes)` token marks
+/// the node hidden. A bare `(hide)` (legacy) also counts as hidden.
+fn node_hidden_flag(node: &Value) -> bool {
+    // `(hide no)` is the only "shown" form; `(hide yes)` and a bare
+    // `(hide)` (legacy) both mean hidden.
+    list_iter(node).nth(1).and_then(as_str) != Some("no")
+}
+
+/// Parse the symbol-level `(pin_names …)` header → `(show, offset_mm)`.
+/// Absent header → `(true, 0.0)` (KiCad default: names shown, offset 0).
+fn parse_pin_names_header(symbol: &Value) -> (bool, f64) {
+    let Some(node) = find_child(symbol, "pin_names") else {
+        return (true, 0.0);
+    };
+    let mut show = true;
+    let mut offset = 0.0;
+    for c in list_iter(node) {
+        match head(c) {
+            Some("hide") => show = !node_hidden_flag(c),
+            Some("offset") => {
+                if let Some(o) = list_iter(c).nth(1).and_then(as_f64) {
+                    offset = o;
+                }
+            }
+            _ => {}
+        }
+    }
+    (show, offset)
+}
+
+/// Parse the symbol-level `(pin_numbers …)` header → `show`. Absent
+/// header → `true` (KiCad default: numbers shown).
+fn parse_pin_numbers_header(symbol: &Value) -> bool {
+    let Some(node) = find_child(symbol, "pin_numbers") else {
+        return true;
+    };
+    let mut show = true;
+    for c in list_iter(node) {
+        if head(c) == Some("hide") {
+            show = !node_hidden_flag(c);
+        }
+    }
+    show
 }
 
 fn walk_pins(node: &Value, path: &Path, out: &mut Vec<Pin>) -> Result<(), LoadError> {
@@ -606,6 +757,9 @@ fn parse_pin(node: &Value, path: &Path) -> Result<Pin, LoadError> {
         path: path.to_path_buf(),
         message: "pin without (number ...)".into(),
     })?;
+    let length = find_child(node, "length")
+        .and_then(|l| list_iter(l).nth(1).and_then(as_f64))
+        .unwrap_or(0.0);
 
     Ok(Pin {
         number: number.to_owned(),
@@ -613,6 +767,7 @@ fn parse_pin(node: &Value, path: &Path) -> Result<Pin, LoadError> {
         x,
         y,
         angle,
+        length,
         electrical,
     })
 }

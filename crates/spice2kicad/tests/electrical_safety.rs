@@ -1334,6 +1334,82 @@ fn visible_text_bboxes(root: &Value) -> Vec<(String, Bbox)> {
     out
 }
 
+/// World-frame bboxes of every VISIBLE symbol-internal pin-name and
+/// pin-number text, tagged `refdes.pin#`. Power glyphs (`#PWR…`) draw
+/// no pin labels and are skipped. Each local pin-text bbox (from
+/// [`kicad_symbols::Symbol::pin_text_local_bboxes`]) is transformed
+/// through the placed pose with the same orientation + eeschema y-flip
+/// used for symbol bodies, so the box agrees with the emitter's nudge
+/// pass.
+fn pin_text_bboxes(root: &Value) -> Vec<(String, Bbox)> {
+    let library = load_test_library();
+    let mut out = Vec::new();
+    for sym in children(root, "symbol") {
+        let Some((refdes, lib_id)) = placed_symbol_refdes_and_lib_id(sym) else {
+            continue;
+        };
+        if refdes.starts_with("#PWR") || lib_id.starts_with("power:") {
+            continue;
+        }
+        let Some((ox, oy, orient)) = placed_symbol_pose(sym) else {
+            continue;
+        };
+        let Some(lib_sym) = library.lookup(&lib_id) else {
+            continue;
+        };
+        #[allow(clippy::cast_lossless)]
+        let rot_deg = f64::from(orient.rotation.degrees());
+        for (i, local) in lib_sym.pin_text_local_bboxes().into_iter().enumerate() {
+            let bbox = body_bbox_to_world(local, ox, oy, rot_deg, orient.mirror_y);
+            out.push((format!("{refdes}.pintext{i}"), bbox));
+        }
+    }
+    out
+}
+
+#[test]
+fn v13_property_text_no_pin_text_overlap() {
+    // V13 part (5): a symbol's VISIBLE Reference / Value property text
+    // must not overprint VISIBLE symbol-internal pin-name / pin-number
+    // text (its own or a neighbour's). The transistor `QGENERIC` Value
+    // over the `B`/`C`/`E` pin names and `1`/`2`/`3` numbers is the
+    // motivating defect (R-4). Budget is a ratchet: per-fixture
+    // literals record the measured post-fix high-water mark and only
+    // ever go down. After the pin-text-aware `nudge_property_text`
+    // pass every fixture routes clean — 0 across the board. A
+    // regression here is a defect, never a budget to bump.
+    let budget = |_name: &str| -> usize { 0 };
+    let mut failures: Vec<String> = Vec::new();
+    for name in SHEETS {
+        let src = fixtures_dir().join(format!("{name}.cir"));
+        let tmp = tempdir(name);
+        let sch = spice_to_kicad(&src, &tmp).expect("spice2kicad");
+        let root = parse(&sch);
+        let props = property_bboxes(&root);
+        let pintexts = pin_text_bboxes(&root);
+        let mut hits = 0;
+        for (pname, pbox) in &props {
+            for (tname, tbox) in &pintexts {
+                if pbox.intersects(tbox) {
+                    eprintln!("{name}: property {pname} overlaps pin-text {tname}");
+                    hits += 1;
+                }
+            }
+        }
+        let b = budget(name);
+        if hits > b {
+            failures.push(format!(
+                "{name}: {hits} property↔pin-text overlaps > V13(5) budget {b}"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "V13(5) regressions:\n  {}",
+        failures.join("\n  "),
+    );
+}
+
 #[test]
 fn v13_property_text_no_mutual_overlap() {
     // V13 part (4): no two VISIBLE on-sheet text bboxes may overlap —

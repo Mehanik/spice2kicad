@@ -1885,55 +1885,60 @@ fn text_crosses_segment(t: TextBbox, a: (f64, f64), b: (f64, f64)) -> bool {
 /// offset and push further away from the body along the same axis.
 /// Purely geometric — no fixture constants.
 fn property_offset_candidates(base_dy: f64) -> Vec<(f64, f64)> {
-    // Same vertical side as the default (sign of base_dy). Sweep the
-    // far horizontal side first (left of the body) at the default
-    // vertical distance, then increase vertical distance, then widen
-    // horizontally. Sorted implicitly by "least surprising first".
-    let dy1 = base_dy; // 2.54 magnitude
-    let dy2 = base_dy * 2.0; // 5.08
-    let dy3 = base_dy * 3.0; // 7.62
-    vec![
-        (2.54, dy1),  // default
-        (-2.54, dy1), // left of body, same height
-        (5.08, dy1),  // further right
-        (2.54, dy2),  // further out vertically
-        (-2.54, dy2),
-        (5.08, dy2),
-        (2.54, dy3),
-        (-2.54, dy3),
-        (5.08, dy3),
-        (-5.08, dy1),
-        (-5.08, dy2),
-    ]
+    // Vertical distances on the default side (sign of base_dy), and
+    // horizontal offsets sweeping both sides. The default `(2.54,
+    // base_dy)` is first so a clean fixture is byte-identical; the rest
+    // widen monotonically so the chosen anchor stays "least
+    // surprising". Within each vertical row the horizontal offset
+    // sweeps near→far, both sides.
+    let vertical = [base_dy, base_dy * 2.0, base_dy * 3.0, base_dy * 4.0];
+    let horizontal = [2.54_f64, -2.54, 5.08, -5.08, 7.62, -7.62];
+    let mut out = vec![(2.54_f64, base_dy)];
+    for &vy in &vertical {
+        for &hx in &horizontal {
+            if (hx, vy) != (2.54, base_dy) {
+                out.push((hx, vy));
+            }
+        }
+    }
+    out
 }
 
-/// DECORATION-phase pass: nudge visible Reference / Value property text
-/// off mutual collisions (V13 part 4 — host text ↔ host text and host
-/// text ↔ power-glyph net-name text). Reads the already-emitted power
-/// glyphs, labels and wires from `items`; computes host-symbol body
-/// bboxes from `placement` + `library`. For each host Reference/Value
-/// it keeps the default anchor when clean, else picks the first
-/// candidate offset (see [`property_offset_candidates`]) that collides
-/// with no occupied text bbox, no symbol body, no label, and no wire
-/// interior. Rewrites only the property `(at …)` token — never the
-/// symbol's own `(at …)` (the decoration contract: text may move,
-/// symbols may not).
-///
-/// General by construction: drives entirely off the measured
-/// `text_bbox` model and the candidate grid; zero fixture/refdes
-/// special-casing.
-fn nudge_property_text(items: &mut [Sexpr], placement: &Placement, library: &Library) {
-    // ---- Build the fixed obstacle sets from already-emitted items. ----
-    // Power-glyph net-name Value text (visible), label text, wires.
+/// World-frame bboxes of every VISIBLE symbol-internal pin-name and
+/// pin-number text for every host (non-power) placed symbol (V13 part
+/// 5). [`Symbol::pin_text_local_bboxes`] yields one local box per
+/// visible label; each is transformed through the placed pose exactly
+/// like the symbol body bbox.
+fn host_pin_text_bboxes(placement: &Placement, library: &Library) -> Vec<TextBbox> {
+    placement
+        .elements
+        .iter()
+        .filter(|el| !el.is_power_source && !el.lib_id.starts_with("power:"))
+        .flat_map(|el| {
+            let (ox, oy) = el.origin.to_mm();
+            let orient = el.orientation;
+            library
+                .lookup(&el.lib_id)
+                .map(Symbol::pin_text_local_bboxes)
+                .unwrap_or_default()
+                .into_iter()
+                .map(move |local| bbox_as_text(body_bbox_to_world(local, ox, oy, orient)))
+        })
+        .collect()
+}
+
+/// Obstacle classes already serialised into `items`: power-glyph
+/// net-name `Value` text bboxes (returned as `occupied`), label text
+/// bboxes, and wire segments. Used by [`nudge_property_text`].
+type EmittedObstacles = (Vec<TextBbox>, Vec<TextBbox>, Vec<((f64, f64), (f64, f64))>);
+fn emitted_text_obstacles(items: &[Sexpr]) -> EmittedObstacles {
     let mut occupied: Vec<TextBbox> = Vec::new();
     let mut labels: Vec<TextBbox> = Vec::new();
     let mut wires: Vec<((f64, f64), (f64, f64))> = Vec::new();
-    for item in items.iter() {
+    for item in items {
         let Sexpr::List(parts) = item else { continue };
         match head_of(item) {
             Some("symbol") => {
-                // Power glyph? (refdes starting with `#PWR`). Add its
-                // visible Value (net-name) text bbox to `occupied`.
                 if sexpr_symbol_refdes(item).is_some_and(|r| r.starts_with("#PWR")) {
                     if let Some(b) = power_glyph_value_bbox(item) {
                         occupied.push(b);
@@ -1953,6 +1958,30 @@ fn nudge_property_text(items: &mut [Sexpr], placement: &Placement, library: &Lib
             _ => {}
         }
     }
+    (occupied, labels, wires)
+}
+
+/// DECORATION-phase pass: nudge visible Reference / Value property text
+/// off mutual collisions (V13 parts 4 & 5 — host text ↔ host text, host
+/// text ↔ power-glyph net-name text, and host text ↔ symbol-internal
+/// pin-name/number text). Reads the already-emitted power
+/// glyphs, labels and wires from `items`; computes host-symbol body
+/// bboxes from `placement` + `library`. For each host Reference/Value
+/// it keeps the default anchor when clean, else picks the first
+/// candidate offset (see [`property_offset_candidates`]) that collides
+/// with no occupied text bbox, no symbol body, no label, and no wire
+/// interior. Rewrites only the property `(at …)` token — never the
+/// symbol's own `(at …)` (the decoration contract: text may move,
+/// symbols may not).
+///
+/// General by construction: drives entirely off the measured
+/// `text_bbox` model and the candidate grid; zero fixture/refdes
+/// special-casing.
+fn nudge_property_text(items: &mut [Sexpr], placement: &Placement, library: &Library) {
+    // ---- Build the fixed obstacle sets from already-emitted items. ----
+    // Power-glyph net-name Value text (visible) seeds `occupied`; labels
+    // and wires are their own classes.
+    let (mut occupied, labels, wires) = emitted_text_obstacles(items);
 
     // Symbol body bboxes (world) for every visible host symbol — a
     // nudged property must not land on any body (V13.1 analogue).
@@ -1978,6 +2007,11 @@ fn nudge_property_text(items: &mut [Sexpr], placement: &Placement, library: &Lib
         })
         .collect();
 
+    // Visible symbol-internal pin-name / pin-number text bboxes (world)
+    // for every host symbol — a nudged property must also clear these
+    // (V13 part 5).
+    let pin_texts = host_pin_text_bboxes(placement, library);
+
     // ---- Decide and rewrite each host symbol's Reference & Value. ----
     // Greedy, deterministic: iterate placement order; each chosen text
     // bbox becomes occupied for subsequent decisions.
@@ -1993,22 +2027,49 @@ fn nudge_property_text(items: &mut [Sexpr], placement: &Placement, library: &Lib
             ("Value", value_text, 2.54_f64),
         ] {
             let candidates = property_offset_candidates(base_dy);
+            // Overlap *area* of a text bbox against every obstacle class
+            // (counting wire-interior crossings as a unit penalty). Used
+            // both as the accept test (== 0 → clear) and, when no
+            // candidate is clear, as the least-overlap tie-breaker so a
+            // dense symbol still gets the *best* available anchor rather
+            // than silently keeping the colliding default.
+            let overlap_cost = |b: TextBbox| -> f64 {
+                let area = |o: &TextBbox| -> f64 {
+                    let w = (b.x1.min(o.x1) - b.x0.max(o.x0)).max(0.0);
+                    let h = (b.y1.min(o.y1) - b.y0.max(o.y0)).max(0.0);
+                    w * h
+                };
+                let mut c: f64 = occupied.iter().map(area).sum();
+                c += labels.iter().map(area).sum::<f64>();
+                c += bodies.iter().map(area).sum::<f64>();
+                c += pin_texts.iter().map(area).sum::<f64>();
+                #[allow(clippy::cast_precision_loss)]
+                let wire_hits = wires
+                    .iter()
+                    .filter(|&&(a, w)| text_crosses_segment(b, a, w))
+                    .count() as f64;
+                c += wire_hits * 100.0;
+                c
+            };
             let mut chosen = candidates[0];
             let mut chosen_bbox = {
                 let (ax, ay) = property_anchor(ox, oy, el.orientation, chosen.0, chosen.1);
                 text_bbox(text, (ax, ay), 0)
             };
+            let mut best_cost = f64::INFINITY;
             for cand in &candidates {
                 let (ax, ay) = property_anchor(ox, oy, el.orientation, cand.0, cand.1);
                 let b = text_bbox(text, (ax, ay), 0);
-                let collides = occupied.iter().any(|o| b.intersects(*o))
-                    || labels.iter().any(|o| b.intersects(*o))
-                    || bodies.iter().any(|o| b.intersects(*o))
-                    || wires.iter().any(|&(a, w)| text_crosses_segment(b, a, w));
-                if !collides {
+                let cost = overlap_cost(b);
+                if cost == 0.0 {
                     chosen = *cand;
                     chosen_bbox = b;
                     break;
+                }
+                if cost < best_cost {
+                    best_cost = cost;
+                    chosen = *cand;
+                    chosen_bbox = b;
                 }
             }
             occupied.push(chosen_bbox);

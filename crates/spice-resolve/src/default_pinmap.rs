@@ -105,6 +105,7 @@ mod tests {
             x: 0.0,
             y: 0.0,
             angle: 0,
+            length: 0.0,
             electrical: PinElectrical::Passive,
         }
     }
@@ -114,6 +115,9 @@ mod tests {
             lib_id: lib_id.to_owned(),
             name: lib_id.to_owned(),
             pins,
+            show_pin_names: true,
+            show_pin_numbers: true,
+            pin_name_offset: 0.0,
             body: RawSexpr::List(Vec::new()),
         }
     }

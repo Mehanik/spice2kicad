@@ -143,11 +143,13 @@ fn extract_symbols(path: &std::path::Path) -> Vec<(String, String, f64, f64, f64
 /// single uniform grid-snapped offset, so every *relative* geometry
 /// (rotation, mirror, inter-element spacing) is preserved — only the
 /// absolute origins move, all to non-negative coordinates inside the
-/// A4 drawable area. (Regenerated once when V13(4) hid the `#PWRn`
-/// Reference and nudged colliding property text: those decoration
-/// changes shrank/shifted each sheet's content bbox, so the V15
-/// offset moved by a single per-fixture delta — symbol poses relative
-/// to one another are unchanged.)
+/// A4 drawable area. (Regenerated when V13(4) hid the `#PWRn`
+/// Reference and nudged colliding property text, and again for V13(5)
+/// when the nudge pass began clearing symbol-internal pin-name/number
+/// text too: those decoration changes shifted some sheets' content
+/// bbox, so the V15 offset moved by a single per-fixture delta — here
+/// `diff_pair` shifted uniformly by +7.62 mm in X. Symbol poses
+/// relative to one another are unchanged.)
 const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
     // (fixture, refdes, lib_id, x, y, rot, mirror)
     //
@@ -266,7 +268,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "diff_pair",
         "#FLG1",
         "power:PWR_FLAG",
-        40.64,
+        48.26,
         44.45,
         270.0,
         "",
@@ -275,45 +277,37 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "diff_pair",
         "#FLG2",
         "power:PWR_FLAG",
-        63.5,
+        71.12,
         44.45,
         90.0,
         "",
     ),
-    (
-        "diff_pair",
-        "#FLG3",
-        "power:PWR_FLAG",
-        30.48,
-        26.67,
-        0.0,
-        "",
-    ),
+    ("diff_pair", "#FLG3", "power:PWR_FLAG", 38.1, 26.67, 0.0, ""),
     (
         "diff_pair",
         "#FLG4",
         "power:PWR_FLAG",
-        25.4,
+        33.02,
         39.37,
         180.0,
         "",
     ),
-    ("diff_pair", "#PWR1", "power:VCC", 30.48, 26.67, 0.0, ""),
-    ("diff_pair", "#PWR2", "power:VCC", 39.37, 26.67, 0.0, ""),
-    ("diff_pair", "#PWR3", "power:VEE", 25.4, 39.37, 0.0, ""),
-    ("diff_pair", "Q1", "Device:Q_NPN_BCE", 45.72, 44.45, 0.0, ""),
+    ("diff_pair", "#PWR1", "power:VCC", 38.1, 26.67, 0.0, ""),
+    ("diff_pair", "#PWR2", "power:VCC", 46.99, 26.67, 0.0, ""),
+    ("diff_pair", "#PWR3", "power:VEE", 33.02, 39.37, 0.0, ""),
+    ("diff_pair", "Q1", "Device:Q_NPN_BCE", 53.34, 44.45, 0.0, ""),
     (
         "diff_pair",
         "Q2",
         "Device:Q_NPN_BCE",
-        58.42,
+        66.04,
         44.45,
         0.0,
         "y",
     ),
-    ("diff_pair", "RC1", "Device:R_US", 30.48, 30.48, 0.0, ""),
-    ("diff_pair", "RC2", "Device:R_US", 39.37, 30.48, 0.0, "y"),
-    ("diff_pair", "RTAIL", "Device:R_US", 25.4, 35.56, 0.0, ""),
+    ("diff_pair", "RC1", "Device:R_US", 38.1, 30.48, 0.0, ""),
+    ("diff_pair", "RC2", "Device:R_US", 46.99, 30.48, 0.0, "y"),
+    ("diff_pair", "RTAIL", "Device:R_US", 33.02, 35.56, 0.0, ""),
     (
         "multivibrator",
         "#FLG1",
