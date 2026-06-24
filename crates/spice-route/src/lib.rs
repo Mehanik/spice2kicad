@@ -10,6 +10,7 @@
 
 pub mod cleanup;
 pub mod conflict;
+pub mod pwrflag;
 pub mod rails;
 mod steiner;
 pub mod types;
@@ -220,6 +221,20 @@ fn build_pin_outward_map(
 pub fn route(req: RouteRequest<'_>) -> RouteResult {
     let mut out = RouteResult::default();
     place_power_symbols(&req, &mut out);
+    // PWR_FLAG drivers for every net with no driving pin (rails whose
+    // pins are all power_in, signal nets whose pins are all input).
+    // Single structural predicate, no fixture knowledge — see
+    // `pwrflag::emit`.
+    let mut flg_counter: usize = 0;
+    pwrflag::emit(
+        req.nets,
+        req.library,
+        req.scope,
+        req.sheet_uuid,
+        req.project_name,
+        &mut flg_counter,
+        &mut out,
+    );
     let mut routed = route_signal_nets(&req, &mut out);
     // Per-net own-pin coords for the cleanup pass below.
     let own_pin_coords_for_cleanup = build_signal_own_pin_coords(&req);

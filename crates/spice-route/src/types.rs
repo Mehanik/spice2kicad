@@ -21,6 +21,16 @@ pub struct PinRef {
     pub y_mm: f64,
     /// Outward direction of the pin in world coordinates, post-rotation.
     pub outward: Direction,
+    /// True when this pin's electrical type *drives* the net (Output /
+    /// Power-output / bidirectional / tri-state / open-collector /
+    /// open-emitter). A net with no driving pin trips ERC's
+    /// `power_pin_not_driven` / `pin_not_driven` and needs a `PWR_FLAG`.
+    pub drives: bool,
+    /// True when this pin's electrical type *requires* its net to carry
+    /// a driver (a `power_in` or `input` pin). A net with no such pin
+    /// (e.g. only `passive` resistor/cap terminals) imposes no ERC
+    /// driver requirement and must NOT receive a spurious `PWR_FLAG`.
+    pub requires_driver: bool,
 }
 
 /// Cardinal direction the pin's stem points away from its symbol body.

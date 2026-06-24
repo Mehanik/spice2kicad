@@ -481,6 +481,21 @@ literals above.
   erc` on every example under `examples/` and asserts the report's
   `errors` count is zero. Tolerated-warning policy is tracked in
   spec §9.
+  The previously-suppressed `power_pin_not_driven` / `pin_not_driven`
+  error classes are now genuinely cleared by `power:PWR_FLAG`
+  emission (V10): `run_v2` (`tests/visual_quality.rs`) carries **no**
+  suppression for them and asserts a fully empty error set on the
+  four flat fixtures. The sole remaining allowance is one
+  `power_pin_not_driven` on `opamp_inverting`'s parent ground glyph,
+  which sits on a *hierarchical sheet pin* — KiCad's per-connection
+  driver check (eeschema/erc/erc.cpp ~L1024-1075) will not credit a
+  parent-side `PWR_FLAG` to a `power_in` glyph whose connection is
+  defined through a sheet pin into the child where the real ground
+  topology lives. Verified unfixable by trying the flag on the glyph
+  anchor, offset+wired, on the child `0` net, and on the child
+  hierarchical label; it is a genuine KiCad hierarchical artifact
+  (it predates this work), allowed for `opamp_inverting` and that
+  one class only.
 
 - **V3 — `lib_symbols` are inlined verbatim.** Library entries
   emitted under `(lib_symbols)` are byte-for-byte copies of the
@@ -836,9 +851,24 @@ literals above.
   in `crates/spice2kicad/tests/placement_quality.rs`,
   calibrated against the five reference fixtures
   (rc_lowpass / common_emitter / multivibrator / diff_pair /
-  opamp_inverting_real) at R7. Open items: PWR_FLAG-style
-  driver emission for `power_pin_not_driven` ERC suppression
-  (currently filtered in `tests/visual_quality.rs::run_v2`).
+  opamp_inverting_real) at R7. **PWR_FLAG driver emission is now
+  live** (`crates/spice-route/src/pwrflag.rs`, called from
+  `route()` after Stage 1): exactly one `power:PWR_FLAG` is placed,
+  wire-coincident, on every net that ERC requires to be driven but
+  has no driving pin — i.e. any net with a `power_in`/`input` pin
+  (or any Power/Ground class net, which carries a `power_in` glyph)
+  and no Output/Power-output/bidirectional/tri-state/open-collector/
+  open-emitter pin. The predicate is derived from KiCad pin
+  electrical types (`kicad_symbols::PinElectrical::{drives,
+  requires_driver}`), never from fixture/refdes names, so it covers
+  rails and the diff_pair input-base nets with one rule and leaves
+  passive-only R–C junctions untouched. Global Power/Ground nets are
+  driven by a single root-sheet flag (child-sheet copies would
+  double-drive). ERC is genuinely clean (zero `power_pin_not_driven`
+  / `pin_not_driven`) on the four flat fixtures; `opamp_inverting`'s
+  hierarchical-sheet-pin ground retains one documented artifact (see
+  V2). The fixture `power.kicad_sym` gained a verbatim `PWR_FLAG`
+  symbol so the emitter can inline it (V3).
   **Each `power:*` glyph's `#PWRn` Reference is emitted hidden**
   (`(effects … (hide yes))` in `spice-route/src/rails.rs`
   `power_symbol_sexpr`) — KiCad convention; the glyph and net-name

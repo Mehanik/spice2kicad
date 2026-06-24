@@ -441,6 +441,64 @@ cost term** (see CLAUDE.md "Constraints vs. costs").
 
 ---
 
+## ADR-12 — PWR_FLAG driver markers from pin electrical types
+
+**Status: wired.** Implemented in `crates/spice-route/src/pwrflag.rs`,
+called from `route()` after Stage 1 power-symbol placement. Pin
+electrical types are parsed into `kicad_symbols::PinElectrical`
+(`drives()` / `requires_driver()`); the emitter derives per-net driver
+state via `collect_driven_nets` / `collect_driver_required_nets`
+(`schematic.rs`) and the router places the flags.
+
+**Context.** KiCad ERC reports `power_pin_not_driven` for a `power_in`
+pin and `pin_not_driven` for an `input` pin when no driving (`output` /
+`power_out`) pin shares the net. Both are Tier-0 (V2) correctness
+errors. The schematics we emit have unavoidable undriven nets: every
+power-rail glyph exposes a `power_in` anchor, and an AC-stimulus net
+whose source is `;@ ignore`d (e.g. `diff_pair`'s base inputs) reaches a
+transistor input pin with no in-sheet driver.
+
+**Decision.** Emit exactly one `power:PWR_FLAG` (a single `power_out`
+pin) on every net that ERC *requires* to be driven but isn't. The
+predicate is purely structural — `requires_driver && !drives`, where
+`requires_driver` = the net has a `power_in`/`input` pin OR is a
+Power/Ground class net (those always get a `power_in` glyph), and
+`drives` = any pin is Output/Power-output/bidirectional/tri-state/
+open-collector/open-emitter. **Driven off pin electrical types, never
+off fixture/refdes names** (project principle 9), so one rule covers
+rails and the input-only signal nets and leaves passive-only R–C
+junctions untouched. The flag's anchor pin is wire-coincident with an
+existing pin of the same net (V11-safe) and its body points in the host
+pin's outward direction (V12/V13-safe). The `PWR_FLAG` symbol was added
+verbatim to the fixture `power.kicad_sym` so the emitter inlines it
+(V3).
+
+**Hierarchical scope.** Power/Ground nets are global in KiCad
+(connected by name across sheets), so their single flag is emitted on
+the root sheet only; a child-sheet copy would double-drive the net
+(`pin_to_pin`). Subckt-*port* nets on a child are treated as driven
+(the parent owns their driver), so a child only flags its genuinely
+sheet-local nets.
+
+**Known unfixable case.** `opamp_inverting`'s parent ground glyph sits
+on a hierarchical *sheet pin*; KiCad's per-connection driver check
+(eeschema/erc/erc.cpp ~L1024-1075) will not credit a parent-side
+`PWR_FLAG` to a `power_in` glyph whose connection is defined through a
+sheet pin into the child. Verified unfixable by placing the flag on the
+glyph anchor, offset+wired, on the child `0` net, and on the child
+hierarchical label. It is a genuine KiCad hierarchical artifact (it
+predates this work — it was previously hidden by a blanket
+`power_pin_not_driven` suppression) and is allowed for that one fixture
+and class only in `run_v2`.
+
+**Why not a soft ERC suppression or a placer change.** Suppression
+hides real regressions (it hid this very artifact). Pin electrical
+type is the faithful, general signal; nothing else distinguishes "this
+net needs a driver" from "this net is passive" without reading symbol
+pin types, which the model now carries.
+
+---
+
 ## What we are not deciding now
 
 - ~~Sidecar file format (JSON vs TOML vs custom). Pick during

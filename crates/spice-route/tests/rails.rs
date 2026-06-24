@@ -11,6 +11,8 @@ fn pin(idx: usize, n: u16, x: f64, y: f64, out: Direction) -> PinRef {
         x_mm: x,
         y_mm: y,
         outward: out,
+        drives: false,
+        requires_driver: false,
     }
 }
 
@@ -248,10 +250,18 @@ fn unknown_lib_id_falls_back_to_global_label() {
         "expected fallback global_label: {:?}",
         r.sexprs
     );
-    assert_eq!(r.warnings.len(), 1, "warning recorded: {:?}", r.warnings);
+    // Two warnings now: the VCC-glyph fallback AND the PWR_FLAG driver
+    // that can't be inlined from the empty library (a Power net always
+    // requires a driver). Both are legitimate "missing lib_id"
+    // diagnostics; neither is faked.
     assert!(
-        r.warnings[0].contains("power:VCC"),
-        "warning mentions lib_id: {:?}",
+        r.warnings.iter().any(|w| w.contains("power:VCC")),
+        "warning mentions VCC lib_id: {:?}",
+        r.warnings
+    );
+    assert!(
+        r.warnings.iter().any(|w| w.contains("PWR_FLAG")),
+        "warning mentions PWR_FLAG lib_id: {:?}",
         r.warnings
     );
 }

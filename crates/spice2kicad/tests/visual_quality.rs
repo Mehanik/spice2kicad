@@ -203,14 +203,12 @@ fn run_v2(name: &str) {
     }
     let (sch, tmp) = emit(name);
     let report = tmp.join(format!("{name}-erc.rpt"));
-    // Drop `--exit-code-violations`: we count residual errors ourselves
-    // so we can suppress `power_pin_not_driven`. With `power_in` pins on
-    // the power.kicad_sym fixture, KiCad ERC requires a `power_out`
-    // driver (PWR_FLAG) on every power net — but the spice2kicad
-    // pipeline does not emit PWR_FLAGs (V10 in CLAUDE.md tracks that as
-    // a future work item). Suppressing the one ERC class lets the rest
-    // of the V2 invariant — connectivity, dangling labels,
-    // off-grid pins, library mismatches — guard against regressions.
+    // Drop `--exit-code-violations`: we count residual errors ourselves.
+    // The emitter now places a `power:PWR_FLAG` on every otherwise-
+    // undriven net (rails and signal nets whose pins are all
+    // power_in/passive/input — no Output driver), so ERC no longer
+    // reports `power_pin_not_driven` / `pin_not_driven`. No error class
+    // needs suppressing; we assert zero error-severity violations.
     let _ = Command::new("kicad-cli")
         .args(["sch", "erc", "--severity-error", "-o"])
         .arg(&report)
@@ -223,19 +221,37 @@ fn run_v2(name: &str) {
     //       ; <severity>
     //       @(...): <where>
     // Pair each `[class]:` line with the next `; <severity>` line so we
-    // can isolate `error` rows. Suppress `power_pin_not_driven` errors
-    // (see comment above run_v2 for rationale).
-    // Also suppress `pin_not_driven` and `global_label_dangling`:
-    // fixtures mark their AC stimuli with `;@ ignore` (the input
-    // sources exist for simulation only, not the schematic), which
-    // leaves the device's input pin and the corresponding global_label
-    // with no upstream driver inside the emitted sheet. That's a
-    // fixture/spec property, not a pipeline regression.
-    let suppressed = [
-        "[power_pin_not_driven]",
-        "[pin_not_driven]",
-        "[global_label_dangling]",
-    ];
+    // can isolate `error` rows.
+    //
+    // The emitter now places a `power:PWR_FLAG` on every otherwise-
+    // undriven net (rails whose pins are all `power_in`, and signal
+    // nets whose pins are all `input` — no Output/Power-output driver).
+    // On every *flat* fixture this genuinely clears all
+    // `power_pin_not_driven` / `pin_not_driven` errors, so they are NOT
+    // suppressed and the gate asserts a fully empty error set.
+    //
+    // The sole documented exception is `opamp_inverting`'s hierarchical
+    // ground: the parent's X1 `inp` port connects to SPICE node `0`
+    // (ground), so the parent draws a `power:GND` glyph (`power_in`) on
+    // that *hierarchical sheet pin*. KiCad's ERC per-connection driver
+    // check (eeschema/erc/erc.cpp ~L1024-1075) requires a `power_out`
+    // pin *in the same CONNECTION* as that `power_in` glyph. When the
+    // connection is defined through a sheet pin into a child sheet
+    // (where the real ground topology lives), the connectivity engine
+    // assigns the coincidence point to the hierarchical net and a
+    // parent-side PWR_FLAG is not credited to the parent glyph's
+    // connection — verified empirically with the flag placed on the
+    // glyph anchor, offset+wired, on the child `0` net, and on the
+    // child `inp` hierarchical label; none satisfy the check. This is a
+    // genuine KiCad hierarchical-connectivity artifact, NOT a pipeline
+    // defect, and it predates this work (it was previously hidden by a
+    // blanket `power_pin_not_driven` suppression). It is allowed for
+    // `opamp_inverting` ONLY, and ONLY for `power_pin_not_driven`.
+    let allowed_artifact: &[&str] = if name == "opamp_inverting" {
+        &["[power_pin_not_driven]"]
+    } else {
+        &[]
+    };
     let mut residual: Vec<String> = Vec::new();
     let lines: Vec<&str> = report_body.lines().collect();
     for i in 0..lines.len() {
@@ -253,7 +269,7 @@ fn run_v2(name: &str) {
         if !sev.starts_with("error") {
             continue;
         }
-        if suppressed.iter().any(|s| trimmed.starts_with(s)) {
+        if allowed_artifact.iter().any(|s| trimmed.starts_with(s)) {
             continue;
         }
         residual.push(lines[i].to_string());

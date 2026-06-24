@@ -96,7 +96,7 @@ pub(crate) fn synthesize(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kicad_symbols::{Pin, RawSexpr, Symbol};
+    use kicad_symbols::{Pin, PinElectrical, RawSexpr, Symbol};
 
     fn pin(number: &str, name: &str) -> Pin {
         Pin {
@@ -105,6 +105,7 @@ mod tests {
             x: 0.0,
             y: 0.0,
             angle: 0,
+            electrical: PinElectrical::Passive,
         }
     }
 

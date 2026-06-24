@@ -381,6 +381,7 @@ fn world_pins(sch: &KicadSch, refdes: &str) -> (Vec<TransformedPin>, Orientation
             x: p.x + tp.x,
             y: p.y + tp.y,
             angle: tp.angle,
+            electrical: tp.electrical,
         })
         .collect();
     (pins, orient)

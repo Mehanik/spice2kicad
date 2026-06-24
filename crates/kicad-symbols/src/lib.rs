@@ -160,6 +160,77 @@ impl Orientation {
 // Pin / Symbol / Library
 // ---------------------------------------------------------------------------
 
+/// KiCad pin electrical type (the first token of a `(pin <electrical>
+/// …)` node). Drives ERC's driver analysis: a net with no driving pin
+/// trips `power_pin_not_driven` / `pin_not_driven`, which the emitter
+/// resolves with a `PWR_FLAG`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PinElectrical {
+    Input,
+    Output,
+    Bidirectional,
+    TriState,
+    Passive,
+    Free,
+    Unspecified,
+    PowerIn,
+    PowerOut,
+    OpenCollector,
+    OpenEmitter,
+    NoConnect,
+}
+
+impl PinElectrical {
+    /// Parse the electrical-type token KiCad writes after `pin`.
+    /// Unknown tokens map to [`PinElectrical::Unspecified`].
+    #[must_use]
+    pub fn from_token(tok: &str) -> Self {
+        match tok {
+            "input" => Self::Input,
+            "output" => Self::Output,
+            "bidirectional" => Self::Bidirectional,
+            "tri_state" => Self::TriState,
+            "passive" => Self::Passive,
+            "free" => Self::Free,
+            "power_in" => Self::PowerIn,
+            "power_out" => Self::PowerOut,
+            "open_collector" => Self::OpenCollector,
+            "open_emitter" => Self::OpenEmitter,
+            "no_connect" => Self::NoConnect,
+            // "unspecified" and anything unrecognised.
+            _ => Self::Unspecified,
+        }
+    }
+
+    /// True when ERC treats this pin as *driving* a net (i.e. it can
+    /// satisfy a `power_in` / `input` pin's driver requirement). Mirrors
+    /// KiCad's connectivity rules: an Output / Power-output / open-
+    /// collector / open-emitter / tri-state / bidirectional pin drives;
+    /// inputs, passives and power inputs do not.
+    #[must_use]
+    pub fn drives(self) -> bool {
+        matches!(
+            self,
+            Self::Output
+                | Self::PowerOut
+                | Self::Bidirectional
+                | Self::TriState
+                | Self::OpenCollector
+                | Self::OpenEmitter
+        )
+    }
+
+    /// True when KiCad ERC *requires* this pin's net to carry a driver
+    /// (else it reports `power_pin_not_driven` for a `power_in` pin, or
+    /// `pin_not_driven` for an `input` pin). Passive / free /
+    /// unspecified / no-connect / output pins impose no such
+    /// requirement, so a net of only those needs no `PWR_FLAG`.
+    #[must_use]
+    pub fn requires_driver(self) -> bool {
+        matches!(self, Self::PowerIn | Self::Input)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Pin {
     pub number: String,
@@ -170,6 +241,8 @@ pub struct Pin {
     pub y: f64,
     /// Direction the pin points outward, in degrees. Always a multiple of 90.
     pub angle: u16,
+    /// KiCad electrical type (`(pin <electrical> …)`).
+    pub electrical: PinElectrical,
 }
 
 #[derive(Debug, Clone)]
@@ -179,6 +252,7 @@ pub struct TransformedPin {
     pub x: f64,
     pub y: f64,
     pub angle: u16,
+    pub electrical: PinElectrical,
 }
 
 /// Verbatim mirror of an `lexpr::Value` sub-tree using the same three
@@ -318,6 +392,7 @@ impl Symbol {
                     x,
                     y,
                     angle: orient.apply_angle(p.angle),
+                    electrical: p.electrical,
                 }
             })
             .collect()
@@ -471,6 +546,11 @@ fn walk_pins(node: &Value, path: &Path, out: &mut Vec<Pin>) -> Result<(), LoadEr
 
 fn parse_pin(node: &Value, path: &Path) -> Result<Pin, LoadError> {
     // (pin <electrical> <shape> (at X Y angle) (length L) (name "..") (number ".."))
+    // First positional atom after `pin` is the electrical type.
+    let electrical = list_iter(node)
+        .nth(1)
+        .and_then(as_str)
+        .map_or(PinElectrical::Unspecified, PinElectrical::from_token);
     let at = find_child(node, "at").ok_or_else(|| LoadError::Structure {
         path: path.to_path_buf(),
         message: "pin without (at ...)".into(),
@@ -533,6 +613,7 @@ fn parse_pin(node: &Value, path: &Path) -> Result<Pin, LoadError> {
         x,
         y,
         angle,
+        electrical,
     })
 }
 

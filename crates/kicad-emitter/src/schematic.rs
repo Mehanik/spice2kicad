@@ -112,7 +112,14 @@ pub fn emit_root(
     items.push(list(vec![atom("generator"), qstring(GENERATOR)]));
     items.push(list(vec![atom("uuid"), qstring(&sheet_uuid())]));
     items.push(list(vec![atom("paper"), qstring("A4")]));
-    let extra_power_lib_ids = power_lib_ids_for_placement(placement);
+    // Nets exposed only through a hierarchical sheet pin (the parent
+    // side of each `X<n>` port) — they carry glyphs / flags too.
+    let sheet_port_nets: Vec<String> = sheets
+        .iter()
+        .flat_map(|b| b.ports.iter().map(|p| p.net.clone()))
+        .collect();
+    let extra_power_lib_ids =
+        power_lib_ids_for_placement(placement, library, &BTreeSet::new(), &sheet_port_nets, true);
     let extra_refs: Vec<&str> = extra_power_lib_ids.iter().map(String::as_str).collect();
     items.push(lib_symbols_with_extra(placement, library, &extra_refs));
 
@@ -144,7 +151,16 @@ pub fn emit_root(
 
     let net_pins = collect_net_pins(placement, library, &extra_pins);
     let obstacles = placement_obstacles(placement, library);
-    for routed in route_nets(&net_pins, "root", library, &obstacles)? {
+    let driven = collect_driven_nets(placement, library);
+    let requires_driver = collect_driver_required_nets(placement, library);
+    for routed in route_nets(
+        &net_pins,
+        "root",
+        library,
+        &obstacles,
+        &driven,
+        &requires_driver,
+    )? {
         items.push(routed);
     }
     let property_bboxes = placement_property_bboxes(placement);
@@ -177,7 +193,9 @@ pub fn emit_root(
 /// a body-element pin connected to the same SPICE net (so the port and
 /// the body net resolve to one connectivity class).
 pub fn emit_child_sheet(child: &ChildSheet<'_>, library: &Library) -> Result<String, EmitError> {
-    let extra_power_lib_ids = power_lib_ids_for_placement(child.placement);
+    let port_driven: BTreeSet<String> = child.ports.iter().cloned().collect();
+    let extra_power_lib_ids =
+        power_lib_ids_for_placement(child.placement, library, &port_driven, &[], false);
     let extra_refs: Vec<&str> = extra_power_lib_ids.iter().map(String::as_str).collect();
     let mut items: Vec<Sexpr> = vec![
         atom("kicad_sch"),
@@ -236,7 +254,23 @@ pub fn emit_child_sheet(child: &ChildSheet<'_>, library: &Library) -> Result<Str
 
     let net_pins = collect_net_pins(child.placement, library, &extra_pins);
     let obstacles = placement_obstacles(child.placement, library);
-    for routed in route_nets(&net_pins, &child.name, library, &obstacles)? {
+    let mut driven = collect_driven_nets(child.placement, library);
+    // A subckt *port* net is exposed to the parent; its driver status
+    // (real driver or a parent-side PWR_FLAG) is decided on the parent
+    // sheet. Marking ports as "driven" here suppresses a child-sheet
+    // PWR_FLAG that would double-drive the global parent net through the
+    // sheet port (`pin_to_pin`: two power_out pins). Only genuinely
+    // sheet-local child nets receive a child PWR_FLAG.
+    driven.extend(port_driven.iter().cloned());
+    let requires_driver = collect_driver_required_nets(child.placement, library);
+    for routed in route_nets(
+        &net_pins,
+        &child.name,
+        library,
+        &obstacles,
+        &driven,
+        &requires_driver,
+    )? {
         items.push(routed);
     }
     let child_props = placement_property_bboxes(child.placement);
@@ -592,7 +626,13 @@ fn child_symbol_instance(el: &PlacedElement, instance_refdeses: &[String]) -> Se
 /// from each element's net node names. Mirrors the heuristic
 /// classification in `classify_net_by_name` and the lib-id selection
 /// in `spice-route::rails`.
-fn power_lib_ids_for_placement(placement: &Placement) -> Vec<String> {
+fn power_lib_ids_for_placement(
+    placement: &Placement,
+    library: &Library,
+    extra_driven: &BTreeSet<String>,
+    extra_pin_nets: &[String],
+    is_root: bool,
+) -> Vec<String> {
     let mut out: BTreeSet<String> = BTreeSet::new();
     for el in &placement.elements {
         for node in &el.nodes {
@@ -601,7 +641,66 @@ fn power_lib_ids_for_placement(placement: &Placement) -> Vec<String> {
             }
         }
     }
+    // Sheet-port nets carry a glyph too (a parent power/ground net
+    // exposed only through a hierarchical sheet pin still gets a
+    // `power:*` glyph). Reflect those lib_ids so they inline as well.
+    for net in extra_pin_nets {
+        if let Some(id) = power_lib_id_for_net(net) {
+            out.insert(id.to_string());
+        }
+    }
+    // `power:PWR_FLAG` is referenced by `spice_route::pwrflag` whenever
+    // a net has pins but no driving pin — inline it so the instance the
+    // router emits resolves (V3 verbatim passthrough). Use the same
+    // net-pin / driver derivation the router runs so the lib-symbol set
+    // exactly matches what gets emitted (no dangling entry, no missing
+    // one).
+    if placement_has_undriven_net(placement, library, extra_driven, extra_pin_nets, is_root) {
+        out.insert("power:PWR_FLAG".to_string());
+    }
     out.into_iter().collect()
+}
+
+/// True when some net in `placement` will receive a `PWR_FLAG`: it has
+/// at least one pin, no driving pin, is not in `extra_driven` (subckt
+/// ports owned by the parent), and — for Power/Ground class nets —
+/// only on the root sheet (global nets are driven once, at root).
+/// Mirrors the predicate in `spice_route::pwrflag::emit`.
+fn placement_has_undriven_net(
+    placement: &Placement,
+    library: &Library,
+    extra_driven: &BTreeSet<String>,
+    extra_pin_nets: &[String],
+    is_root: bool,
+) -> bool {
+    // Feed the same sheet-port "extra pins" the router sees, so a
+    // parent power/ground net present only through a hierarchical sheet
+    // pin still counts as having a pin (and thus gets a PWR_FLAG).
+    let extra: Vec<(String, f64, f64)> = extra_pin_nets
+        .iter()
+        .map(|n| (n.clone(), 0.0, 0.0))
+        .collect();
+    let net_pins = collect_net_pins(placement, library, &extra);
+    let driven = collect_driven_nets(placement, library);
+    let requires_driver = collect_driver_required_nets(placement, library);
+    net_pins.iter().any(|(name, pins)| {
+        if pins.is_empty() || driven.contains(name) || extra_driven.contains(name) {
+            return false;
+        }
+        let class = classify_net_by_name(name);
+        let is_power_ground = !matches!(class, spice_layout::net_class::NetClass::Signal);
+        // Mirror `spice_route::pwrflag::emit`: a Power/Ground net always
+        // requires a driver (it gets a `power_in` glyph); a Signal net
+        // requires one only if a placement pin on it is input/power_in.
+        if !is_power_ground && !requires_driver.contains(name) {
+            return false;
+        }
+        if is_power_ground && !is_root {
+            // Power/Ground on a child sheet: root owns the driver.
+            return false;
+        }
+        true
+    })
 }
 
 fn power_lib_id_for_net(net_name: &str) -> Option<&'static str> {
@@ -931,6 +1030,65 @@ pub(crate) fn collect_net_pins(
     nets
 }
 
+/// Set of net names that have at least one *driving* pin — a pin whose
+/// KiCad electrical type drives connectivity (Output, Power-output,
+/// bidirectional, tri-state, open-collector / open-emitter). Used by
+/// the router to decide which nets need a `PWR_FLAG` driver marker so
+/// ERC stops reporting `power_pin_not_driven` / `pin_not_driven`.
+///
+/// Power-rail *sources* (`is_power_source`) contribute no symbol and
+/// no pins (V10), so their nets are driven only if a real circuit
+/// element on the net carries a driving pin — exactly the rail case
+/// that needs a `PWR_FLAG`. Hierarchical `extra_pins` (sheet ports /
+/// labels) are intentionally NOT counted as drivers: they are label
+/// anchors, and on a child sheet the body still needs its own
+/// `PWR_FLAG` if nothing inside drives the net.
+pub(crate) fn collect_driven_nets(
+    placement: &Placement,
+    library: &Library,
+) -> std::collections::BTreeSet<String> {
+    net_set_where(placement, library, |pin| pin.electrical.drives())
+}
+
+/// Set of net names with at least one pin that *requires* a driver
+/// (a `power_in` or `input` pin). A net absent from this set imposes no
+/// ERC driver requirement (e.g. a purely `passive` R–C junction) and
+/// must not receive a `PWR_FLAG`.
+pub(crate) fn collect_driver_required_nets(
+    placement: &Placement,
+    library: &Library,
+) -> std::collections::BTreeSet<String> {
+    net_set_where(placement, library, |pin| pin.electrical.requires_driver())
+}
+
+/// Collect net names having ≥1 pin satisfying `pred`. Shared backbone
+/// of [`collect_driven_nets`] and [`collect_driver_required_nets`].
+fn net_set_where(
+    placement: &Placement,
+    library: &Library,
+    pred: impl Fn(&kicad_symbols::TransformedPin) -> bool,
+) -> std::collections::BTreeSet<String> {
+    let mut set = std::collections::BTreeSet::new();
+    for el in &placement.elements {
+        if el.is_power_source {
+            continue;
+        }
+        let Some(symbol) = library.lookup(&el.lib_id) else {
+            continue;
+        };
+        let pins = symbol.pins_in(el.orientation);
+        for (node, kicad_pin) in el.nodes.iter().zip(el.pin_mapping.iter()) {
+            let Some(pin) = pins.iter().find(|p| &p.number == kicad_pin) else {
+                continue;
+            };
+            if pred(pin) {
+                set.insert(node.clone());
+            }
+        }
+    }
+    set
+}
+
 /// Route every net with ≥ 2 pin positions.
 ///
 /// Thin adapter over `spice_route::route`. Power/Ground nets become
@@ -945,6 +1103,8 @@ fn route_nets(
     scope: &str,
     library: &Library,
     obstacles: &[spice_route::Bbox],
+    driven: &std::collections::BTreeSet<String>,
+    requires_driver: &std::collections::BTreeSet<String>,
 ) -> Result<Vec<Sexpr>, EmitError> {
     use spice_route::{NetSpec, PinRef, RouteRequest};
 
@@ -967,6 +1127,8 @@ fn route_nets(
             }
         }
         let class = classify_net_by_name(name);
+        let net_driven = driven.contains(name);
+        let net_requires = requires_driver.contains(name);
         let pin_refs: Vec<PinRef> = uniq
             .into_iter()
             .map(|(x, y, angle)| PinRef {
@@ -975,6 +1137,8 @@ fn route_nets(
                 x_mm: x,
                 y_mm: y,
                 outward: angle_to_direction(angle),
+                drives: net_driven,
+                requires_driver: net_requires,
             })
             .collect();
         specs.push(NetSpec {
@@ -1069,6 +1233,9 @@ pub(crate) fn trial_route(placement: &Placement, library: &Library) -> TrialRout
             }
         }
         let class = classify_net_by_name(name);
+        // trial_route only measures wire-segment geometry for V5/V11
+        // refinement; PWR_FLAG markers are not emitted as wires, so the
+        // driver flag is irrelevant here.
         let pin_refs: Vec<PinRef> = uniq
             .into_iter()
             .map(|(x, y, angle)| PinRef {
@@ -1077,6 +1244,8 @@ pub(crate) fn trial_route(placement: &Placement, library: &Library) -> TrialRout
                 x_mm: x,
                 y_mm: y,
                 outward: angle_to_direction(angle),
+                drives: false,
+                requires_driver: false,
             })
             .collect();
         specs.push(NetSpec {

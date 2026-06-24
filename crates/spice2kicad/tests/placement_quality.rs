@@ -590,12 +590,14 @@ fn placed_symbols(root: &Value) -> Vec<(String, Pt)> {
         let Some(refdes) = found_ref else {
             continue;
         };
-        // Skip power-symbol glyphs (Reference == "#PWR"). They are
-        // emitted by `spice_route::route` Stage 1 at pin coordinates,
-        // so they intentionally sit on top of the connected element's
-        // pin and would always trigger overlap-detection asserts that
-        // expect only "real" placed elements.
-        if refdes.starts_with("#PWR") {
+        // Skip power-symbol glyphs (Reference == "#PWR") and PWR_FLAG
+        // driver markers (Reference == "#FLG"). Both are emitted by
+        // `spice_route::route` at pin coordinates, so they intentionally
+        // sit on top of the connected element's pin (a same-net label
+        // anchored on that pin is V11-safe, not a defect) and would
+        // always trigger overlap asserts that expect only "real" placed
+        // elements.
+        if refdes.starts_with("#PWR") || refdes.starts_with("#FLG") {
             continue;
         }
         let mut it = list_iter(at);
@@ -1127,6 +1129,15 @@ fn v14_power_glyphs_have_canonical_orientation() {
                 continue;
             };
             if !lib_id.starts_with("power:") {
+                continue;
+            }
+            // `power:PWR_FLAG` is a driver MARKER, not a rail glyph: it
+            // has no canonical screen direction (no "VCC up / GND
+            // down"). It is oriented to point its body in the host
+            // pin's outward direction so it clears the host body
+            // (V12/V13), so it legitimately carries rot 90/180/270.
+            // V14 governs only the directional rail glyphs.
+            if lib_id == "power:PWR_FLAG" {
                 continue;
             }
             let Some(at) = find_child(sym, "at") else {
