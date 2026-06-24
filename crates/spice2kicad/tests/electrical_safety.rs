@@ -1307,6 +1307,140 @@ fn v13_label_anchor_not_on_foreign_wire_interior() {
     );
 }
 
+/// Collect each placed `power:*` glyph's *body* bbox (world frame) plus
+/// its visible `Value` net-name text bbox. These are the two pieces of
+/// geometry a sheet-port glyph hangs into the strip beside the sheet's
+/// left edge; the V13 sheet-glyph-clearance verifier asserts neither
+/// touches a neighbouring component's value text.
+fn power_glyph_bboxes(root: &Value) -> Vec<(String, Bbox)> {
+    let library = load_test_library();
+    let mut out = Vec::new();
+    for sym in children(root, "symbol") {
+        let mut lib_id = String::new();
+        if let Some(lid_node) = find_child(sym, "lib_id")
+            && let Some(s) = list_iter(lid_node).nth(1).and_then(as_str)
+        {
+            s.clone_into(&mut lib_id);
+        }
+        // PWR_FLAG carries no drawn body the reader confuses with a
+        // glyph; the rail glyphs (GND/VCC/VEE/…) are the offenders.
+        if !lib_id.starts_with("power:") || lib_id == "power:PWR_FLAG" {
+            continue;
+        }
+        let mut refdes = String::new();
+        for prop in children(sym, "property") {
+            let mut it = list_iter(prop);
+            it.next();
+            if it.next().and_then(as_str) == Some("Reference") {
+                it.next()
+                    .and_then(as_str)
+                    .unwrap_or_default()
+                    .clone_into(&mut refdes);
+                break;
+            }
+        }
+        let Some((gx, gy, grot)) = at_xy_rot(sym) else {
+            continue;
+        };
+        let mirror_y = find_child(sym, "mirror")
+            .and_then(|m| list_iter(m).nth(1).and_then(as_str))
+            .is_some_and(|t| t.eq_ignore_ascii_case("y"));
+        // Glyph body bbox (world).
+        if let Some(local) = library
+            .lookup(&lib_id)
+            .and_then(kicad_symbols::Symbol::body_bbox)
+        {
+            out.push((
+                format!("{refdes}({lib_id}).body"),
+                body_bbox_to_world(local, gx, gy, f64::from(grot), mirror_y),
+            ));
+        }
+        // Glyph net-name text bbox (the visible `Value` property).
+        for prop in children(sym, "property") {
+            if property_hidden(prop) {
+                continue;
+            }
+            let mut it = list_iter(prop);
+            it.next();
+            if it.next().and_then(as_str) != Some("Value") {
+                continue;
+            }
+            let val = it.next().and_then(as_str).unwrap_or("");
+            let Some((px, py, prot)) = at_xy_rot(prop) else {
+                continue;
+            };
+            let size = effects_font_size(prop).unwrap_or(1.27);
+            out.push((
+                format!("{refdes}({lib_id}).Value"),
+                text_bbox(val, (px, py), size, prot, TextKind::PropertyValue),
+            ));
+        }
+    }
+    out
+}
+
+/// Collect each non-power placed component's visible `(property "Value"
+/// …)` text bbox — the "neighbour value text" a sheet-port glyph must
+/// not crowd. Reuses [`property_bboxes`] (which already skips `#PWR`)
+/// and keeps only the `.Value` entries.
+fn neighbour_value_text_bboxes(root: &Value) -> Vec<(String, Bbox)> {
+    property_bboxes(root)
+        .into_iter()
+        .filter(|(name, _)| name.ends_with(".Value"))
+        .collect()
+}
+
+#[test]
+fn sheet_port_glyphs_clear_neighbour_text() {
+    // V13 — a hierarchical sheet's left-edge port pins hang `power:*`
+    // glyphs (GND/VCC/VEE) into the strip beside the sheet. Those glyph
+    // bodies AND their net-name labels must not crowd a neighbouring
+    // component's rendered value text. The sheet de-overlap reserves the
+    // glyph zone against neighbour *bodies* only; without folding the
+    // neighbour's value-text width into the obstacle the sheet stops too
+    // far left and a glyph (or its label) lands on e.g. RF's "10k".
+    //
+    // Budget 0 across every fixture that emits a sheet — this is a
+    // ratchet, not a knob; a regression is a defect to diagnose, not a
+    // budget to bump.
+    let budget = |_name: &str| -> usize { 0 };
+    // Every fixture that can emit a `(sheet …)` block. Fixtures without
+    // one contribute zero glyph-on-sheet geometry and pass trivially.
+    let with_sheets: Vec<&str> = {
+        let mut v = vec!["opamp_inverting"];
+        v.extend_from_slice(SHEETS);
+        v
+    };
+    for name in with_sheets {
+        let src = fixtures_dir().join(format!("{name}.cir"));
+        let tmp = tempdir(name);
+        let sch = spice_to_kicad(&src, &tmp).expect("spice2kicad");
+        let root = parse(&sch);
+        // Only meaningful when a hierarchical sheet is present.
+        if children(&root, "sheet").is_empty() {
+            continue;
+        }
+        let glyphs = power_glyph_bboxes(&root);
+        let neighbour_text = neighbour_value_text_bboxes(&root);
+        let mut hits = 0;
+        for (gname, gbbox) in &glyphs {
+            for (tname, tbbox) in &neighbour_text {
+                if gbbox.intersects(tbbox) {
+                    eprintln!(
+                        "{name}: sheet-port glyph {gname} overlaps neighbour value text {tname}",
+                    );
+                    hits += 1;
+                }
+            }
+        }
+        let b = budget(name);
+        assert!(
+            hits <= b,
+            "{name}: {hits} sheet-glyph↔neighbour-value-text overlaps > budget {b}",
+        );
+    }
+}
+
 /// Collect every VISIBLE on-sheet text bbox that V13 part (4) governs:
 ///  * each placed component's visible `(property "Reference" …)` and
 ///    `(property "Value" …)` text, AND

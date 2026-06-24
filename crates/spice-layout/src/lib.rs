@@ -324,7 +324,7 @@ const MIN_CLEARANCE_MM: f64 = GridPoint::STEP_MM;
 /// Used so neighbouring elements clear each other's value text too.
 /// (Mirrors the emitter's `text_bbox` width estimate ≈ chars*0.6*size;
 /// rounded up for margin.)
-const VALUE_CHAR_MM: f64 = 0.76;
+pub(crate) const VALUE_CHAR_MM: f64 = 0.76;
 
 /// World-frame offset (mm) from a symbol origin at which the emitter
 /// left-justifies the value text. The text occupies
@@ -334,7 +334,7 @@ const VALUE_CHAR_MM: f64 = 0.76;
 /// `kicad-emitter/src/schematic.rs`'s `property_anchor(.., 2.54, 2.54)`
 /// call) — modelling it at 0 underestimated the text's right reach by a
 /// full 2.54 mm, so align-clustered members crowded their neighbour.
-const VALUE_TEXT_OFFSET_MM: f64 = 2.54;
+pub(crate) const VALUE_TEXT_OFFSET_MM: f64 = 2.54;
 
 /// Guaranteed clear horizontal gap (mm) between a left align-cluster
 /// member's rendered value text and the right member's *drawn body*

@@ -51,6 +51,13 @@ const SHEET_PIN_PAD_MM: f64 = 5.08;
 /// share a constant, but the geometry is the same grid).
 const SHEET_GLYPH_REACH_MM: f64 = 3.0 * STEP_MM;
 
+/// Trailing margin (mm) the emitter's text renderer adds past the bare
+/// per-character advance of a value string (~0.8 × the 1.27 mm text
+/// size). Folded into the value-text obstacle reach so the sheet
+/// de-overlap clears a glyph from the *rendered* text box (the V13
+/// verifier's `text_bbox` model), not merely a tighter advance estimate.
+const VALUE_TEXT_TRAIL_MM: f64 = 0.8 * STEP_MM;
+
 /// A sheet's computed world rectangle, in millimetres.
 #[derive(Debug, Clone, Copy)]
 struct Rect {
@@ -105,9 +112,45 @@ fn element_pins_on_nets<'a>(
     })
 }
 
-/// Body bounding boxes (world, mm) of every real placed symbol. Used as
-/// overlap obstacles for sheet placement. Symbols without a drawable
-/// body contribute a small placeholder box around their origin.
+/// World-frame right reach (mm) of the value text the emitter renders on
+/// a symbol's +X side: the text is left-justified at `VALUE_TEXT_OFFSET_MM`
+/// from the origin and advances `VALUE_CHAR_MM` per character. Returns the
+/// absolute world X the text reaches (origin-relative reach added to `ox`),
+/// or `ox` when the element has no value text. Mirrors the +X value-text
+/// pad `world_extent` uses for align-cluster spacing (`lib.rs`).
+fn value_text_right_x(el: &crate::PlacedElement, ox: f64) -> f64 {
+    let Some(v) = el.value.as_deref() else {
+        return ox;
+    };
+    let chars = v.chars().count();
+    if chars == 0 {
+        return ox;
+    }
+    // Match the emitter's rendered text right reach: the text is
+    // left-justified `VALUE_TEXT_OFFSET_MM` from the origin, advances
+    // `VALUE_CHAR_MM` per character, plus the renderer's trailing margin.
+    #[allow(clippy::cast_precision_loss)]
+    let reach =
+        crate::VALUE_TEXT_OFFSET_MM + (chars as f64) * crate::VALUE_CHAR_MM + VALUE_TEXT_TRAIL_MM;
+    ox + reach
+}
+
+/// Body bounding boxes (world, mm) of every real placed symbol, each
+/// widened on its +X side to cover the value text the emitter renders
+/// there. Used as overlap obstacles for sheet placement. Symbols without
+/// a drawable body contribute a small placeholder box around their
+/// origin.
+///
+/// The +X value-text extension is load-bearing for sheet placement: the
+/// sheet's left-edge port pins hang `power:*` glyphs into the strip to
+/// their left, and the de-overlap loop only nudges the sheet RIGHT until
+/// that glyph zone clears every obstacle. Modelling each neighbour's
+/// body alone (ignoring its value text, which reaches right toward the
+/// sheet) let the sheet stop while a glyph still speared the neighbour's
+/// rendered value (e.g. RF's "10k", V13). Folding the text reach into the
+/// obstacle's `x1` pushes the sheet right until both clear. The loop only
+/// ever moves the sheet, never a real symbol, so this is purely additive
+/// clearance.
 fn symbol_obstacles(placement: &Placement, library: &Library) -> Vec<Rect> {
     let mut out = Vec::new();
     for el in &placement.elements {
@@ -115,7 +158,7 @@ fn symbol_obstacles(placement: &Placement, library: &Library) -> Vec<Rect> {
             continue;
         }
         let (ox, oy) = el.origin.to_mm();
-        let rect = library
+        let mut rect = library
             .lookup(&el.lib_id)
             .and_then(kicad_symbols::Symbol::body_bbox)
             .map_or_else(
@@ -139,6 +182,8 @@ fn symbol_obstacles(placement: &Placement, library: &Library) -> Vec<Rect> {
                     }
                 },
             );
+        // Widen the +X edge to cover the value text rendered there.
+        rect.x1 = rect.x1.max(value_text_right_x(el, ox));
         out.push(rect);
     }
     out
