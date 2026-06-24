@@ -1872,6 +1872,149 @@ fn glyph_world_extent(library: &Library, sym: &Value) -> Option<(String, Bbox)> 
     }
 }
 
+/// World-frame AABB of a placed `power:*` glyph's *body* only (no pin
+/// reach), orientation-transformed. Mirrors [`resolved_body_bbox`] but
+/// for glyphs (which `resolved_body_bbox` filters out): the glyph's
+/// single pin sits at its `(at …)` origin coincident with the host
+/// pin, so including pin reach would always touch the host — we measure
+/// the drawn triangle/chevron body, which is what a reader perceives as
+/// overlapping a foreign part.
+fn glyph_body_bbox(library: &Library, sym: &Value) -> Option<(String, Bbox)> {
+    let (refdes, lib_id) = placed_symbol_refdes_and_lib_id(sym)?;
+    if !lib_id.starts_with("power:") {
+        return None;
+    }
+    let (ox, oy, orient) = placed_symbol_pose(sym)?;
+    let lib_sym = library.lookup(&lib_id)?;
+    let local = lib_sym.body_bbox()?;
+    let mut x0 = f64::INFINITY;
+    let mut y0 = f64::INFINITY;
+    let mut x1 = f64::NEG_INFINITY;
+    let mut y1 = f64::NEG_INFINITY;
+    for (lx, ly) in [
+        (local.x0, local.y0),
+        (local.x0, local.y1),
+        (local.x1, local.y0),
+        (local.x1, local.y1),
+    ] {
+        let (rx, ry) = orient.apply_point(lx, ly);
+        x0 = x0.min(ox + rx);
+        y0 = y0.min(oy - ry);
+        x1 = x1.max(ox + rx);
+        y1 = y1.max(oy - ry);
+    }
+    Some((refdes, Bbox { x0, y0, x1, y1 }))
+}
+
+/// Per-fixture budget for `no_power_glyph_foreign_body_overlap_across_fixtures`:
+/// the recorded high-water mark (count of power-glyph bodies overlapping a
+/// foreign real-symbol body) on current master. ZERO-SLACK ratchet — each
+/// literal equals the measured count and may only ever decrease.
+///
+/// The non-zero entries are issue [3]: a `power:*` glyph (or its
+/// co-located `power:PWR_FLAG` marker) body clipping a NON-host symbol
+/// body. This is the deferred V14 placer-pin-choice item — un-fixable
+/// today without regressing a higher/equal tier (SA-gate → V5; seed
+/// clearance → V13), so it is documented here as a containment ratchet to
+/// be driven to 0 by a future v0.2 placement redesign, NOT a license to
+/// add more crossings.
+fn power_glyph_foreign_body_overlap_budget(fixture: &str) -> usize {
+    match fixture {
+        // [3] deferred V14 placer-pin-choice: one residual glyph/foreign-body clip.
+        "common_emitter" | "opamp_inverting_real" => 1,
+        _ => 0,
+    }
+}
+
+/// Tier-1 readability containment: a `power:*` glyph body (including the
+/// `power:PWR_FLAG` driver marker) must not overlap the body bbox of any
+/// NON-host real symbol. The host — the symbol the glyph attaches to —
+/// is excluded: a glyph clipping its own host is the documented, accepted
+/// V14 case (CLAUDE.md V14: "the glyph body may visually overlap the host
+/// symbol's body … V14's contract is purely 'no surprising rotations'").
+/// The host is bound by the nearest same-net (here: nearest, period —
+/// glyphs sit on a single host pin) non-power pin to the glyph anchor,
+/// exactly as `v14_rail_pin_faces_rail` binds glyphs to hosts.
+///
+/// This records the current residual as a zero-slack per-fixture ratchet
+/// (issue [3], deferred V14 placer item) so it can never get worse; a
+/// future placement redesign drives every budget to 0.
+#[test]
+fn no_power_glyph_foreign_body_overlap_across_fixtures() {
+    let library = load_test_library();
+    for (name, path) in fixtures() {
+        let tmp = tempdir(name);
+        let sch = common::spice_to_kicad(&path, &tmp).expect("spice2kicad");
+        let root = parse_sch(&sch);
+
+        // Body bbox of every NON-power real symbol, plus its pins (world
+        // coords) for host binding.
+        let real_bodies: Vec<(String, Bbox)> = children(&root, "symbol")
+            .into_iter()
+            .filter_map(|sym| resolved_body_bbox(&library, sym))
+            .collect();
+        let mut host_pins: Vec<(String, f64, f64)> = Vec::new();
+        for sym in children(&root, "symbol") {
+            let Some((refdes, lib_id)) = placed_symbol_refdes_and_lib_id(sym) else {
+                continue;
+            };
+            if refdes.starts_with("#PWR") || lib_id.starts_with("power:") {
+                continue;
+            }
+            let Some((ox, oy, orient)) = placed_symbol_pose(sym) else {
+                continue;
+            };
+            let Some(lib_sym) = library.lookup(&lib_id) else {
+                continue;
+            };
+            for tp in lib_sym.pins_in(orient) {
+                host_pins.push((refdes.clone(), ox + tp.x, oy - tp.y));
+            }
+        }
+
+        let mut overlaps = 0usize;
+        let mut detail: Vec<String> = Vec::new();
+        for sym in children(&root, "symbol") {
+            let Some((glyph_ref, glyph_box)) = glyph_body_bbox(&library, sym) else {
+                continue;
+            };
+            let Some((ax, ay, _)) = placed_symbol_pose(sym) else {
+                continue;
+            };
+            // Host = nearest non-power pin to the glyph anchor (the glyph
+            // wires to one host pin; allow a short stub by taking nearest).
+            let host_refdes = host_pins
+                .iter()
+                .min_by(|a, b| {
+                    let da = (a.1 - ax).hypot(a.2 - ay);
+                    let db = (b.1 - ax).hypot(b.2 - ay);
+                    da.partial_cmp(&db).unwrap()
+                })
+                .map(|(r, _, _)| r.clone());
+            for (real_ref, real_box) in &real_bodies {
+                if Some(real_ref) == host_refdes.as_ref() {
+                    continue; // host clip is the accepted V14 case
+                }
+                if glyph_box.intersects(real_box) {
+                    overlaps += 1;
+                    detail.push(format!(
+                        "{glyph_ref} {glyph_box:?} overlaps foreign body {real_ref} {real_box:?} \
+                         (host={host_refdes:?})"
+                    ));
+                }
+            }
+        }
+
+        let budget = power_glyph_foreign_body_overlap_budget(name);
+        assert!(
+            overlaps <= budget,
+            "{name}: {overlaps} power-glyph/foreign-body overlaps exceed ratchet budget {budget} \
+             (issue [3], deferred V14 placer item — budgets only ratchet DOWN):\n  {}",
+            detail.join("\n  "),
+        );
+    }
+}
+
 /// No placed symbol's resolved extent (body + pin reach) and no power
 /// glyph's body may overlap a `(sheet …)` body bbox. Budget 0, ratchet
 /// (CLAUDE.md V6 no-overlap clause extended to sheets — Tier-1
