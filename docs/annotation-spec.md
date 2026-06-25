@@ -232,10 +232,13 @@ The `pinmap=` value uses the same syntax described in §4.2; for
 in the order it was declared (`inp`=1, `inn`=2, `out`=3, `vcc`=4,
 `vee`=5 in the example above). KiCad pin references on the
 right-hand side may be numbers or names exactly as for any other
-element. (Implementation status: trailing `;@ symbol=` on `X<n>`
-already overrides sheet emission today; the `for=X<n>` block form
-is being introduced as an additive extension. Until it lands, the
-trailing-tag form is the only working override.)
+element. (Implementation status: both override forms work today —
+the trailing `;@ symbol=` tag on the `X<n>` line and the block form
+`*@symbol Lib:Name for=<glob>` whose glob matches the instance
+refdes. Either one suppresses the `.subckt` → hierarchical-sheet
+lowering and maps the instance to the named flat symbol, with any
+`pinmap=` from the same directive applied. See
+`crates/spice-resolve/tests/resolve.rs::subckt_instance_block_symbol_overrides_sheet`.)
 
 ### 4.2 `pinmap` — terminal remapping
 

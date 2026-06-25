@@ -353,6 +353,77 @@ fn subckt_instance_without_symbol_is_error() {
     assert!(codes.iter().any(|c| c == "E003"), "got {codes:?}");
 }
 
+/// A trailing `;@ symbol=` on an `X<n>` instance overrides the default
+/// `.subckt` → hierarchical-sheet lowering: the instance becomes a flat
+/// symbol and no `(sheet …)` is emitted for it (spec §4.1, CLAUDE.md V8).
+#[test]
+fn subckt_instance_trailing_symbol_overrides_sheet() {
+    let src = "* t\n\
+               .subckt amp in out\n\
+               R1 in out 1k\n\
+               .ends\n\
+               X1 a b amp ;@ symbol=Device:R\n";
+    let r = parse_and_resolve(src);
+    assert!(
+        r.sheet_instances.is_empty(),
+        "trailing symbol tag must suppress the sheet; got {:?}",
+        r.sheet_instances
+    );
+    let x1 = r
+        .elements
+        .iter()
+        .find(|e| e.refdes == "X1")
+        .expect("X1 resolved as flat element");
+    assert_eq!(x1.lib_id, "Device:R");
+}
+
+/// The block form `*@symbol Lib:Name for=X<n>` likewise overrides the
+/// `.subckt` → sheet lowering for the matching instance (spec §4.1
+/// "Targeting `.subckt` instances"). This is the form that, until now,
+/// the spec noted as not yet wired up; it pins the behaviour.
+#[test]
+fn subckt_instance_block_symbol_overrides_sheet() {
+    let src = "* t\n\
+               *@symbol Device:R for=X1\n\
+               .subckt amp in out\n\
+               R1 in out 1k\n\
+               .ends\n\
+               X1 a b amp\n";
+    let r = parse_and_resolve(src);
+    assert!(
+        r.sheet_instances.is_empty(),
+        "block `for=X1` must suppress the sheet; got {:?}",
+        r.sheet_instances
+    );
+    let x1 = r
+        .elements
+        .iter()
+        .find(|e| e.refdes == "X1")
+        .expect("X1 resolved as flat element");
+    assert_eq!(x1.lib_id, "Device:R");
+}
+
+/// A glob `for=X*` in the block form matches `X<n>` instances too.
+#[test]
+fn subckt_instance_block_symbol_glob_overrides_sheet() {
+    let src = "* t\n\
+               *@symbol Device:R for=X*\n\
+               .subckt amp in out\n\
+               R1 in out 1k\n\
+               .ends\n\
+               X7 a b amp\n";
+    let r = parse_and_resolve(src);
+    assert!(
+        r.sheet_instances.is_empty(),
+        "block `for=X*` must suppress the sheet; got {:?}",
+        r.sheet_instances
+    );
+    assert_eq!(
+        r.elements.iter().find(|e| e.refdes == "X7").unwrap().lib_id,
+        "Device:R"
+    );
+}
+
 #[test]
 fn place_tag_passes_through() {
     let mut r1 = elem("R1", ElementKind::Resistor, &["a", "b"]);
