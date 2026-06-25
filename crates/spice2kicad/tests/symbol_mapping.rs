@@ -46,8 +46,14 @@ fn lib_dir() -> PathBuf {
 }
 
 fn tempdir(name: &str) -> PathBuf {
+    // Unique per `emit()` call, not per fixture: several tests convert the
+    // same fixture (e.g. `opamp_inverting_real`) and run concurrently, so a
+    // dir keyed only by fixture name races — one test's `remove_dir_all`
+    // wipes another's freshly-written `.kicad_sch` between write and read.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let pid = std::process::id();
-    let dir = std::env::temp_dir().join(format!("spice2kicad-sm-{pid}-{name}"));
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("spice2kicad-sm-{pid}-{seq}-{name}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create tempdir");
     dir
