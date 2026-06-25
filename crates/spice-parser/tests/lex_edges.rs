@@ -742,21 +742,36 @@ fn continuation_then_continuation_then_blank_then_continuation() {
     }
 }
 
-/// `+` line with nothing to continue: must not panic and must not
-/// silently corrupt a later element.
+/// `+` line with nothing to continue: must not panic, must not silently
+/// corrupt a later element, must not leak a `"+"` element, and flags W912.
 #[test]
 fn continuation_at_start_of_file() {
-    let nl = parse_ok("* t\n+ stuff\nR1 a b 1k\n");
-    let r1 = elem(&nl, "R1");
+    let out = common::parse_with_diags("* t\n+ stuff\nR1 a b 1k\n");
+    let nl = &out.netlist;
+    let r1 = elem(nl, "R1");
     assert_eq!(r1.nodes, ["a", "b"]);
     assert!(
         !r1.params.iter().any(|(k, _)| k == "stuff"),
         "stuff must not leak into R1; params: {:?}",
         r1.params
     );
+    assert!(
+        !nl.elements.iter().any(|e| e.designator == "+"),
+        "dangling `+` must not produce a `+` element; elements: {:?}",
+        nl.elements
+            .iter()
+            .map(|e| &e.designator)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        out.diagnostics.iter().any(|d| d.code == "W912"),
+        "expected W912 for dangling `+`; diags: {}",
+        common::fmt_diags(&out.diagnostics)
+    );
 }
 
-/// `+` after a block annotation cannot continue it.
+/// `+` after a block annotation cannot continue it: the lexer keeps it a
+/// separate code line, and the parser flags it W912 and drops it.
 #[test]
 fn continuation_after_block_annotation_only() {
     let s = scan("* t\n*@symbol Device:R for=R*\n+ extra\n", fid());
@@ -770,6 +785,17 @@ fn continuation_after_block_annotation_only() {
     assert!(
         !block_words.contains(&"extra"),
         "`+ extra` must not merge into the block annotation; words: {block_words:?}"
+    );
+
+    let out = common::parse_with_diags("* t\n*@symbol Device:R for=R*\n+ extra\n");
+    assert!(
+        !out.netlist.elements.iter().any(|e| e.designator == "+"),
+        "dangling `+` after block annotation must not produce a `+` element"
+    );
+    assert!(
+        out.diagnostics.iter().any(|d| d.code == "W912"),
+        "expected W912 for dangling `+` after block annotation; diags: {}",
+        common::fmt_diags(&out.diagnostics)
     );
 }
 

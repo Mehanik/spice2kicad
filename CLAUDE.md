@@ -256,11 +256,10 @@ For full grammar, examples, and diagnostics, see
 - **Dangling `+` continuation at unusual positions.** A `+`
   continuation line with nothing to continue (e.g. as the first
   non-title line of a file, or immediately after a `*@` block
-  annotation) is parsed as a code line whose first token is `+`,
-  producing an `ElementKind::Other` element with refdes `"+"`.
-  Benign in practice but visible to downstream passes; emit
-  error/warning diagnostics here once the parser has policy
-  support for them. See
+  annotation) reaches `handle_code_line` as a code line whose first
+  token is `+`. The parser now flags it with `W912` (spec §7) and
+  drops it — it no longer produces an `ElementKind::Other` element
+  with refdes `"+"` that leaks into downstream passes. See
   `crates/spice-parser/tests/lex_edges.rs::continuation_at_start_of_file`
   and
   `crates/spice-parser/tests/lex_edges.rs::continuation_after_block_annotation_only`.

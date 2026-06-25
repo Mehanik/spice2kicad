@@ -590,6 +590,9 @@ into the typed AST, before the semantic passes above run.
 - **W910** a control directive inside a `.subckt` body is ignored
 - **W911** `.if` / `.elseif` / `.else` conditional blocks are
   ignored (one warning per top-level `.if`)
+- **W912** a `+` continuation line with nothing to continue (e.g.
+  at the start of the file, or immediately after a `*@` block
+  annotation); the orphaned line is ignored
 
 > Note: `E908`, `E909`, and `E910` are constructed as warnings today
 > despite their `E` prefix — a malformed `symbol` directive (block or

@@ -92,6 +92,20 @@ fn handle_code_line(
     };
     let head = first.text.clone();
 
+    // Dangling `+` continuation: a `+` line the lexer could not merge into
+    // a preceding code line (e.g. at the start of the file, or right after
+    // a `*@` block annotation). It has nothing to continue. Flag it and
+    // drop it rather than emitting an `ElementKind::Other` element with
+    // refdes `"+"` that leaks into downstream passes (see W912 in spec §7).
+    if head == "+" {
+        diags.push(Diagnostic::warning(
+            "W912",
+            "`+` continuation line has nothing to continue; ignored",
+            Label::new(line.span, ""),
+        ));
+        return;
+    }
+
     // Directive?
     if let Some(name) = head.strip_prefix('.') {
         let name_lc = name.to_ascii_lowercase();
