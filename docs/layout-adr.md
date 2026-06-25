@@ -499,6 +499,72 @@ pin types, which the model now carries.
 
 ---
 
+## Post-mortems / cautionary tales
+
+Detailed narratives of past failures. CLAUDE.md keeps the one-line
+*rule* each one yields; the full story lives here.
+
+### V14 / power-glyph orientation — Attempt A and Attempt B
+
+V14 ("power-glyph orientation: GND down, VCC up") is a **hard
+constraint** (Tier 1, categorical), not a soft cost. Two earlier
+attempts to enforce it failed, in opposite ways, and between them
+pin down why the constraint must be a candidate-space filter applied
+at *every* stage that can move an element.
+
+**Attempt A — a soft cost term.** A `power_pin_outward` weight was
+added to the SA objective (`cost.rs` / `CostWeights`). At any *safe*
+weight the term did nothing: the optimiser traded it off against the
+other soft terms and routinely left the glyph mis-oriented. Cranking
+the weight high enough to dominate destabilised the rest of the
+layout. This is the generic failure mode of encoding a *categorical*
+property (one correct answer) as a *continuous* penalty: a soft term
+is for preferences and tie-breakers, never for a property that must
+categorically hold. There is deliberately **no `power_pin_outward`
+term in the current tree** — re-adding one re-creates this failure.
+
+**Attempt B — a seed-time filter, but only at seed time.** The
+orientation candidate set was filtered at seeding
+(`pick_orientations`) to those placing VCC-pins up / GND-pins down —
+correct so far. But the SA cost weight was left at 0, and the SA
+`rotate` move (`propose_move`'s `rotate`, p≈0.1, `rotate_once` in
+`anneal.rs`) then rotated the element back *out* of the filtered set.
+A hard constraint at seed-time plus a weight-0 soft cost at
+refine-time means the refiner silently undoes the constraint.
+
+**The rule both attempts yield.** A property enforced as a hard
+constraint at the seeding/placement stage MUST be hard at *every*
+stage that can move the element — both `pick_orientations` *and* the
+SA rotate move — either by projecting every move back into the
+feasible set or by restricting the move's candidate set. The correct
+design for V14: filter the orientation candidate set for any element
+bearing a power/ground pin to the VCC-up / GND-down survivors at both
+`pick_orientations` and the SA rotate move; when the filtered set is
+*empty* (a forced sideways pin), fall back to the
+**detached-glyph-with-stub-wire** path — not a soft penalty.
+
+### The V5-scorer rework that regressed V13
+
+An attempt to fix V14 glyph-direction on `common_emitter` by
+reworking the **V5 orientation scorer** rearranged the entire layout.
+It was "made to pass" only by *loosening V5 / V13 budgets on other
+fixtures*. Under the tier ordering this is forbidden twice over:
+
+1. it **regressed a tier** — it broke V13 (Tier 1) to chase a layout
+   change, and
+2. it **loosened budgets sideways** — paying for one fixture's
+   improvement by relaxing another's ratchet.
+
+The lesson, now codified in CLAUDE.md's tier and ratchet rules:
+budgets ratchet *down*, never sideways, and a change may never
+regress a higher-priority tier to improve a lower one. (The narrow
+exception — a change that strictly reduces *total* violations across
+all fixtures, with a one-line rationale and user sign-off — is the
+"global-improvement escape" in CLAUDE.md; it still never licenses a
+Tier-0 regression.)
+
+---
+
 ## What we are not deciding now
 
 - ~~Sidecar file format (JSON vs TOML vs custom). Pick during
