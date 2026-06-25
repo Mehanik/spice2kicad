@@ -409,6 +409,7 @@ dependencies = [
  "kicad-symbols",
  "lexpr",
  "log",
+ "spice-diagnostics",
  "spice-layout",
  "spice-parser",
  "spice-route",

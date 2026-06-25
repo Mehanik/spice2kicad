@@ -19,3 +19,6 @@ lexpr.workspace = true
 thiserror.workspace = true
 log.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+spice-diagnostics.workspace = true
