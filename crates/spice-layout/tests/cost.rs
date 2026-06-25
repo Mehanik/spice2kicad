@@ -10,7 +10,7 @@ use spice_layout::{GridPoint, PlacedElement, Placement, place};
 use spice_policy::{CheckedNetlist, check};
 use spice_resolve::{
     AlignSpec, Axis, ElementKind, ElementRole, PlaceSpec, Relation, ResolvedElement,
-    ResolvedNetlist, SubcktPorts,
+    ResolvedNetlist, SheetScope, SubcktPorts,
 };
 
 const STEP_MM: f64 = 1.27;
@@ -535,6 +535,7 @@ fn build_scenario(scenario: &Scenario) -> (Placement, CheckedNetlist) {
             axis: *axis,
             refdes: idxs.iter().map(|i| names[*i].clone()).collect(),
             span: None,
+            scope: SheetScope::Root,
         })
         .collect();
     let place_specs: Vec<PlaceSpec> = scenario

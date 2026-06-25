@@ -109,12 +109,35 @@ pub enum ElementRole {
     Power(String),
 }
 
+/// Which sheet a directive belongs to.
+///
+/// `.subckt`→hierarchical-sheet lowering puts each `.subckt` body on
+/// its own child sheet (V6/V8), named after the subckt; top-level
+/// elements and `X<n>` instances live on the root sheet. This is the
+/// minimal scope identity the policy pass needs to answer "are these
+/// two refdeses on the same sheet?" for the cross-sheet `align` check
+/// (E004). It reuses the existing subckt name as the sheet identity
+/// rather than inventing a parallel one.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub enum SheetScope {
+    /// The top-level / root schematic sheet.
+    #[default]
+    Root,
+    /// The child hierarchical sheet for the named `.subckt` body.
+    Subckt(String),
+}
+
 /// A pass-through `*@align` directive.
 #[derive(Debug, Clone)]
 pub struct AlignSpec {
     pub axis: Axis,
     pub refdes: Vec<String>,
     pub span: Option<Span>,
+    /// Sheet the directive was declared on. A top-level `*@align` is
+    /// `Root`; an `*@align` inside a `.subckt` body is `Subckt(name)`.
+    /// The policy pass uses this together with each member's own sheet
+    /// to detect cross-sheet alignment (E004).
+    pub scope: SheetScope,
 }
 
 /// A pass-through `;@ place=` tag.
@@ -199,13 +222,13 @@ pub fn resolve(netlist: &Netlist, library: &Library) -> Result<ResolvedNetlist, 
         });
     }
 
-    let align = collect_align(&netlist.annotations)
+    let align = collect_align(&netlist.annotations, &SheetScope::Root)
         .into_iter()
         .chain(
             netlist
                 .subckts
                 .iter()
-                .flat_map(|s| collect_align(&s.annotations)),
+                .flat_map(|s| collect_align(&s.annotations, &SheetScope::Subckt(s.name.clone()))),
         )
         .collect();
 
@@ -618,7 +641,7 @@ fn collect_symbol_defaults(annotations: &[SpannedAnnotation]) -> Vec<BlockSymbol
         .collect()
 }
 
-fn collect_align(annotations: &[SpannedAnnotation]) -> Vec<AlignSpec> {
+fn collect_align(annotations: &[SpannedAnnotation], scope: &SheetScope) -> Vec<AlignSpec> {
     annotations
         .iter()
         .filter_map(|a| match &a.annotation {
@@ -626,6 +649,7 @@ fn collect_align(annotations: &[SpannedAnnotation]) -> Vec<AlignSpec> {
                 axis: *axis,
                 refdes: refdes.clone(),
                 span: a.span,
+                scope: scope.clone(),
             }),
             Annotation::SymbolDefault { .. } => None,
         })

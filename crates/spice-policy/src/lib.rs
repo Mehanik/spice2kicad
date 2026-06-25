@@ -24,10 +24,10 @@
 //!   (directive dropped)
 //! - **W104** — `place` directive on an element already fixed by
 //!   `align` (`place` dropped)
-//!
-//! `E004` (cross-sheet `align`) is intentionally not detected here
-//! — `ResolvedNetlist` is currently flat and lacks the subckt
-//! scoping required.
+//! - **E004** — an `align` cluster references elements on different
+//!   sheets (across a `.subckt` instance boundary). Per spec §4.4,
+//!   all members of one `align` must resolve within the same parent
+//!   sheet (fatal; collected, not bailed-on).
 
 #![forbid(unsafe_code)]
 
@@ -35,7 +35,8 @@ use std::collections::{HashMap, HashSet};
 
 use spice_diagnostics::{Diagnostic, Label, Severity, Span};
 use spice_resolve::{
-    AlignSpec, PlaceSpec, Relation, ResolvedElement, ResolvedNetlist, SheetInstance, SubcktPorts,
+    AlignSpec, PlaceSpec, Relation, ResolvedElement, ResolvedNetlist, SheetInstance, SheetScope,
+    SubcktPorts,
 };
 
 // ---------------------------------------------------------------------------
@@ -46,8 +47,11 @@ use spice_resolve::{
 /// and de-conflicted. Downstream consumers (the layout pass) can
 /// trust that:
 ///
-/// * every refdes mentioned in `align` / `place` exists in
-///   `elements`,
+/// * every refdes mentioned in `align` / `place` exists somewhere in
+///   the netlist (top-level `elements`, a sheet instance, or a
+///   `.subckt` body),
+/// * every `align` cluster's members all live on the same sheet
+///   (no cross-sheet alignment — E004),
 /// * no element appears in more than one `place` directive,
 /// * no element appears in both `align` and `place`,
 /// * the `place` graph contains no per-axis directional cycles, and
@@ -88,23 +92,56 @@ pub fn check(
     } = resolved;
 
     let mut diags: Vec<Diagnostic> = Vec::new();
-    let known: HashSet<&str> = elements.iter().map(|e| e.refdes.as_str()).collect();
 
-    // 1 + 2. E001: collect every unknown-refdes reference. Don't bail.
+    // Map every refdes to the sheet it lives on. Root-sheet members are
+    // the top-level `elements` and the `X<n>` instances (each emitted as
+    // a sheet-symbol on the parent); subckt-body members live on the
+    // child sheet named after their `.subckt`. This is the scope identity
+    // E004 compares against — built once and shared by the E001 and E004
+    // checks below.
+    let scope_of: HashMap<&str, SheetScope> =
+        build_scope_map(&elements, &subckts, &sheet_instances);
+
+    // 1 + 2. E001 (unknown refdes) and E004 (cross-sheet align) over the
+    // `align` directives. Both are collected, not bailed-on.
     for spec in &align {
-        // TODO(E004): subckt scoping not yet preserved in ResolvedNetlist;
-        // cross-sheet align detection is deferred.
+        let mut cross_sheet_offenders: Vec<&str> = Vec::new();
         for r in &spec.refdes {
-            if !known.contains(r.as_str()) {
-                push_err(
+            match scope_of.get(r.as_str()) {
+                None => push_err(
                     &mut diags,
                     "E001",
                     format!("`align` references unknown refdes `{r}`"),
                     spec.span,
-                );
+                ),
+                Some(member_scope) if *member_scope != spec.scope => {
+                    cross_sheet_offenders.push(r.as_str());
+                }
+                Some(_) => {}
             }
         }
+        if !cross_sheet_offenders.is_empty() {
+            push_err(
+                &mut diags,
+                "E004",
+                format!(
+                    "`align` crosses a sheet boundary: {} {} not on {}; all members of one `align` must resolve within the same sheet",
+                    cross_sheet_offenders.join(", "),
+                    if cross_sheet_offenders.len() == 1 {
+                        "is"
+                    } else {
+                        "are"
+                    },
+                    describe_scope(&spec.scope),
+                ),
+                spec.span,
+            );
+        }
     }
+
+    // `place` still validates against top-level refdeses only; cross-sheet
+    // `place` is not part of v0.1's E004 contract (spec §4.3 / §7).
+    let known: HashSet<&str> = elements.iter().map(|e| e.refdes.as_str()).collect();
     for spec in &place {
         if !known.contains(spec.refdes.as_str()) {
             push_err(
@@ -159,6 +196,7 @@ pub fn check(
             axis: spec.axis,
             refdes: deduped,
             span: spec.span,
+            scope: spec.scope,
         });
     }
 
@@ -380,6 +418,44 @@ fn tarjan_sccs<'a>(edges: &[(&'a str, &'a str, Option<Span>)]) -> Vec<Vec<&'a st
     }
 
     sccs
+}
+
+// ---------------------------------------------------------------------------
+// Sheet-scope mapping (for E004)
+// ---------------------------------------------------------------------------
+
+/// Build a refdes → [`SheetScope`] map over every placeable refdes in
+/// the netlist. Root-sheet members are the top-level `elements` and the
+/// `X<n>` instances; each `.subckt` body's elements map to
+/// `Subckt(name)`. A refdes absent from the result is genuinely
+/// unknown (→ E001); a refdes present but whose scope differs from an
+/// `align`'s own scope is a cross-sheet reference (→ E004).
+fn build_scope_map<'a>(
+    elements: &'a [ResolvedElement],
+    subckts: &'a [SubcktPorts],
+    sheet_instances: &'a [SheetInstance],
+) -> HashMap<&'a str, SheetScope> {
+    let mut map: HashMap<&'a str, SheetScope> = HashMap::new();
+    for e in elements {
+        map.insert(e.refdes.as_str(), SheetScope::Root);
+    }
+    for si in sheet_instances {
+        map.insert(si.refdes.as_str(), SheetScope::Root);
+    }
+    for sc in subckts {
+        for e in &sc.elements {
+            map.insert(e.refdes.as_str(), SheetScope::Subckt(sc.name.clone()));
+        }
+    }
+    map
+}
+
+/// Human-readable name for a sheet scope, used in E004 messages.
+fn describe_scope(scope: &SheetScope) -> String {
+    match scope {
+        SheetScope::Root => "the root sheet".to_owned(),
+        SheetScope::Subckt(name) => format!("sheet `{name}`"),
+    }
 }
 
 // ---------------------------------------------------------------------------

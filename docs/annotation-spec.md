@@ -544,11 +544,12 @@ The converter reports, in this order:
   directive or the built-in default table) is not present in any
   loaded `.kicad_sym` library, *or* an element has no symbol
   mapping (e.g. `X…` subckt instance with no `;@ symbol=` tag)
-- **E004** `align` references cross a sheet boundary — *reserved;
-  not yet detected.* Subckt scoping is not preserved in the resolved
-  netlist today, so this check is unimplemented (see the `TODO(E004)`
-  in `crates/spice-policy/src/lib.rs`). The semantics below are the
-  intended contract.
+- **E004** `align` references cross a sheet boundary — all members
+  of one `align` must resolve within the same parent sheet (spec
+  §4.4); referencing an element inside a `.subckt` body from a
+  root-sheet `align` (or vice versa) is a hard error. Detected in the
+  policy pass (`crates/spice-policy/src/lib.rs`) using the per-element
+  `SheetScope` carried through `spice-resolve`.
 - **E005** invalid `pinmap` — references an unknown pin (by number
   or name), uses an out-of-range SPICE terminal index, or repeats
   a SPICE index or KiCad pin

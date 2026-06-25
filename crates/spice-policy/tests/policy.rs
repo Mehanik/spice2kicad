@@ -5,7 +5,7 @@ use proptest::prelude::*;
 use spice_diagnostics::Severity;
 use spice_resolve::{
     AlignSpec, Axis, ElementKind, ElementRole, PlaceSpec, Relation, ResolvedElement,
-    ResolvedNetlist,
+    ResolvedNetlist, SheetScope,
 };
 
 use spice_policy::{CheckedNetlist, check};
@@ -48,6 +48,7 @@ fn mk_resolved(
                 axis: *axis,
                 refdes: refs.iter().map(|s| (*s).to_owned()).collect(),
                 span: None,
+                scope: SheetScope::Root,
             })
             .collect(),
         place: place
@@ -118,6 +119,145 @@ fn e001_collects_multiple() {
     let e001s: Vec<_> = diags.iter().filter(|d| d.code == "E001").collect();
     // 2 align unknowns + 1 place refdes + 1 place anchor = 4.
     assert_eq!(e001s.len(), 4, "got: {:?}", codes_of(&diags));
+}
+
+// ---------------------------------------------------------------------------
+// E004 — cross-sheet `align`
+// ---------------------------------------------------------------------------
+
+use spice_resolve::{SheetInstance, SubcktPorts};
+
+/// Build a netlist with one root element `root_r` and one `.subckt`
+/// body element `sub_r` inside subckt `name`, plus a single `align`
+/// scoped to `align_scope` referencing both. This is the minimal shape
+/// that exercises the cross-sheet check.
+fn cross_sheet_netlist(
+    root_r: &str,
+    sub_name: &str,
+    sub_r: &str,
+    align_scope: SheetScope,
+    align_members: &[&str],
+) -> ResolvedNetlist {
+    ResolvedNetlist {
+        elements: vec![make_element(root_r)],
+        align: vec![AlignSpec {
+            axis: Axis::Vertical,
+            refdes: align_members.iter().map(|s| (*s).to_owned()).collect(),
+            span: None,
+            scope: align_scope,
+        }],
+        place: vec![],
+        subckts: vec![SubcktPorts {
+            name: sub_name.to_owned(),
+            ports: vec![],
+            elements: vec![make_element(sub_r)],
+        }],
+        sheet_instances: vec![],
+    }
+}
+
+#[test]
+fn e004_align_crosses_subckt_boundary() {
+    // A root-scoped align that names a root element AND a subckt-body
+    // element straddles the sheet boundary → E004.
+    let n = cross_sheet_netlist("R1", "AMP", "R5", SheetScope::Root, &["R1", "R5"]);
+    let diags = check(n).expect_err("fatal");
+    let codes = codes_of(&diags);
+    assert!(codes.contains(&"E004"), "got: {codes:?}");
+    // The members both resolve, so no E001 should be emitted.
+    assert!(!codes.contains(&"E001"), "got: {codes:?}");
+}
+
+#[test]
+fn e004_subckt_scoped_align_referencing_root_member() {
+    // Mirror case: an align declared inside the subckt that reaches out
+    // to a root element is equally cross-sheet.
+    let n = cross_sheet_netlist(
+        "R1",
+        "AMP",
+        "R5",
+        SheetScope::Subckt("AMP".to_owned()),
+        &["R5", "R1"],
+    );
+    let diags = check(n).expect_err("fatal");
+    assert!(codes_of(&diags).contains(&"E004"));
+}
+
+#[test]
+fn no_e004_same_sheet_root_control() {
+    // Both members on the root sheet → no E004 (control).
+    let n = ResolvedNetlist {
+        elements: vec![make_element("R1"), make_element("R2")],
+        align: vec![AlignSpec {
+            axis: Axis::Vertical,
+            refdes: vec!["R1".to_owned(), "R2".to_owned()],
+            span: None,
+            scope: SheetScope::Root,
+        }],
+        place: vec![],
+        subckts: vec![],
+        sheet_instances: vec![],
+    };
+    let (out, warns) = check(n).expect("clean");
+    assert_eq!(out.align.len(), 1);
+    assert!(
+        !codes_of(&warns).contains(&"E004"),
+        "got: {:?}",
+        codes_of(&warns)
+    );
+}
+
+#[test]
+fn no_e004_same_sheet_subckt_control() {
+    // Two members both inside the same subckt body, with the align
+    // scoped to that subckt → no E004.
+    let n = ResolvedNetlist {
+        elements: vec![],
+        align: vec![AlignSpec {
+            axis: Axis::Vertical,
+            refdes: vec!["R5".to_owned(), "R6".to_owned()],
+            span: None,
+            scope: SheetScope::Subckt("AMP".to_owned()),
+        }],
+        place: vec![],
+        subckts: vec![SubcktPorts {
+            name: "AMP".to_owned(),
+            ports: vec![],
+            elements: vec![make_element("R5"), make_element("R6")],
+        }],
+        sheet_instances: vec![],
+    };
+    let (out, _warns) = check(n).expect("clean");
+    assert_eq!(out.align.len(), 1);
+}
+
+#[test]
+fn e004_sheet_instance_is_root_scoped() {
+    // An `X<n>` sheet instance lives on the root sheet; aligning a root
+    // element with a subckt-body element is still cross-sheet even when
+    // a sheet instance is present.
+    let n = ResolvedNetlist {
+        elements: vec![make_element("R1")],
+        align: vec![AlignSpec {
+            axis: Axis::Horizontal,
+            refdes: vec!["X1".to_owned(), "R5".to_owned()],
+            span: None,
+            scope: SheetScope::Root,
+        }],
+        place: vec![],
+        subckts: vec![SubcktPorts {
+            name: "AMP".to_owned(),
+            ports: vec![],
+            elements: vec![make_element("R5")],
+        }],
+        sheet_instances: vec![SheetInstance {
+            refdes: "X1".to_owned(),
+            subckt_name: "AMP".to_owned(),
+            nodes: vec![],
+        }],
+    };
+    let diags = check(n).expect_err("fatal");
+    assert!(codes_of(&diags).contains(&"E004"));
 }
 
 #[test]
@@ -341,6 +481,7 @@ fn arb_acyclic_input() -> impl Strategy<Value = ResolvedNetlist> {
                     },
                     refdes: members.into_iter().map(|i| refs[i].clone()).collect(),
                     span: None,
+                    scope: SheetScope::Root,
                 })
                 .collect();
             ResolvedNetlist {

@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 use kicad_symbols::Library;
 use spice_resolve::{
     AlignSpec, Axis, ElementKind, ElementRole, PlaceSpec, Relation, ResolvedElement,
-    ResolvedNetlist,
+    ResolvedNetlist, SheetScope,
 };
 
 /// Workspace-relative path to the kicad-symbols fixture directory.
@@ -66,6 +66,7 @@ pub fn mk_resolved(
                 axis: *axis,
                 refdes: refs.iter().map(|s| (*s).to_owned()).collect(),
                 span: None,
+                scope: SheetScope::Root,
             })
             .collect(),
         place: place
