@@ -301,16 +301,16 @@ invariant here.
   is vertical, so `Q1.y == Q2.y`, `RC1.y == RC2.y`, …); (c) Q1 and
   Q2 carry mirrored orientations — same rotation, but exactly one
   of the two has a `(mirror y)` token in its `(symbol …)` instance
-  (so the BJT arrows point toward each other). Today's placer
-  arranges the eight elements left-to-right with equal stride,
-  which makes *pairwise* distances equal but does **not** put the
-  pairs on a common axis (RB1/RB2 and C1/C2 sit far to the right
-  of the Q axis), so verifier (a) fails by roughly one cell width
-  per pair. Scope: v0.2+ quality metric. The symmetry detector is
-  expected to live in `crates/spice-layout/src/`, composing with
-  V6's classify → bands → layers pipeline — likely as an extra
-  pass that runs after band/layer seeding and before phase 4
-  auto-fill (annotation spec §5).
+  (so the BJT arrows point toward each other). The placer pins each
+  detected mirror pair `(L, R)` at `R.x = axis_sum - L.x`, `R.y =
+  L.y` about a single shared `axis_sum` (the seed bbox midpoint, or a
+  user-pinned pair's midpoint when one exists), so all four pairs land
+  on the **same** vertical axis — verifier (a) holds within a fraction
+  of a cell rather than failing by one cell per pair. The symmetry
+  detector lives in `crates/spice-layout/src/symmetry.rs`, composing
+  with V6's classify → bands → layers pipeline as a pass that runs
+  after band/layer seeding and before V5's orientation chooser
+  (`place_with_hint` in `crates/spice-layout/src/lib.rs`).
 
 - **V8 — Standard symbol mapping for subckts.** A SPICE `.subckt`
   whose top-level instantiation `X<n>` carries a `*@symbol <lib_id>`
