@@ -183,10 +183,10 @@ Block form with `for=` (defaults across many elements):
   element's terminals; on mismatch it errors unless `pinmap=` is also
   supplied.
 - The value is required; an empty value (e.g. `;@ symbol=`) is
-  malformed and should produce a diagnostic. Implementations that
-  silently accept an empty value violate the spec. (Current parser
-  produces `Tag::Symbol("")` without a diagnostic — known gap;
-  see `tests/lex_edges.rs::semicolon_at_equals_only`.)
+  malformed and produces an `E910` diagnostic. The tag is dropped
+  (no `Tag::Symbol` is emitted), so the element falls back to the
+  built-in default symbol table. See
+  `tests/lex_edges.rs::semicolon_at_symbol_empty_value`.
 
 **Glob syntax.** Shell-style: `*` matches any run of characters
 (including empty). No other metacharacters. Matching is
@@ -581,6 +581,8 @@ into the typed AST, before the semantic passes above run.
 - **E908** `*@symbol` block directive missing its `for=GLOB` key
 - **E909** `*@symbol` block directive missing its `Lib:Name`
   positional
+- **E910** trailing `;@ symbol=` tag with an empty value — the
+  `Lib:Name` value is required (see §4.1). The tag is dropped.
 - **W900** a `.subckt` was never closed by `.ends` (closed
   implicitly at end of file)
 - **W907** malformed BJT line — `Q…` needs at least three nodes and
@@ -589,10 +591,11 @@ into the typed AST, before the semantic passes above run.
 - **W911** `.if` / `.elseif` / `.else` conditional blocks are
   ignored (one warning per top-level `.if`)
 
-> Note: `E908` and `E909` are constructed as warnings today despite
-> their `E` prefix — a missing key on a `*@symbol` directive degrades
-> the directive rather than blocking conversion. Treat the prefix as
-> indicative of severity intent, not current blocking behaviour.
+> Note: `E908`, `E909`, and `E910` are constructed as warnings today
+> despite their `E` prefix — a malformed `symbol` directive (block or
+> trailing) degrades the directive rather than blocking conversion.
+> Treat the prefix as indicative of severity intent, not current
+> blocking behaviour.
 
 ---
 

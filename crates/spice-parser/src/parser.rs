@@ -503,7 +503,19 @@ fn parse_tag(raw: &RawTag, diags: &mut Vec<Diagnostic>) -> Option<Tag> {
     match directive_lc.as_str() {
         "symbol" => {
             let v = rest_after_eq.or(rest_after_space)?;
-            Some(Tag::Symbol(first_token(v).to_owned()))
+            let lib_id = first_token(v);
+            if lib_id.is_empty() {
+                // `;@ symbol=` with an empty value — malformed per spec §4.1
+                // ("the value is required"). Degrade the tag rather than
+                // producing a bogus `Tag::Symbol("")`.
+                diags.push(Diagnostic::warning(
+                    "E910",
+                    "symbol tag requires a Lib:Name value",
+                    Label::new(raw.body_span, ""),
+                ));
+                return None;
+            }
+            Some(Tag::Symbol(lib_id.to_owned()))
         }
         "pinmap" => {
             let v = rest_after_eq.or(rest_after_space)?;

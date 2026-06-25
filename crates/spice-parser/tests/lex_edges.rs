@@ -970,3 +970,21 @@ fn semicolon_at_equals_only() {
         r1.tags
     );
 }
+
+/// `;@ symbol=` (empty value) is malformed per spec §4.1: it produces an
+/// `E910` diagnostic and the tag is dropped (no bogus `Tag::Symbol("")`).
+#[test]
+fn semicolon_at_symbol_empty_value() {
+    let out = common::parse_with_diags("* t\nR1 a b 1k ;@ symbol=\n");
+    let r1 = elem(&out.netlist, "R1");
+    assert!(
+        !has_tag(r1, |t| matches!(t, Tag::Symbol(_))),
+        "empty `symbol=` must not produce a Symbol tag; tags: {:?}",
+        r1.tags
+    );
+    assert!(
+        out.diagnostics.iter().any(|d| d.code == "E910"),
+        "expected E910 for empty symbol value; diags: {}",
+        common::fmt_diags(&out.diagnostics)
+    );
+}
