@@ -67,6 +67,25 @@ invariant here.
   file's `(lib_symbols)`, and asserts byte equality of the body
   sub-tree.
 
+  **Synthesis exception (ADR-13, v0.2 — design, not yet wired).** V3
+  remains byte-for-byte verbatim for every `lib_symbols` entry that
+  originated from a user `.kicad_sym`; that portability guarantee is
+  unconditional and Tier-0. The *one* permitted exception is the
+  emitter's own power-glyph family (`power:GND` / `power:VCC` /
+  `power:VDD` / `power:VEE` / `power:+…` / `power:PWR_FLAG`), which the
+  emitter may rotate/mirror by a 90° multiple via a narrow `RawSexpr`
+  coordinate-transform (ADR-13) so a glyph on a non-canonical pin faces
+  outward without the forced-sideways stub. This applies only to glyphs
+  the emitter *generates*, never to a user-provided symbol, and only as
+  a 90°-multiple coordinate rotation of a fixed emitter-owned glyph — it
+  does not introduce a typed primitive model and does not enable
+  auto-drawing of unknown symbols. Justified by V14 (correct power-glyph
+  orientation without body overlap). The V3 round-trip verifier is
+  unaffected: it compares *user*-symbol bodies, which are never
+  transformed; the synthesised orientation-suffixed glyph entries (e.g.
+  `power:GND_R90`) have no user `.kicad_sym` source to round-trip
+  against and are excluded by name.
+
 - **V4 — Plain labels for in-sheet annotation; global labels for
   cross-sheet or one-pin interfaces; ≤ 1 plain label per net per
   sheet — a second only for a hierarchical-port name-jump pair.**

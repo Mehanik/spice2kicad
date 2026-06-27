@@ -499,6 +499,243 @@ pin types, which the model now carries.
 
 ---
 
+## ADR-13 — Narrow `RawSexpr` coordinate-transform for emitter-generated power glyphs
+
+**Status: design (v0.2).** No code yet; this ADR reopens invariant
+V3's "verbatim everything" rule for one tightly-scoped synthesis path
+and specifies its shape, integration point, and the V3 amendment it
+requires. It is the design for v0.2 Item 5 (CLAUDE.md "v0.2 deferred
+decisions → Revisit verbatim `lib_symbols` (V3)").
+
+**Context / problem.** V3 is a Tier-0 portability guarantee: every
+`(lib_symbols …)` entry is a byte-for-byte passthrough of the source
+`.kicad_sym` body, so the emitter never *synthesises* or *tweaks* a
+symbol. The mechanism is `RawSexpr::from_lexpr`
+(`crates/kicad-symbols/src/lib.rs:283-302`) mirroring the parsed
+`lexpr::Value` into `Symbol::body`
+(`crates/kicad-symbols/src/lib.rs:326`), which the emitter
+re-serialises unchanged via `lib_symbol_inline`
+(`crates/kicad-emitter/src/schematic.rs:816-824`) and
+`impl From<RawSexpr> for Sexpr`
+(`crates/kicad-emitter/src/schematic.rs:826-834`). The only edit
+`lib_symbol_inline` makes is rewriting slot-1 (the bare name) to the
+full `lib_id`; all graphics, pins, and properties forward untouched.
+
+That rule blocks two v0.2 features. This ADR addresses one and
+deliberately leaves the other unenabled:
+
+1. **The V14 [3] power-glyph body-overlap case (in scope).** V14 locks
+   each power glyph to its conventional rotation (rot 0: GND triangle
+   down, VCC/VEE chevron up) regardless of the host pin's outward
+   direction — `symbol_pose` hardcodes the angle to `0`
+   (`crates/spice-route/src/rails.rs:209-214`), and the verifier
+   (`tests/placement_quality.rs::v14_*`) asserts `rot == 0` on every
+   directional rail glyph. When a GND glyph attaches to an *upward*-
+   facing pin, the rot-0 triangle extends back *into* the host symbol
+   body. Today's only escape is the **forced-sideways offset + stub
+   wire** fallback: `glyph_offset` shifts the anchor one grid cell
+   along the pin's outward direction and `stub_wire` bridges the host
+   pin to it (`crates/spice-route/src/rails.rs:232-241`, `248-257`).
+   This clears the *body* but produces a glyph hanging off a stub in
+   an unnatural place — the residual defect tracked as the deferred
+   V14 placer item (CLAUDE.md "v0.2 deferred decisions"; MEMORY
+   "V14 placer pin-choice deferred"). A *rotated/mirrored* glyph whose
+   business-end (triangle tip / chevron) faces the correct outward
+   direction would sit flush on the pin with no stub and no body
+   overlap — but synthesising that variant is exactly what V3 forbids.
+
+2. **Zero-annotation auto-symbol-drawing (out of scope, NOT enabled).**
+   Deriving a body for a symbol the user does not have installed would
+   also need synthesis. This ADR's narrow option deliberately does
+   **not** enable it (see Consequences).
+
+**Decision.** Reopen V3 to permit a single, narrow synthesis path: a
+**`RawSexpr` coordinate-transform** applied to **emitter-generated
+power glyphs only** (`power:GND` / `power:VCC` / `power:VDD` /
+`power:VEE` / `power:+…` variants / `power:PWR_FLAG`). Every
+**user-supplied** `lib_symbols` entry stays byte-for-byte verbatim, so
+V3's portability guarantee is fully preserved for user symbols. The
+rejected alternative — a full typed graphical-primitive model — is too
+invasive and risks V3 across *all* symbols (see Rejected alternatives).
+
+**Scope (precise).** The transform applies **only** to the lib-symbol
+bodies of the emitter's own power-glyph family — symbols the emitter
+itself owns and inlines from the fixture `power.kicad_sym` (already a
+verbatim passthrough today). It never touches a `Symbol` that
+originated from a user's `.kicad_sym`. The discriminator is the same
+one the rest of the power path already uses: the symbol is an
+emitter-synthesised power glyph iff it is produced by the
+`spice-route::rails` / `pwrflag` glyph path (`is_power_source` /
+`power_lib_id_for_net` lineage), not a placed user element. A
+user-installed symbol that happens to be named `power:GND` is **not**
+in scope — the transform keys off provenance (emitter-generated), not
+lib_id string.
+
+**The transform.** Given a glyph's raw `RawSexpr` graphical tree and a
+target orientation (one of rotation ∈ {90, 180, 270} plus an optional
+mirror), rewrite the *coordinate-bearing leaves* of the tree:
+
+- **pin positions** — the `(at x y angle)` inside each `(pin …)`, with
+  the pin angle rotated by the same amount;
+- **graphic-primitive coordinates** — the `(xy x y)` points inside
+  `(polyline …)`, the `(center …)` / `(start …)` / `(end …)` of
+  `(circle …)` / `(arc …)`, the `(start …)`/`(end …)` of
+  `(rectangle …)`, and any `(at …)` on a drawn `(text …)`.
+
+applying the 2-D rotation (and optional axis mirror) about the
+symbol's local origin, snapped to the grid (the glyph's primitives are
+already grid-aligned, so 90°-multiple rotation keeps them so). The
+result is a synthesised glyph whose triangle tip / chevron points in
+the chosen outward direction. The transform is a pure
+`RawSexpr → RawSexpr` function over the captured body; it does **not**
+introduce a typed primitive model — it walks and rewrites the same
+opaque s-expr tree the verbatim path already carries. Non-coordinate
+leaves (stroke, fill, type, names) pass through untouched, exactly as
+in the verbatim path.
+
+Because it is a coordinate rotation of a *known emitter-owned* glyph
+by a 90° multiple, it cannot produce malformed graphics: the input is
+one of a handful of fixed fixture symbols, not arbitrary user input.
+This is the property that makes the narrow transform safe where a
+general synthesis pass would not be.
+
+**Integration — where it hooks.** The transform **replaces the
+forced-sideways offset + stub fallback** in the `rails.rs` glyph path
+for the non-canonical-pin case. Concretely:
+
+- `symbol_pose` (`crates/spice-route/src/rails.rs:209-214`) currently
+  returns `(x, y, 0)` and lets `glyph_offset` push the anchor sideways
+  when the pin faces the wrong way. Under this ADR, the
+  *forced-sideways* branch of `glyph_offset`
+  (`crates/spice-route/src/rails.rs:236-238` —
+  `is_forced_sideways`) is replaced: instead of offsetting + emitting a
+  stub, the emitter selects the glyph orientation whose transformed
+  business-end faces the host pin's outward direction, synthesises that
+  rotated `RawSexpr` body, and anchors the glyph *directly on the pin*
+  (no offset, no `stub_wire`).
+- The **sheet-edge** branch of `glyph_offset`
+  (`crates/spice-route/src/rails.rs:233-234`) is **unchanged**: a
+  sheet-port glyph is offset outward to clear the *sheet body and port
+  label*, a different concern that rotation does not solve. Sheet-edge
+  keeps offset + stub.
+- `value_text_anchor` (`crates/spice-route/src/rails.rs:280-286`)
+  already keys off the host pin's outward direction, so it continues to
+  place the net-name on the outward side with no change.
+- The PWR_FLAG co-location (`flag_rotation`,
+  `crates/spice-route/src/pwrflag.rs:157-159` — note the function is
+  named `flag_rotation`, *not* `pwrflag_rotation`) already rotates the
+  flag to point away from the glyph body; it composes with a rotated
+  glyph by reading the glyph's (now-transformed) body direction rather
+  than the hardcoded canon.
+
+**Call boundary.** The transform is a `kicad-symbols` helper
+(`fn transform_glyph_body(body: &RawSexpr, rot: u16, mirror: bool) ->
+RawSexpr`), called from `spice-route::rails` at glyph-emit time — the
+one site that both knows the host pin's outward direction and owns the
+glyph. The emitter's verbatim `lib_symbol_inline` path
+(`schematic.rs:816-824`) is **not** modified: a synthesised glyph
+either (a) is inlined as a *distinct* `(lib_symbols …)` entry whose
+name encodes the orientation (e.g. `power:GND_R90`), keeping each
+`lib_symbols` body internally consistent with the instances that
+reference it, or (b) keeps the canonical body in `lib_symbols` and
+applies the transform only to the instance — **(a) is preferred**, so
+the inlined definition still matches its instances and the V3 verifier
+(which compares `lib_symbols` bodies, not instances) sees a
+self-consistent file. The orientation-suffixed name lives only in the
+emitted file's `lib_symbols`; it is never a user-facing lib_id.
+
+**V3 amendment.** V3 stays Tier-0 verbatim for **all user symbols**.
+The single permitted synthesis exception is emitter-generated
+power-glyph rotation, justified by V14. Add the following clause to
+`docs/invariants.md` V3 (drafted here, applied there marked as the
+ADR-13 amendment):
+
+> **Synthesis exception (ADR-13, v0.2).** V3 remains byte-for-byte
+> verbatim for every `lib_symbols` entry that originated from a user
+> `.kicad_sym`; that portability guarantee is unconditional and
+> Tier-0. The *one* permitted exception is the emitter's own
+> power-glyph family (`power:GND` / `power:VCC` / `power:VDD` /
+> `power:VEE` / `power:+…` / `power:PWR_FLAG`), which the emitter
+> may rotate/mirror by a 90° multiple via a narrow `RawSexpr`
+> coordinate-transform (ADR-13) so a glyph on a non-canonical pin
+> faces outward without the forced-sideways stub. This applies only
+> to glyphs the emitter *generates*, never to a user-provided symbol,
+> and only as a 90°-multiple coordinate rotation of a fixed
+> emitter-owned glyph — it does not introduce a typed primitive model
+> and does not enable auto-drawing of unknown symbols. Justified by
+> V14 (correct power-glyph orientation without body overlap).
+
+This changes no invariant **semantics** beyond stating the exception:
+user-symbol passthrough is exactly as before.
+
+**How V3's existing verifier stays green.** The V3 round-trip test
+re-parses each source `.kicad_sym`, locates each *used user symbol* in
+the emitted `(lib_symbols)`, and asserts byte equality of the body
+sub-tree. That path is **untouched**: no user symbol is ever
+transformed, so every user-symbol body still round-trips byte-for-byte.
+The synthesised glyphs are emitter-owned power symbols, which the V3
+verifier does not (and should not) compare against a user
+`.kicad_sym` — they have no user source to round-trip against. If the
+verifier currently asserts byte-equality against the fixture
+`power.kicad_sym`, it is narrowed to the *canonical* (rot-0) glyph
+entries only; the orientation-suffixed synthesised entries are
+excluded by name, exactly as the amendment scopes them.
+
+**Rejected alternative — full typed graphical-primitive model.**
+Replace the opaque `RawSexpr` passthrough with a typed model of KiCad
+graphical primitives (rectangles, polylines, arcs, …) so any symbol
+can be synthesised or transformed generically. Rejected:
+
+- It risks V3 across **all** symbols: once the emitter round-trips
+  through a typed model instead of byte-copying, any modelling gap
+  (an unmodelled primitive, a property-ordering difference, a
+  floating-point reformat) silently breaks the byte-verbatim
+  portability guarantee for *user* symbols — the exact Tier-0 property
+  V3 exists to protect.
+- It is far more invasive than the problem warrants. The only thing
+  that needs synthesis today is a 90° rotation of a handful of fixed
+  emitter-owned glyphs. A general typed model is a large surface for a
+  narrow need.
+- The narrow `RawSexpr` transform gets the V14 [3] win while leaving
+  the verbatim path — and thus V3 for user symbols — completely
+  unchanged. The typed model would have to re-establish that guarantee
+  by hand.
+
+The symbol-synthesis question for the *general* case (auto-drawing
+symbols the user lacks) stays open for a later v0.2 decision; this ADR
+deliberately does not answer it.
+
+**Consequences / follow-on.**
+
+- **Item 5 implementation.** This ADR is the design for v0.2 Item 5.
+  Implementation: add `transform_glyph_body` to `kicad-symbols`; in
+  `spice-route::rails`, replace the `is_forced_sideways` offset+stub
+  branch with orientation-selection + body synthesis; emit
+  orientation-suffixed `lib_symbols` entries; update the V14 verifier
+  to accept a flush rot-rotated glyph (the rotation now lives in the
+  synthesised *body*, so the instance angle and the V14 "rot == 0"
+  assertion need re-expressing in terms of *effective business-end
+  direction*, not raw instance angle); narrow the V3 verifier per the
+  amendment. The deferred V14 placer item then closes via decoration,
+  not a placer redesign — note this in MEMORY when landed.
+- **Sheet-edge glyphs keep offset + stub.** Rotation does not clear a
+  sheet body / port label; that path is out of scope and unchanged.
+- **Auto-symbol-drawing remains deferred.** This narrow option
+  deliberately does NOT enable synthesising bodies for unknown user
+  symbols — it only rotates fixed emitter-owned glyphs. Re-open the
+  general symbol-synthesis question separately in v0.2 with
+  zero-annotation auto-symbol-selection as the motivation (CLAUDE.md
+  "v0.2 deferred decisions").
+- **V14 stays a hard candidate filter at placement.** The transform is
+  a *decoration-phase* glyph synthesis, not a placement-phase
+  orientation change of a host symbol — it rotates the *glyph*, never
+  the element bearing the pin. The constraints-vs-costs contract
+  (CLAUDE.md) is untouched: `allowed_orientations` still filters host
+  element orientations; this ADR only changes how the *attached glyph*
+  is drawn once the host is placed.
+
+---
+
 ## Post-mortems / cautionary tales
 
 Detailed narratives of past failures. CLAUDE.md keeps the one-line
