@@ -596,6 +596,23 @@ without losing it, and recovery is a merge rather than a manual
 reconstruction. So: land step N (tests green, committed) *before*
 dispatching the agent for step N+1.
 
+**Always branch a worktree/agent from *current* master, and merge its
+result back to master when it finishes.** Worktree isolation can branch
+from a stale ref (the repo's default-branch HEAD at some cached point)
+rather than your live working HEAD — so an agent dispatched while master
+is at commit Z may silently start from an earlier commit, missing
+already-landed work. Before dispatching, confirm the intended base
+(`git rev-parse HEAD`); after the agent reports green, integrate its
+commits onto current master (cherry-pick the diffs, or rebase the branch)
+and re-run `just test` on the *combined* tree — never assume an agent's
+green on its own base survives integration. A wave that branched from an
+older base is not a failure (cherry-pick applies the diffs), but you must
+resolve the overlap conflicts against the newer work and re-verify, not
+fast-forward. (Real example: a v0.2 wave branched from `dc65d3a` while
+master was at `e0b9288`; the v0.1 diagnostic codes / test fixes only
+survived because each agent's commit was cherry-picked onto the live
+master and the suite re-run, not because the branches contained them.)
+
 A regression in the router (or placer) can produce unbounded segment
 growth and OOM-kill the host before any single test fails. To keep
 that contained, **always run tests and one-off conversions under a
