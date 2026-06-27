@@ -164,7 +164,14 @@ fn emit_schematic_target(
         align: resolved.align,
         place: resolved.place,
         subckts: top_subckts.clone(),
-        sheet_instances: Vec::new(),
+        // Carry the sheet instances through to placement. The top-level
+        // element placer ignores them for positioning (sheets are placed
+        // separately by `place_sheets`), but the idiom detector reads
+        // their port nets so a tap wired into a `.subckt` instance port
+        // is counted as a real consumer — otherwise a two-resistor
+        // network feeding an opamp sheet (the `opamp_inverting` `inv`
+        // net) is misdetected as a bare resistor divider.
+        sheet_instances: top_sheet_instances.clone(),
     };
 
     let (checked, warnings) = match spice_policy::check(top_resolved) {

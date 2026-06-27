@@ -25,6 +25,7 @@
 
 pub mod bands;
 pub mod cost;
+mod idioms;
 pub mod layers;
 pub mod net_class;
 pub mod orient;
@@ -499,6 +500,14 @@ pub fn place_with_hint(
     if let Some(plan) = symmetry::detect_pairs(&checked) {
         symmetry::apply(&mut placement, &mut pinned, &plan);
     }
+    // Idiom detection (roadmap §6, v0.2 Item 4): infer placement
+    // constraints from recurring analog sub-topologies and emit them
+    // through the same `align`/pin channel the user `align` path uses.
+    // Runs AFTER V7 symmetry so a symmetry pin always wins (the
+    // detector skips already-pinned elements) and BEFORE
+    // `pick_orientations` so the newly-pinned pairs guide V5/V3.
+    let dividers = idioms::detect_dividers(&checked);
+    idioms::apply(&mut placement, &mut pinned, &checked, &dividers);
     // V14: per-element allowed-orientation set (power pin up / ground
     // pin down). A *hard* candidate-space filter, threaded into both
     // the V5 seed chooser below and the SA refiner so the constraint is
@@ -552,6 +561,11 @@ pub fn refinement_meta(
     if let Some(plan) = symmetry::detect_pairs(checked) {
         symmetry::apply(&mut placement, &mut pinned, &plan);
     }
+    // Mirror the exact seed→hint→symmetry→idiom sequence
+    // `place_with_hint` runs, so the refinement phase sees the same
+    // `pinned` mask (the divider-pinned pair must not be reoriented).
+    let dividers = idioms::detect_dividers(checked);
+    idioms::apply(&mut placement, &mut pinned, checked, &dividers);
     let allowed = orient::allowed_orientations(checked);
     Ok(RefinementMeta { pinned, allowed })
 }
