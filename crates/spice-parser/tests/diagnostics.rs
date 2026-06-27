@@ -88,12 +88,32 @@ fn e005_invalid_pinmap_no_colon() {
 }
 
 #[test]
-fn e005_invalid_pinmap_non_numeric_index() {
-    let diags = parse_err("* t\nD1 a k DMOD ;@ pinmap=A:1\n");
-    assert!(
-        diags.iter().any(|d| d.code == "E005"),
-        "expected E005 in {diags:?}"
-    );
+fn pinmap_non_numeric_lhs_parses_as_port_name() {
+    // A non-numeric left-hand side is no longer a parse-level E005: it
+    // is a `.subckt` port name (spec §4.2), carried through as
+    // `PinmapEntry { port_name: Some(_), spice_index: 0 }` for the
+    // resolver to bind. Whether the name is actually a valid port (or
+    // whether the element is even a `.subckt` instance) is the
+    // resolver's call (E009), not the parser's.
+    use spice_parser::ast::{PinRef, Tag};
+    let nl = parse_ok("* t\nX1 a b OPAMP ;@ pinmap=inp:1\n");
+    let x1 = nl
+        .elements
+        .iter()
+        .find(|e| e.designator == "X1")
+        .expect("X1 present");
+    let entries = x1
+        .tags
+        .iter()
+        .find_map(|t| match &t.tag {
+            Tag::Pinmap(es) => Some(es),
+            _ => None,
+        })
+        .expect("pinmap tag present");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].port_name.as_deref(), Some("inp"));
+    assert_eq!(entries[0].spice_index, 0);
+    assert!(matches!(&entries[0].kicad_pin, PinRef::Number(n) if n == "1"));
 }
 
 #[test]

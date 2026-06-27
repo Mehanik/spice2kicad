@@ -252,6 +252,47 @@ fn v8_opamp_inverting_real_pin_connectivity() {
     assert_eq!(property_value(opamp, "Reference"), Some("X1"));
 }
 
+// --- definition-level subckt symbol (spec §4.1 / §4.2) -----------------
+
+/// A single definition-level `;@ symbol=` + `;@ pinmap=` on the
+/// `.subckt OPAMP …` header makes EVERY `X` instance emit the flat
+/// OPAMP triangle — no per-instance tags, no hierarchical sheet (V8).
+#[test]
+fn definition_level_symbol_inherited_by_all_instances() {
+    let (sch, tmp) = emit("opamp_definition_level");
+    let root = parse_sch(&sch);
+
+    let opamp_lib_id = "Amplifier_Operational:OPAMP";
+    let opamps: Vec<&Value> = instance_symbols(&root)
+        .into_iter()
+        .filter(|inst| first_string_arg(inst, "lib_id") == Some(opamp_lib_id))
+        .collect();
+    assert_eq!(
+        opamps.len(),
+        2,
+        "both X1 and X2 must inherit the definition-level OPAMP symbol"
+    );
+
+    let mut refs: Vec<&str> = opamps
+        .iter()
+        .filter_map(|inst| property_value(inst, "Reference"))
+        .collect();
+    refs.sort_unstable();
+    assert_eq!(refs, vec!["X1", "X2"]);
+
+    // No hierarchical sheet, and no child OPAMP.kicad_sch.
+    let sheets = children(&root, "sheet");
+    assert!(
+        sheets.is_empty(),
+        "definition-annotated subckt must not lower to a sheet; found {}",
+        sheets.len()
+    );
+    assert!(
+        !tmp.join("OPAMP.kicad_sch").exists(),
+        "no child OPAMP.kicad_sch should be written"
+    );
+}
+
 // --- default pinmap regression (V11) -----------------------------------
 
 #[test]

@@ -70,6 +70,7 @@ pub(crate) fn synthesize(
             }
             entries.push(PinmapEntry {
                 spice_index: i + 1,
+                port_name: None,
                 kicad_pin: PinRef::Name((*name).to_owned()),
             });
         }
@@ -78,6 +79,7 @@ pub(crate) fn synthesize(
         for i in take..arity {
             entries.push(PinmapEntry {
                 spice_index: i + 1,
+                port_name: None,
                 kicad_pin: PinRef::Number(symbol.pins[i].number.clone()),
             });
         }
@@ -88,6 +90,7 @@ pub(crate) fn synthesize(
     Ok((0..arity)
         .map(|i| PinmapEntry {
             spice_index: i + 1,
+            port_name: None,
             kicad_pin: PinRef::Number(symbol.pins[i].number.clone()),
         })
         .collect())

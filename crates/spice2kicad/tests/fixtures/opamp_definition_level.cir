@@ -1,0 +1,23 @@
+* Two-instance op-amp deck driving the definition-level symbol path.
+* The .subckt OPAMP header carries a definition-level symbol + port-name
+* pinmap (spec §4.1 / §4.2). BOTH X1 and X2 inherit it: each is emitted
+* as a flat Amplifier_Operational:OPAMP triangle, and the OPAMP subckt is
+* NOT lowered to a hierarchical sheet.
+*@symbol Device:R_US for=R*
+
+.subckt OPAMP inp inn out vcc vee ;@ symbol=Amplifier_Operational:OPAMP ;@ pinmap=inp:3,inn:2,out:1,vcc:8,vee:4
+E1 out 0 inp inn 1e5
+.ends
+
+VCC vcc 0   DC  15   ;@ power=+15V
+VEE vee 0   DC -15   ;@ power=-15V
+
+RIN1 in1  inv1 1k
+RF1  inv1 out1 10k
+RIN2 in2  inv2 1k
+RF2  inv2 out2 10k
+
+X1 0 inv1 out1 vcc vee OPAMP
+X2 0 inv2 out2 vcc vee OPAMP
+
+.end

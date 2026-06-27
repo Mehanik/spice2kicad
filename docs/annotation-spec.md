@@ -230,15 +230,50 @@ X1 0 inv out vcc vee OPAMP
 The `pinmap=` value uses the same syntax described in §4.2; for
 `X<n>` instances the SPICE indices refer to the `.subckt` port list
 in the order it was declared (`inp`=1, `inn`=2, `out`=3, `vcc`=4,
-`vee`=5 in the example above). KiCad pin references on the
-right-hand side may be numbers or names exactly as for any other
-element. (Implementation status: both override forms work today —
-the trailing `;@ symbol=` tag on the `X<n>` line and the block form
-`*@symbol Lib:Name for=<glob>` whose glob matches the instance
-refdes. Either one suppresses the `.subckt` → hierarchical-sheet
-lowering and maps the instance to the named flat symbol, with any
-`pinmap=` from the same directive applied. See
-`crates/spice-resolve/tests/resolve.rs::subckt_instance_block_symbol_overrides_sheet`.)
+`vee`=5 in the example above), and may also be written as port
+*names* (§4.2). KiCad pin references on the right-hand side may be
+numbers or names exactly as for any other element. (Implementation
+status: trailing `;@ symbol=` on `X<n>`, the `for=X<n>` block form,
+and the definition-level form below all override sheet emission
+today.)
+
+**Annotating the `.subckt` definition once (model-level).** Adding a
+per-instance tag to every `X` of the same subckt is repetitive and a
+`for=X*` glob is fragile. Instead, attach the `symbol` (and any
+`pinmap`) directly to the `.subckt NAME ports…` **header line** as
+trailing tags. Every `X` instance of that subckt then *inherits* the
+mapping — it is emitted as the flat symbol, with no hierarchical
+sheet, exactly as if each instance had carried the tag itself:
+
+```
+.subckt OPAMP inp inn out vcc vee  ;@ symbol=Amplifier_Operational:OPAMP ;@ pinmap=inp:3,inn:2,out:1,vcc:8,vee:4
+E1 out 0 inp inn 1e5
+.ends
+X1 0 inv1 out1 vcc vee OPAMP        ; both X1 and X2 render as the
+X2 0 inv2 out2 vcc vee OPAMP        ; OPAMP triangle, no sheets
+```
+
+Per §2.3, one directive per tag: write `symbol` and `pinmap` as two
+adjacent `;@…` tags on the header (comma-joining directives in one
+tag is not supported). The definition-level `pinmap` left-hand side
+may use port names or positional indices (§4.2).
+
+**Resolution priority (most specific wins).** When more than one
+`symbol` source applies to an instance, the converter uses, in order:
+
+1. a per-instance trailing `;@ symbol=` on the `X<n>` line;
+2. a block `*@symbol … for=<refdes>` whose glob matches the instance;
+3. a **definition-level `;@ symbol=`** on the matching `.subckt`
+   header line;
+4. the built-in kind default (for `X<n>`: none — sheet lowering).
+
+A per-instance tag therefore always overrides the definition-level
+one, letting a single odd instance opt out of the shared mapping. The
+inherited `pinmap` follows its symbol: a per-instance `symbol` brings
+its own `pinmap` (or the kind default); the definition-level `symbol`
+brings the definition-level `pinmap`. A `.subckt` carrying a
+definition-level `symbol` that is never instantiated produces a
+`W105` warning (the annotation has no effect).
 
 ### 4.2 `pinmap` — terminal remapping
 
@@ -274,13 +309,27 @@ chosen symbol lacks one of the expected names, the converter emits
 **E008** and asks for an explicit `pinmap`.
 
 For `.subckt` instances (§4.1, "Targeting `.subckt` instances"),
-the SPICE indices refer to the *port positions* in the matching
-`.subckt PORTNAME …` declaration rather than to terminals on a
-SPICE primitive. The KiCad-side syntax is unchanged. A future
-extension may accept port names on the left-hand side
-(`pinmap=inp:3,inn:2,…`) for readability; v0.1 keeps the
-positional `<spice_index>:<kicad_pin>` form for both primitives
-and `X<n>` instances to avoid two parallel grammars.
+the left-hand side may be either a 1-based port *position* in the
+matching `.subckt PORTNAME …` declaration, or the port *name*
+itself — the converter resolves names against the declared port
+list. The two forms are interchangeable and may be mixed within one
+`pinmap`:
+
+```
+* by port name (most readable; pairs with §4.1 definition-level form):
+.subckt OPAMP inp inn out vcc vee  ;@ symbol=Amplifier_Operational:OPAMP ;@ pinmap=inp:3,inn:2,out:1,vcc:8,vee:4
+
+* the equivalent positional form (inp=1, inn=2, out=3, vcc=4, vee=5):
+.subckt OPAMP inp inn out vcc vee  ;@ symbol=Amplifier_Operational:OPAMP ;@ pinmap=1:3,2:2,3:1,4:8,5:4
+```
+
+The KiCad-side (right-hand) syntax is unchanged. A port name that is
+not declared by the `.subckt`, or a port-name left-hand side used on
+an element that is not a `.subckt` instance (it has no port list to
+bind against), is an **E009** error. Port names are matched
+case-insensitively. A bare integer left-hand side is always read as a
+positional index, never as a port that happens to be named with
+digits.
 
 ### 4.3 `place` — relative position
 
@@ -598,12 +647,20 @@ The converter reports, in this order:
   chosen library symbol is missing a canonical pin name for the
   element's kind (e.g. a 3-pin BJT-target symbol with no pin
   named `B`). Supply an explicit `;@ pinmap=…` to override.
+- **E009** invalid port-name `pinmap` — a left-hand side names a
+  `.subckt` port that the matching `.subckt` does not declare, or a
+  port-name left-hand side is used on an element that is not a
+  `.subckt` instance (so there is no port list to bind against).
+  See §4.2.
 - **W101** conflicting `place` constraints (which one was kept)
 - **W102** `align` cluster has fewer than two members
 - **W103** annotation on a line the parser did not recognize as an
   element (typo guard)
 - **W104** `place` directive on an element already fixed by `align`
   (directive dropped)
+- **W105** a `.subckt` carries a definition-level `;@ symbol=`
+  (§4.1, "Annotating the `.subckt` definition once") but is never
+  instantiated by any `X` line — the annotation has no effect.
 
 ### Parser / lexer syntax diagnostics (`E9xx` / `W9xx`)
 
@@ -742,11 +799,10 @@ Two caveats:
   "auto-promotion heuristic" — the zero-annotation ceiling). Until
   then the user opts in per instance via the §4.1 "Targeting
   `.subckt` instances" mechanism.
-- **Pinmap port-name syntax for `X<n>`** — accept
-  `pinmap=<port_name>:<kicad_pin>` on subckt instances so that
-  `pinmap=inp:3,inn:2,vcc:8,vee:4,out:1` reads as the schematic
-  intent rather than as port-position indices. Defer until the
-  positional form proves error-prone in real files.
+- ~~**Pinmap port-name syntax for `X<n>`**~~ — *implemented (v0.2).*
+  `pinmap=<port_name>:<kicad_pin>` is accepted on `.subckt`
+  instances and on the definition-level form, resolved against the
+  `.subckt` port list. See §4.2 and `E009`.
 - **Round-trip from KiCad back to annotations** (so manual sheet
   edits survive a re-conversion) — needs a stable element-to-symbol
   identity scheme first.

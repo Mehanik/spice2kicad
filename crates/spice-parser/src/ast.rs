@@ -98,6 +98,10 @@ pub struct Subckt {
     pub body: Vec<Element>,
     /// Block-level `*@…` annotations declared *inside* this subckt body.
     pub annotations: Vec<SpannedAnnotation>,
+    /// Trailing `;@…` tags on the `.subckt NAME ports…` header line.
+    /// Definition-level `;@ symbol=` / `;@ pinmap=` here are inherited
+    /// by every `X` instance of this subckt (spec §4.1). Empty if none.
+    pub tags: Vec<SpannedTag>,
 }
 
 #[derive(Debug, Clone)]
@@ -159,8 +163,17 @@ impl SpannedTag {
 
 #[derive(Debug, Clone)]
 pub struct PinmapEntry {
-    /// 1-based SPICE terminal index.
+    /// 1-based SPICE terminal index. When [`Self::port_name`] is
+    /// `Some`, this is a placeholder (`0`) until the resolver binds the
+    /// named `.subckt` port to its declared position (spec §4.2).
     pub spice_index: usize,
+    /// `.subckt` port name on the left-hand side of a `pinmap=` entry,
+    /// e.g. `inp` in `pinmap=inp:3`. Only meaningful for `.subckt`
+    /// definition / instance pinmaps; `None` for the positional
+    /// `<index>:<pin>` form and for primitive elements. The resolver
+    /// looks the name up against the matching `.subckt` port list and
+    /// rewrites `spice_index` accordingly.
+    pub port_name: Option<String>,
     pub kicad_pin: PinRef,
 }
 

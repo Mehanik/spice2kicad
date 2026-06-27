@@ -17,8 +17,12 @@
 //! - **E008** — default pin mapping cannot synthesize because the
 //!   symbol is missing a canonical pin name for the element's kind
 //!   (e.g. a 3-pin BJT-target symbol with no pin named `B`)
+//! - **E009** — a port-name `pinmap=` left-hand side does not match any
+//!   declared `.subckt` port, or is used on a non-`.subckt` element
 //! - **W103** — multiple conflicting tags on one element (e.g. two
 //!   `;@ symbol=` tags); the first is kept
+//! - **W105** — a `.subckt` carries a definition-level `;@ symbol=` but
+//!   is never instantiated by any `X` line (the annotation is inert)
 //!
 //! `E001`/`E004` and `W101`/`W102`/`W104` are owned by other passes
 //! and are not emitted here.
@@ -172,40 +176,91 @@ pub fn resolve(netlist: &Netlist, library: &Library) -> Result<ResolvedNetlist, 
     // Top-level annotations only apply to top-level elements.
     let block_symbols = collect_symbol_defaults(&netlist.annotations);
 
+    // Definition-level `;@ symbol=` / `;@ pinmap=` on each `.subckt`
+    // header line. Every `X` instance of the subckt inherits these
+    // (spec §4.1). Keyed by subckt name.
+    let subckt_defs = collect_subckt_defs(&netlist.subckts, &mut diags);
     let defined_subckts: HashSet<&str> = netlist.subckts.iter().map(|s| s.name.as_str()).collect();
+    // Track which definition-annotated subckts actually get instantiated
+    // so we can warn (W105) about a definition-level symbol that never
+    // applies to anything.
+    let mut instantiated: HashSet<&str> = HashSet::new();
 
     for element in &netlist.elements {
         // Top-level `X…` instances become hierarchical-sheet blocks
-        // unless the user supplied an explicit `;@ symbol=` (in which
-        // case the user opted into a flat-symbol mapping and we keep
-        // the existing path). Instances whose subckt is not defined
-        // in the file fall through to the regular element resolver,
-        // which will emit `E003` for the missing symbol mapping.
+        // unless the user opted into a flat-symbol mapping — either via
+        // a per-instance `;@ symbol=`, a block `*@symbol … for=<refdes>`,
+        // or a definition-level `;@ symbol=` on the `.subckt` header
+        // (spec §4.1). Any of those suppresses sheet lowering and emits
+        // the flat symbol. Instances whose subckt is not defined in the
+        // file fall through to the regular element resolver, which will
+        // emit `E003` for the missing symbol mapping.
         if element.kind == ElementKind::Subckt
-            && !has_explicit_symbol_tag(element)
-            && !has_block_symbol_override(element, &block_symbols)
             && let Some(name) = subckt_name(element)
-            && defined_subckts.contains(name.as_str())
         {
-            // Skip if `;@ ignore` is set.
-            if element.tags.iter().any(|t| matches!(t.tag, Tag::Ignore)) {
+            if let Some(defined) = defined_subckts.get(name.as_str()).copied() {
+                instantiated.insert(defined);
+            }
+            let def = subckt_defs.get(name.as_str());
+            let def_has_symbol = def.is_some_and(|d| d.symbol.is_some());
+            if !has_explicit_symbol_tag(element)
+                && !has_block_symbol_override(element, &block_symbols)
+                && !def_has_symbol
+                && defined_subckts.contains(name.as_str())
+            {
+                // Skip if `;@ ignore` is set.
+                if element.tags.iter().any(|t| matches!(t.tag, Tag::Ignore)) {
+                    continue;
+                }
+                sheet_instances.push(SheetInstance {
+                    refdes: element.designator.clone(),
+                    subckt_name: name,
+                    nodes: element.nodes.clone(),
+                });
                 continue;
             }
-            sheet_instances.push(SheetInstance {
-                refdes: element.designator.clone(),
-                subckt_name: name,
-                nodes: element.nodes.clone(),
-            });
+            resolve_element(
+                element,
+                &block_symbols,
+                def,
+                library,
+                &mut out_elements,
+                &mut place,
+                &mut diags,
+            );
             continue;
         }
         resolve_element(
             element,
             &block_symbols,
+            None,
             library,
             &mut out_elements,
             &mut place,
             &mut diags,
         );
+    }
+
+    // W105: a `.subckt` carrying a definition-level `;@ symbol=` that is
+    // never instantiated by any `X` line — the annotation is inert.
+    for subckt in &netlist.subckts {
+        if subckt_defs
+            .get(subckt.name.as_str())
+            .is_some_and(|d| d.symbol.is_some())
+            && !instantiated.contains(subckt.name.as_str())
+        {
+            push_warn(
+                &mut diags,
+                "W105",
+                format!(
+                    "`.subckt {}` has a definition-level `;@ symbol=` but is never instantiated; the annotation has no effect",
+                    subckt.name
+                ),
+                subckt_defs
+                    .get(subckt.name.as_str())
+                    .and_then(|d| d.symbol_span),
+            );
+        }
     }
 
     // Subckts: each subckt has its own scope of *@symbol defaults.
@@ -278,7 +333,15 @@ fn resolve_subckt(
     let block_symbols = collect_symbol_defaults(&subckt.annotations);
     let mut body: Vec<ResolvedElement> = Vec::new();
     for element in &subckt.body {
-        resolve_element(element, &block_symbols, library, &mut body, place, diags);
+        resolve_element(
+            element,
+            &block_symbols,
+            None,
+            library,
+            &mut body,
+            place,
+            diags,
+        );
     }
     body
 }
@@ -374,6 +437,7 @@ fn collect_tags<'a>(
 fn resolve_element(
     element: &Element,
     block_symbols: &[BlockSymbol<'_>],
+    subckt_def: Option<&SubcktDef<'_>>,
     library: &Library,
     out_elements: &mut Vec<ResolvedElement>,
     place: &mut Vec<PlaceSpec>,
@@ -398,8 +462,10 @@ fn resolve_element(
         return;
     }
 
-    // 1. Determine lib_id (and any block-form pinmap that came with it).
-    let (lib_id, block_pinmap) = match resolve_lib_id(element, &tags, block_symbols) {
+    // 1. Determine lib_id (and any inherited pinmap that came with the
+    //    winning symbol source — block `for=` or `.subckt`-definition).
+    let (lib_id, inherited_pinmap) = match resolve_lib_id(element, &tags, block_symbols, subckt_def)
+    {
         Ok(r) => r,
         Err(reason) => {
             push_err(
@@ -430,8 +496,19 @@ fn resolve_element(
     let arity = element.nodes.len();
     let pin_count = symbol.pin_count();
 
-    let effective_pinmap = tags.pinmap.or(block_pinmap);
-    let pin_mapping = if let Some(entries) = effective_pinmap {
+    let effective_pinmap = tags.pinmap.or(inherited_pinmap);
+    // Resolve any port-name left-hand sides (`pinmap=inp:3`) against the
+    // matching `.subckt` port list (spec §4.2). Positional entries pass
+    // through unchanged. Only `.subckt` instances carry a `subckt_def`,
+    // so a port name on a primitive element is rejected here.
+    let resolved_pinmap = match effective_pinmap
+        .map(|entries| resolve_port_names(&element.designator, entries, subckt_def, diags))
+    {
+        Some(Some(v)) => Some(v),
+        Some(None) => return,
+        None => None,
+    };
+    let pin_mapping = if let Some(entries) = resolved_pinmap.as_deref() {
         match build_pinmap(
             &element.designator,
             arity,
@@ -502,6 +579,61 @@ fn resolve_element(
         value: element.value.clone(),
         role,
     });
+}
+
+/// Bind port-name `pinmap=` left-hand sides (`inp:3`) to 1-based SPICE
+/// indices using the matching `.subckt` port list (spec §4.2).
+/// Positional entries (`port_name == None`) are returned verbatim.
+///
+/// Returns `None` (fatal) if a port name is used on an element with no
+/// `.subckt` definition, or if a name does not match any declared port
+/// (`E009`). When no entry uses a port name the input is cloned through
+/// unchanged.
+fn resolve_port_names(
+    refdes: &str,
+    entries: &[PinmapEntry],
+    subckt_def: Option<&SubcktDef<'_>>,
+    diags: &mut Vec<Diagnostic>,
+) -> Option<Vec<PinmapEntry>> {
+    if entries.iter().all(|e| e.port_name.is_none()) {
+        return Some(entries.to_vec());
+    }
+    let Some(def) = subckt_def else {
+        push_err(
+            diags,
+            "E009",
+            format!(
+                "element `{refdes}` uses a port-name `pinmap=` but is not a `.subckt` instance; port names are only valid for `X…` instances"
+            ),
+            None,
+        );
+        return None;
+    };
+    let mut out = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let Some(name) = &entry.port_name else {
+            out.push(entry.clone());
+            continue;
+        };
+        let Some(pos) = def.ports.iter().position(|p| p.eq_ignore_ascii_case(name)) else {
+            push_err(
+                diags,
+                "E009",
+                format!(
+                    "element `{refdes}` pinmap: `{name}` is not a port of its `.subckt` (declared ports: {})",
+                    def.ports.join(", ")
+                ),
+                None,
+            );
+            return None;
+        };
+        out.push(PinmapEntry {
+            spice_index: pos + 1,
+            port_name: None,
+            kicad_pin: entry.kicad_pin.clone(),
+        });
+    }
+    Some(out)
 }
 
 fn build_pinmap(
@@ -641,6 +773,43 @@ fn collect_symbol_defaults(annotations: &[SpannedAnnotation]) -> Vec<BlockSymbol
         .collect()
 }
 
+/// Definition-level annotations harvested from a `.subckt` header line's
+/// trailing `;@…` tags (spec §4.1). Inherited by every `X` instance of
+/// the subckt. Borrows from the parser AST.
+struct SubcktDef<'a> {
+    /// `.subckt` port names in declared order, used to resolve a
+    /// port-name `pinmap=` left-hand side (spec §4.2) to a 1-based index.
+    ports: &'a [String],
+    /// Definition-level `;@ symbol=Lib:Name`, if present.
+    symbol: Option<&'a str>,
+    symbol_span: Option<Span>,
+    /// Definition-level `;@ pinmap=…`, if present. May use port names on
+    /// the left-hand side; bound against `ports` at instance time.
+    pinmap: Option<&'a [PinmapEntry]>,
+}
+
+/// Collect per-`.subckt` definition-level annotations from each header
+/// line's trailing tags, keyed by subckt name.
+fn collect_subckt_defs<'a>(
+    subckts: &'a [Subckt],
+    diags: &mut Vec<Diagnostic>,
+) -> HashMap<&'a str, SubcktDef<'a>> {
+    let mut out = HashMap::new();
+    for subckt in subckts {
+        let tags = collect_tags(&subckt.name, &subckt.tags, diags);
+        out.insert(
+            subckt.name.as_str(),
+            SubcktDef {
+                ports: subckt.ports.as_slice(),
+                symbol: tags.symbol,
+                symbol_span: tags.symbol_span,
+                pinmap: tags.pinmap,
+            },
+        );
+    }
+    out
+}
+
 fn collect_align(annotations: &[SpannedAnnotation], scope: &SheetScope) -> Vec<AlignSpec> {
     annotations
         .iter()
@@ -660,7 +829,13 @@ fn resolve_lib_id<'a>(
     element: &Element,
     tags: &ElementTags<'_>,
     block_symbols: &'a [BlockSymbol<'a>],
+    subckt_def: Option<&SubcktDef<'a>>,
 ) -> Result<(String, Option<&'a [PinmapEntry]>), String> {
+    // Priority (spec §4.1): per-instance `;@ symbol=` > block
+    // `*@symbol … for=<refdes>` > `.subckt`-definition-level `;@ symbol=`
+    // > built-in kind default. A per-instance tag carries its own
+    // `;@ pinmap=` (handled by the caller), so it returns no inherited
+    // pinmap here.
     if let Some(s) = tags.symbol {
         return Ok((s.to_owned(), None));
     }
@@ -675,6 +850,12 @@ fn resolve_lib_id<'a>(
         .find(|bs| glob_matches(bs.glob, &element.designator))
     {
         return Ok((matched.lib_id.to_owned(), matched.pinmap));
+    }
+    // Definition-level symbol from the matching `.subckt` header line.
+    if let Some(def) = subckt_def
+        && let Some(lib_id) = def.symbol
+    {
+        return Ok((lib_id.to_owned(), def.pinmap));
     }
     if let Some(default) = default_lib_id(element.kind) {
         return Ok((default.to_owned(), None));

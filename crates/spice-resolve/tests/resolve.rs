@@ -38,7 +38,9 @@ fn library() -> &'static Library {
             .expect("parse Device.kicad_sym");
         let sim = Library::from_file(fixtures_dir().join("Simulation_SPICE.kicad_sym"))
             .expect("parse Simulation_SPICE.kicad_sym");
-        device.merge(sim)
+        let opamp = Library::from_file(fixtures_dir().join("Amplifier_Operational.kicad_sym"))
+            .expect("parse Amplifier_Operational.kicad_sym");
+        device.merge(sim).merge(opamp)
     })
 }
 
@@ -198,10 +200,12 @@ fn pinmap_swaps_terminals() {
     e.tags.push(SpannedTag::bare(Tag::Pinmap(vec![
         PinmapEntry {
             spice_index: 1,
+            port_name: None,
             kicad_pin: PinRef::Number("2".to_owned()),
         },
         PinmapEntry {
             spice_index: 2,
+            port_name: None,
             kicad_pin: PinRef::Number("1".to_owned()),
         },
     ])));
@@ -219,14 +223,17 @@ fn pinmap_can_reference_pin_by_name() {
     e.tags.push(SpannedTag::bare(Tag::Pinmap(vec![
         PinmapEntry {
             spice_index: 1,
+            port_name: None,
             kicad_pin: PinRef::Name("B".to_owned()),
         },
         PinmapEntry {
             spice_index: 2,
+            port_name: None,
             kicad_pin: PinRef::Name("C".to_owned()),
         },
         PinmapEntry {
             spice_index: 3,
+            port_name: None,
             kicad_pin: PinRef::Name("E".to_owned()),
         },
     ])));
@@ -243,10 +250,12 @@ fn pinmap_with_unknown_pin_is_e005() {
     e.tags.push(SpannedTag::bare(Tag::Pinmap(vec![
         PinmapEntry {
             spice_index: 1,
+            port_name: None,
             kicad_pin: PinRef::Number("99".to_owned()),
         },
         PinmapEntry {
             spice_index: 2,
+            port_name: None,
             kicad_pin: PinRef::Number("1".to_owned()),
         },
     ])));
@@ -260,10 +269,12 @@ fn pinmap_duplicate_spice_index_is_e005() {
     e.tags.push(SpannedTag::bare(Tag::Pinmap(vec![
         PinmapEntry {
             spice_index: 1,
+            port_name: None,
             kicad_pin: PinRef::Number("1".to_owned()),
         },
         PinmapEntry {
             spice_index: 1,
+            port_name: None,
             kicad_pin: PinRef::Number("2".to_owned()),
         },
     ])));
@@ -277,10 +288,12 @@ fn pinmap_duplicate_kicad_pin_is_e005() {
     e.tags.push(SpannedTag::bare(Tag::Pinmap(vec![
         PinmapEntry {
             spice_index: 1,
+            port_name: None,
             kicad_pin: PinRef::Number("1".to_owned()),
         },
         PinmapEntry {
             spice_index: 2,
+            port_name: None,
             kicad_pin: PinRef::Number("1".to_owned()),
         },
     ])));
@@ -294,10 +307,12 @@ fn pinmap_out_of_range_index_is_e005() {
     e.tags.push(SpannedTag::bare(Tag::Pinmap(vec![
         PinmapEntry {
             spice_index: 7,
+            port_name: None,
             kicad_pin: PinRef::Number("1".to_owned()),
         },
         PinmapEntry {
             spice_index: 2,
+            port_name: None,
             kicad_pin: PinRef::Number("2".to_owned()),
         },
     ])));
@@ -424,6 +439,146 @@ fn subckt_instance_block_symbol_glob_overrides_sheet() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Definition-level `.subckt` symbol + port-name pinmap (spec §4.1 / §4.2)
+// ---------------------------------------------------------------------------
+
+const OPAMP_DECK: &str = "* opamp deck\n\
+    .subckt OPAMP inp inn out vcc vee ;@ symbol=Amplifier_Operational:OPAMP ;@ pinmap=inp:3,inn:2,out:1,vcc:8,vee:4\n\
+    E1 out 0 inp inn 1e5\n\
+    .ends\n\
+    X1 0 inv outa vcc vee OPAMP\n\
+    X2 0 inv2 outb vcc vee OPAMP\n\
+    .end\n";
+
+#[test]
+fn subckt_definition_symbol_is_inherited_by_all_instances() {
+    // 3a: a single definition-level `;@ symbol=` on the `.subckt` header
+    // makes EVERY `X` instance emit the flat symbol — no sheets.
+    let r = parse_and_resolve(OPAMP_DECK);
+    assert!(
+        r.sheet_instances.is_empty(),
+        "definition-annotated subckt must not lower to sheets; got {:?}",
+        r.sheet_instances
+    );
+    let opamps: Vec<&_> = r
+        .elements
+        .iter()
+        .filter(|e| e.lib_id == "Amplifier_Operational:OPAMP")
+        .collect();
+    assert_eq!(opamps.len(), 2, "both X1 and X2 should be flat symbols");
+    let mut refs: Vec<&str> = opamps.iter().map(|e| e.refdes.as_str()).collect();
+    refs.sort_unstable();
+    assert_eq!(refs, vec!["X1", "X2"]);
+}
+
+#[test]
+fn subckt_definition_port_name_pinmap_resolves() {
+    // 3b: `pinmap=inp:3,inn:2,out:1,vcc:8,vee:4` resolves the port names
+    // against the `.subckt OPAMP inp inn out vcc vee` declaration.
+    // Port positions: inp=1, inn=2, out=3, vcc=4, vee=5. So SPICE term
+    // 1(inp)→pin "3", 2(inn)→"2", 3(out)→"1", 4(vcc)→"8", 5(vee)→"4".
+    let r = parse_and_resolve(OPAMP_DECK);
+    let x1 = r
+        .elements
+        .iter()
+        .find(|e| e.refdes == "X1")
+        .expect("X1 resolved");
+    assert_eq!(
+        x1.pin_mapping,
+        vec![
+            "3".to_owned(),
+            "2".to_owned(),
+            "1".to_owned(),
+            "8".to_owned(),
+            "4".to_owned()
+        ],
+        "port-name pinmap must bind by .subckt port position"
+    );
+}
+
+#[test]
+fn per_instance_symbol_overrides_definition_level() {
+    // A per-instance `;@ symbol=` beats the definition-level one.
+    let src = "* override deck\n\
+        .subckt OPAMP inp inn out vcc vee ;@ symbol=Amplifier_Operational:OPAMP ;@ pinmap=inp:3,inn:2,out:1,vcc:8,vee:4\n\
+        E1 out 0 inp inn 1e5\n\
+        .ends\n\
+        X1 a b OPAMP ;@ symbol=Device:R\n\
+        X2 0 inv out vcc vee OPAMP\n\
+        .end\n";
+    let r = parse_and_resolve(src);
+    let x1 = r
+        .elements
+        .iter()
+        .find(|e| e.refdes == "X1")
+        .expect("X1 resolved");
+    assert_eq!(
+        x1.lib_id, "Device:R",
+        "per-instance symbol must win over the definition-level symbol"
+    );
+    // X2 still inherits the definition-level OPAMP.
+    let x2 = r
+        .elements
+        .iter()
+        .find(|e| e.refdes == "X2")
+        .expect("X2 resolved");
+    assert_eq!(x2.lib_id, "Amplifier_Operational:OPAMP");
+}
+
+#[test]
+fn subckt_without_annotation_still_becomes_a_sheet() {
+    // Absent any annotation, the default `.subckt`→sheet path is
+    // unchanged: each `X` is a SheetInstance, no flat symbol emitted.
+    let src = "* plain deck\n\
+        .subckt OPAMP inp inn out vcc vee\n\
+        E1 out 0 inp inn 1e5\n\
+        .ends\n\
+        X1 0 inv out vcc vee OPAMP\n\
+        .end\n";
+    let r = parse_and_resolve(src);
+    assert_eq!(r.sheet_instances.len(), 1);
+    assert_eq!(r.sheet_instances[0].refdes, "X1");
+    assert!(
+        r.elements.iter().all(|e| e.refdes != "X1"),
+        "X1 must not be emitted as a flat symbol"
+    );
+}
+
+#[test]
+fn unknown_port_name_in_pinmap_is_e009() {
+    // A port name that is not in the `.subckt` declaration is E009.
+    let src = "* bad port\n\
+        .subckt OPAMP inp inn out vcc vee ;@ symbol=Amplifier_Operational:OPAMP ;@ pinmap=bogus:3,inn:2,out:1,vcc:8,vee:4\n\
+        E1 out 0 inp inn 1e5\n\
+        .ends\n\
+        X1 0 inv out vcc vee OPAMP\n\
+        .end\n";
+    let codes = parse_and_resolve_codes(src);
+    assert!(codes.iter().any(|c| c == "E009"), "got {codes:?}");
+}
+
+#[test]
+fn port_name_pinmap_on_primitive_is_e009() {
+    // A port-name pinmap on a non-`.subckt` element has no port list to
+    // bind against → E009.
+    let mut e = elem("R1", ElementKind::Resistor, &["a", "b"]);
+    e.tags.push(SpannedTag::bare(Tag::Pinmap(vec![
+        PinmapEntry {
+            spice_index: 0,
+            port_name: Some("a".to_owned()),
+            kicad_pin: PinRef::Number("1".to_owned()),
+        },
+        PinmapEntry {
+            spice_index: 2,
+            port_name: None,
+            kicad_pin: PinRef::Number("2".to_owned()),
+        },
+    ])));
+    let codes = err_codes(&nl_with(vec![e]));
+    assert!(codes.iter().any(|c| c == "E009"), "got {codes:?}");
+}
+
 #[test]
 fn place_tag_passes_through() {
     let mut r1 = elem("R1", ElementKind::Resistor, &["a", "b"]);
@@ -469,6 +624,7 @@ fn subckt_body_resolves() {
             params: Vec::new(),
             body: vec![elem("R1", ElementKind::Resistor, &["in", "out"])],
             annotations: Vec::new(),
+            tags: Vec::new(),
         }],
         ..Netlist::default()
     };

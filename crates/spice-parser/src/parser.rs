@@ -111,7 +111,15 @@ fn handle_code_line(
         let name_lc = name.to_ascii_lowercase();
         match name_lc.as_str() {
             "subckt" => {
-                if let Some(sub) = parse_subckt_header(&line.words, diags) {
+                if let Some(mut sub) = parse_subckt_header(&line.words, diags) {
+                    // Definition-level `;@ symbol=` / `;@ pinmap=` tags on
+                    // the `.subckt` header line are inherited by every `X`
+                    // instance of this subckt (spec §4.1).
+                    for raw in &line.tags {
+                        if let Some(tag) = parse_tag(raw, diags) {
+                            sub.tags.push(SpannedTag::new(tag, raw.body_span));
+                        }
+                    }
                     stack.push(sub);
                 }
             }
@@ -467,6 +475,7 @@ fn parse_subckt_header(words: &[Word], diags: &mut Vec<Diagnostic>) -> Option<Su
         params,
         body: Vec::new(),
         annotations: Vec::new(),
+        tags: Vec::new(),
     })
 }
 
@@ -621,6 +630,7 @@ fn parse_pinmap_entries(
 ) -> Option<Vec<PinmapEntry>> {
     let mut entries = Vec::new();
     let mut seen_spice: HashSet<usize> = HashSet::new();
+    let mut seen_port: HashSet<String> = HashSet::new();
     let mut seen_kicad: HashSet<String> = HashSet::new();
     let mut malformed = false;
     for chunk in s.split(',') {
@@ -632,19 +642,38 @@ fn parse_pinmap_entries(
             malformed = true;
             break;
         };
-        let Ok(spice_index) = lhs.trim().parse::<usize>() else {
+        let lhs = lhs.trim();
+        // The left-hand side is either a 1-based SPICE terminal index
+        // (positional form) or a `.subckt` port name (port-name form,
+        // spec §4.2). A bare unsigned integer is treated as an index;
+        // anything else is carried as a port name for the resolver to
+        // bind against the matching `.subckt` port list.
+        let (spice_index, port_name) = if let Ok(idx) = lhs.parse::<usize>() {
+            if !seen_spice.insert(idx) {
+                diags.push(error(
+                    "E005",
+                    format!("pinmap repeats SPICE terminal index {idx}"),
+                    Label::new(body_span, ""),
+                ));
+                return None;
+            }
+            (idx, None)
+        } else if lhs.is_empty() {
             malformed = true;
             break;
+        } else {
+            let key = lhs.to_ascii_lowercase();
+            if !seen_port.insert(key) {
+                diags.push(error(
+                    "E005",
+                    format!("pinmap repeats port name `{lhs}`"),
+                    Label::new(body_span, ""),
+                ));
+                return None;
+            }
+            (0, Some(lhs.to_owned()))
         };
         let rhs = rhs.trim();
-        if !seen_spice.insert(spice_index) {
-            diags.push(error(
-                "E005",
-                format!("pinmap repeats SPICE terminal index {spice_index}"),
-                Label::new(body_span, ""),
-            ));
-            return None;
-        }
         let kicad_key = rhs.to_ascii_lowercase();
         if !seen_kicad.insert(kicad_key) {
             diags.push(error(
@@ -661,6 +690,7 @@ fn parse_pinmap_entries(
         };
         entries.push(PinmapEntry {
             spice_index,
+            port_name,
             kicad_pin,
         });
     }
