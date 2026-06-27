@@ -438,3 +438,61 @@ fn if_else_endif_preserves_both_branches() {
     assert!(nl.elements.iter().all(|e| e.designator != "R2"));
     assert!(outcome.diagnostics.iter().any(|d| d.code == "W911"));
 }
+
+// ─── *@spec version= (annotation-spec handshake, §4.7) ───────────────────────
+
+#[test]
+fn spec_version_current_parses_and_passes() {
+    let nl = parse_ok("* t\n*@spec version=0.1\nR1 a b 1k\n");
+    assert!(has_annotation(&nl, |a| matches!(
+        a,
+        Annotation::SpecVersion(v) if v == "0.1"
+    )));
+    // Handshake: current version is supported → no diagnostics.
+    let diags = spice_parser::check_spec_version(&nl);
+    assert!(diags.is_empty(), "current version must pass: {diags:?}");
+}
+
+#[test]
+fn spec_version_absent_assumes_current_no_diagnostic() {
+    // The load-bearing rule: a zero-`*@spec` file keeps working.
+    let nl = parse_ok("* t\nR1 a b 1k\n");
+    assert!(!has_annotation(&nl, |a| matches!(
+        a,
+        Annotation::SpecVersion(_)
+    )));
+    let diags = spice_parser::check_spec_version(&nl);
+    assert!(diags.is_empty(), "absent directive must not warn");
+}
+
+#[test]
+fn spec_version_unsupported_fires_e911() {
+    // A higher/unknown declared version the converter does not support.
+    let nl = parse_ok("* t\n*@spec version=2.0\nR1 a b 1k\n");
+    let diags = spice_parser::check_spec_version(&nl);
+    assert!(
+        diags.iter().any(|d| d.code == "E911"),
+        "unsupported version must fire E911: {diags:?}"
+    );
+}
+
+#[test]
+fn spec_version_empty_value_is_malformed_e911() {
+    // `*@spec version=` with no value: the key=value pair never forms
+    // (no RHS token), so no `version` key is collected → E911 at parse.
+    let diags = common::parse_err("* t\n*@spec version=\nR1 a b 1k\n");
+    assert!(
+        diags.iter().any(|d| d.code == "E911"),
+        "malformed *@spec must fire E911: {diags:?}"
+    );
+}
+
+#[test]
+fn spec_directive_missing_version_key_is_e911() {
+    // `*@spec` with no `version=` key at all is malformed.
+    let diags = common::parse_err("* t\n*@spec\nR1 a b 1k\n");
+    assert!(
+        diags.iter().any(|d| d.code == "E911"),
+        "*@spec without version= must fire E911: {diags:?}"
+    );
+}

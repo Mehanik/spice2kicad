@@ -11,10 +11,12 @@
 pub mod ast;
 pub mod lexer;
 pub mod parser;
+pub mod spec_version;
 
 use spice_diagnostics::{Diagnostic, FileId};
 
 pub use ast::Netlist;
+pub use spec_version::{CURRENT_SPEC, check as check_spec_version};
 
 /// Successful parse result: netlist plus any non-fatal diagnostics.
 #[derive(Debug, Clone)]

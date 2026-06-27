@@ -373,6 +373,42 @@ as a no-connect comment in the `.kicad_sch`. Useful for zero-volt
 current-measurement sources (`Vsense`), `.ic` helper sources, and
 similar simulation-only elements.
 
+### 4.7 `spec` — annotation-spec version handshake
+
+Block-form only:
+
+```
+*@spec version=<value>
+```
+
+Declares the annotation-spec version the file targets. This is the
+forward-compatibility handshake: when a future spec version changes
+the meaning of an existing directive, a file can pin the version it
+was written against so a converter that only implements an older (or
+incompatible) version refuses it loudly rather than silently
+mis-reading a directive.
+
+- **Absent → assume the current version.** A file with no `*@spec`
+  directive is treated as targeting the version the converter
+  implements, and produces **no diagnostic**. Every existing
+  zero-`*@spec` netlist keeps converting unchanged — this is
+  load-bearing and will remain true across spec revisions.
+- **Declared version the converter supports → ok.** The current
+  converter implements spec version **0.1**.
+- **Declared version the converter does NOT support** (a higher /
+  unknown version, or a malformed/empty value) → **E911**, a hard
+  error that blocks conversion before any resolve or layout work.
+
+```
+*@spec version=0.1     ← matches the current converter → ok
+*@spec version=2.0     ← unsupported → E911
+*@spec version=        ← malformed (no value) → E911
+```
+
+The directive is file-scoped; place it once, typically near the top
+of the netlist. It is a no-op at simulation time (the leading `*`
+makes the whole line a SPICE comment, per §8).
+
 ---
 
 ## 5. Constraint resolution
@@ -587,6 +623,14 @@ into the typed AST, before the semantic passes above run.
   positional
 - **E910** trailing `;@ symbol=` tag with an empty value — the
   `Lib:Name` value is required (see §4.1). The tag is dropped.
+- **E911** `*@spec` declares an annotation-spec version this
+  converter does not support, or carries a malformed/empty
+  `version=` value (§4.7). Unlike `E908`/`E909`, this is a real
+  blocking error: an unsupported version means the file may use a
+  directive whose meaning this converter would mis-read, so
+  conversion stops. The parser raises it for a malformed/missing
+  `version=`; the CLI version-handshake pass raises it (with the
+  same code) for a well-formed but unsupported declared version.
 - **W900** a `.subckt` was never closed by `.ends` (closed
   implicitly at end of file)
 - **W907** malformed BJT line — `Q…` needs at least three nodes and
@@ -629,8 +673,15 @@ Two caveats:
 
 ## 9. Open questions / deferred
 
-- **Spec versioning** (`*@spec version=…`). Add when v0.2 introduces
-  a breaking change.
+- **Spec versioning** (`*@spec version=…`). **Implemented** (§4.7).
+  The `*@spec version=` directive and its version-handshake (`E911`
+  for an unsupported declared version, absent = current) are in
+  place, so the mechanism is armed for the first v0.2 breaking
+  change. What remains for v0.2 is *policy*, not mechanism: the
+  converter currently accepts exactly version `0.1`; when `0.2`
+  lands, broaden the supported set / add a compatibility range and
+  decide whether older-but-compatible versions warn or convert
+  silently.
 - **Net cosmetics** (`*@net style=… label=…`). Defer until users ask
   for control beyond auto-grounding `0`/`.global` nets and `power=`
   rails.

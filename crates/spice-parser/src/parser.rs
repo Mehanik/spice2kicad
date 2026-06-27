@@ -675,6 +675,7 @@ fn parse_pinmap_entries(
     Some(entries)
 }
 
+#[allow(clippy::too_many_lines)]
 fn parse_block_annotation(line: &LogicalLine, diags: &mut Vec<Diagnostic>) -> Option<Annotation> {
     let directive = line.words.first()?.text.to_ascii_lowercase();
     match directive.as_str() {
@@ -748,6 +749,30 @@ fn parse_block_annotation(line: &LogicalLine, diags: &mut Vec<Diagnostic>) -> Op
             };
             let refdes = tail[1..].iter().map(|w| w.text.clone()).collect();
             Some(Annotation::Align { axis, refdes })
+        }
+        "spec" => {
+            // `*@spec version=<value>` — annotation-spec version handshake.
+            let tail = &line.words[1..];
+            let mut params: Vec<(String, Value)> = Vec::new();
+            let _positional = collect_positional(tail, &mut params);
+            let version = params
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("version"))
+                .map(|(_, v)| match v {
+                    Value::String(s) => s.clone(),
+                    Value::Number(n) => format!("{n}"),
+                    Value::Expr(e) => e.clone(),
+                })
+                .filter(|s| !s.is_empty());
+            let Some(version) = version else {
+                diags.push(error(
+                    "E911",
+                    "*@spec requires a non-empty version=<value>",
+                    Label::new(line.span, ""),
+                ));
+                return None;
+            };
+            Some(Annotation::SpecVersion(version))
         }
         other => {
             diags.push(Diagnostic::warning(

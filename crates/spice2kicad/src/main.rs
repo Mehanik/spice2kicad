@@ -112,6 +112,14 @@ fn run(cli: &Cli) -> Result<()> {
         }
     };
 
+    // Annotation-spec version handshake (spec §4.7). Absent `*@spec`
+    // → assume current, no diagnostic. An unsupported declared version
+    // is a hard error (E911) before any resolve/layout work.
+    let version_diags = spice_parser::check_spec_version(&netlist);
+    if !surface_diags(&version_diags, &sources) {
+        std::process::exit(1);
+    }
+
     match cli.target {
         Target::Netlist => {
             let rendered = kicad_emitter::emit_netlist(&netlist)?;

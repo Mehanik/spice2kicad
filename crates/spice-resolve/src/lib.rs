@@ -636,7 +636,7 @@ fn collect_symbol_defaults(annotations: &[SpannedAnnotation]) -> Vec<BlockSymbol
                 glob: for_glob.as_str(),
                 pinmap: pinmap.as_deref(),
             }),
-            Annotation::Align { .. } => None,
+            Annotation::Align { .. } | Annotation::SpecVersion(_) => None,
         })
         .collect()
 }
@@ -651,7 +651,7 @@ fn collect_align(annotations: &[SpannedAnnotation], scope: &SheetScope) -> Vec<A
                 span: a.span,
                 scope: scope.clone(),
             }),
-            Annotation::SymbolDefault { .. } => None,
+            Annotation::SymbolDefault { .. } | Annotation::SpecVersion(_) => None,
         })
         .collect()
 }

@@ -194,6 +194,11 @@ pub enum Annotation {
     },
     /// `*@align <axis> R1 R2 …`
     Align { axis: Axis, refdes: Vec<String> },
+    /// `*@spec version=<value>` — declares the annotation-spec version
+    /// the file targets. Absent means "assume the current version".
+    /// The version-handshake pass (in the CLI pipeline) rejects a
+    /// declared version the converter does not support.
+    SpecVersion(String),
 }
 
 #[derive(Debug, Clone)]

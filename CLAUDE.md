@@ -543,9 +543,17 @@ changes to a public API:
 - Behavioural changes to existing directives are breaking.
 - Removing a directive is breaking.
 
-The spec deliberately does **not** carry a version field yet (see
-spec §9). Add `*@spec version=…` and a version-handshake the day
-v0.2 introduces a breaking change — not before.
+The spec now carries a version handshake: `*@spec version=…` (spec
+§4.7) is implemented and **armed**. Absent → assume current (no
+diagnostic, load-bearing); an unsupported/malformed declared version
+→ `E911` (parser raises it for malformed input, the CLI handshake
+pass — `spice_parser::check_spec_version` in `crates/spice-parser/
+src/spec_version.rs`, called from `main.rs` between parse and
+resolve — for a well-formed but unsupported version). The converter
+implements exactly `CURRENT_SPEC = "0.1"`. The day a v0.2 breaking
+change lands, broaden the supported set in `is_supported` (and decide
+the warn-vs-silent policy for older-but-compatible versions) rather
+than re-inventing the handshake.
 
 When tempted to add a new directive, first check spec §9 to see if
 it's already been considered and deferred. If it has, the spec
