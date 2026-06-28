@@ -406,6 +406,31 @@ fn world_extent(symbol: &Symbol, orientation: Orientation, value: Option<&str>) 
     }
 }
 
+/// Resolved world extent of `element` placed at the origin in
+/// `orientation`, with the **power-glyph reach** of every rail pin
+/// folded in (ADR-14 Option A). Beyond [`world_extent`]'s body ∪ pin ∪
+/// value-text terms, this also reserves — outward of each rail pin — the
+/// cell(s) the `power:*` glyph body and its net-name value text will
+/// occupy in decoration, so the seed/align spacing keeps foreign bodies
+/// that whole zone clear as a HARD spacing floor (same mechanism and
+/// tier as the existing body/pin no-overlap, V6 Tier-1). Adds only
+/// outward spacing; never narrows the orientation set (V5 untouched).
+fn world_extent_with_glyphs(
+    element: &spice_resolve::ResolvedElement,
+    orientation: Orientation,
+    value: Option<&str>,
+    prefs: &HashMap<String, crate::net_class::VertPref>,
+) -> WorldExtent {
+    let mut ext = world_extent(&element.symbol, orientation, value);
+    for (dx, dy) in crate::glyph_geom::glyph_reach(element, orientation, prefs) {
+        ext.min_x = ext.min_x.min(dx);
+        ext.max_x = ext.max_x.max(dx);
+        ext.min_y = ext.min_y.min(dy);
+        ext.max_y = ext.max_y.max(dy);
+    }
+    ext
+}
+
 /// World-frame left reach (mm, as a non-negative magnitude) of a
 /// symbol's *body* alone — orientation-transformed body bbox, pins
 /// excluded. `0.0` if the symbol has no body bbox. Used by the align
@@ -801,6 +826,10 @@ fn place_seed(checked: &CheckedNetlist) -> Result<(Placement, Vec<bool>), Vec<Di
     let classes = classify_nets(checked);
     let band_asg = assign_y_bands(checked, &classes);
     let layer_asg = assign_x_layers(checked, &classes);
+    // Per-net screen-vertical preference (Power → up, Ground/negative →
+    // down). Used to identify rail pins whose power-glyph footprint the
+    // layer stride must reserve (ADR-14 Option A).
+    let prefs = crate::net_class::vertical_prefs(checked);
 
     // Per-layer X positions, geometry-derived (HARD, at the spacing
     // boundary). Each element's resolved world extent (identity
@@ -820,7 +849,13 @@ fn place_seed(checked: &CheckedNetlist) -> Result<(Placement, Vec<bool>), Vec<Di
         // padding it here would shove a whole layer asymmetrically.
         // The align path *does* include value text (tighter, pinned
         // rows where text genuinely abuts a neighbour).
-        let ext = world_extent(&e.symbol, Orientation::IDENTITY, None);
+        //
+        // It DOES reserve the power-glyph reach of every rail pin
+        // (ADR-14 Option A): a glyph's body + net-name text is real
+        // decoration geometry that lands outward of the pin, so the
+        // layer stride must keep a foreign body that zone clear — a hard
+        // spacing floor, same tier as the body/pin no-overlap.
+        let ext = world_extent_with_glyphs(e, Orientation::IDENTITY, None, &prefs);
         let l = layer_asg.layers[i] as usize;
         layer_max_right[l] = layer_max_right[l].max(ext.max_x);
         layer_max_left[l] = layer_max_left[l].max(-ext.min_x);
@@ -953,6 +988,9 @@ fn apply_user_constraints(
     pinned: &mut [bool],
     checked: &CheckedNetlist,
 ) -> Result<(), Vec<Diagnostic>> {
+    // Rail-pin screen-vertical preferences, for the align stride's
+    // power-glyph reach reservation (ADR-14 Option A).
+    let prefs = crate::net_class::vertical_prefs(checked);
     let CheckedNetlist {
         elements,
         align,
@@ -1013,10 +1051,11 @@ fn apply_user_constraints(
             let Some(&idx) = refdes_to_index.get(refdes.as_str()) else {
                 continue;
             };
-            let extent = world_extent(
-                &elements[idx].symbol,
+            let extent = world_extent_with_glyphs(
+                &elements[idx],
                 Orientation::IDENTITY,
                 placed[idx].value.as_deref(),
+                &prefs,
             );
             if let Some(prev_ext) = prev_ext {
                 let geom = match spec.axis {

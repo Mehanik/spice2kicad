@@ -18,7 +18,12 @@
 //!
 //! All values are in millimetres on the 1.27 mm KiCad grid.
 
-use crate::net_class::NetClass;
+use std::collections::HashMap;
+
+use kicad_symbols::Orientation;
+use spice_resolve::{ElementRole, ResolvedElement};
+
+use crate::net_class::{NetClass, VertPref};
 
 /// One KiCad grid cell (50 mil). Power glyphs sit one cell along the
 /// host pin's outward direction, so the pin meets the glyph's anchor
@@ -76,4 +81,79 @@ pub fn canonical_axis(class: NetClass, negative_rail: bool) -> GlyphAxis {
         NetClass::Power => GlyphAxis::Up,
         _ => GlyphAxis::Down,
     }
+}
+
+/// World-extent-frame outward reach points of every power-glyph zone an
+/// element's **rail pins** carry, for `world_extent` / the SA gate to
+/// reserve (ADR-14 Option A, Phase 2/3).
+///
+/// Each returned `(dx, dy)` is the far tip of a reserved glyph zone,
+/// expressed as a signed offset from the element origin in the *same
+/// frame `world_extent` grows in* — `dx` positive = right, `dy` positive
+/// = screen-down (the eeschema y-flip is already applied, matching
+/// `world_extent`'s `grow(rx, -ry)`). Unioning these into an element's
+/// `WorldExtent` reserves, outward of every rail pin, the cell(s) the
+/// `power:*` glyph **body and its net-name value text** will occupy in
+/// decoration. The placer then keeps foreign bodies that whole zone
+/// clear — the foreign element is repelled, the glyph never moves.
+///
+/// The reach runs along each rail pin's *transformed outward direction*
+/// (`angle`: 270 → up, 90 → down, 180 → left, 0 → right), so it is
+/// orientation-aware: rotating the host moves the reserved zone with the
+/// pin, exactly as the emitted glyph follows the pin. Its length is
+/// [`VALUE_TEXT_OFFSET_MM`] — the joint body + value-text reach — so the
+/// reservation covers the *whole* decoration footprint and cannot buy
+/// glyph clearance at a label-on-body (V13) cost.
+///
+/// A rail pin is a terminal whose net carries a [`VertPref`] (i.e. a
+/// Power/Ground/negative-rail net). Power *sources* (`ElementRole::Power`)
+/// are excluded: their body is itself replaced by a rail glyph in
+/// decoration, so there is no separate host body to reserve around — the
+/// V14 detached-glyph fallback already governs them.
+///
+/// This adds only outward **spacing**; it never restricts the
+/// orientation set (V5 untouched).
+#[must_use]
+#[allow(clippy::implicit_hasher)] // callers always pass the default-hasher prefs map.
+pub fn glyph_reach(
+    elem: &ResolvedElement,
+    orientation: Orientation,
+    prefs: &HashMap<String, VertPref>,
+) -> Vec<(f64, f64)> {
+    // A power source's drawn body is replaced by its own glyph; nothing
+    // to reserve a foreign-clearance zone around.
+    if matches!(elem.role, ElementRole::Power(_)) {
+        return Vec::new();
+    }
+
+    let pins = elem.symbol.pins_in(orientation);
+    let mut out = Vec::new();
+    for (term_idx, node) in elem.nodes.iter().enumerate() {
+        if !prefs.contains_key(node) {
+            continue; // signal pin: no glyph, no reservation
+        }
+        let Some(kicad_pin) = elem.pin_mapping.get(term_idx) else {
+            continue;
+        };
+        let Some(p) = pins.iter().find(|p| &p.number == kicad_pin) else {
+            continue;
+        };
+        // Pin tip in the extent frame (eeschema y-flip, matching
+        // `world_extent`'s `grow(p.x, -p.y)`).
+        let (tip_x, tip_y) = (p.x, -p.y);
+        // Outward unit along the pin's transformed direction, in the
+        // same (y-down screen) frame.
+        let (ux, uy) = match p.angle % 360 {
+            270 => (0.0, -1.0), // screen up
+            90 => (0.0, 1.0),   // screen down
+            180 => (-1.0, 0.0), // screen left
+            0 => (1.0, 0.0),    // screen right
+            _ => continue,      // non-cardinal: no glyph reservation
+        };
+        out.push((
+            tip_x + ux * VALUE_TEXT_OFFSET_MM,
+            tip_y + uy * VALUE_TEXT_OFFSET_MM,
+        ));
+    }
+    out
 }
