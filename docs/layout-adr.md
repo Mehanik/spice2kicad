@@ -765,6 +765,323 @@ deliberately does not answer it.
 
 ---
 
+## ADR-14 — Reserve power-glyph footprint as placement geometry
+
+**Status: proposed (for review).** Design-only. No implementation has
+landed; this ADR exists to make the decision defensible before any code
+is written, and to stop a *fifth* dead-end (four prior attempts all
+correctly stopped at the tier floor — see "Why not …" below).
+
+### Problem
+
+Exactly one class of converted-schematic defect remains: a power
+glyph's **body** overlapping a **foreign** symbol body. The tracked
+residual ("[3]") is on `common_emitter`: `#PWR1`, a *correctly
+oriented* `power:GND` glyph (canonical, rot 0, triangle down) anchored
+on R2's down-facing grounded pin, whose triangle clips a corner of
+**Q1's** body. Q1 is not the glyph's host — R2 is — so this is not the
+accepted "glyph clips its own host" V14 case; it is a foreign-body
+overlap. It is contained by the zero-slack ratchet
+`no_power_glyph_foreign_body_overlap_across_fixtures`
+(`crates/spice2kicad/tests/placement_quality.rs:1943`), budget
+`common_emitter` = 1, `opamp_inverting_real` = 1, 0 elsewhere
+(`power_glyph_foreign_body_overlap_budget`,
+`placement_quality.rs:1921-1927`). The goal is to drive every budget to
+0 without regressing any higher/equal tier.
+
+Crucially this is **not** a glyph-*orientation* defect. The glyph is
+already in its conventional rotation; rotating it (ADR-13) would only
+dodge Q1 by pointing the ground triangle *upward* (an upside-down GND —
+a V14-intent regression), which is exactly why the ADR-13 amendment
+re-classified [3] as a placer defect, not an emitter-glyph one. The
+glyph sits in the *right* place facing the *right* way; the problem is
+that **Q1 was placed too close to where R2's ground glyph would land**.
+
+### Root cause — placement is blind to glyph footprint
+
+Power glyphs, PWR_FLAG markers, and net labels are emitted in
+**Decoration (Layout phase 5)** by `spice-route` / `kicad-emitter`,
+which "reads final symbol positions; never moves them" (CLAUDE.md
+"Layout phases", roadmap §4.1). The glyph's geometry does not exist
+until decoration: it is first realized in `spice_route::rails`, where
+`symbol_pose` (`crates/spice-route/src/rails.rs:209-215`) computes the
+glyph anchor from the host pin and `power_symbol_sexpr`
+(`rails.rs:288`) emits a `power:*` lib symbol whose body extends roughly
+±1 grid cell about that anchor (the bbox the verifier recomputes in
+`glyph_body_bbox`, `placement_quality.rs:1882-1906`).
+
+The placement passes that decide where Q1 and R2 sit run *earlier* and
+have no model of that footprint:
+
+- The seed/spacing model `world_extent`
+  (`crates/spice-layout/src/lib.rs:369-406`) unions only the
+  orientation-transformed **body bbox**, the **pin-stem reach**, and a
+  **value-text width** estimate. There is no term for the power glyph
+  that decoration will later hang off a rail pin — `WorldExtent`
+  (`lib.rs:356-362`) has no glyph field, and neither the per-layer seed
+  stride (`place_seed`, `lib.rs:781`, `831-838`) nor the align-cluster
+  stride (`lib.rs:1015-1046`) reserves any glyph clearance.
+- The SA "never-increase" overlap gate `symbol_overlap_count`
+  (`crates/spice-layout/src/solver/anneal.rs:428`) measures
+  `footprint_half_extents` (`anneal.rs:394`) = body ∪ pin reach — again
+  **no glyph term**.
+- `cost.rs` has body `overlap` (`cost.rs:312`) and rail-direction
+  (`cost.rs:622`) terms, but nothing that knows a glyph will occupy a
+  cell beyond a rail pin.
+
+So the placer packs Q1 next to R2 using only their bare bodies, and the
+ground glyph's space is *realized later*, in decoration, when nothing
+can move. The only place the pipeline reserves glyph space at all is
+`spice-layout/src/sheets.rs` — `SHEET_GLYPH_REACH_MM`
+(`sheets.rs:52`), which extends a *hierarchical sheet's* de-overlap
+rectangle leftward by the port-glyph reach. That mechanism exists for
+**sheet port pins only**; it has no analogue for an ordinary element's
+rail pin. The four prior dead-ends all tried to bolt glyph clearance
+onto a pipeline that does not represent it.
+
+### The phase-ordering tension (and the precedent that resolves it)
+
+Decoration is a strict one-way consumer: it may not move a placed
+symbol (roadmap §4.1; CLAUDE.md decoration contract). Yet the glyph's
+footprint *must* influence placement, because by the time the glyph
+exists the symbols are frozen. The naive resolutions — let decoration
+nudge a symbol (breaks the contract / Tier-0 risk), or have
+`spice-layout` import `spice-route` to ask where glyphs go (closes a
+dependency **cycle**: `spice-route` already depends on `spice-layout`)
+— are both blocked.
+
+**Precedent: phase 4.5.** ADR-11's routing-aware orientation refinement
+faces the identical cycle constraint and resolves it by living in
+`kicad-emitter` — the one crate that sees *both* the placer's
+`Placement` and the real router (`crates/kicad-emitter/src/refine.rs`,
+called from the orchestrator after `place_with_hint` and before
+`emit_root`, `crates/spice2kicad/src/main.rs:233-251`). It is
+**placement, not decoration**: it runs before the final
+route/glyph/label pass and changes orientation only. This ADR uses the
+same boundary-crossing shape — glyph footprint is a *placement* concern
+that is computed where both sides are visible, not a decoration nudge.
+
+The key insight separating this from ADR-13: the [3] fix is **not** an
+orientation change of the glyph or the host. It is reserving *space* so
+foreign bodies never land in a glyph zone in the first place. That is a
+spacing/seeding concern, which is exactly where `world_extent` and the
+SA overlap gate already live.
+
+### Design options
+
+A power glyph's reach is a *deterministic function of the host pin*:
+canonical axis (Up for VCC, Down for GND/VEE — `canonical_axis`,
+`rails.rs:134-144`) and a ~1-cell body extent, plus a possible
+forced-sideways/sheet-edge offset (`glyph_offset`, `rails.rs:232-241`).
+Critically, this reach is computable from **placement-side data alone**
+— the resolved netlist's net classes (already in `spice-layout` via
+`net_class.rs`) and the element's own pins — *without* importing
+`spice-route`. The glyph footprint is small, fixed, and rule-derived,
+not router output. That is what makes options A/B feasible without a
+cycle.
+
+**Option A — glyph reach as part of effective placement geometry
+(recommended).** Teach the placer that a rail pin carries a reserved
+glyph zone, and fold that zone into the same `WorldExtent` /
+`footprint_half_extents` machinery that already reserves body + pin +
+value-text space. Concretely:
+
+- A new pure helper in `spice-layout` (e.g.
+  `net_class::glyph_reach(element, orientation, classes) -> Option<
+  WorldExtent-delta>`) returns, for each rail pin, the cell(s) the
+  glyph will occupy *outward* of that pin (Up/Down per
+  `canonical_axis`, ±1 cell body). It encodes the **same geometry**
+  `rails::canonical_axis` + the glyph bbox use, but lives placement-side
+  and depends on nothing in `spice-route`. (To prevent the two
+  definitions drifting, the glyph-reach constant is a shared
+  `kicad-symbols` or `spice-layout` const that `spice-route::rails`
+  *also* reads — single source of truth, dependency points the safe
+  way.)
+- `world_extent` (`lib.rs:369`) unions this delta, so the seed stride
+  (`place_seed`) and align stride keep foreign bodies a glyph-zone
+  clear of any rail pin **as a hard spacing floor at the
+  candidate boundary** — the same mechanism, and the same tier, as the
+  existing body/pin no-overlap clause (V6 no-overlap, Tier-1).
+- `footprint_half_extents` (`anneal.rs:394`) unions the same delta, so
+  the SA "never-increase" gate cannot slide a foreign body into a glyph
+  zone either (the consistency-requirement rule: hard at *every* stage
+  that can move the element).
+
+Because the reservation is added to the *element bearing the rail pin*
+(R2 reserves the cell below its ground pin), the placer naturally keeps
+Q1 out of that cell — the foreign body is repelled, not the glyph
+moved. Nothing in decoration changes; the glyph still emits exactly as
+today, but now lands in space the placer guaranteed was clear.
+
+**Label/text footprint (V13), jointly.** Approach 2 (below) failed by
+buying glyph clearance and paying in a label-on-body (V13). To avoid
+re-creating that, the *same* reservation pass must also account for the
+glyph's net-name **value text**, whose anchor is already a deterministic
+function of the host pin's outward direction (`value_text_anchor`,
+`rails.rs:280-286`). Option A folds the value-text reach into the same
+`WorldExtent` delta (it already has a value-text term to extend), so the
+placer reserves the *whole* decoration footprint — glyph body + glyph
+value text — as one zone. Reserving more space cannot push a label onto
+a body: the V13 nudge pass (`nudge_property_text`,
+`kicad-emitter/src/schematic.rs`) runs in decoration over a *less*
+crowded layout, strictly easier, not harder.
+
+**Option B — glyph-reach repulsion as a soft cost term.** Add a
+`cost.rs` term penalizing a foreign body inside a rail pin's glyph
+zone. **Rejected.** This is the Attempt-A failure shape verbatim: a
+foreign-body-in-glyph-zone is a *categorical* geometric fact (the cell
+is occupied or it isn't), and CLAUDE.md "Constraints vs. costs" is
+explicit that a categorical Tier-1 property must be a hard
+candidate-space filter, never a soft term — at a safe weight it does
+nothing; cranked, it destabilizes the layout. Documented for
+completeness so a future contributor does not re-propose it.
+
+**Option C — sheet-style post-hoc de-overlap for element glyphs.**
+Generalize `sheets.rs`'s `SHEET_GLYPH_REACH_MM` de-overlap (which
+nudges a *sheet rectangle* off neighbours after placement) to ordinary
+elements: after `place_with_hint`, in a `kicad-emitter` phase-4.5-style
+pass, detect glyph-zone/foreign-body overlaps and shift the *foreign*
+element away. **Rejected as primary**, viable as fallback. It re-opens
+the boundary question (it *moves* a placed element after the placer ran)
+and, more importantly, a post-hoc shove fights a finished, constrained
+layout: shoving Q1 can break its own V5/V6 spacing or collide it
+elsewhere, exactly the "post-hoc gate fighting a finished layout"
+failure mode the four dead-ends share. Option A reserves the space
+*during* placement so the SA optimizes around it from the start, which
+is strictly better. C is noted only as the escape if A proves
+infeasible on some fixture.
+
+### Why this avoids each of the four prior dead-ends
+
+1. **SA "never-increase" overlap gate including glyph reach → regressed
+   V5.** That attempt added glyph reach to the *overlap gate only*,
+   asymmetrically, so the gate rejected the orientations the router
+   needed for outward first segments (V5). Option A adds glyph reach to
+   **both** the seed/spacing floor *and* the SA gate (the
+   consistency-requirement rule), and — decisively — reserves it as
+   *extra spacing on the rail-pin element*, not as an orientation
+   restriction. It never narrows the orientation candidate set, so the
+   V5 seed heuristic and the phase-4.5 router-in-the-loop refinement
+   keep exactly the freedom they have today. V5 is untouched.
+2. **Seed-time glyph-reach clearance in `place_seed` → regressed V13
+   (label onto a body).** That attempt reserved glyph space but ignored
+   the glyph's *value text*, so making room for the triangle shoved a
+   net-label onto a neighbour. Option A reserves glyph body **and**
+   value-text reach jointly (the V13-joint clause above), and the V13
+   nudge pass then operates on a *less* crowded layout. The specific
+   failure — clearance bought at V13's expense — cannot recur because
+   the label footprint is part of the same reservation.
+3. **Detached-glyph-with-stub fallback → non-outward first segment (V5)
+   / body-cross (V12).** That attempt *moved the glyph* onto a stub,
+   creating a wire that either ran inward (V5) or speared a body (V12).
+   Option A **does not move the glyph at all** — it stays exactly where
+   `symbol_pose` puts it today, on the pin, rot 0. There is no new stub
+   wire, so no new V5/V12 surface. (The existing forced-sideways/
+   sheet-edge stubs are unchanged and out of scope.)
+4. **Emitter glyph-rotation (ADR-13) → GND-up (V14-intent regression).**
+   [3] is a correctly-oriented glyph clipping a *foreign* body;
+   rotation would point GND up. Option A keeps the glyph at rot 0 and
+   instead moves the *foreign element away during placement*. V14 is
+   untouched — the glyph orientation never changes.
+
+### Recommendation
+
+Adopt **Option A**: make each rail pin's power-glyph footprint (body +
+value text) part of the bearing element's **effective placement
+geometry**, reserved as a hard spacing floor in `world_extent` /
+`place_seed` / align-stride and as a hard term in the SA
+`footprint_half_extents` gate — the identical mechanism and tier (V6
+no-overlap, Tier-1) that already reserves body/pin/value-text space.
+The glyph-reach geometry is computed placement-side from net class +
+host pin (no `spice-route` import, no cycle), with the reach constant
+shared single-source so `rails.rs` and the placer cannot drift. This
+drives the foreign body out of the glyph zone *during* optimization
+rather than fighting a finished layout post-hoc, and it changes **no**
+glyph orientation, position, or stub — so V5, V12, V13, and V14 are all
+left as they are while the V12/V14-flavoured foreign-body overlap [3] is
+removed at its source.
+
+If, on a given fixture, reserving the zone proves jointly infeasible
+with `place`/`align` pins (the reservation cannot be honored without
+violating a user constraint), the correct outcome is **no regression**:
+the placer keeps the user constraint (higher precedence) and the
+fixture's ratchet stays at its current value — never bumped. That
+fixture then remains a documented deferral, not a budget increase.
+
+### Phased implementation plan
+
+Each phase is independently testable and ratchet-safe (no phase may
+*raise* a budget; phases land only when their verifier is green).
+
+1. **Phase 1 — shared glyph-reach geometry (no behaviour change).**
+   Extract the glyph body-reach constant + canonical-axis mapping into a
+   single shared location (`kicad-symbols` or a `spice-layout` module)
+   and have `spice-route::rails` read it instead of its local constant.
+   Pure refactor; existing tests must stay byte-identical. Establishes
+   the single source of truth before either consumer uses it.
+2. **Phase 2 — placement-side `glyph_reach` helper + `WorldExtent`
+   fold-in.** Add the pure `spice-layout` helper returning a rail pin's
+   reserved glyph+value-text delta; union it into `world_extent`. Gate
+   it behind the seed/align stride only at first. Verify: the [3]
+   ratchet drops on `common_emitter` and/or `opamp_inverting_real`
+   toward 0; **no other budget rises** (run the full
+   `placement_quality` + `electrical_safety` suite under the vsize cap).
+   Lower the [3] literal to the new measured count in the same commit.
+3. **Phase 3 — SA gate symmetry.** Union the same delta into
+   `footprint_half_extents` (`anneal.rs`) so the SA rotate/move cannot
+   re-introduce the overlap the seed avoided (consistency-requirement
+   rule). Verify the ratchet holds at the Phase-2 value under SA
+   refinement (it must not regress when `refine: true`).
+4. **Phase 4 — drive ratchet to 0 and ratchet down.** Confirm every
+   `power_glyph_foreign_body_overlap_budget` entry now measures 0;
+   update the literals to 0; the deferred MEMORY note ("V14 placer
+   pin-choice deferred") is closed and updated to point at this ADR.
+   Only land if **all** of V5/V12/V13/V14 and every other ratchet are
+   non-regressed.
+
+### Tier accounting
+
+- **Touches (must not regress):** V5 (Tier-2, pin-facing — preserved:
+  no orientation set is narrowed), V6 no-overlap clause (Tier-1 — this
+  is the mechanism extended), V12 (Tier-1 — no new wires), V13 (Tier-1
+  — value-text reserved jointly), V14 (Tier-1 — no rotation change),
+  symbol-symbol/overlap budgets (Tier-1).
+- **Improves:** the [3] foreign-body-overlap ratchet (Tier-1
+  readability), driven 1→0 on the two non-zero fixtures and held 0→0
+  elsewhere.
+- **Tier order:** the change is a Tier-1 readability fix implemented as
+  a hard spacing constraint; it regresses no Tier-0 (it adds no glyph
+  rotation/synthesis — V3 untouched; it changes no wiring — V11/V2
+  untouched) and trades nothing from a higher tier to gain a lower one.
+- **Ratchets:** every literal moves **down** (or holds); none is bumped.
+  Per the within-tier rule, no fixture's budget is loosened to tighten
+  another's — reserving glyph space on one element cannot, by
+  construction, cost another fixture violations (the reservation is
+  local geometry, not a global trade).
+
+### Risks / open questions
+
+- **Spacing inflation.** Reserving a glyph cell on every rail pin
+  widens layouts; on a glyph-dense fixture this could nudge content
+  past the A4 usable area (V15). Mitigation: reserve **only** the
+  outward glyph cell (not a full bbox halo) and verify V15 in Phase 2.
+  If V15 trips, the reach is over-estimated — tighten it, don't relax
+  V15.
+- **`place`/`align` interaction.** A user pin constraint may conflict
+  with the reserved zone. Resolution (above): user constraint wins, no
+  regression, fixture stays deferred rather than its budget bumped.
+- **Drift between `rails.rs` and the placer helper.** Mitigated by the
+  Phase-1 shared constant, but the *axis/offset logic* is duplicated;
+  a future refactor could share more. Acceptable for now; flag if a
+  third consumer appears.
+- **`opamp_inverting_real`'s residual may have a different cause.** Its
+  budget is also 1; confirm in Phase 2 that it is the same
+  foreign-body-in-glyph-zone shape and not a sheet-port artifact (which
+  `sheets.rs` already handles). If different, scope it out of this ADR
+  rather than forcing one mechanism to cover two defects.
+
+---
+
 ## Post-mortems / cautionary tales
 
 Detailed narratives of past failures. CLAUDE.md keeps the one-line
