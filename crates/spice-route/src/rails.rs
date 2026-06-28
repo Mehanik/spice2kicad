@@ -13,14 +13,17 @@
 
 use kicad_symbols::Library;
 use lexpr::Value as Sexpr;
+use spice_layout::glyph_geom::{self, GlyphAxis};
 use spice_layout::net_class::NetClass;
 
 use crate::types::{Direction, NetSpec, PinRef};
 
 /// One grid cell (1.27 mm). Power glyphs sit one cell along the pin's
 /// outward direction, so the pin connects to the symbol's anchor pin
-/// without a stem wire.
-const GRID_MM: f64 = 1.27;
+/// without a stem wire. Single-sourced from `spice-layout` so the
+/// placer's reserved glyph zone and this drawn glyph cannot drift
+/// (ADR-14, Phase 1).
+const GRID_MM: f64 = glyph_geom::GRID_MM;
 
 /// Grid-cell offset applied to a power glyph anchored on a
 /// hierarchical-sheet port pin. The glyph (and its net-name label) are
@@ -29,8 +32,9 @@ const GRID_MM: f64 = 1.27;
 /// label, which KiCad draws at the port-pin coordinate. Two cells: the
 /// glyph body extends ±1 cell about its anchor, so a 2-cell offset puts
 /// the inner glyph edge one full cell clear of the sheet edge. A stub
-/// wire bridges the port pin to the offset anchor.
-const SHEET_EDGE_GLYPH_OFFSET_CELLS: f64 = 2.0;
+/// wire bridges the port pin to the offset anchor. Single-sourced from
+/// `spice-layout` (ADR-14, Phase 1).
+const SHEET_EDGE_GLYPH_OFFSET_CELLS: f64 = glyph_geom::SHEET_EDGE_GLYPH_OFFSET_CELLS;
 
 /// Append power-symbol (or fallback global-label) S-exprs for every
 /// pin on a Power/Ground net. Signal nets are ignored.
@@ -132,14 +136,13 @@ fn ground_lib_id(_net_name: &str) -> &'static str {
 ///   V12 foreign-body crossing); the body-direction mismatch is a
 ///   pre-existing V13 quality concern, not a wiring defect to create.
 fn canonical_axis(class: NetClass, negative_rail: bool) -> Direction {
-    if negative_rail {
-        return Direction::Down;
-    }
-    match class {
-        NetClass::Power => Direction::Up,
-        // Ground (the only other class that reaches here; Signal is
-        // filtered out before `symbol_pose` is called).
-        _ => Direction::Down,
+    // Delegate the rule to the single-sourced placement-side mapping
+    // (ADR-14, Phase 1), then lift the screen-vertical axis into this
+    // crate's `Direction`. Signal nets never reach here (they are
+    // filtered out before `symbol_pose` is called).
+    match glyph_geom::canonical_axis(class, negative_rail) {
+        GlyphAxis::Up => Direction::Up,
+        GlyphAxis::Down => Direction::Down,
     }
 }
 
@@ -257,8 +260,10 @@ fn stub_wire(pin: &PinRef, canon: Direction) -> Option<Sexpr> {
 }
 
 /// Offset (mm) past the glyph tip for the net-name Value text, one grid
-/// cell beyond the ≈2.54 mm glyph body extent.
-const VALUE_TEXT_OFFSET_MM: f64 = 3.81;
+/// cell beyond the ≈2.54 mm glyph body extent. Single-sourced from
+/// `spice-layout` (ADR-14, Phase 1) so the placer reserves the same
+/// value-text reach it draws here.
+const VALUE_TEXT_OFFSET_MM: f64 = glyph_geom::VALUE_TEXT_OFFSET_MM;
 
 /// World anchor `(x, y)` for a power glyph's Value (net-name) text,
 /// placed on the *outward* side of the glyph — the side the host pin

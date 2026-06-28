@@ -25,6 +25,7 @@
 
 pub mod bands;
 pub mod cost;
+pub mod glyph_geom;
 mod idioms;
 pub mod layers;
 pub mod net_class;
