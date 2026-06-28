@@ -501,11 +501,40 @@ pin types, which the model now carries.
 
 ## ADR-13 — Narrow `RawSexpr` coordinate-transform for emitter-generated power glyphs
 
-**Status: design (v0.2).** No code yet; this ADR reopens invariant
-V3's "verbatim everything" rule for one tightly-scoped synthesis path
-and specifies its shape, integration point, and the V3 amendment it
-requires. It is the design for v0.2 Item 5 (CLAUDE.md "v0.2 deferred
-decisions → Revisit verbatim `lib_symbols` (V3)").
+**Status: design (v0.2), NOT pursued — premise corrected (see
+amendment).** This ADR reopens invariant V3's "verbatim everything"
+rule for one tightly-scoped synthesis path and specifies its shape,
+integration point, and the V3 amendment it requires. It was the design
+for v0.2 Item 5 (CLAUDE.md "v0.2 deferred decisions → Revisit verbatim
+`lib_symbols` (V3)"), but the implementation attempt found its
+motivating premise does not match the real defect — see the amendment
+immediately below before reading the rest.
+
+**Amendment (2026-06-28) — premise corrected; mechanism not landed.** A
+v0.2 implementation attempt (Item 5) built and unit-tested this
+mechanism in full (`transform_glyph_body`, glyph-variant threading
+route→emitter, suffixed `power:GND_R180` inlining), then **discarded
+it**, because the forced-sideways premise in point (1) below does **not**
+match the actual V14 [3] residual. Measured on `common_emitter`
+(byte-identical output on master): the residual is `#PWR1`, a
+**correctly-oriented** `power:GND` glyph on R2's *down*-facing pin
+(canonical GND-down, rot 0) whose triangle clips a corner of **Q1's
+foreign body** — not a glyph bending into its *own* host. It is a placer
+**pin-choice / neighbour-placement** defect (where Q1 sits relative to
+R2's grounded pin), not a glyph-orientation defect. Rotating `#PWR1`
+would dodge Q1 only by pointing the ground triangle *upward* (an
+upside-down GND symbol — a V14-intent regression), which this ADR's
+transform explicitly does not sanction (it rotates only so the
+business-end faces the host pin's *outward* direction, which `#PWR1`
+already does at rot 0). Consequences: (a) **the V14 [3] residual stays
+deferred to the placer redesign** (MEMORY "V14 placer pin-choice
+deferred") — it is not an emitter-glyph-orientation problem; (b) this
+ADR's narrow transform only helps a *genuine* forced-sideways case
+(filtered orientation set empty), and **no current fixture produces
+one**, so the mechanism was unexercised end-to-end and not landed (the
+project's "no unused code" rule). Re-open this ADR — the
+`transform_glyph_body` design below is sound and cheap to re-create — if
+and when a real forced-sideways glyph appears in a fixture.
 
 **Context / problem.** V3 is a Tier-0 portability guarantee: every
 `(lib_symbols …)` entry is a byte-for-byte passthrough of the source

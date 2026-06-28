@@ -56,15 +56,23 @@ the codebase simpler over the one that preserves history.
 Decisions deliberately frozen for v0.1, recorded here so they are
 revisited rather than forgotten:
 
-- **Revisit verbatim `lib_symbols` (V3).** V3 is final for v0.1: every
+- **Revisit verbatim `lib_symbols` (V3).** V3 stays final: every
   `(lib_symbols …)` entry is a byte-for-byte passthrough, so the
-  emitter never *synthesises* or *tweaks* a symbol. That rule blocks
-  two future features — a clean fix for the deferred placer-glyph
-  body-overlap item (the V14/[3] case, where a synthesised or rotated
-  glyph variant would help) and zero-annotation auto-symbol-selection
-  (which may want to derive a symbol the user doesn't have installed).
-  Keep V3 as the current rule; re-open the symbol-synthesis question
-  in v0.2 with these two use cases as the motivation.
+  emitter never *synthesises* or *tweaks* a symbol. Two use cases were
+  once floated to motivate re-opening it; both have since weakened:
+  - *The V14/[3] glyph-overlap fix — DISPROVEN.* A v0.2 attempt
+    (ADR-13 / Item 5) found the [3] residual is a **placer pin-choice**
+    defect (a correctly-oriented GND glyph clipping a *foreign* body),
+    not a glyph-orientation one, so a rotated glyph variant does **not**
+    help it. It stays deferred to the placer redesign (see MEMORY "V14
+    placer pin-choice deferred" and the ADR-13 amendment).
+  - *Auto-symbol-DRAWING (deriving an uninstalled symbol body).* Still
+    hypothetical, and only weakly motivated now that symbol *selection*
+    is explicit-annotation-driven, not heuristic (the annotations-over-
+    heuristics direction). Auto-*selection* is retired.
+  Net: there is currently **no live motivation** to re-open V3. Keep it
+  verbatim; revisit only if auto-symbol-drawing becomes a real need, or
+  a genuine forced-sideways glyph appears (then re-open ADR-13).
 
 ## Repository layout
 

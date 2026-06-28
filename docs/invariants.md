@@ -67,24 +67,16 @@ invariant here.
   file's `(lib_symbols)`, and asserts byte equality of the body
   sub-tree.
 
-  **Synthesis exception (ADR-13, v0.2 — design, not yet wired).** V3
-  remains byte-for-byte verbatim for every `lib_symbols` entry that
-  originated from a user `.kicad_sym`; that portability guarantee is
-  unconditional and Tier-0. The *one* permitted exception is the
-  emitter's own power-glyph family (`power:GND` / `power:VCC` /
-  `power:VDD` / `power:VEE` / `power:+…` / `power:PWR_FLAG`), which the
-  emitter may rotate/mirror by a 90° multiple via a narrow `RawSexpr`
-  coordinate-transform (ADR-13) so a glyph on a non-canonical pin faces
-  outward without the forced-sideways stub. This applies only to glyphs
-  the emitter *generates*, never to a user-provided symbol, and only as
-  a 90°-multiple coordinate rotation of a fixed emitter-owned glyph — it
-  does not introduce a typed primitive model and does not enable
-  auto-drawing of unknown symbols. Justified by V14 (correct power-glyph
-  orientation without body overlap). The V3 round-trip verifier is
-  unaffected: it compares *user*-symbol bodies, which are never
-  transformed; the synthesised orientation-suffixed glyph entries (e.g.
-  `power:GND_R90`) have no user `.kicad_sym` source to round-trip
-  against and are excluded by name.
+  **No synthesis exception (today).** V3 is *unconditional* byte-for-byte
+  verbatim for every `lib_symbols` entry — there is no synthesis or
+  coordinate-transform carve-out in the emitter. ADR-13 explored a narrow
+  exception (rotating emitter-owned power glyphs to fix the V14 [3]
+  body-overlap residual) but it was **not pursued**: the [3] residual
+  turned out to be a placer pin-choice defect, not a glyph-orientation
+  one, so rotation does not address it (see the ADR-13 amendment). If a
+  genuine forced-sideways glyph ever appears in a fixture, re-open ADR-13;
+  any such exception would be tightly scoped to emitter-generated glyphs
+  and would never touch a user-provided symbol.
 
 - **V4 — Plain labels for in-sheet annotation; global labels for
   cross-sheet or one-pin interfaces; ≤ 1 plain label per net per
