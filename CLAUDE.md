@@ -60,12 +60,20 @@ revisited rather than forgotten:
   `(lib_symbols …)` entry is a byte-for-byte passthrough, so the
   emitter never *synthesises* or *tweaks* a symbol. Two use cases were
   once floated to motivate re-opening it; both have since weakened:
-  - *The V14/[3] glyph-overlap fix — DISPROVEN.* A v0.2 attempt
-    (ADR-13 / Item 5) found the [3] residual is a **placer pin-choice**
-    defect (a correctly-oriented GND glyph clipping a *foreign* body),
-    not a glyph-orientation one, so a rotated glyph variant does **not**
-    help it. It stays deferred to the placer redesign (see MEMORY "V14
-    placer pin-choice deferred" and the ADR-13 amendment).
+  - *The V14/[3] glyph-overlap fix — DISPROVEN as a V3 motivation, and
+    now LARGELY FIXED in the placer.* A v0.2 attempt (ADR-13 / Item 5)
+    found the [3] residual is a **placer pin-choice** defect (a
+    correctly-oriented GND glyph clipping a *foreign* body), not a
+    glyph-orientation one, so a rotated glyph variant does **not** help
+    it. ADR-14 (Option A, now implemented) confirmed this: reserving each
+    rail pin's power-glyph footprint (body + value text) as effective
+    placement geometry — hard at both the seed/align stride and the SA
+    overlap gate — repels the foreign body during optimization and
+    **closed `common_emitter` [3] (1→0)** with the glyph untouched. One
+    residual remains on `opamp_inverting_real` (a `PWR_FLAG` marker
+    clipping `RIN`, anchored on the oversized opamp triangle — a distinct
+    sheet-port-flavoured case scoped out of ADR-14); see ADR-14 and
+    MEMORY "V14 placer pin-choice deferred". This never needed V3.
   - *Auto-symbol-DRAWING (deriving an uninstalled symbol body).* Still
     hypothetical, and only weakly motivated now that symbol *selection*
     is explicit-annotation-driven, not heuristic (the annotations-over-

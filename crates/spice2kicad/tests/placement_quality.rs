@@ -1911,17 +1911,32 @@ fn glyph_body_bbox(library: &Library, sym: &Value) -> Option<(String, Bbox)> {
 /// foreign real-symbol body) on current master. ZERO-SLACK ratchet — each
 /// literal equals the measured count and may only ever decrease.
 ///
-/// The non-zero entries are issue [3]: a `power:*` glyph (or its
-/// co-located `power:PWR_FLAG` marker) body clipping a NON-host symbol
-/// body. This is the deferred V14 placer-pin-choice item — un-fixable
-/// today without regressing a higher/equal tier (SA-gate → V5; seed
-/// clearance → V13), so it is documented here as a containment ratchet to
-/// be driven to 0 by a future v0.2 placement redesign, NOT a license to
-/// add more crossings.
+/// `common_emitter` is now **0**: ADR-14 Option A reserves each rail pin's
+/// power-glyph footprint (body + value text) as effective placement
+/// geometry — hard at both the seed/align stride
+/// (`world_extent_with_glyphs`) and the SA overlap gate
+/// (`footprint_half_extents`) — so the placer repels the foreign body
+/// (Q1) out of R2's ground-glyph zone during optimization. No glyph
+/// moves; only the foreign element is repelled.
+///
+/// `opamp_inverting_real` remains **1**: its residual is a distinct
+/// defect class — a `power:PWR_FLAG` driver marker (`#FLG4`) clipping
+/// `RIN`, anchored on the opamp triangle `X1` (a sheet-port-flavoured
+/// overlap, ADR-14 "Risks": "may have a different cause … scope it out").
+/// The opamp's rail pins sit on the oversized `X1` body itself; reserving
+/// those crowded zones in the SA gate reshuffled the part into a
+/// `RIN`/glyph value-text V13 overlap — a within-Tier-1 sideways trade
+/// the ratchet rule forbids. So the SA-gate reservation is scoped to
+/// *non-oversized* rail consumers, which fixes `common_emitter` while
+/// leaving the opamp layout (and its deferred residual) exactly as
+/// master. Driving this last residual to 0 needs the PWR_FLAG /
+/// host-on-oversized-body case, deferred to v0.2 (see ADR-14).
 fn power_glyph_foreign_body_overlap_budget(fixture: &str) -> usize {
     match fixture {
-        // [3] deferred V14 placer-pin-choice: one residual glyph/foreign-body clip.
-        "common_emitter" | "opamp_inverting_real" => 1,
+        // [3] deferred: a PWR_FLAG marker clipping RIN, anchored on the
+        // oversized opamp X1. Distinct from the (now-fixed) rail-consumer
+        // case; see ADR-14. Driven to 0 by a future v0.2 placement pass.
+        "opamp_inverting_real" => 1,
         _ => 0,
     }
 }

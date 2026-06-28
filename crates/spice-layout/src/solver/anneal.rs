@@ -387,15 +387,37 @@ fn body_half_extents(el: &spice_resolve::ResolvedElement, orient: Orientation) -
 
 /// World-frame *footprint* half-extents (`half_w`, `half_h`, mm): the
 /// orientation-transformed body bbox unioned with the reach of every
-/// pin stem. Matches the `no_symbol_symbol_overlap` verifier so that,
-/// once the gate is active for a pair, it forbids exactly the overlaps
-/// that verifier flags — including a body that merely kisses a
-/// neighbour but whose pin stem then spears it.
-fn footprint_half_extents(el: &spice_resolve::ResolvedElement, orient: Orientation) -> (f64, f64) {
+/// pin stem **and the power-glyph reach of every rail pin**. Matches the
+/// `no_symbol_symbol_overlap` verifier so that, once the gate is active
+/// for a pair, it forbids exactly the overlaps that verifier flags —
+/// including a body that merely kisses a neighbour but whose pin stem
+/// then spears it.
+///
+/// The glyph-reach union is the SA half of the ADR-14 reservation: it
+/// mirrors the same `glyph_geom::glyph_reach` delta the seed/align
+/// stride reserves (`world_extent_with_glyphs`), so the SA
+/// "never-increase" gate cannot slide a foreign body into a glyph zone
+/// the seed kept clear (CLAUDE.md consistency-requirement: a hard
+/// reservation must bind every stage that can move the element). The
+/// gate's half-extent model is symmetric about the origin, so a glyph
+/// reach point `(dx, dy)` extends the half-extent by `|dx|`/`|dy|`. This
+/// is extra outward spacing only; it changes no orientation (V5) and no
+/// glyph pose (V14).
+fn footprint_half_extents(
+    el: &spice_resolve::ResolvedElement,
+    orient: Orientation,
+    prefs: Option<&std::collections::HashMap<String, crate::net_class::VertPref>>,
+) -> (f64, f64) {
     let (mut hw, mut hh) = body_half_extents(el, orient);
     for p in el.symbol.pins_in(orient) {
         hw = hw.max(p.x.abs());
         hh = hh.max(p.y.abs());
+    }
+    if let Some(prefs) = prefs {
+        for (dx, dy) in crate::glyph_geom::glyph_reach(el, orient, prefs) {
+            hw = hw.max(dx.abs());
+            hh = hh.max(dy.abs());
+        }
     }
     (hw, hh)
 }
@@ -431,19 +453,40 @@ fn symbol_overlap_count(placement: &Placement, checked: &CheckedNetlist) -> usiz
     let cell_hw = f64::from(crate::CELL_W) * GridPoint::STEP_MM / 2.0;
     let cell_hh = f64::from(crate::CELL_H) * GridPoint::STEP_MM / 2.0;
 
+    // Rail-pin screen-vertical prefs, for the glyph-reach reservation the
+    // footprint measure unions in (ADR-14 phase 3, mirroring the seed).
+    let prefs = crate::net_class::vertical_prefs(checked);
+
     let extents: Vec<(f64, f64, f64, f64, bool)> = checked
         .elements
         .iter()
         .zip(&placement.elements)
         .map(|(el, placed)| {
             // Activation key: body-only (unchanged set — only a large
-            // body trips the gate). Overlap measure: full footprint
-            // (body ∪ pin reach) so a pin stub spearing a neighbour is
-            // caught.
+            // body trips the gate).
             let (bhw, bhh) = body_half_extents(el, placed.orientation);
-            let (fhw, fhh) = footprint_half_extents(el, placed.orientation);
-            let (ox, oy) = placed.origin.to_mm();
             let oversized = bhw > cell_hw + 1e-6 || bhh > cell_hh + 1e-6;
+            // Overlap measure: full footprint (body ∪ pin reach ∪
+            // rail-pin glyph reach) so a pin stub or a reserved glyph
+            // zone spearing a neighbour is caught.
+            //
+            // The glyph-reach reservation is scoped to *non-oversized*
+            // rail-pin elements — the rail *consumers* (e.g. a 2-pin
+            // resistor whose ground glyph a neighbouring large body would
+            // clip, ADR-14's `common_emitter` [3]). A large body's own
+            // crowded rail-pin zones (an opamp triangle carrying VCC /
+            // VEE / GND pins) are deliberately NOT self-reserved here:
+            // reserving them over-constrains the SA and reshuffles the
+            // part into a worse layout (an opamp `RIN`/glyph value-text
+            // V13 overlap — a within-Tier-1 sideways trade the ratchet
+            // rule forbids). Such a body is already the gate's *neighbour*
+            // that the consumer's reservation repels, so the foreign-body
+            // overlap is still removed from the consumer side. (The
+            // remaining opamp `#FLG4`/PWR_FLAG residual is a distinct
+            // sheet-port-flavoured defect, scoped out per ADR-14.)
+            let prefs_for = if oversized { None } else { Some(&prefs) };
+            let (fhw, fhh) = footprint_half_extents(el, placed.orientation, prefs_for);
+            let (ox, oy) = placed.origin.to_mm();
             (ox, oy, fhw, fhh, oversized)
         })
         .collect();
