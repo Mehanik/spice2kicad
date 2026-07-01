@@ -1913,11 +1913,18 @@ fn glyph_body_bbox(library: &Library, sym: &Value) -> Option<(String, Bbox)> {
 ///
 /// `common_emitter` is now **0**: ADR-14 Option A reserves each rail pin's
 /// power-glyph footprint (body + value text) as effective placement
-/// geometry — hard at both the seed/align stride
-/// (`world_extent_with_glyphs`) and the SA overlap gate
-/// (`footprint_half_extents`) — so the placer repels the foreign body
-/// (Q1) out of R2's ground-glyph zone during optimization. No glyph
-/// moves; only the foreign element is repelled.
+/// geometry, so the placer repels the foreign body (Q1) out of R2's
+/// ground-glyph zone during optimization. No glyph moves; only the
+/// foreign element is repelled. Scope, precisely: the reservation is
+/// hard only where an OVERSIZED body is involved — the SA overlap gate
+/// (`footprint_half_extents`) activates per pair only when one body is
+/// oversized, and reserves glyph zones only on non-oversized consumers
+/// (which covers `common_emitter`'s R2×Q1: Q1's BJT body is oversized)
+/// — and the phase-2 seed floor (`world_extent_with_glyphs` in the
+/// layer stride) is X-only outside the align path. Small×small pairs
+/// and the seed's Y axis are guarded only by THIS zero-slack output
+/// ratchet, which measures emitted geometry and trips on any drift.
+/// See ADR-14 "Known scope limits".
 ///
 /// `opamp_inverting_real` remains **1**: its residual is a distinct
 /// defect class — a `power:PWR_FLAG` driver marker (`#FLG4`) clipping

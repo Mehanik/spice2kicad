@@ -116,6 +116,12 @@ pub(super) fn refine(
         .filter_map(|(k, v)| if v.len() >= 2 { Some(*k) } else { None })
         .collect();
 
+    // Rail-pin screen-vertical prefs for the ADR-14 glyph-reach
+    // reservation in `symbol_overlap_count`. A pure function of the
+    // netlist — invariant across the anneal — so it is computed once
+    // here and threaded down, not recomputed per proposal.
+    let glyph_prefs = crate::net_class::vertical_prefs(checked);
+
     let weights = CostWeights::DEFAULT;
     let mut current_breakdown = cost::breakdown(&seed, checked, library);
     let mut current_cost = cost::total(&current_breakdown, &weights);
@@ -139,7 +145,7 @@ pub(super) fn refine(
     // can slide under its wide body cost-free. Enforced as a candidate-
     // space filter (never a cost term, per CLAUDE.md), same mechanism as
     // the V11 and V14 gates below.
-    let mut current_overlaps = symbol_overlap_count(&seed, checked);
+    let mut current_overlaps = symbol_overlap_count(&seed, checked, &glyph_prefs);
     // V5 pin-facing alignment, used as a "never increase" gate on the
     // mirror-Y move only (see acceptance below). Tracked from the seed so
     // a flip can never make signal pins face away from their net.
@@ -221,7 +227,7 @@ pub(super) fn refine(
         // none), so it is always safe to evaluate when the move is still
         // alive after cost + V14 + the coincidence filter.
         let trial_overlaps = if alive && coincidence_ok {
-            symbol_overlap_count(&seed, checked)
+            symbol_overlap_count(&seed, checked, &glyph_prefs)
         } else {
             current_overlaps
         };
@@ -370,8 +376,8 @@ fn foreign_pin_coincidences(placement: &Placement, checked: &CheckedNetlist) -> 
 /// decide whether a part is "oversized vs the cost cell" — the gate's
 /// activation key. Body-only (excludes pin stems) so the activation
 /// set stays exactly as before: only a genuinely large body (an opamp
-/// triangle) trips the gate, leaving every all-small-symbol fixture's
-/// SA trajectory byte-identical.
+/// triangle, a BJT circle — see `symbol_overlap_count`) trips the
+/// gate, leaving every SA trajectory without one byte-identical.
 fn body_half_extents(el: &spice_resolve::ResolvedElement, orient: Orientation) -> (f64, f64) {
     let mut hw = 0.0_f64;
     let mut hh = 0.0_f64;
@@ -395,14 +401,24 @@ fn body_half_extents(el: &spice_resolve::ResolvedElement, orient: Orientation) -
 ///
 /// The glyph-reach union is the SA half of the ADR-14 reservation: it
 /// mirrors the same `glyph_geom::glyph_reach` delta the seed/align
-/// stride reserves (`world_extent_with_glyphs`), so the SA
-/// "never-increase" gate cannot slide a foreign body into a glyph zone
-/// the seed kept clear (CLAUDE.md consistency-requirement: a hard
-/// reservation must bind every stage that can move the element). The
-/// gate's half-extent model is symmetric about the origin, so a glyph
-/// reach point `(dx, dy)` extends the half-extent by `|dx|`/`|dy|`. This
-/// is extra outward spacing only; it changes no orientation (V5) and no
-/// glyph pose (V14).
+/// stride reserves (`world_extent_with_glyphs`). Scope, precisely: the
+/// reservation is hard **only for pairs involving an oversized body** —
+/// `symbol_overlap_count` passes `prefs` only for *non-oversized*
+/// consumers and skips small×small pairs entirely, so the SA can still
+/// slide a small foreign body into a small host's glyph zone. Likewise
+/// the phase-2 seed floor consumes only the X axis outside the align
+/// path (`place_seed` reads `max_x`/`min_x`; the vertical hard floor
+/// exists only in `vertical_stride_cells` on the align path). Those
+/// gaps are guarded downstream by the zero-slack output ratchet
+/// (`no_power_glyph_foreign_body_overlap_across_fixtures`), which
+/// measures emitted geometry and trips on any drift — see ADR-14
+/// "Known scope limits". The gate's half-extent model is symmetric
+/// about the origin, so a glyph reach point `(dx, dy)` extends the
+/// half-extent by `|dx|`/`|dy|` on BOTH sides: a reserved zone below
+/// the part also blocks space above it — a strict-but-conservative
+/// halo (ADR-14's Risks flagged this shape; acceptable now, revisit if
+/// a glyph-dense fixture hits V15). This is extra outward spacing
+/// only; it changes no orientation (V5) and no glyph pose (V14).
 fn footprint_half_extents(
     el: &spice_resolve::ResolvedElement,
     orient: Orientation,
@@ -438,24 +454,36 @@ fn footprint_half_extents(
 /// `overlap` cost: that cost already keeps every body within a
 /// `CELL_W × CELL_H` footprint apart, so this gate only counts a pair
 /// when **at least one body is oversized** — its real half-extent
-/// exceeds the cost's cell half-extent on the colliding axis. The only
-/// oversized symbol in the fixtures is the opamp triangle (~5 mm
-/// half-extent vs the cell's 3.81 mm); once V14 pins it at rot 0 its
-/// wide body would let a neighbour slide under it cost-free, which this
-/// gate forbids. Keying off "oversized vs the cost cell" makes the gate
-/// a genuine no-op for every all-small-symbol fixture: their overlaps
-/// are entirely handled by the cost, so the gate's count stays 0 and
-/// the SA trajectory is unchanged.
+/// exceeds the cost's cell half-extent on the colliding axis. TWO
+/// fixture symbols are oversized, not one: the opamp triangle (~5 mm
+/// half-extent vs the cell's 3.81 mm) and the BJT `Device:Q_NPN_BCE`
+/// (body half-extent ~4.09 mm — pinned by
+/// `kicad-symbols/tests/body_bbox.rs::body_bbox_q_npn_bce_covers_circle`).
+/// Once V14 pins the opamp at rot 0 its wide body would let a neighbour
+/// slide under it cost-free, which this gate forbids. The BJT tripping
+/// the oversized key is LOAD-BEARING for the ADR-14 glyph-zone defense:
+/// `common_emitter`'s [3] fix depends on Q1 activating the gate for the
+/// R2×Q1 pair, so that R2's reserved ground-glyph zone repels Q1 —
+/// narrow the activation and that fix silently evaporates (the output
+/// ratchet would catch it, but only after the fact). Keying off
+/// "oversized vs the cost cell" makes the gate a genuine no-op for
+/// every fixture whose symbols are all small: their overlaps are
+/// entirely handled by the cost, so the gate's count stays 0 and the SA
+/// trajectory is unchanged.
 #[allow(clippy::similar_names)] // ahw/ahh, bhw/bhh: half-extent pairs.
-fn symbol_overlap_count(placement: &Placement, checked: &CheckedNetlist) -> usize {
+fn symbol_overlap_count(
+    placement: &Placement,
+    checked: &CheckedNetlist,
+    // Rail-pin screen-vertical prefs, for the glyph-reach reservation the
+    // footprint measure unions in (ADR-14 phase 3, mirroring the seed).
+    // Computed once in `refine` (invariant across the anneal) and
+    // threaded in, so the SA hot loop never re-runs `classify_nets`.
+    prefs: &std::collections::HashMap<String, crate::net_class::VertPref>,
+) -> usize {
     // The cell half-extents the `overlap` cost already enforces. A body
     // within these contributes nothing here (the cost covers it).
     let cell_hw = f64::from(crate::CELL_W) * GridPoint::STEP_MM / 2.0;
     let cell_hh = f64::from(crate::CELL_H) * GridPoint::STEP_MM / 2.0;
-
-    // Rail-pin screen-vertical prefs, for the glyph-reach reservation the
-    // footprint measure unions in (ADR-14 phase 3, mirroring the seed).
-    let prefs = crate::net_class::vertical_prefs(checked);
 
     let extents: Vec<(f64, f64, f64, f64, bool)> = checked
         .elements
@@ -484,7 +512,7 @@ fn symbol_overlap_count(placement: &Placement, checked: &CheckedNetlist) -> usiz
             // overlap is still removed from the consumer side. (The
             // remaining opamp `#FLG4`/PWR_FLAG residual is a distinct
             // sheet-port-flavoured defect, scoped out per ADR-14.)
-            let prefs_for = if oversized { None } else { Some(&prefs) };
+            let prefs_for = if oversized { None } else { Some(prefs) };
             let (fhw, fhh) = footprint_half_extents(el, placed.orientation, prefs_for);
             let (ox, oy) = placed.origin.to_mm();
             (ox, oy, fhw, fhh, oversized)

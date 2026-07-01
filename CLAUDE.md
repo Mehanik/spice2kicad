@@ -67,9 +67,16 @@ revisited rather than forgotten:
     glyph-orientation one, so a rotated glyph variant does **not** help
     it. ADR-14 (Option A, now implemented) confirmed this: reserving each
     rail pin's power-glyph footprint (body + value text) as effective
-    placement geometry — hard at both the seed/align stride and the SA
-    overlap gate — repels the foreign body during optimization and
-    **closed `common_emitter` [3] (1→0)** with the glyph untouched. One
+    placement geometry repels the foreign body during optimization and
+    **closed `common_emitter` [3] (1→0)** with the glyph untouched.
+    Scope, precisely: the reservation is hard only for
+    oversized-involving pairs in the SA gate (which covers
+    `common_emitter`'s R2×Q1 — Q1's BJT body is oversized) and X-only
+    at the seed stride outside `align`; small×small pairs and the
+    seed's Y axis are guarded by the zero-slack output ratchet
+    (`no_power_glyph_foreign_body_overlap_across_fixtures`), which
+    measures emitted geometry and trips on any drift — see ADR-14
+    "Known scope limits". One
     residual remains on `opamp_inverting_real` (a `PWR_FLAG` marker
     clipping `RIN`, anchored on the oversized opamp triangle — a distinct
     sheet-port-flavoured case scoped out of ADR-14); see ADR-14 and

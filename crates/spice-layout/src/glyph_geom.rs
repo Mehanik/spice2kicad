@@ -25,9 +25,12 @@ use spice_resolve::{ElementRole, ResolvedElement};
 
 use crate::net_class::{NetClass, VertPref};
 
-/// One KiCad grid cell (50 mil). Power glyphs sit one cell along the
-/// host pin's outward direction, so the pin meets the glyph's anchor
-/// pin with no stem wire.
+/// One KiCad grid cell (50 mil). In the canonical case a power glyph's
+/// anchor pin sits exactly ON the host pin (`spice-route::rails`'
+/// `symbol_pose` with `glyph_offset` = `None`) — no stem wire at all.
+/// The forced-sideways and sheet-edge cases instead offset the anchor a
+/// whole number of these cells along the pin's outward direction and
+/// DO emit a bridging stub wire (`rails::stub_wire`).
 pub const GRID_MM: f64 = 1.27;
 
 /// Outward extent (mm) of a power-glyph **body** from its anchor pin: a
@@ -97,13 +100,27 @@ pub fn canonical_axis(class: NetClass, negative_rail: bool) -> GlyphAxis {
 /// decoration. The placer then keeps foreign bodies that whole zone
 /// clear — the foreign element is repelled, the glyph never moves.
 ///
-/// The reach runs along each rail pin's *transformed outward direction*
-/// (`angle`: 270 → up, 90 → down, 180 → left, 0 → right), so it is
-/// orientation-aware: rotating the host moves the reserved zone with the
-/// pin, exactly as the emitted glyph follows the pin. Its length is
-/// [`VALUE_TEXT_OFFSET_MM`] — the joint body + value-text reach — so the
-/// reservation covers the *whole* decoration footprint and cannot buy
-/// glyph clearance at a label-on-body (V13) cost.
+/// The reach direction maps the pin's *transformed* angle exactly as
+/// the decoration side does (`angle`: 270 → up, 90 → down, 180 → left,
+/// 0 → right — the same table as `kicad-emitter`'s `angle_to_direction`
+/// and `rails::outward_delta`), so the reservation lands where the
+/// glyph's value text will actually be drawn — the drift-free property
+/// ADR-14 needs. For a *vertically*-facing transformed pin (the
+/// canonical GND-down / VCC-up case every fixture exercises) this is
+/// the true outward direction. For a *horizontally*-facing transformed
+/// pin the shared convention degenerates — it points toward the body,
+/// so the reach lands inside the body bbox and reserves nothing extra
+/// (latent; no fixture rotates a rail consumer sideways — see ADR-14's
+/// "Known scope limits" amendment). Its length is
+/// [`VALUE_TEXT_OFFSET_MM`] — the joint body + value-text reach — which
+/// covers the decoration footprint in the *canonical* case: a pin
+/// facing its glyph's canonical direction, with the glyph body and
+/// value-text anchor stacked along the pin's outward axis. NOT
+/// modelled: the value text's *width* (its extent perpendicular to the
+/// axis), a forced-sideways glyph's body, the forced-sideways /
+/// sheet-edge one-cell outward offset, and the co-located `PWR_FLAG`
+/// body (which points anti-outward) — see ADR-14's "Known scope
+/// limits" amendment.
 ///
 /// A rail pin is a terminal whose net carries a [`VertPref`] (i.e. a
 /// Power/Ground/negative-rail net). Power *sources* (`ElementRole::Power`)

@@ -767,10 +767,60 @@ deliberately does not answer it.
 
 ## ADR-14 — Reserve power-glyph footprint as placement geometry
 
-**Status: proposed (for review).** Design-only. No implementation has
-landed; this ADR exists to make the decision defensible before any code
-is written, and to stop a *fifth* dead-end (four prior attempts all
-correctly stopped at the tier floor — see "Why not …" below).
+**Status: accepted; Option A implemented (see the amendment immediately
+below for the as-built scope).** Originally written design-first, to
+make the decision defensible before any code and to stop a *fifth*
+dead-end (four prior attempts all correctly stopped at the tier floor —
+see "Why not …" below).
+
+**Amendment (2026-07-01) — implemented; known scope limits.** Option A
+landed (phases 1–4, `glyph_geom.rs` / `world_extent_with_glyphs` /
+`footprint_half_extents`) and closed `common_emitter` [3] (1→0). The
+as-built reservation is, however, **narrower than the "hard at every
+stage" ideal above**, and the narrowing is deliberate (widening it
+regressed the opamp fixture — see the scoping comment in
+`solver/anneal.rs::symbol_overlap_count`). Record of the blind spots:
+
+- **SA gate: oversized-involving pairs only.** The gate skips
+  small×small pairs entirely (they are the cell-bbox cost's job) and
+  reserves glyph zones only on *non-oversized* consumers. This covers
+  the fixture that motivated the ADR (`common_emitter`'s R2×Q1 — Q1's
+  BJT body is oversized and trips the activation) but leaves a small
+  foreign body free to drift into a small host's glyph zone during SA.
+- **Seed floor: X-only outside `align`.** The layer stride consumes
+  only `max_x`/`min_x` of `world_extent_with_glyphs`; the vertical hard
+  floor exists only on the align path (`vertical_stride_cells`). A
+  vertically-reaching glyph zone gets no seed-time Y protection.
+- **Oversized-host self-zones.** A grounded-emitter BJT (`Q1 c b 0`)
+  is *itself* oversized, so its own GND-glyph zone gets no SA-gate
+  defense (the gate scopes prefs to non-oversized elements) and no
+  seed-X protection (the pin is vertical). Only the output ratchet
+  guards it.
+- **PWR_FLAG bodies are never reserved.** The co-located `PWR_FLAG`
+  marker points *anti*-outward of the rail glyph
+  (`pwrflag.rs::flag_rotation`), on the opposite side of the pin from
+  the reserved reach — the same shape as the scoped-out
+  `opamp_inverting_real` `#FLG4` residual.
+- **Sideways-transformed rail pins degenerate.** `glyph_reach` maps the
+  transformed pin angle with the same table the decoration side uses
+  (`angle_to_direction` / `rails::outward_delta`) — which keeps the
+  reservation drift-free with the drawn value text, but that shared
+  convention yields the true outward direction only for *vertical*
+  pins. For a rail pin rotated horizontal the direction points toward
+  the body, so the reach lands inside the body bbox and reserves
+  nothing extra (and the decoration it mirrors would place the net
+  name there too). Latent: no fixture rotates a rail consumer
+  sideways; pinned by
+  `spice-layout/tests/glyph_geom.rs::reach_pins_decoration_geometry_across_orientations`.
+
+All these gaps share one guard: the zero-slack output ratchet
+`no_power_glyph_foreign_body_overlap_across_fixtures`, which measures
+*emitted* geometry and trips on any drift. A possible remedy — widen
+the gate activation to "either body is oversized OR either element's
+glyph reach exceeds the cell half-extent" — is explicitly **deferred
+until a fixture demonstrates the need**: today every measured count is
+already at its floor, so widening buys nothing and risks reshuffling
+layouts (the within-Tier-1 sideways trade the ratchet rule forbids).
 
 ### Problem
 
