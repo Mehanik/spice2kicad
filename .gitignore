@@ -7,3 +7,7 @@ Cargo.lock.bak
 
 .claude/settings.local.json
 .mcp.json
+
+# local conversion outputs (scratch)
+/out/
+/scratch_svg/
