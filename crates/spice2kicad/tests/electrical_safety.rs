@@ -27,7 +27,7 @@ mod common;
 use std::path::PathBuf;
 
 use common::spice_to_kicad;
-use kicad_symbols::{Orientation, Rotation};
+use kicad_symbols::{Orientation, PinElectrical, Rotation};
 use lexpr::Value;
 
 fn fixtures_dir() -> PathBuf {
@@ -2077,4 +2077,231 @@ fn negative_rails_render_as_vee_not_gnd() {
              but no negative-rail glyph was emitted",
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1 — no spurious PWR_FLAG on internal signal nets.
+//
+// A `power:PWR_FLAG` is only warranted on a net KiCad's ERC would
+// otherwise flag as undriven:
+//   * a Power/Ground *rail* net (its pins are all `power_in`; passives
+//     do NOT count as drivers on a power net — a rail flag stays until
+//     the deferred rail-elimination decision), or
+//   * a *signal* net whose pins are ALL `input`/`power_in` with no
+//     passive or driving pin (e.g. a transistor base fed solely by an
+//     `;@ ignore`d stimulus — `diff_pair`'s `in1`/`in2`).
+//
+// The current generator uses the POWER-net driver rule (`drives()`,
+// which excludes `Passive`) on *signal* nets too, so a signal net with
+// only passive pins plus one `input` pin — e.g. `common_emitter`'s net
+// `b` (R1/R2/CIN passive + Q1 base input) — wrongly gets a flag. But
+// KiCad's real ERC counts a PASSIVE pin as a valid driver on a signal
+// net, so such a net needs NO flag. These tests pin that down:
+// `no_pwr_flag_on_signal_net_with_passive_pin` FAILS today (it catches
+// the net-`b` flag) and passes once the generator is class-aware;
+// `phase1_erc_stays_clean` is a Tier-0 (V2) regression guard that the
+// flag removal must not reintroduce any ERC error.
+// ---------------------------------------------------------------------------
+
+/// World-frame pin electrical types for every *placed real symbol*
+/// (power glyphs `power:*` and `#PWR`/`#FLG` markers excluded — they are
+/// not the pins whose presence makes a flag redundant). Keyed by
+/// quantised world coordinate so a co-located PWR_FLAG can be classified
+/// by what actually sits under it.
+#[allow(clippy::type_complexity)]
+fn placed_pin_electricals(
+    root: &Value,
+) -> HashMap<(i64, i64), Vec<(String, String, PinElectrical)>> {
+    let library = load_test_library();
+    let mut out: HashMap<(i64, i64), Vec<(String, String, PinElectrical)>> = HashMap::new();
+    for sym in children(root, "symbol") {
+        let Some((refdes, lib_id)) = placed_symbol_refdes_and_lib_id(sym) else {
+            continue;
+        };
+        // Rail glyphs and flags carry `power:*` lib_ids and #PWR/#FLG
+        // refdes — never a real component pin we'd count as a driver.
+        if lib_id.starts_with("power:") || refdes.starts_with("#PWR") || refdes.starts_with("#FLG")
+        {
+            continue;
+        }
+        let Some((ox, oy, orient)) = placed_symbol_pose(sym) else {
+            continue;
+        };
+        let Some(lib_sym) = library.lookup(&lib_id) else {
+            continue;
+        };
+        for tp in lib_sym.pins_in(orient) {
+            let wx = ox + tp.x;
+            let wy = oy - tp.y;
+            out.entry(qkey(wx, wy)).or_default().push((
+                refdes.clone(),
+                tp.number.clone(),
+                tp.electrical,
+            ));
+        }
+    }
+    out
+}
+
+/// Quantised world coordinates of every placed rail glyph
+/// (`power:GND` / `power:VCC` / `power:VEE` / … — NOT `power:PWR_FLAG`).
+/// A PWR_FLAG co-located with one of these is a *rail* flag, exempt from
+/// the signal-net check (rail-flag elimination is a separate, deferred
+/// decision — see MEMORY / annotation-spec §9).
+fn rail_glyph_coords(root: &Value) -> HashSet<(i64, i64)> {
+    let mut out = HashSet::new();
+    for sym in children(root, "symbol") {
+        let mut lib_id = String::new();
+        if let Some(lid) = find_child(sym, "lib_id")
+            && let Some(s) = list_iter(lid).nth(1).and_then(as_str)
+        {
+            s.clone_into(&mut lib_id);
+        }
+        if !lib_id.starts_with("power:") || lib_id == "power:PWR_FLAG" {
+            continue;
+        }
+        if let Some((x, y, _)) = at_xy_rot(sym) {
+            out.insert(qkey(x, y));
+        }
+    }
+    out
+}
+
+/// Quantised world coordinates + refdes of every placed `power:PWR_FLAG`.
+fn pwr_flag_coords(root: &Value) -> Vec<(String, (i64, i64))> {
+    let mut out = Vec::new();
+    for sym in children(root, "symbol") {
+        let Some((refdes, lib_id)) = placed_symbol_refdes_and_lib_id(sym) else {
+            continue;
+        };
+        if lib_id != "power:PWR_FLAG" {
+            continue;
+        }
+        if let Some((x, y, _)) = at_xy_rot(sym) {
+            out.push((refdes, qkey(x, y)));
+        }
+    }
+    out
+}
+
+#[test]
+#[allow(clippy::cast_precision_loss)]
+fn no_pwr_flag_on_signal_net_with_passive_pin() {
+    // For every fixture, every emitted `power:PWR_FLAG` that is NOT
+    // co-located with a rail glyph must sit on a signal net whose pins
+    // are *all* driver-requiring (`input`/`power_in`) — i.e. it must
+    // land on a real component pin, and none of the pins co-located
+    // there may be `Passive` or a driver (`drives()`). A flag whose
+    // anchor pin is passive/driving is spurious: KiCad counts that pin
+    // as a valid signal-net driver, so the flag is redundant noise.
+    let mut violations: Vec<String> = Vec::new();
+    for name in SHEETS {
+        let src = fixtures_dir().join(format!("{name}.cir"));
+        let tmp = tempdir(name);
+        let sch = spice_to_kicad(&src, &tmp).expect("spice2kicad");
+        let root = parse(&sch);
+
+        let rails = rail_glyph_coords(&root);
+        let pins = placed_pin_electricals(&root);
+        for (refdes, coord) in pwr_flag_coords(&root) {
+            if rails.contains(&coord) {
+                // Rail flag — exempt (deferred rail-flag decision).
+                continue;
+            }
+            let here = pins.get(&coord);
+            // A non-rail flag must anchor on a real component pin.
+            let Some(here) = here else {
+                violations.push(format!(
+                    "{name}: {refdes} at ({:.2},{:.2}) is not co-located with any rail glyph \
+                     or real component pin — cannot be a legitimate driver marker",
+                    coord.0 as f64 / 1000.0,
+                    coord.1 as f64 / 1000.0,
+                ));
+                continue;
+            };
+            let bad: Vec<String> = here
+                .iter()
+                .filter(|(_, _, e)| *e == PinElectrical::Passive || e.drives())
+                .map(|(r, p, e)| format!("{r}.{p}({e:?})"))
+                .collect();
+            if !bad.is_empty() {
+                violations.push(format!(
+                    "{name}: {refdes} at ({:.2},{:.2}) sits on a signal net driven by \
+                     passive/driving pin(s) [{}] — flag is spurious (KiCad counts a passive \
+                     pin as a valid signal-net driver)",
+                    coord.0 as f64 / 1000.0,
+                    coord.1 as f64 / 1000.0,
+                    bad.join(", "),
+                ));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "spurious PWR_FLAG(s) on signal nets that already have a passive/driving pin:\n  {}",
+        violations.join("\n  "),
+    );
+}
+
+/// Fixtures whose emitted schematic Phase 1 touches (flat root-sheet
+/// fixtures — no hierarchical-ground ERC artifact). ERC must stay at
+/// zero errors after the net-`b`-class flag is removed.
+const PHASE1_ERC_FIXTURES: &[&str] = &[
+    "rc_lowpass",
+    "common_emitter",
+    "diff_pair",
+    "multivibrator",
+    "opamp_inverting_real",
+];
+
+#[test]
+fn phase1_erc_stays_clean() {
+    // Tier-0 (V2) regression guard: removing the spurious net-`b` flag
+    // (and any other class-aware flag pruning) must not reintroduce an
+    // ERC error. Passes today (ERC is already clean) and must keep
+    // passing after the fix. Skips cleanly when `kicad-cli` is absent.
+    if std::process::Command::new("kicad-cli")
+        .arg("version")
+        .output()
+        .ok()
+        .is_none_or(|o| !o.status.success())
+    {
+        eprintln!("kicad-cli not on PATH — skipping phase1_erc_stays_clean");
+        return;
+    }
+    let mut failures: Vec<String> = Vec::new();
+    for name in PHASE1_ERC_FIXTURES {
+        let src = fixtures_dir().join(format!("{name}.cir"));
+        let tmp = tempdir(name);
+        let sch = spice_to_kicad(&src, &tmp).expect("spice2kicad");
+        let report = tmp.join(format!("{name}-erc.rpt"));
+        let _ = std::process::Command::new("kicad-cli")
+            .args(["sch", "erc", "--severity-error", "-o"])
+            .arg(&report)
+            .arg(&sch)
+            .output()
+            .expect("invoke kicad-cli sch erc");
+        let body = std::fs::read_to_string(&report).unwrap_or_default();
+        let lines: Vec<&str> = body.lines().collect();
+        for i in 0..lines.len() {
+            let trimmed = lines[i].trim_start();
+            if !trimmed.starts_with('[') {
+                continue;
+            }
+            let sev = lines
+                .iter()
+                .skip(i + 1)
+                .take(3)
+                .find_map(|l| l.trim_start().strip_prefix("; "))
+                .unwrap_or("warning");
+            if sev.starts_with("error") {
+                failures.push(format!("{name}: {}", lines[i].trim()));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "Phase 1 ERC regression — error-severity violations after flag pruning:\n  {}",
+        failures.join("\n  "),
+    );
 }

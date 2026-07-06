@@ -36,7 +36,7 @@ use std::collections::BTreeSet;
 
 use crate::EmitError;
 use crate::sexpr::Sexpr;
-use kicad_symbols::{Library, Orientation, RawSexpr, Rotation, Symbol};
+use kicad_symbols::{Library, Orientation, PinElectrical, RawSexpr, Rotation, Symbol};
 use spice_layout::{PlacedElement, Placement};
 use uuid::Uuid;
 
@@ -161,6 +161,8 @@ pub fn emit_root(
     let obstacles = placement_obstacles(placement, library);
     let driven = collect_driven_nets(placement, library);
     let requires_driver = collect_driver_required_nets(placement, library);
+    let passive = collect_passive_nets(placement, library);
+    let power_in = collect_power_in_nets(placement, library);
     let negative_rails = spice_layout::net_class::negative_rail_nets(placement);
     for routed in route_nets(
         &net_pins,
@@ -170,6 +172,8 @@ pub fn emit_root(
         &driven,
         &requires_driver,
         &negative_rails,
+        &passive,
+        &power_in,
         &sheet_edge_pins,
     )? {
         items.push(routed);
@@ -275,6 +279,8 @@ pub fn emit_child_sheet(child: &ChildSheet<'_>, library: &Library) -> Result<Str
     // sheet-local child nets receive a child PWR_FLAG.
     driven.extend(port_driven.iter().cloned());
     let requires_driver = collect_driver_required_nets(child.placement, library);
+    let passive = collect_passive_nets(child.placement, library);
+    let power_in = collect_power_in_nets(child.placement, library);
     let negative_rails = spice_layout::net_class::negative_rail_nets(child.placement);
     for routed in route_nets(
         &net_pins,
@@ -284,6 +290,8 @@ pub fn emit_child_sheet(child: &ChildSheet<'_>, library: &Library) -> Result<Str
         &driven,
         &requires_driver,
         &negative_rails,
+        &passive,
+        &power_in,
         &[],
     )? {
         items.push(routed);
@@ -704,16 +712,31 @@ fn placement_has_undriven_net(
     let net_pins = collect_net_pins(placement, library, &extra);
     let driven = collect_driven_nets(placement, library);
     let requires_driver = collect_driver_required_nets(placement, library);
+    let passive = collect_passive_nets(placement, library);
+    let power_in = collect_power_in_nets(placement, library);
     net_pins.iter().any(|(name, pins)| {
         if pins.is_empty() || driven.contains(name) || extra_driven.contains(name) {
             return false;
         }
         let class = classify_net_by_name(name);
         let is_power_ground = !matches!(class, spice_layout::net_class::NetClass::Signal);
+        // KiCad's `ispowerNet` (erc.cpp:1033) is pin-based: any net with
+        // a component `power_in` pin is a power net, which accepts only a
+        // `power_out` driver (passive does not qualify). Superset of the
+        // name-based Power/Ground class.
+        let is_power_class = is_power_ground || power_in.contains(name);
         // Mirror `spice_route::pwrflag::emit`: a Power/Ground net always
         // requires a driver (it gets a `power_in` glyph); a Signal net
         // requires one only if a placement pin on it is input/power_in.
         if !is_power_ground && !requires_driver.contains(name) {
+            return false;
+        }
+        // Mirror the class-aware driver rule: a Signal net with any
+        // passive pin is validly driven (KiCad `PT_PASSIVE` ∈
+        // `DrivingPinTypes`), so it gets no PWR_FLAG. A *power* net (a
+        // name-based rail OR any net with a component `power_in` pin)
+        // still demands a real `power_out`, so passive pins do not count.
+        if !is_power_class && passive.contains(name) {
             return false;
         }
         if is_power_ground && !is_root {
@@ -1072,7 +1095,10 @@ pub(crate) fn collect_net_pins(
 /// Power-rail *sources* (`is_power_source`) contribute no symbol and
 /// no pins (V10), so their nets are driven only if a real circuit
 /// element on the net carries a driving pin — exactly the rail case
-/// that needs a `PWR_FLAG`. Hierarchical `extra_pins` (sheet ports /
+/// that needs a `PWR_FLAG`. Latent divergence (mirrors the primary
+/// note at `spice-route/src/pwrflag.rs`): for a *power-class* net KiCad
+/// silences `power_pin_not_driven` only for a `POWER_OUT` pin, not any
+/// `drives()` pin; no current fixture exercises the gap. Hierarchical `extra_pins` (sheet ports /
 /// labels) are intentionally NOT counted as drivers: they are label
 /// anchors, and on a child sheet the body still needs its own
 /// `PWR_FLAG` if nothing inside drives the net.
@@ -1092,6 +1118,36 @@ pub(crate) fn collect_driver_required_nets(
     library: &Library,
 ) -> std::collections::BTreeSet<String> {
     net_set_where(placement, library, |pin| pin.electrical.requires_driver())
+}
+
+/// Set of net names with at least one `Passive` pin (a resistor/cap
+/// terminal). KiCad counts a passive pin as a valid *signal-net* driver
+/// (`PT_PASSIVE` ∈ `DrivingPinTypes`), so a Signal net in this set needs
+/// no `PWR_FLAG`. Mirrors the `NetSpec::has_passive` predicate consumed
+/// by `spice_route::pwrflag::emit`.
+pub(crate) fn collect_passive_nets(
+    placement: &Placement,
+    library: &Library,
+) -> std::collections::BTreeSet<String> {
+    net_set_where(placement, library, |pin| {
+        pin.electrical == PinElectrical::Passive
+    })
+}
+
+/// Set of net names with at least one component `power_in` pin. KiCad's
+/// ERC classifies any such net as a *power net* (`ispowerNet`,
+/// erc.cpp:1033), which accepts only a `power_out` driver — a passive
+/// pin does NOT drive it. So a passive pin must not suppress the
+/// `PWR_FLAG` on such a net, even one with a signal-flavoured name.
+/// Mirrors `NetSpec::has_power_in` consumed by
+/// `spice_route::pwrflag::emit`.
+pub(crate) fn collect_power_in_nets(
+    placement: &Placement,
+    library: &Library,
+) -> std::collections::BTreeSet<String> {
+    net_set_where(placement, library, |pin| {
+        pin.electrical == PinElectrical::PowerIn
+    })
 }
 
 /// Collect net names having ≥1 pin satisfying `pred`. Shared backbone
@@ -1139,6 +1195,8 @@ fn route_nets(
     driven: &std::collections::BTreeSet<String>,
     requires_driver: &std::collections::BTreeSet<String>,
     negative_rails: &std::collections::BTreeSet<String>,
+    passive: &std::collections::BTreeSet<String>,
+    power_in: &std::collections::BTreeSet<String>,
     sheet_edge_pins: &[(f64, f64)],
 ) -> Result<Vec<Sexpr>, EmitError> {
     use spice_route::{NetSpec, PinRef, RouteRequest};
@@ -1202,6 +1260,8 @@ fn route_nets(
             class,
             pins: pin_refs,
             negative_rail: negative_rails.contains(name),
+            has_passive: passive.contains(name),
+            has_power_in: power_in.contains(name),
         });
     }
 
@@ -1318,6 +1378,10 @@ pub(crate) fn trial_route(placement: &Placement, library: &Library) -> TrialRout
             // selection never feeds back into placement (CLAUDE.md:
             // "Decoration is a strict consumer of placement output").
             negative_rail: false,
+            // PWR_FLAG-only concern (no wire geometry) — irrelevant to
+            // the V5/V11 refinement measurement, same as `drives`.
+            has_passive: false,
+            has_power_in: false,
         });
     }
 

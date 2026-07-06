@@ -7,17 +7,34 @@
 //! remedy is a `PWR_FLAG` symbol: it exposes a single `power_out` pin
 //! that marks the net as externally driven, silencing both checks.
 //!
-//! The rule here is **general and structural**: place exactly one
-//! `PWR_FLAG` on every net that (a) has at least one pin, (b) has at
-//! least one pin that *requires* a driver (a `power_in` or `input`
-//! pin — `PinRef::requires_driver`), and (c) has no *driving* pin
-//! (`PinRef::drives == false` for all its pins). This single predicate
-//! covers both ERC classes — a rail net whose only pins are
-//! `power_in`, and a signal net whose only pins are `input` (e.g. a
-//! transistor base fed solely by an input global label whose stimulus
-//! source is `;@ ignore`d) — while leaving passive-only nets (R–C
-//! junctions) untouched, since they impose no driver requirement. No
-//! fixture or refdes names are consulted.
+//! The rule here is **general, structural, and class-aware**. A net
+//! gets exactly one `PWR_FLAG` iff:
+//!   (a) it has at least one pin, AND
+//!   (b) ERC *requires* it to be driven — a Power/Ground net always
+//!       does (its `power:*` glyph exposes a `power_in` anchor), and a
+//!       Signal net does only if some pin on it is `input`/`power_in`
+//!       (`PinRef::requires_driver`), AND
+//!   (c) it lacks a valid driver *for its class*:
+//!         * any class → a true *driving* pin (`PinRef::drives`:
+//!           Output/PowerOut/bidirectional/…);
+//!         * Signal only → **also** any `Passive` pin. KiCad's
+//!           `DrivingPinTypes` includes `PT_PASSIVE` for non-power
+//!           nets, so a resistor/cap terminal is a valid signal-net
+//!           driver — but *not* for a *power net*, which still demands
+//!           a real `power_out`. "Power net" here follows KiCad's
+//!           `ispowerNet` (erc.cpp:1033): a name-based Power/Ground
+//!           rail OR any net carrying a component `power_in` pin
+//!           (`NetSpec::has_power_in`), even under a signal-flavoured
+//!           name.
+//!
+//! This covers both ERC classes — a rail net whose only pins are
+//! `power_in` (rail flag preserved), and a signal net whose only pins
+//! are `input` with no passive terminal (e.g. a transistor base fed
+//! solely by an input global label whose stimulus source is `;@
+//! ignore`d) — while leaving passive-bearing signal nets (R–C
+//! junctions, a transistor base with a bias resistor) untouched, since
+//! their passive pin is a valid driver. No fixture or refdes names are
+//! consulted.
 //!
 //! Placement is V11-safe: the flag's anchor pin sits exactly on an
 //! existing pin coordinate of the *same* net, so it joins that net by
@@ -65,29 +82,59 @@ pub fn emit(
         if net.pins.is_empty() {
             continue;
         }
-        // Only nets that ERC *requires* to be driven need a flag.
-        // Two sources of that requirement:
+        let is_power_ground = matches!(net.class, NetClass::Power | NetClass::Ground);
+        // KiCad's ERC treats a net as a *power net* (`ispowerNet`,
+        // erc.cpp:1033) iff it carries ≥1 `power_in` pin — purely
+        // pin-based, not name-based. A power net accepts only a
+        // `power_out` driver; a passive pin does NOT drive it. So the
+        // passive exception below must be suppressed for any net with a
+        // component `power_in` pin, even one with a signal-flavoured
+        // name (e.g. an opamp `V+` on an RC-derived midrail). This is a
+        // superset of the name-based Power/Ground class.
+        let is_power_class = is_power_ground || net.has_power_in;
+        // (1) Does ERC *require* this net to be driven?
         //   * A Power/Ground net always gets a `power:*` glyph (whose
         //     anchor pin is `power_in`) from `rails::emit`, so it
         //     unconditionally requires a `power_out` driver.
         //   * A Signal net requires one only if a placement pin on it is
         //     itself `input`/`power_in` (`PinRef::requires_driver`).
-        // A purely passive Signal net (e.g. an R–C junction) imposes no
-        // driver requirement, so a PWR_FLAG there would be spurious
-        // visual noise.
-        let requires = matches!(net.class, NetClass::Power | NetClass::Ground)
-            || net.pins.iter().any(|p| p.requires_driver);
+        let requires = is_power_ground || net.pins.iter().any(|p| p.requires_driver);
         if !requires {
             continue;
         }
-        if net.pins.iter().any(|p| p.drives) {
+        // (2) Does the net already carry a valid driver *for its class*?
+        //   * Any class → a true driving pin (`PinRef::drives`).
+        //   * Signal only → also a `Passive` pin (`NetSpec::has_passive`).
+        //     KiCad's `DrivingPinTypes` counts `PT_PASSIVE` as a driver
+        //     on a non-power net, so a Signal net with a resistor/cap
+        //     terminal needs no flag. A *power* net (name-based rail OR
+        //     any net with a component `power_in` pin, `is_power_class`)
+        //     still requires a real `power_out`, so its passive pins do
+        //     not qualify.
+        // Latent divergence: for a *power-class* net, `p.drives` accepts
+        // any driving pin (Output/TriState/Bidi), but KiCad silences
+        // `power_pin_not_driven` **only** for a `POWER_OUT` pin — a power
+        // net whose sole driver is a plain `Output` pin would skip the flag
+        // here yet still trip ERC. No current fixture exercises it (same
+        // untestable-divergence family as `drives()`'s OC/OE note,
+        // kicad-symbols lib.rs); tighten this to a power_out-specific check
+        // when a fixture that reproduces it lands.
+        let has_driver = net.pins.iter().any(|p| p.drives) || (!is_power_class && net.has_passive);
+        if has_driver {
             continue;
         }
         // Power/Ground nets are global (one electrical net across all
         // sheets). Drive them with a single root-sheet PWR_FLAG; a
         // child-sheet copy would double-drive the net. Signal nets are
         // sheet-local, so a child PWR_FLAG is correct and necessary.
-        if matches!(net.class, NetClass::Power | NetClass::Ground) && !is_root {
+        //
+        // This gate keys on `is_power_ground` (name-based global rails),
+        // NOT `is_power_class`. A signal-named net that is only a "power
+        // net" by virtue of carrying a component `power_in` pin
+        // (`has_power_in`) is sheet-*local*, so on a child sheet it
+        // legitimately needs its own local flag — do not fold it into
+        // the global root-only gate.
+        if is_power_ground && !is_root {
             continue;
         }
         // Net has no driver — it would trip ERC. Pick a deterministic

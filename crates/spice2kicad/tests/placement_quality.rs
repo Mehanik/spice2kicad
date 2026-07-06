@@ -1927,7 +1927,8 @@ fn glyph_body_bbox(library: &Library, sym: &Value) -> Option<(String, Bbox)> {
 /// See ADR-14 "Known scope limits".
 ///
 /// `opamp_inverting_real` remains **1**: its residual is a distinct
-/// defect class — a `power:PWR_FLAG` driver marker (`#FLG4`) clipping
+/// defect class — a `power:PWR_FLAG` driver marker (`#FLG3` at
+/// (30.48,44.45), the VEE rail flag) clipping
 /// `RIN`, anchored on the opamp triangle `X1` (a sheet-port-flavoured
 /// overlap, ADR-14 "Risks": "may have a different cause … scope it out").
 /// The opamp's rail pins sit on the oversized `X1` body itself; reserving
@@ -1940,7 +1941,8 @@ fn glyph_body_bbox(library: &Library, sym: &Value) -> Option<(String, Bbox)> {
 /// host-on-oversized-body case, deferred to v0.2 (see ADR-14).
 fn power_glyph_foreign_body_overlap_budget(fixture: &str) -> usize {
     match fixture {
-        // [3] deferred: a PWR_FLAG marker clipping RIN, anchored on the
+        // [3] deferred: a PWR_FLAG marker (#FLG3 at (30.48,44.45), the VEE
+        // rail flag) clipping RIN, anchored on the
         // oversized opamp X1. Distinct from the (now-fixed) rail-consumer
         // case; see ADR-14. Driven to 0 by a future v0.2 placement pass.
         "opamp_inverting_real" => 1,

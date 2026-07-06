@@ -66,6 +66,20 @@ pub struct NetSpec {
     /// (CLAUDE.md V10). Derived generally upstream via
     /// [`spice_layout::net_class::negative_rail_nets`].
     pub negative_rail: bool,
+    /// True when the net has ≥1 `Passive` pin (resistor/cap terminal).
+    /// KiCad counts a passive pin as a valid *signal-net* driver
+    /// (`PT_PASSIVE` ∈ `DrivingPinTypes`), so a Signal net with a
+    /// passive pin needs no `PWR_FLAG`. Ignored for Power/Ground nets,
+    /// which require a true `power_out` driver regardless.
+    pub has_passive: bool,
+    /// True when the net has ≥1 component `power_in` pin. KiCad's ERC
+    /// classifies any net with a `power_in` pin as a *power net*
+    /// (`ispowerNet`, erc.cpp:1033), which accepts only a `power_out`
+    /// driver — a passive pin does NOT drive it. So a passive pin must
+    /// not suppress the flag on such a net. Distinct from `class`
+    /// (name-based) because a component `power_in` pin can land on a
+    /// signal-named net.
+    pub has_power_in: bool,
 }
 
 /// Input to [`crate::route`].

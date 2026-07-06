@@ -204,11 +204,15 @@ fn run_v2(name: &str) {
     let (sch, tmp) = emit(name);
     let report = tmp.join(format!("{name}-erc.rpt"));
     // Drop `--exit-code-violations`: we count residual errors ourselves.
-    // The emitter now places a `power:PWR_FLAG` on every otherwise-
-    // undriven net (rails and signal nets whose pins are all
-    // power_in/passive/input — no Output driver), so ERC no longer
-    // reports `power_pin_not_driven` / `pin_not_driven`. No error class
-    // needs suppressing; we assert zero error-severity violations.
+    // The emitter places a `power:PWR_FLAG` on every otherwise-undriven
+    // net, class-aware: a Power/Ground rail (its `power_in` glyph needs a
+    // `power_out`), and a signal net whose driver-requiring pin
+    // (`input`/`power_in`) has NO valid driver. A signal net with any
+    // `Passive` (resistor/cap) pin is validly driven — KiCad counts
+    // `PT_PASSIVE` as a signal-net driver — so it gets no flag. This
+    // clears every `power_pin_not_driven` / `pin_not_driven`; no error
+    // class needs suppressing, and we assert zero error-severity
+    // violations.
     let _ = Command::new("kicad-cli")
         .args(["sch", "erc", "--severity-error", "-o"])
         .arg(&report)
@@ -223,12 +227,14 @@ fn run_v2(name: &str) {
     // Pair each `[class]:` line with the next `; <severity>` line so we
     // can isolate `error` rows.
     //
-    // The emitter now places a `power:PWR_FLAG` on every otherwise-
-    // undriven net (rails whose pins are all `power_in`, and signal
-    // nets whose pins are all `input` — no Output/Power-output driver).
-    // On every *flat* fixture this genuinely clears all
-    // `power_pin_not_driven` / `pin_not_driven` errors, so they are NOT
-    // suppressed and the gate asserts a fully empty error set.
+    // The emitter places a `power:PWR_FLAG` on every otherwise-undriven
+    // net (rails whose pins are all `power_in`, and signal nets whose
+    // only driver-requiring pin is `input` with no passive terminal — no
+    // Output/Power-output/Passive driver). A signal net carrying any
+    // `Passive` pin needs no flag (KiCad counts `PT_PASSIVE` as a
+    // signal-net driver). On every *flat* fixture this genuinely clears
+    // all `power_pin_not_driven` / `pin_not_driven` errors, so they are
+    // NOT suppressed and the gate asserts a fully empty error set.
     //
     // The sole documented exception is `opamp_inverting`'s hierarchical
     // ground: the parent's X1 `inp` port connects to SPICE node `0`

@@ -207,6 +207,18 @@ impl PinElectrical {
     /// KiCad's connectivity rules: an Output / Power-output / open-
     /// collector / open-emitter / tri-state / bidirectional pin drives;
     /// inputs, passives and power inputs do not.
+    ///
+    /// NB: this is intentionally *broader* than KiCad's own
+    /// `DrivingPinTypes` (`erc.cpp:116–123` = OUTPUT, POWER_OUT, PASSIVE,
+    /// TRISTATE, BIDI), which does **not** list `OPEN_COLLECTOR` /
+    /// `OPEN_EMITTER`. Keeping OC/OE here is a *known, deliberate*
+    /// divergence for now: no current fixture has any OC/OE pin, so it is
+    /// untestable/zero-impact today, and the class-independent driver set
+    /// handles `Passive` separately (via `NetSpec::has_passive`), so a
+    /// verbatim match to `DrivingPinTypes` is *not* the right edit. The
+    /// only correct change — *dropping* OC/OE — should land alongside a
+    /// fixture that actually exercises it, else it is unverifiable. Do
+    /// not silently re-copy this into a "match KiCad exactly" refactor.
     #[must_use]
     pub fn drives(self) -> bool {
         matches!(

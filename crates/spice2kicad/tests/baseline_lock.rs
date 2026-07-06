@@ -169,6 +169,20 @@ fn extract_symbols(path: &std::path::Path) -> Vec<(String, String, f64, f64, f64
 /// from the glyph body (rot follows GND-down vs VCC/VEE-up), so the
 /// `#FLG*` rows move onto their `#PWR*` coordinate and flip rotation. All
 /// relative poses are otherwise preserved; every verifier stays green.
+///
+/// Regenerated again for the Phase-1 class-aware PWR_FLAG pruning: a
+/// PWR_FLAG is no longer emitted on a *signal* net that carries a
+/// `Passive` (resistor/cap) terminal, because KiCad's `DrivingPinTypes`
+/// counts `PT_PASSIVE` as a valid signal-net driver — so those flags
+/// were redundant. This removed the spurious signal-net flags on
+/// `common_emitter` (net `b`), `multivibrator` (two base nets), and
+/// `opamp_inverting_real` (one feedback node), renumbering the surviving
+/// `#FLG*` rows on those three sheets (fewer flag rows = less geometry;
+/// ratchet direction DOWN). No symbol moved — the removed flags were
+/// co-located with an existing rail glyph/pin, so the V15 content bbox
+/// and every other pose are unchanged. Rail flags (one per global rail)
+/// and genuinely input-only signal nets (`diff_pair` `in1`/`in2`,
+/// base-only with no passive pin) are preserved; ERC stays 0 errors.
 const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
     // (fixture, refdes, lib_id, x, y, rot, mirror)
     //
@@ -191,15 +205,6 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
     (
         "common_emitter",
         "#FLG2",
-        "power:PWR_FLAG",
-        30.48,
-        36.83,
-        180.0,
-        "",
-    ),
-    (
-        "common_emitter",
-        "#FLG3",
         "power:PWR_FLAG",
         30.48,
         29.21,
@@ -365,24 +370,6 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "#FLG2",
         "power:PWR_FLAG",
         25.40,
-        49.53,
-        180.0,
-        "",
-    ),
-    (
-        "multivibrator",
-        "#FLG3",
-        "power:PWR_FLAG",
-        41.91,
-        53.34,
-        180.0,
-        "",
-    ),
-    (
-        "multivibrator",
-        "#FLG4",
-        "power:PWR_FLAG",
-        25.40,
         41.91,
         180.0,
         "",
@@ -518,15 +505,6 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "opamp_inverting_real",
         "#FLG2",
         "power:PWR_FLAG",
-        25.40,
-        39.37,
-        180.0,
-        "",
-    ),
-    (
-        "opamp_inverting_real",
-        "#FLG3",
-        "power:PWR_FLAG",
         30.48,
         29.21,
         180.0,
@@ -534,7 +512,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
     ),
     (
         "opamp_inverting_real",
-        "#FLG4",
+        "#FLG3",
         "power:PWR_FLAG",
         30.48,
         44.45,

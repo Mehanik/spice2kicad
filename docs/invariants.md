@@ -458,15 +458,26 @@ invariant here.
   opamp_inverting_real) at R7. **PWR_FLAG driver emission is now
   live** (`crates/spice-route/src/pwrflag.rs`, called from
   `route()` after Stage 1): exactly one `power:PWR_FLAG` is placed,
-  wire-coincident, on every net that ERC requires to be driven but
-  has no driving pin — i.e. any net with a `power_in`/`input` pin
-  (or any Power/Ground class net, which carries a `power_in` glyph)
-  and no Output/Power-output/bidirectional/tri-state/open-collector/
-  open-emitter pin. The predicate is derived from KiCad pin
-  electrical types (`kicad_symbols::PinElectrical::{drives,
-  requires_driver}`), never from fixture/refdes names, so it covers
-  rails and the diff_pair input-base nets with one rule and leaves
-  passive-only R–C junctions untouched. Global Power/Ground nets are
+  wire-coincident, on a net iff (a) it has ≥1 pin, (b) ERC *requires*
+  it driven — a Power/Ground net always, a Signal net only if some pin
+  on it is `input`/`power_in` — and (c) it lacks a valid driver *for
+  its class*. The driver rule is class-aware, mirroring KiCad's
+  `DrivingPinTypes`: **any** class is driven by a true driving pin
+  (`PinElectrical::drives` — Output/PowerOut/bidirectional/…), and a
+  **Signal** net is *additionally* driven by any **Passive** pin
+  (KiCad's `DrivingPinTypes` ∋ `PT_PASSIVE`, so a resistor/cap
+  terminal is a valid signal-net driver). A **power net** — a
+  name-based Power/Ground rail **or** any net carrying a component
+  `power_in` pin (KiCad's `ispowerNet`, `erc.cpp:1033`, tracked via
+  `NetSpec::has_power_in`, even under a signal-flavoured name) —
+  ignores passives and still demands a real `power_out`. The predicate
+  is derived from KiCad pin electrical types
+  (`kicad_symbols::PinElectrical::{drives, requires_driver}`) plus the
+  net-level `has_passive`/`has_power_in` flags, never from
+  fixture/refdes names, so it covers rails and the diff_pair
+  input-base nets with one rule and leaves passive-bearing signal nets
+  (R–C junctions, a transistor base with a bias resistor) untouched —
+  their passive terminal is itself the driver. Global Power/Ground nets are
   driven by a single root-sheet flag (child-sheet copies would
   double-drive). ERC is genuinely clean (zero `power_pin_not_driven`
   / `pin_not_driven`) on the four flat fixtures; `opamp_inverting`'s
