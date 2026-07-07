@@ -972,6 +972,427 @@ fn part_overlaps_sibling(routed: &[RoutedNet], target: usize, part: &Segment) ->
     false
 }
 
+/// True iff a horizontal and a vertical segment cross at a point that
+/// is **strictly interior to both** — a genuine wire X-crossing. A
+/// T-touch (one segment's endpoint lying on the other's interior) is
+/// deliberately excluded, matching the crossing verifier's
+/// straddle-only `segments_cross_interior`
+/// (`tests/placement_quality.rs`): the deconfliction guard must count
+/// the same crossings the ratchet budget does, or it would accept a jog
+/// that raises the measured crossing count. Parallel segments never
+/// count (collinear overlap is a separate predicate).
+fn interior_cross(a: &Segment, b: &Segment) -> bool {
+    let a_h = (a.y1 - a.y2).abs() < EPS && (a.x1 - a.x2).abs() >= EPS;
+    let a_v = (a.x1 - a.x2).abs() < EPS && (a.y1 - a.y2).abs() >= EPS;
+    let b_h = (b.y1 - b.y2).abs() < EPS && (b.x1 - b.x2).abs() >= EPS;
+    let b_v = (b.x1 - b.x2).abs() < EPS && (b.y1 - b.y2).abs() >= EPS;
+    let (h, v) = if a_h && b_v {
+        (a, b)
+    } else if a_v && b_h {
+        (b, a)
+    } else {
+        return false;
+    };
+    let hy = h.y1;
+    let (hx_lo, hx_hi) = (h.x1.min(h.x2), h.x1.max(h.x2));
+    let vx = v.x1;
+    let (vy_lo, vy_hi) = (v.y1.min(v.y2), v.y1.max(v.y2));
+    vx > hx_lo + EPS && vx < hx_hi - EPS && hy > vy_lo + EPS && hy < vy_hi - EPS
+}
+
+/// Count true interior X-crossings (`interior_cross`) between each part
+/// in `parts` and every segment of every routed net other than
+/// `target`.
+fn count_interior_crossings(parts: &[Segment], routed: &[RoutedNet], target: usize) -> usize {
+    let mut n = 0;
+    for p in parts {
+        if approx_zero_len(p) {
+            continue;
+        }
+        for (i, other) in routed.iter().enumerate() {
+            if i == target {
+                continue;
+            }
+            for s in &other.segments {
+                if interior_cross(p, s) {
+                    n += 1;
+                }
+            }
+        }
+    }
+    n
+}
+
+/// True iff some segment of `net` starts at `pin` (either endpoint) and
+/// leaves it in `pin`'s recorded outward direction — i.e. the pin has a
+/// first wire segment extending outward (the V5 property). Reuses
+/// [`corner_satisfies_outward`] for the direction test, so a pin absent
+/// from `pin_outward` (unconstrained) never counts as having an outward
+/// segment.
+fn pin_has_outward(net: &RoutedNet, pin: (i64, i64), pin_outward: &PinOutwardMap) -> bool {
+    #[allow(clippy::cast_precision_loss)]
+    let p = (pin.0 as f64 / 1000.0, pin.1 as f64 / 1000.0);
+    for s in &net.segments {
+        if approx_zero_len(s) {
+            continue;
+        }
+        for (a, b) in [((s.x1, s.y1), (s.x2, s.y2)), ((s.x2, s.y2), (s.x1, s.y1))] {
+            if key(a.0, a.1) == pin && corner_satisfies_outward(p, b, pin_outward) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// V5-preservation guard: reject a jog that would strip the
+/// outward-extending first segment from any victim own pin that had one
+/// before the jog. Landing a trunk directly on a pin's own row (the
+/// diff_pair failure: the pin sits exactly one cell off the channel)
+/// turns the pin's outward stub into a parallel run — a V5 regression
+/// the ratchet forbids. Returns `true` when the jog is V5-safe.
+fn jog_preserves_v5<S: ::std::hash::BuildHasher>(
+    pre: &RoutedNet,
+    post: &RoutedNet,
+    own_pins: &std::collections::HashSet<(i64, i64), S>,
+    pin_outward: &PinOutwardMap,
+) -> bool {
+    for &pin in own_pins {
+        if pin_has_outward(pre, pin, pin_outward) && !pin_has_outward(post, pin, pin_outward) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Total wire length of a routed net (millimetres), used only as a
+/// deterministic tie-break when two jog directions both pass the
+/// guards.
+fn net_wire_len(net: &RoutedNet) -> f64 {
+    net.segments
+        .iter()
+        .map(|s| (s.x1 - s.x2).abs() + (s.y1 - s.y2).abs())
+        .sum()
+}
+
+/// Move one endpoint of `seg` from `from` to `to` (quantised match on
+/// either end). No-op if neither end coincides with `from`.
+fn move_seg_endpoint(seg: &mut Segment, from: (f64, f64), to: (f64, f64)) {
+    if key(seg.x1, seg.y1) == key(from.0, from.1) {
+        seg.x1 = to.0;
+        seg.y1 = to.1;
+    }
+    if key(seg.x2, seg.y2) == key(from.0, from.1) {
+        seg.x2 = to.0;
+        seg.y2 = to.1;
+    }
+}
+
+/// Translate the trunk segment `si` of `net` by one grid cell on its
+/// perpendicular axis (`delta` on x for a vertical trunk, on y for a
+/// horizontal one), re-anchoring the connector segments that met its
+/// two endpoints so the net stays a connected orthogonal tree:
+///   * a connector whose meeting vertex is **not** one of the victim's
+///     own pins is dragged onto the new track (it grows / shrinks by a
+///     cell, or collapses to zero length when it lands on a pin);
+///   * a meeting vertex that **is** a victim own pin must not move — the
+///     pin keeps its coordinate and a one-cell bridge stub reconnects it
+///     to the trunk's new track (an L), never orphaning the pin.
+///
+/// Zero-length residue is dropped in place (the global cleanup pass
+/// would drop it anyway).
+fn translate_trunk<S: ::std::hash::BuildHasher>(
+    net: &mut RoutedNet,
+    si: usize,
+    delta: f64,
+    own_pins: &std::collections::HashSet<(i64, i64), S>,
+) {
+    let s = net.segments[si];
+    let horizontal = (s.y1 - s.y2).abs() < EPS;
+    let (ox, oy) = if horizontal {
+        (0.0, delta)
+    } else {
+        (delta, 0.0)
+    };
+    let e1 = (s.x1, s.y1);
+    let e2 = (s.x2, s.y2);
+    let e1p = (e1.0 + ox, e1.1 + oy);
+    let e2p = (e2.0 + ox, e2.1 + oy);
+    // Translate the trunk itself.
+    net.segments[si] = Segment {
+        x1: e1p.0,
+        y1: e1p.1,
+        x2: e2p.0,
+        y2: e2p.1,
+    };
+    let mut bridges: Vec<Segment> = Vec::new();
+    for (e, ep) in [(e1, e1p), (e2, e2p)] {
+        if own_pins.contains(&key(e.0, e.1)) {
+            // Pin can't move: bridge from the pin to the new track,
+            // leave every connector anchored on the pin.
+            bridges.push(Segment {
+                x1: e.0,
+                y1: e.1,
+                x2: ep.0,
+                y2: ep.1,
+            });
+        } else {
+            // Drag every connector meeting this vertex onto the track.
+            for (j, seg) in net.segments.iter_mut().enumerate() {
+                if j == si {
+                    continue;
+                }
+                move_seg_endpoint(seg, e, ep);
+            }
+        }
+    }
+    net.segments.extend(bridges);
+    net.segments.retain(|seg| !approx_zero_len(seg));
+}
+
+/// Deterministic winner/victim decision for a cross-net collinear
+/// overlap between routed nets `a` and `b`: the higher-priority net
+/// (`net_priority_key`) is the winner and stays put; ties break to the
+/// lower routed-net index (the same convention `avoid_foreign_pins`
+/// sorts by). Returns `true` when `a` is the winner.
+fn a_wins(routed: &[RoutedNet], a: usize, b: usize) -> bool {
+    let ka = net_priority_key(&routed[a]);
+    let kb = net_priority_key(&routed[b]);
+    ka > kb || (ka == kb && a < b)
+}
+
+/// Find the first cross-net collinear overlap not already recorded as
+/// unresolvable, returning `(victim, victim_seg_idx, winner,
+/// winner_seg_idx)`. Both segment indices are returned so the caller can
+/// fall back to jogging the *winner*'s overlapping trunk when the
+/// victim's own trunk cannot move.
+fn find_first_cross_overlap(
+    routed: &[RoutedNet],
+    failed: &std::collections::HashSet<(usize, usize)>,
+) -> Option<(usize, usize, usize, usize)> {
+    for a in 0..routed.len() {
+        for b in (a + 1)..routed.len() {
+            if failed.contains(&(a, b)) {
+                continue;
+            }
+            for (ia, sa) in routed[a].segments.iter().enumerate() {
+                for (ib, sb) in routed[b].segments.iter().enumerate() {
+                    if segments_collinearly_overlap(sa, sb) {
+                        return if a_wins(routed, a, b) {
+                            // victim = b (seg ib), winner = a (seg ia)
+                            Some((b, ib, a, ia))
+                        } else {
+                            // victim = a (seg ia), winner = b (seg ib)
+                            Some((a, ia, b, ib))
+                        };
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Try to jog the given net's overlapping trunk one grid cell onto an
+/// adjacent free parallel track, in either perpendicular direction.
+/// Fully generic over the net index (`idx`): used for both the victim
+/// (lower-priority net, tried first) and — as a fallback — the winner
+/// (higher-priority net). Accepts the direction (best crossing count,
+/// then shortest wire, then `+` sign) whose *new* geometry clears all
+/// five guards: no sibling collinear overlap (the overlap is gone, not
+/// merely moved) [G1], no obstacle body cross (V12) [G2], no foreign-pin
+/// coincidence (V11) [G3], no rise in the true interior-crossing count
+/// (the ratchet metric) [G4], and no loss of a moved pin's outward first
+/// segment (V5) [G5]. Returns `true` when a direction was applied; rolls
+/// back and returns `false` otherwise.
+fn try_jog_net<S: ::std::hash::BuildHasher>(
+    routed: &mut [RoutedNet],
+    idx: usize,
+    seg_idx: usize,
+    foreign_pins: &std::collections::HashSet<(i64, i64), S>,
+    own_pins: &std::collections::HashSet<(i64, i64), S>,
+    obstacles: &[Bbox],
+    pin_outward: &PinOutwardMap,
+) -> bool {
+    let s = routed[idx].segments[seg_idx];
+    let horizontal = (s.y1 - s.y2).abs() < EPS;
+    let vertical = (s.x1 - s.x2).abs() < EPS;
+    if !horizontal && !vertical {
+        return false; // only axis-aligned trunks are joggable
+    }
+    let pre = routed[idx].clone();
+    let pre_keys: std::collections::HashSet<(i64, i64, i64, i64)> =
+        pre.segments.iter().map(seg_key).collect();
+    #[allow(clippy::cast_precision_loss)]
+    let foreign_bboxes: Vec<Bbox> = foreign_pins
+        .iter()
+        .map(|&(x, y)| Bbox::from_point(x as f64 / 1000.0, y as f64 / 1000.0))
+        .collect();
+
+    // Evaluate both perpendicular directions; keep every one that
+    // passes all guards, then pick deterministically.
+    let mut best: Option<(usize, f64, usize, RoutedNet)> = None;
+    for (sign_rank, delta) in [GRID_MM, -GRID_MM].into_iter().enumerate() {
+        translate_trunk(&mut routed[idx], seg_idx, delta, own_pins);
+        let new_parts: Vec<Segment> = routed[idx]
+            .segments
+            .iter()
+            .filter(|s| !pre_keys.contains(&seg_key(s)) && !approx_zero_len(s))
+            .copied()
+            .collect();
+        let removed_parts: Vec<Segment> = pre
+            .segments
+            .iter()
+            .filter(|s| {
+                !routed[idx]
+                    .segments
+                    .iter()
+                    .any(|n| seg_key(n) == seg_key(s))
+            })
+            .copied()
+            .collect();
+
+        let g1 = !new_parts
+            .iter()
+            .any(|p| part_overlaps_sibling(routed, idx, p));
+        let g2 = !new_parts.iter().any(|p| crosses_any_bbox(p, obstacles));
+        let g3 = !new_parts.iter().any(|p| {
+            crosses_any_bbox(p, &foreign_bboxes)
+                || foreign_pins.contains(&key(p.x1, p.y1))
+                || foreign_pins.contains(&key(p.x2, p.y2))
+        });
+        let new_cross = count_interior_crossings(&new_parts, routed, idx);
+        let old_cross = count_interior_crossings(&removed_parts, routed, idx);
+        let g4 = new_cross <= old_cross;
+        let g5 = jog_preserves_v5(&pre, &routed[idx], own_pins, pin_outward);
+
+        if g1 && g2 && g3 && g4 && g5 {
+            let len = net_wire_len(&routed[idx]);
+            let better = match &best {
+                None => true,
+                Some((bc, bl, br, _)) => (new_cross, len, sign_rank) < (*bc, *bl, *br),
+            };
+            if better {
+                best = Some((new_cross, len, sign_rank, routed[idx].clone()));
+            }
+        }
+        routed[idx] = pre.clone();
+    }
+
+    if let Some((_, _, _, chosen)) = best {
+        routed[idx] = chosen;
+        true
+    } else {
+        routed[idx] = pre;
+        false
+    }
+}
+
+/// Stage 3d — cross-net collinear-overlap deconfliction.
+///
+/// Symmetric placement (mirror-image sub-circuits at the same Y) can
+/// drive two *different* nets' trunks onto the identical horizontal
+/// (or vertical) channel, so their Steiner segments share a positive-
+/// length collinear run. The two nets stay electrically distinct only
+/// because no junction dot merges the run — a **latent V11 short**: a
+/// single added junction, or any later endpoint snap onto the shared
+/// line, silently merges them. Per-net routing never sees this (each
+/// net is routed in isolation, and conflict avoidance keys on foreign
+/// *pin points* only), so it is resolved here, once, after the
+/// V11/V12 convergence loop and before cleanup.
+///
+/// For each overlap the lower-priority net (the *victim*, by
+/// [`net_priority_key`], ties to lower index) has its overlapping trunk
+/// jogged one grid cell to an adjacent free parallel track
+/// ([`try_jog_net`]) — moving wires only, never a symbol. When the
+/// victim's own trunk cannot move (both directions blocked by a guard),
+/// the pass falls back to jogging the *winner* (higher-priority net)
+/// instead — useful when the two nets' priority keys tie and the
+/// index-based tie-break arbitrarily fixed the victim. Every candidate
+/// track is a hard accept/reject against the V11/V12/sibling-overlap/
+/// crossing-count guards; only if *both* the victim jog and the winner
+/// jog fail in both directions is the overlap left in place and
+/// reported, driving the v0.2 channel / maze router work item rather
+/// than trading down a higher-tier property.
+///
+/// `foreign_per_routed`, `own_per_routed` and `obstacles` are the same
+/// per-routed-net inputs the V11/V12 passes consume; all three are
+/// indexed by routed-net order.
+pub fn deconflict_cross_net_overlaps<S: ::std::hash::BuildHasher>(
+    routed: &mut [RoutedNet],
+    foreign_per_routed: &[std::collections::HashSet<(i64, i64), S>],
+    own_per_routed: &[std::collections::HashSet<(i64, i64), S>],
+    obstacles: &[Bbox],
+    pin_outward: &PinOutwardMap,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if routed.len() < 2 {
+        return warnings;
+    }
+    let mut failed: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+    // Each successful jog removes one overlap; a failed pair is recorded
+    // and skipped. The pair count bounds the loop (every iteration either
+    // resolves a pair or marks one failed).
+    let cap = routed.len() * routed.len() + 1;
+    for _ in 0..cap {
+        let Some((victim, victim_seg, winner, winner_seg)) =
+            find_first_cross_overlap(routed, &failed)
+        else {
+            break;
+        };
+        // `foreign_per_routed`, `own_per_routed` and `routed` are all
+        // indexed by routed-net order and equal length, so both `victim`
+        // and `winner` (< routed.len()) are valid indices into every one.
+        //
+        // Order is load-bearing: try the *victim* (lower-priority net)
+        // first, and fall back to jogging the *winner* (higher-priority
+        // net) only when the victim's own trunk cannot move. Both use
+        // the moved net's *own* foreign/own pin slice. The outer loop
+        // re-detects from scratch after any successful jog, so a
+        // winner-jog that happened to introduce a fresh overlap with a
+        // third net is found and resolved (or escalated) later; the loop
+        // is bounded by `cap` and every iteration either resolves a pair
+        // or marks one failed.
+        let victim_ok = try_jog_net(
+            routed,
+            victim,
+            victim_seg,
+            &foreign_per_routed[victim],
+            &own_per_routed[victim],
+            obstacles,
+            pin_outward,
+        );
+        if victim_ok {
+            // resolved by moving the lower-priority net; re-detect.
+            continue;
+        }
+        let winner_ok = try_jog_net(
+            routed,
+            winner,
+            winner_seg,
+            &foreign_per_routed[winner],
+            &own_per_routed[winner],
+            obstacles,
+            pin_outward,
+        );
+        if winner_ok {
+            // resolved by moving the higher-priority net; re-detect.
+            continue;
+        }
+        let pair = if winner < victim {
+            (winner, victim)
+        } else {
+            (victim, winner)
+        };
+        failed.insert(pair);
+        warnings.push(format!(
+            "cross-net overlap: nets {winner}/{victim} unresolved by single-track jog \
+             (channel router — v0.2)"
+        ));
+    }
+    warnings
+}
+
 /// Hash key for a segment (quantised to 1 µm) so we can compare new
 /// vs old segment sets after an in-place jog. Direction-insensitive:
 /// (x1,y1)→(x2,y2) and (x2,y2)→(x1,y1) hash to the same key.

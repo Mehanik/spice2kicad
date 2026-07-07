@@ -323,6 +323,24 @@ pub fn route(req: RouteRequest<'_>) -> RouteResult {
         }
     }
     out.warnings.extend(accumulated_warnings);
+    // Stage 3d — cross-net collinear-overlap deconfliction. The V11
+    // pass above keys on foreign *pin points*; it cannot see two
+    // *different* nets whose trunks share a collinear run on the same
+    // channel (the symmetric diff_pair / multivibrator failure mode) —
+    // a latent V11 short that stays distinct only for want of a junction
+    // dot. Jog the lower-priority net's overlapping trunk one grid cell
+    // onto an adjacent free track, wires only, guarded so it cannot
+    // regress V11/V12 or raise the crossing count; unresolved pairs are
+    // reported for the v0.2 channel router. Runs before cleanup so
+    // coalesce / junction re-add normalise the jogged geometry.
+    let w_deconf = conflict::deconflict_cross_net_overlaps(
+        &mut routed,
+        &foreign_per_routed,
+        &net_pin_coords,
+        req.obstacles,
+        &pin_outward,
+    );
+    out.warnings.extend(w_deconf);
     // Stage 4 — per-net coalesce of collinear segments + dedup of
     // coincident junctions across nets. The own-pin barrier set
     // prevents the cleanup pass from merging across a pin coord and

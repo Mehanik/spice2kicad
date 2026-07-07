@@ -2709,3 +2709,211 @@ fn item3_interface_global_labels_clear_foreign_bodies() {
         failures.join("\n  "),
     );
 }
+
+// ---------------------------------------------------------------------------
+// V11 (correctness) — latent cross-net collinear wire overlap.
+// ---------------------------------------------------------------------------
+
+/// True when two axis-aligned wire segments overlap *collinearly* — i.e.
+/// they lie on the same grid line (both horizontal at the same Y, or
+/// both vertical at the same X) AND their extents share a run of
+/// strictly positive length. A shared single endpoint (touch of length
+/// zero) is NOT an overlap; a shared interval is.
+///
+/// All fixtures land on the 1.27 mm grid, so we compare the integer
+/// micrometre keys from [`qkey`] for exactness (no float tolerance).
+fn segments_collinearly_overlap(s1: &(Pt, Pt), s2: &(Pt, Pt)) -> bool {
+    // Two closed integer intervals share a run of strictly positive
+    // length (a shared single endpoint returns false).
+    fn intervals_overlap(p: (i64, i64), q: (i64, i64)) -> bool {
+        p.0.min(p.1).max(q.0.min(q.1)) < p.0.max(p.1).min(q.0.max(q.1))
+    }
+
+    // Endpoints as integer-micrometre (x, y) keys.
+    let (a0, a1) = (qkey(s1.0.0, s1.0.1), qkey(s1.1.0, s1.1.1));
+    let (b0, b1) = (qkey(s2.0.0, s2.0.1), qkey(s2.1.0, s2.1.1));
+
+    // Both horizontal on a shared Y: overlap runs along X.
+    if a0.1 == a1.1 && b0.1 == b1.1 && a0.1 == b0.1 {
+        return intervals_overlap((a0.0, a1.0), (b0.0, b1.0));
+    }
+    // Both vertical on a shared X: overlap runs along Y.
+    if a0.0 == a1.0 && b0.0 == b1.0 && a0.0 == b0.0 {
+        return intervals_overlap((a0.1, a1.1), (b0.1, b1.1));
+    }
+    false
+}
+
+/// Per-fixture budget for cross-net collinear wire overlaps. This is a
+/// **correctness** (Tier-0, V11) property, not a quality one: two
+/// different-net wires sharing a collinear run are a *latent short* —
+/// they stay electrically distinct today only because no junction dot
+/// or nudge merges them, but a single added junction (or any router
+/// tweak that snaps an endpoint onto the shared run) would merge the two
+/// nets into one. ERC does not catch it because the segments carry no
+/// junction. The budget is **zero** wherever the router's single-track
+/// jog resolves the overlap; it is **1** for the two recorded v0.2
+/// channel-router escalations ([`CROSS_NET_V02_ESCALATIONS`]) where the
+/// minimal jog provably cannot land — that literal is a coverage
+/// high-water mark that records the true current count (one latent
+/// overlap the router escalates with a warning), and it ratchets
+/// **down to 0** when the v0.2 channel/maze router resolves it. A
+/// non-zero count anywhere else — or a *second* overlap on an escalated
+/// fixture — is a defect to fix in the router, never a budget to raise.
+fn cross_net_overlap_budget(name: &str) -> usize {
+    usize::from(CROSS_NET_V02_ESCALATIONS.contains(&name))
+}
+
+/// Fixtures exercised by [`no_cross_net_collinear_wire_overlap`].
+///
+/// This is deliberately a *separate* list from the shared `SHEETS`
+/// const: `SHEETS` gates ~20 unrelated budget tests (crossing,
+/// wire-length, V12, min-gap) that the opamp fixtures are not tuned
+/// for, so broadening `SHEETS` to reach the opamp cases would cascade
+/// failures. This verifier therefore carries its own list.
+///
+/// Each fixture's overlap count is checked against
+/// `cross_net_overlap_budget`: a hard **0** where the router's
+/// single-track jog resolves the channel share, or **1** for the two
+/// recorded v0.2 channel-router escalations (`multivibrator`,
+/// `opamp_definition_level`) where the minimal jog provably cannot land.
+///
+/// `diff_pair` used to be an escalation: its c1/c2 priority keys tie, so
+/// the index tie-break arbitrarily fixed c1 as winner / c2 as victim,
+/// and both of c2's tracks were blocked. The router now falls back to
+/// jogging the *winner* (c1 down to y=39.37) when the victim cannot
+/// move, which clears all five guards — so `diff_pair` is a hard 0 here
+/// and no longer escalated.
+///
+/// The two remaining escalations (`CROSS_NET_V02_ESCALATIONS`) are still
+/// listed here — with budget 1 — so they carry regression coverage: the
+/// router's deconfliction pass detects each overlap and tries to jog
+/// both the victim and (fallback) the winner one grid cell onto an
+/// adjacent track, but on these two *neither* net can land in *either*
+/// direction without a higher-tier regression, so the pass rolls back
+/// and emits an observability warning. The budget-1 literal records that
+/// single latent overlap and ratchets to 0 when the v0.2 channel/maze
+/// router resolves it. See the escalation const for the per-fixture wall
+/// each hits.
+const ALL_FIXTURES_FOR_CROSS_NET: &[&str] = &[
+    "rc_lowpass",
+    "common_emitter",
+    "opamp_inverting_real",
+    "opamp_inverting",
+    "diff_pair",
+    "multivibrator",
+    "opamp_definition_level",
+];
+
+/// Symmetric fixtures whose two mirror-image sub-circuits force two
+/// different nets' trunks onto one channel, producing a cross-net
+/// collinear overlap (a latent V11 short) that the **minimal
+/// single-grid-cell jog cannot clear without raising a per-fixture
+/// budget** — the documented v0.2 channel-router boundary. The router's
+/// deconfliction pass tries both the victim and (fallback) the winner
+/// net here; on each of these two *neither* net can land in *either*
+/// direction (both jog directions blocked). Each hits a distinct wall:
+///
+/// * `multivibrator` (b1/b2 at y=54.61): the up-track (y=53.34) runs the
+///   trunk through a b1 pin at (57.15,53.34) — a **V11** short (G3
+///   reject); the down-track (y=55.88) crosses b1's trunk — **+1
+///   interior crossing** (budget 4→5).
+/// * `opamp_definition_level` (out1/out2 at y=40.64): the down-track
+///   (y=41.91) crosses an opamp-triangle body — **V12** (G2 reject); the
+///   up-track (y=39.37) has no clean landing among the input stubs.
+///
+/// These ARE in `ALL_FIXTURES_FOR_CROSS_NET` with a budget-1 high-water
+/// mark (coverage — the true current count of one latent overlap the
+/// router escalates with a warning). A change that resolves one (the
+/// v0.2 channel/maze router, or a signed-off budget trade under the
+/// global-improvement escape) ratchets its budget **down to 0**. Never
+/// mask a *second* residual by raising the budget above 1.
+const CROSS_NET_V02_ESCALATIONS: &[&str] = &["multivibrator", "opamp_definition_level"];
+
+#[allow(clippy::too_many_lines)]
+#[test]
+fn no_cross_net_collinear_wire_overlap() {
+    // Each emitted wire segment is mapped to its net by reusing the
+    // V11 island machinery: `build_wire_uf` groups wire endpoints into
+    // connected components (islands) and `assign_island_nets` labels
+    // each island with the single net carried by the pins that touch
+    // it. Two different-net segments that share a collinear run are the
+    // defect. A shared *endpoint* between same-net segments is fine
+    // (that's ordinary connectivity); we only flag a positive-length
+    // overlap between segments whose islands resolve to two DISTINCT,
+    // known nets.
+    //
+    // Two different-net wire segments that share a collinear run are a
+    // latent V11 short (distinct today only for want of a junction dot).
+    // This verifier checks each fixture in `ALL_FIXTURES_FOR_CROSS_NET`
+    // (its own list, not the shared `SHEETS`) against
+    // `cross_net_overlap_budget` — a hard 0 where the router's
+    // victim-or-winner single-track jog resolves the channel share, or a
+    // budget-1 high-water for the two `CROSS_NET_V02_ESCALATIONS`
+    // (`multivibrator`, `opamp_definition_level`) where neither net can
+    // land in either direction and the pass escalates with a warning
+    // (deferred to the v0.2 channel router — see that const for the
+    // per-fixture wall). `diff_pair` is now a hard 0 via the winner-jog
+    // fallback. Resolving an escalation ratchets its budget down to 0.
+    let mut failures: Vec<String> = Vec::new();
+    for name in ALL_FIXTURES_FOR_CROSS_NET {
+        let src = fixtures_dir().join(format!("{name}.cir"));
+        let tmp = tempdir(name);
+        let sch = spice_to_kicad(&src, &tmp).expect("spice2kicad");
+        let root = parse(&sch);
+
+        let pins = world_pins_for_sheet(&src, &root);
+        let pin_index = build_pin_index(&pins);
+        let wires = wire_segments(&root);
+        let (coord_idx, mut uf, _coords) = build_wire_uf(&wires);
+        let (comp_net, _extras) = assign_island_nets(&wires, &coord_idx, &mut uf, &pin_index, name);
+
+        // Resolve each segment to its island net (None = wire island
+        // with no pin contact — net unknown, skip).
+        let seg_net: Vec<Option<String>> = wires
+            .iter()
+            .map(|(a, _b)| {
+                let r = uf.find(coord_idx[&qkey(a.0, a.1)]);
+                comp_net.get(&r).cloned()
+            })
+            .collect();
+
+        let mut overlaps = 0usize;
+        for i in 0..wires.len() {
+            for j in (i + 1)..wires.len() {
+                let (Some(ni), Some(nj)) = (&seg_net[i], &seg_net[j]) else {
+                    continue;
+                };
+                if ni == nj {
+                    // Same net sharing a collinear run is ordinary
+                    // connectivity, not a short.
+                    continue;
+                }
+                if segments_collinearly_overlap(&wires[i], &wires[j]) {
+                    let (a, b) = wires[i];
+                    let (c, d) = wires[j];
+                    eprintln!(
+                        "{name}: cross-net collinear overlap — net {ni:?} wire \
+                         ({:.2},{:.2})→({:.2},{:.2}) overlaps net {nj:?} wire \
+                         ({:.2},{:.2})→({:.2},{:.2})",
+                        a.0, a.1, b.0, b.1, c.0, c.1, d.0, d.1,
+                    );
+                    overlaps += 1;
+                }
+            }
+        }
+
+        let budget = cross_net_overlap_budget(name);
+        if overlaps > budget {
+            failures.push(format!(
+                "{name}: {overlaps} cross-net collinear wire overlap(s) > budget {budget} \
+                 (latent V11 short)"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "cross-net collinear wire overlap regressions:\n  {}",
+        failures.join("\n  "),
+    );
+}
