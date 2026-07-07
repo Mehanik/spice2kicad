@@ -1246,20 +1246,19 @@ fn crossing_count_within_budget_across_fixtures() {
     // crossings — that is *router* behaviour, not a placer
     // failure. Budgets here reflect what is achievable today on
     // each fixture; tighten when a smarter router lands.
-    // R7 budgets, calibrated against the spice-route Steiner-tree
-    // router. Measured crossings on master at R7: rc_lowpass=0,
-    // common_emitter=4, multivibrator=2, diff_pair=1,
-    // opamp_inverting_real=1. Plan target was 0/2/4/2/2;
-    // common_emitter exceeds the plan target (4 > 2) under the
-    // current placement so its budget stays at the measured floor
-    // rather than the spec target. Other fixtures are at or below
-    // spec.
+    // Ratchet high-water marks (zero slack). Phase-2 wire cleanup
+    // (collapse collinear same-net overlaps into a non-overlapping,
+    // vertex-preserving cover + interior-T junction dots) plus the
+    // foreign power-glyph router obstacle lowered the measured crossings
+    // from the prior R7 marks: common_emitter 4→3, diff_pair 1→0,
+    // opamp_inverting_real 1→0. multivibrator holds at 4, rc_lowpass at
+    // 0. Never raise.
     let budgets: &[(&str, u32)] = &[
         ("rc_lowpass", 0),
-        ("common_emitter", 4),
+        ("common_emitter", 3),
         ("multivibrator", 4),
-        ("diff_pair", 2),
-        ("opamp_inverting_real", 2),
+        ("diff_pair", 0),
+        ("opamp_inverting_real", 0),
     ];
     for (name, path) in fixtures() {
         let tmp = tempdir(name);

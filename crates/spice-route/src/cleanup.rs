@@ -209,6 +209,205 @@ fn barrier_in_interior(seg: &Segment, barriers: &dyn BarrierSet) -> bool {
     false
 }
 
+/// Quantise a single coordinate to a 1 µm integer key, matching the
+/// scheme used throughout the router (`(v * 1000.0).round() as i64`).
+#[allow(clippy::cast_possible_truncation)]
+fn qk1(v: f64) -> i64 {
+    (v * 1000.0).round() as i64
+}
+
+/// Given the member intervals on one line, return a set of
+/// **non-overlapping** sub-intervals that (a) cover exactly the union of
+/// the members and (b) have a breakpoint at *every* member endpoint, so
+/// no original vertex is lost. Overlapping / nested / duplicate members
+/// collapse into shared sub-intervals; a gap between two disjoint
+/// clusters stays a gap.
+///
+/// Why split rather than merge into one span: `kicad-cli`'s netlist
+/// export connects wires only at shared segment **endpoints**, never at
+/// a bare point on a wire's interior (see
+/// `conflict::anchor_own_pin_endpoints`). A branch / pin that attached
+/// at a member endpoint must therefore remain a segment endpoint after
+/// cleanup, or the export silently drops the connection. Splitting the
+/// union at every member endpoint preserves all those vertices while
+/// still eliminating the redundant collinear overlap.
+fn split_union_at_endpoints(ivals: &mut [(f64, f64)]) -> Vec<(f64, f64)> {
+    ivals.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut out: Vec<(f64, f64)> = Vec::new();
+    let mut i = 0;
+    while i < ivals.len() {
+        // Grow a maximal cluster of members overlapping (positively) or
+        // touching the running union.
+        let mut hi = ivals[i].1;
+        let mut breaks: Vec<f64> = vec![ivals[i].0, ivals[i].1];
+        let mut j = i + 1;
+        while j < ivals.len() && ivals[j].0 <= hi + EPS {
+            breaks.push(ivals[j].0);
+            breaks.push(ivals[j].1);
+            if ivals[j].1 > hi {
+                hi = ivals[j].1;
+            }
+            j += 1;
+        }
+        // Distinct sorted breakpoints spanning the cluster.
+        breaks.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        breaks.dedup_by(|a, b| (*a - *b).abs() < EPS);
+        for w in breaks.windows(2) {
+            if (w[1] - w[0]).abs() > EPS {
+                out.push((w[0], w[1]));
+            }
+        }
+        i = j;
+    }
+    out
+}
+
+/// Collapse collinear same-net overlaps into a non-overlapping cover.
+///
+/// Two axis-parallel segments on the same line (same X for verticals,
+/// same Y for horizontals) whose spans overlap by a positive length —
+/// including the fully-nested and exact-duplicate cases — are
+/// redundant: the shorter is entirely covered by the longer. This pass
+/// replaces every overlapping cluster with the *split* of its union at
+/// each original member endpoint (see [`split_union_at_endpoints`]), so
+/// the redundant overlap is gone but every attachment vertex survives.
+///
+/// **V11 safety.** The output covers exactly the union of the members,
+/// pointwise a subset of the longest member's span; no coordinate
+/// outside the members' extents is introduced, so no new foreign-pin
+/// coincidence can arise — the pre-cleanup V11 pass that vetted the
+/// members' spans still holds.
+///
+/// **Connectivity safety.** Every original segment endpoint remains a
+/// segment endpoint (it is a breakpoint of the split), so `kicad-cli`'s
+/// endpoint-only connection rule sees the same vertices it did before.
+///
+/// Junction lists are left untouched; [`add_connection_junctions`] and
+/// [`dedup_junctions`] run afterwards.
+pub fn collapse_collinear_overlaps(routed: &mut [RoutedNet]) {
+    use std::collections::HashMap;
+    for net in routed.iter_mut() {
+        // fixed-coord key -> (representative fixed coord, spans).
+        let mut vert: HashMap<i64, (f64, Vec<(f64, f64)>)> = HashMap::new();
+        let mut horiz: HashMap<i64, (f64, Vec<(f64, f64)>)> = HashMap::new();
+        let mut others: Vec<Segment> = Vec::new();
+        for s in &net.segments {
+            let is_vert = (s.x1 - s.x2).abs() < EPS;
+            let is_horiz = (s.y1 - s.y2).abs() < EPS;
+            if is_vert && !is_horiz {
+                let e = vert.entry(qk1(s.x1)).or_insert((s.x1, Vec::new()));
+                e.1.push((s.y1.min(s.y2), s.y1.max(s.y2)));
+            } else if is_horiz && !is_vert {
+                let e = horiz.entry(qk1(s.y1)).or_insert((s.y1, Vec::new()));
+                e.1.push((s.x1.min(s.x2), s.x1.max(s.x2)));
+            } else {
+                // Zero-length (both axes) or diagonal — never emitted by
+                // the axis-aligned router, but preserve verbatim if seen.
+                others.push(*s);
+            }
+        }
+        let mut out = others;
+        for (_, (x, mut spans)) in vert {
+            for (lo, hi) in split_union_at_endpoints(&mut spans) {
+                out.push(Segment {
+                    x1: x,
+                    y1: lo,
+                    x2: x,
+                    y2: hi,
+                });
+            }
+        }
+        for (_, (y, mut spans)) in horiz {
+            for (lo, hi) in split_union_at_endpoints(&mut spans) {
+                out.push(Segment {
+                    x1: lo,
+                    y1: y,
+                    x2: hi,
+                    y2: y,
+                });
+            }
+        }
+        net.segments = out;
+    }
+}
+
+/// Add a junction dot at every point where three or more same-net wire
+/// *rays* meet — KiCad's own junction rule. A ray is one direction a
+/// wire leaves the point: a segment with an **endpoint** at `p`
+/// contributes one ray; a segment whose **strict interior** contains
+/// `p` contributes two (it passes through). Two rays (a straight
+/// pass-through, an L-corner, or two collinear segments meeting
+/// end-to-end) need no dot; three (a T, whether the trunk is split at
+/// `p` or passes through it) or four (a cross) do.
+///
+/// This covers both the split-T case produced by
+/// [`collapse_collinear_overlaps`] (three endpoints coincide) and a
+/// mid-span T where a branch endpoint lands on an unbroken trunk
+/// interior. Each [`RoutedNet`] is a single net by construction, so
+/// every incidence examined here is same-net.
+///
+/// Idempotent against pre-existing junctions (e.g. own-pin anchors from
+/// `conflict::anchor_own_pin_endpoints`): a point already recorded is
+/// not duplicated. [`dedup_junctions`] flattens the rest.
+pub fn add_connection_junctions(routed: &mut [RoutedNet]) {
+    use std::collections::HashSet;
+    for net in routed.iter_mut() {
+        // Candidate points: every distinct segment endpoint (a junction
+        // can only occur where at least one wire ends or a branch
+        // attaches — both are endpoints of some segment).
+        let mut candidates: Vec<(f64, f64)> = Vec::new();
+        {
+            let mut seen: HashSet<(i64, i64)> = HashSet::new();
+            for s in &net.segments {
+                for (x, y) in [(s.x1, s.y1), (s.x2, s.y2)] {
+                    if seen.insert((qk1(x), qk1(y))) {
+                        candidates.push((x, y));
+                    }
+                }
+            }
+        }
+        let mut existing: HashSet<(i64, i64)> = net
+            .junctions
+            .iter()
+            .map(|&(x, y)| (qk1(x), qk1(y)))
+            .collect();
+        let mut add: Vec<(f64, f64)> = Vec::new();
+        for &(px, py) in &candidates {
+            let mut rays = 0usize;
+            for s in &net.segments {
+                let at_a = (s.x1 - px).abs() < EPS && (s.y1 - py).abs() < EPS;
+                let at_b = (s.x2 - px).abs() < EPS && (s.y2 - py).abs() < EPS;
+                if at_a || at_b {
+                    rays += 1;
+                } else if point_strictly_interior(s, px, py) {
+                    rays += 2;
+                }
+            }
+            if rays >= 3 {
+                let k = (qk1(px), qk1(py));
+                if existing.insert(k) {
+                    add.push((px, py));
+                }
+            }
+        }
+        net.junctions.extend(add);
+    }
+}
+
+/// True iff `(px, py)` lies on the strict interior (exclusive of both
+/// endpoints) of the axis-parallel segment `s`.
+fn point_strictly_interior(s: &Segment, px: f64, py: f64) -> bool {
+    let is_vert = (s.x1 - s.x2).abs() < EPS;
+    let is_horiz = (s.y1 - s.y2).abs() < EPS;
+    if is_vert && !is_horiz {
+        (px - s.x1).abs() < EPS && py > s.y1.min(s.y2) + EPS && py < s.y1.max(s.y2) - EPS
+    } else if is_horiz && !is_vert {
+        (py - s.y1).abs() < EPS && px > s.x1.min(s.x2) + EPS && px < s.x1.max(s.x2) - EPS
+    } else {
+        false
+    }
+}
+
 /// Collapse the per-net junction lists into a single deduplicated set.
 /// Uses 0.001 mm-quantised keys so f64 noise doesn't desync identical
 /// coordinates emitted by independent Steiner trees.

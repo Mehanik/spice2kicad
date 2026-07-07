@@ -329,7 +329,16 @@ pub fn route(req: RouteRequest<'_>) -> RouteResult {
     // erasing the V5-aware outward stubs the Steiner stage emits.
     cleanup::drop_zero_length(&mut routed);
     cleanup::coalesce_collinear_with_barriers(&mut routed, &own_pin_coords_for_cleanup);
+    // Collapse redundant collinear same-net overlaps (nested / duplicate
+    // stubs the end-to-end merge above cannot touch, e.g. the three
+    // co-directional verticals on a Steiner trunk sharing a start
+    // point), then re-add interior-T junction dots so every mid-span
+    // same-net branch reads as connected. Electrically inert: the
+    // collapse's union is a pointwise subset of the members' span and
+    // the junctions only make same-net incidences explicit.
+    cleanup::collapse_collinear_overlaps(&mut routed);
     cleanup::drop_zero_length(&mut routed);
+    cleanup::add_connection_junctions(&mut routed);
     let junctions = cleanup::dedup_junctions(&routed);
     // Serialise routed nets to s-exprs.
     for net in &routed {

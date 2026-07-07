@@ -2305,3 +2305,407 @@ fn phase1_erc_stays_clean() {
         failures.join("\n  "),
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 2 — router / label READABILITY (decoration-only).
+//
+// Three defect classes, all Tier-1 (V12/V13), all fixable in the
+// DECORATION phase without moving any placed symbol:
+//
+//  (1) redundant collinear same-net wire overlaps + missing mid-span
+//      junction dots ("wires look disconnected"). The 3-pin Steiner +
+//      conflict-detour passes emit co-directional segments that share a
+//      start point and fully/partially overlap, and tee same-net wires
+//      off another same-net wire's interior with NO junction dot.
+//  (2) a FOREIGN (different-net) global-label / wire overlapping a
+//      power-glyph BODY — power glyphs are excluded from both the
+//      router/label obstacle set AND the label↔body V13 verifier, so
+//      this was unmodeled and untested (common_emitter `in` over GND).
+//  (3) an interface global-label overlapping a foreign symbol body
+//      (diff_pair `in1` over Q1). See the note on the item-(3) guard
+//      below — this class is already enforced by
+//      `v13_labels_dont_overlap_symbol_body` at budget 0.
+//
+// Connectivity-inert guard for item (1): coalescing overlaps and adding
+// junction dots is electrically inert, so the exported-netlist topology
+// check in `tests/roundtrip.rs` (`common_emitter` / `diff_pair`, via
+// `kicad-cli sch export netlist` → canonical topology match) must stay
+// green. Those tests are the item-(1) connectivity guard; they run here
+// only implicitly (kicad-cli present) but are the authoritative check
+// that item (1) does not change connectivity.
+// ---------------------------------------------------------------------------
+
+const EPS_MM: f64 = 1e-6;
+
+/// Every emitted `(junction (at x y) …)` position. A junction node has a
+/// two-value `(at x y)` (no rotation); [`at_xy_rot`] tolerates that
+/// (rot defaults to 0).
+fn junction_positions(root: &Value) -> Vec<Pt> {
+    let mut out = Vec::new();
+    for j in children(root, "junction") {
+        if let Some((x, y, _)) = at_xy_rot(j) {
+            out.push((x, y));
+        }
+    }
+    out
+}
+
+/// If `a` and `b` are collinear (both vertical at the same X, or both
+/// horizontal at the same Y) and their spans overlap by a POSITIVE
+/// length, return that overlap length. Sharing only an endpoint (overlap
+/// length 0) returns `None` — that is a legal end-to-end chain, not a
+/// redundant overlap. Two collinear segments overlapping by a positive
+/// length are necessarily on the SAME net: a foreign collinear overlap
+/// would already be a V11 short, forbidden elsewhere.
+#[allow(clippy::similar_names)]
+fn collinear_overlap(a: &(Pt, Pt), b: &(Pt, Pt)) -> Option<f64> {
+    let (ax1, ay1) = a.0;
+    let (ax2, ay2) = a.1;
+    let (bx1, by1) = b.0;
+    let (bx2, by2) = b.1;
+    let a_vert = (ax1 - ax2).abs() < EPS_MM;
+    let b_vert = (bx1 - bx2).abs() < EPS_MM;
+    let a_horiz = (ay1 - ay2).abs() < EPS_MM;
+    let b_horiz = (by1 - by2).abs() < EPS_MM;
+    if a_vert && b_vert && (ax1 - bx1).abs() < EPS_MM {
+        let (alo, ahi) = (ay1.min(ay2), ay1.max(ay2));
+        let (blo, bhi) = (by1.min(by2), by1.max(by2));
+        let ov = ahi.min(bhi) - alo.max(blo);
+        if ov > EPS_MM {
+            return Some(ov);
+        }
+    }
+    if a_horiz && b_horiz && (ay1 - by1).abs() < EPS_MM {
+        let (alo, ahi) = (ax1.min(ax2), ax1.max(ax2));
+        let (blo, bhi) = (bx1.min(bx2), bx1.max(bx2));
+        let ov = ahi.min(bhi) - alo.max(blo);
+        if ov > EPS_MM {
+            return Some(ov);
+        }
+    }
+    None
+}
+
+#[test]
+fn no_same_net_collinear_wire_overlap() {
+    // Item (1a): no two emitted wire segments may overlap collinearly.
+    // Concrete current defects this catches on `common_emitter`: three
+    // IDENTICAL verticals at x=43.18 (43.18,40.64)->(43.18,39.37), and a
+    // nested triple at x=52.07 (Q1-collector Steiner) where
+    // [44.45,45.72] ⊂ [44.45,46.99] ⊂ [44.45,49.53] all share the start
+    // y=44.45. Budget 0 — a ratchet, not a knob. Electrically inert
+    // (same-net), so the roundtrip topology guard must stay green.
+    let mut failures: Vec<String> = Vec::new();
+    for name in SHEETS {
+        let src = fixtures_dir().join(format!("{name}.cir"));
+        let tmp = tempdir(name);
+        let sch = spice_to_kicad(&src, &tmp).expect("spice2kicad");
+        let root = parse(&sch);
+        let wires = wire_segments(&root);
+        // Restrict to SAME-net pairs via the wire-only union-find. A
+        // connected net's Steiner tree is one island (its segments share
+        // endpoints transitively), so same-island == same-net here. This
+        // deliberately EXCLUDES collinear overlaps between DIFFERENT nets
+        // (e.g. diff_pair `in1`/`in2`, multivibrator's cross-couple),
+        // which are a distinct wire-on-wire coincidence class — item (1a)
+        // is same-net redundancy only, and its coalescing fix must never
+        // merge two different nets.
+        let (coord_idx, mut uf, _c) = build_wire_uf(&wires);
+        let start_root = |uf: &mut UnionFind, seg: &(Pt, Pt)| -> usize {
+            let (sa, _) = *seg;
+            uf.find(coord_idx[&qkey(sa.0, sa.1)])
+        };
+        let mut hits = 0usize;
+        for i in 0..wires.len() {
+            let ri = start_root(&mut uf, &wires[i]);
+            for j in (i + 1)..wires.len() {
+                let rj = start_root(&mut uf, &wires[j]);
+                if ri != rj {
+                    continue; // different net — not item (1a)
+                }
+                if let Some(ov) = collinear_overlap(&wires[i], &wires[j]) {
+                    let (ai, bi) = wires[i];
+                    let (aj, bj) = wires[j];
+                    eprintln!(
+                        "{name}: collinear same-net overlap ({ov:.4}mm) between \
+                         ({:.2},{:.2})->({:.2},{:.2}) and ({:.2},{:.2})->({:.2},{:.2})",
+                        ai.0, ai.1, bi.0, bi.1, aj.0, aj.1, bj.0, bj.1,
+                    );
+                    hits += 1;
+                }
+            }
+        }
+        if hits > 0 {
+            failures.push(format!("{name}: {hits} collinear same-net wire overlap(s)"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "item(1a) redundant collinear same-net wire overlaps (budget 0):\n  {}",
+        failures.join("\n  "),
+    );
+}
+
+#[test]
+fn mid_span_same_net_t_has_junction() {
+    // Item (1b): wherever a same-net wire endpoint lands on the strict
+    // interior of another same-net wire segment (a mid-span T), KiCad
+    // draws no automatic junction dot, so the schematic reads as
+    // disconnected. Every such incidence must carry an explicit
+    // `(junction …)`. "Same-net" is established via the wire-only
+    // union-find (a foreign endpoint-on-interior is a V13 concern, not
+    // a junction one). Concrete current defect on `common_emitter`:
+    // (52.07,45.72) and (52.07,46.99) tee into the x=52.07 collector
+    // trunk with no junction. Budget 0.
+    let mut failures: Vec<String> = Vec::new();
+    for name in SHEETS {
+        let src = fixtures_dir().join(format!("{name}.cir"));
+        let tmp = tempdir(name);
+        let sch = spice_to_kicad(&src, &tmp).expect("spice2kicad");
+        let root = parse(&sch);
+        let wires = wire_segments(&root);
+        let (coord_idx, mut uf, _c) = build_wire_uf(&wires);
+        let juncs: HashSet<(i64, i64)> = junction_positions(&root)
+            .iter()
+            .map(|p| qkey(p.0, p.1))
+            .collect();
+
+        // Distinct wire-endpoint coords.
+        let mut endpoints: Vec<(i64, i64)> = Vec::new();
+        {
+            let mut seen: HashSet<(i64, i64)> = HashSet::new();
+            for (a, b) in &wires {
+                for k in [qkey(a.0, a.1), qkey(b.0, b.1)] {
+                    if seen.insert(k) {
+                        endpoints.push(k);
+                    }
+                }
+            }
+        }
+
+        let mut hits = 0usize;
+        for (a, b) in &wires {
+            let ka = qkey(a.0, a.1);
+            let kb = qkey(b.0, b.1);
+            let seg_root = uf.find(coord_idx[&ka]);
+            for &p in &endpoints {
+                if p == ka || p == kb {
+                    continue; // endpoint of this very segment
+                }
+                let Some(&pi) = coord_idx.get(&p) else {
+                    continue;
+                };
+                if uf.find(pi) != seg_root {
+                    continue; // different net — not a same-net T
+                }
+                let interior = if ka.0 == kb.0 && p.0 == ka.0 {
+                    let (lo, hi) = (ka.1.min(kb.1), ka.1.max(kb.1));
+                    p.1 > lo && p.1 < hi
+                } else if ka.1 == kb.1 && p.1 == ka.1 {
+                    let (lo, hi) = (ka.0.min(kb.0), ka.0.max(kb.0));
+                    p.0 > lo && p.0 < hi
+                } else {
+                    false
+                };
+                if interior && !juncs.contains(&p) {
+                    #[allow(clippy::cast_precision_loss)]
+                    {
+                        eprintln!(
+                            "{name}: mid-span same-net T at ({:.2},{:.2}) on segment \
+                             ({:.2},{:.2})->({:.2},{:.2}) has no junction dot",
+                            p.0 as f64 / 1000.0,
+                            p.1 as f64 / 1000.0,
+                            a.0,
+                            a.1,
+                            b.0,
+                            b.1,
+                        );
+                    }
+                    hits += 1;
+                }
+            }
+        }
+        if hits > 0 {
+            failures.push(format!(
+                "{name}: {hits} mid-span same-net T-branch(es) without a junction dot"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "item(1b) mid-span same-net T-branches missing junction dots (budget 0):\n  {}",
+        failures.join("\n  "),
+    );
+}
+
+/// Each rail glyph's (`power:*` except `PWR_FLAG`) canonical net and
+/// world-frame BODY bbox (the drawn triangle/chevron). Net comes from the
+/// glyph's visible `Value` (canonicalised so `0`→`GND`, `vcc`→`VCC`).
+fn rail_glyph_bodies_with_net(root: &Value) -> Vec<(String, Bbox)> {
+    let library = load_test_library();
+    let mut out = Vec::new();
+    for sym in children(root, "symbol") {
+        let mut lib_id = String::new();
+        if let Some(l) = find_child(sym, "lib_id")
+            .and_then(|n| list_iter(n).nth(1))
+            .and_then(as_str)
+        {
+            l.clone_into(&mut lib_id);
+        }
+        if !lib_id.starts_with("power:") || lib_id == "power:PWR_FLAG" {
+            continue;
+        }
+        let mut net = String::new();
+        for prop in children(sym, "property") {
+            let mut it = list_iter(prop);
+            it.next();
+            if it.next().and_then(as_str) == Some("Value") {
+                net = canonical_net(it.next().and_then(as_str).unwrap_or(""));
+                break;
+            }
+        }
+        let Some((gx, gy, grot)) = at_xy_rot(sym) else {
+            continue;
+        };
+        let mirror_y = find_child(sym, "mirror")
+            .and_then(|m| list_iter(m).nth(1).and_then(as_str))
+            .is_some_and(|t| t.eq_ignore_ascii_case("y"));
+        if let Some(local) = library
+            .lookup(&lib_id)
+            .and_then(kicad_symbols::Symbol::body_bbox)
+        {
+            out.push((
+                net,
+                body_bbox_to_world(local, gx, gy, f64::from(grot), mirror_y),
+            ));
+        }
+    }
+    out
+}
+
+/// Per-fixture budget for [`no_foreign_label_or_wire_over_power_glyph_body`].
+/// Budget 0 across the board: item (2) is a fully decoration-fixable
+/// readability defect (add power glyphs to the label/wire obstacle set;
+/// nudge the offending label clear). The tracked `opamp_inverting_real`
+/// residual is glyph-body-vs-symbol-BODY (RIN), counted by
+/// `placement_quality::power_glyph_foreign_body_overlap_budget=1` on a
+/// DIFFERENT axis — this label/wire measure must stay 0 there too.
+fn v13_foreign_over_glyph_budget(_name: &str) -> usize {
+    0
+}
+
+#[test]
+fn no_foreign_label_or_wire_over_power_glyph_body() {
+    // Item (2): a FOREIGN (different-net) global-label / plain-label text
+    // bbox, or a foreign-net wire, overlapping a power-glyph BODY.
+    // common_emitter's `in` global-label sits over a GND glyph — invisible
+    // to `v13_labels_dont_overlap_symbol_body` (which skips `power:*`) and
+    // to the router obstacle set (glyphs early-return None there). This
+    // models the glyph body as an obstacle for foreign labels/wires ONLY
+    // (a glyph is never an obstacle for its OWN net's stub). Budget 0.
+    let mut failures: Vec<String> = Vec::new();
+    for name in SHEETS {
+        let src = fixtures_dir().join(format!("{name}.cir"));
+        let tmp = tempdir(name);
+        let sch = spice_to_kicad(&src, &tmp).expect("spice2kicad");
+        let root = parse(&sch);
+        let glyphs = rail_glyph_bodies_with_net(&root);
+        let labels = labels_with_kind(&root);
+        let wires = wire_segments(&root);
+        let pins = world_pins_for_sheet(&src, &root);
+        let pin_index = build_pin_index(&pins);
+        let (coord_idx, mut uf, _c) = build_wire_uf(&wires);
+        let (comp_net, _extra) = assign_island_nets(&wires, &coord_idx, &mut uf, &pin_index, name);
+
+        let mut hits = 0usize;
+        for (gnet, gbody) in &glyphs {
+            for (lname, anchor, rot, kind) in &labels {
+                let lnet = canonical_net(lname);
+                if &lnet == gnet {
+                    continue; // a glyph is never an obstacle for its own net
+                }
+                let lbox = text_bbox(lname, *anchor, 1.27, *rot, *kind);
+                if lbox.intersects(gbody) {
+                    eprintln!("{name}: foreign label {lnet:?} overlaps {gnet:?} glyph body");
+                    hits += 1;
+                }
+            }
+            for (a, b) in &wires {
+                let root_id = uf.find(coord_idx[&qkey(a.0, a.1)]);
+                let Some(wnet) = comp_net.get(&root_id) else {
+                    continue;
+                };
+                if wnet == gnet {
+                    continue; // own-net stub, not foreign
+                }
+                if gbody.intersects_segment(*a, *b) {
+                    eprintln!(
+                        "{name}: foreign wire on net {wnet:?} ({:.2},{:.2})->({:.2},{:.2}) \
+                         crosses {gnet:?} glyph body",
+                        a.0, a.1, b.0, b.1,
+                    );
+                    hits += 1;
+                }
+            }
+        }
+        let b = v13_foreign_over_glyph_budget(name);
+        if hits > b {
+            failures.push(format!(
+                "{name}: {hits} foreign label/wire over power-glyph body > budget {b}"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "item(2) foreign label/wire over power-glyph body:\n  {}",
+        failures.join("\n  "),
+    );
+}
+
+#[test]
+fn item3_interface_global_labels_clear_foreign_bodies() {
+    // Item (3): an interface global-label must not overlap a foreign
+    // symbol body (diff_pair `in1` over Q1). This is the SAME property
+    // `v13_labels_dont_overlap_symbol_body` already enforces at budget 0
+    // for every fixture — so this test is a focused, self-documenting
+    // GUARD on the interface-label subset. It measures global-labels only
+    // against non-host symbol bodies. Budget 0.
+    //
+    // NOTE: on current master this passes — the placer / routing-aware
+    // orientation refinement positions `in1` reading leftward, away from
+    // Q1's body, so the described symptom does not reproduce. It is kept
+    // as a regression guard: if a future placement change re-introduces
+    // the overlap, both this and `v13_labels_dont_overlap_symbol_body`
+    // trip. (See the returned notes in the phase-2 test-author report.)
+    let mut failures: Vec<String> = Vec::new();
+    for name in SHEETS {
+        let src = fixtures_dir().join(format!("{name}.cir"));
+        let tmp = tempdir(name);
+        let sch = spice_to_kicad(&src, &tmp).expect("spice2kicad");
+        let root = parse(&sch);
+        let bodies = placed_symbol_bboxes(&root);
+        let mut hits = 0usize;
+        for (lname, anchor, rot, kind) in &labels_with_kind(&root) {
+            if !matches!(kind, TextKind::GlobalLabel) {
+                continue;
+            }
+            let lbox = text_bbox(lname, *anchor, 1.27, *rot, *kind);
+            for (refdes, body) in &bodies {
+                if lbox.intersects(body) {
+                    eprintln!("{name}: global-label {lname:?} overlaps {refdes} body");
+                    hits += 1;
+                }
+            }
+        }
+        if hits > 0 {
+            failures.push(format!(
+                "{name}: {hits} interface global-label↔foreign-body overlap(s)"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "item(3) interface global-label over foreign body (budget 0):\n  {}",
+        failures.join("\n  "),
+    );
+}

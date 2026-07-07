@@ -27,8 +27,8 @@ use kicad_symbols::{Library, Orientation, Symbol};
 use spice_layout::{Placement, RefinementMeta};
 
 use crate::schematic::{
-    TextBbox, collect_net_pins, label_specs, placement_obstacles, placement_property_bboxes,
-    text_bbox, trial_route,
+    TextBbox, collect_net_pins, label_rotation_obstacles, label_specs, placement_obstacles,
+    placement_property_bboxes, rail_glyph_body_bboxes, text_bbox, trial_route,
 };
 use crate::v5::{PinProbe, Violation, count_outward_violations};
 
@@ -378,7 +378,14 @@ fn measure(placement: &Placement, library: &Library) -> Measure {
 fn v13_overlap_count(placement: &Placement, library: &Library) -> usize {
     let net_pins = collect_net_pins(placement, library, &[]);
     let props = placement_property_bboxes(placement);
-    let specs = label_specs(&net_pins, &[], &props);
+    // Interface-label rotation obstacles, matching the emitter
+    // (`emit_root`): host symbol bodies plus foreign rail-glyph bodies,
+    // so the refinement gate measures the SAME rotated global-label
+    // geometry the final decoration will emit (V13 item 2B).
+    let negative_rails = spice_layout::net_class::negative_rail_nets(placement);
+    let glyph_bodies = rail_glyph_body_bboxes(&net_pins, library, &negative_rails);
+    let label_obstacles = label_rotation_obstacles(placement, library, &glyph_bodies);
+    let specs = label_specs(&net_pins, &[], &props, &label_obstacles);
     // World body bboxes (as TextBboxes) for the label↔body check.
     let bodies: Vec<TextBbox> = placement
         .elements

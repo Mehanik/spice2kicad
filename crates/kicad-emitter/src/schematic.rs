@@ -158,12 +158,18 @@ pub fn emit_root(
     }
 
     let net_pins = collect_net_pins(placement, library, &extra_pins);
-    let obstacles = placement_obstacles(placement, library);
     let driven = collect_driven_nets(placement, library);
     let requires_driver = collect_driver_required_nets(placement, library);
     let passive = collect_passive_nets(placement, library);
     let power_in = collect_power_in_nets(placement, library);
     let negative_rails = spice_layout::net_class::negative_rail_nets(placement);
+    // Router obstacles: host symbol bodies (V12) plus the rail-glyph
+    // bodies a foreign signal wire must not spear (V13 item 2A). Glyphs
+    // are foreign to every routed net (power nets are unrouted), so
+    // appending them repels only foreign wires.
+    let glyph_bodies = rail_glyph_body_bboxes(&net_pins, library, &negative_rails);
+    let mut obstacles = placement_obstacles(placement, library);
+    obstacles.extend(glyph_bodies.iter().copied());
     for routed in route_nets(
         &net_pins,
         "root",
@@ -179,7 +185,14 @@ pub fn emit_root(
         items.push(routed);
     }
     let property_bboxes = placement_property_bboxes(placement);
-    for label in dangling_pin_labels(&net_pins, "root", &extra_pins, &property_bboxes) {
+    let label_body_obstacles = label_rotation_obstacles(placement, library, &glyph_bodies);
+    for label in dangling_pin_labels(
+        &net_pins,
+        "root",
+        &extra_pins,
+        &property_bboxes,
+        &label_body_obstacles,
+    ) {
         items.push(label);
     }
 
@@ -269,7 +282,10 @@ pub fn emit_child_sheet(child: &ChildSheet<'_>, library: &Library) -> Result<Str
     }
 
     let net_pins = collect_net_pins(child.placement, library, &extra_pins);
-    let obstacles = placement_obstacles(child.placement, library);
+    let child_negative_rails = spice_layout::net_class::negative_rail_nets(child.placement);
+    let glyph_bodies = rail_glyph_body_bboxes(&net_pins, library, &child_negative_rails);
+    let mut obstacles = placement_obstacles(child.placement, library);
+    obstacles.extend(glyph_bodies.iter().copied());
     let mut driven = collect_driven_nets(child.placement, library);
     // A subckt *port* net is exposed to the parent; its driver status
     // (real driver or a parent-side PWR_FLAG) is decided on the parent
@@ -281,7 +297,6 @@ pub fn emit_child_sheet(child: &ChildSheet<'_>, library: &Library) -> Result<Str
     let requires_driver = collect_driver_required_nets(child.placement, library);
     let passive = collect_passive_nets(child.placement, library);
     let power_in = collect_power_in_nets(child.placement, library);
-    let negative_rails = spice_layout::net_class::negative_rail_nets(child.placement);
     for routed in route_nets(
         &net_pins,
         &child.name,
@@ -289,7 +304,7 @@ pub fn emit_child_sheet(child: &ChildSheet<'_>, library: &Library) -> Result<Str
         &obstacles,
         &driven,
         &requires_driver,
-        &negative_rails,
+        &child_negative_rails,
         &passive,
         &power_in,
         &[],
@@ -297,7 +312,14 @@ pub fn emit_child_sheet(child: &ChildSheet<'_>, library: &Library) -> Result<Str
         items.push(routed);
     }
     let child_props = placement_property_bboxes(child.placement);
-    for label in dangling_pin_labels(&net_pins, &child.name, &extra_pins, &child_props) {
+    let label_body_obstacles = label_rotation_obstacles(child.placement, library, &glyph_bodies);
+    for label in dangling_pin_labels(
+        &net_pins,
+        &child.name,
+        &extra_pins,
+        &child_props,
+        &label_body_obstacles,
+    ) {
         items.push(label);
     }
 
@@ -1546,6 +1568,95 @@ fn body_bbox_to_world(
     }
 }
 
+/// World-frame body bbox of every rail glyph a sheet will draw, one per
+/// Power/Ground net pin. Built from the *actual* `power:*` lib_id
+/// (`power_lib_id_for_net`) and its library body, transformed at the
+/// host pin with the glyph's fixed rot-0 pose — the exact footprint
+/// `spice_route::rails` draws (V14 locks every rail glyph to rot 0) and
+/// the exact box the V13 verifier measures. A GND triangle reaches
+/// screen-down, a VCC/VDD chevron and a VEE marker reach screen-up; each
+/// gets its true asymmetric footprint rather than a guessed one.
+///
+/// **Foreign-only by construction.** Power/Ground nets are unrouted
+/// (only Signal nets reach the Steiner router) and carry no `(label …)`
+/// (rail glyphs are their connectivity carrier), so every routed wire
+/// and every emitted label is foreign to every glyph here. Feeding these
+/// as router / label obstacles therefore repels only foreign geometry; a
+/// glyph is never an obstacle for its own net.
+///
+/// Body footprint only — the glyph's net-name value text is deliberately
+/// excluded (its width is not a wire hazard, and a wider zone risks
+/// over-constraining the router; ADR-14 / phase-2 plan).
+///
+/// The rot-0 anchor sits on the host pin in the canonical case; the rare
+/// forced-sideways / sheet-edge one-to-two-cell outward offset is not
+/// modelled here (no v0.1 fixture routes a foreign wire through those
+/// offset glyphs), matching the "known scope limits" of ADR-14.
+pub(crate) fn rail_glyph_body_bboxes(
+    net_pins: &std::collections::BTreeMap<String, Vec<(f64, f64, u16)>>,
+    library: &Library,
+    negative_rails: &std::collections::BTreeSet<String>,
+) -> Vec<spice_route::Bbox> {
+    let mut out = Vec::new();
+    for (name, pins) in net_pins {
+        let Some(lib_id) = power_lib_id_for_net(name, negative_rails) else {
+            continue;
+        };
+        let Some(local) = library.lookup(lib_id).and_then(Symbol::body_bbox) else {
+            continue;
+        };
+        for &(x, y, _ang) in pins {
+            out.push(body_bbox_to_world(local, x, y, Orientation::IDENTITY));
+        }
+    }
+    out
+}
+
+/// World-frame body bboxes (as [`TextBbox`]) of every visible host
+/// symbol — a resistor/cap/transistor/opamp body, excluding suppressed
+/// power sources and `power:*` glyphs. Shared by the property-text nudge
+/// (V13.1) and the interface-label rotation avoidance (V13 item 2B) so a
+/// nudged property / rotated label never lands on a foreign body.
+pub(crate) fn host_symbol_body_bboxes(placement: &Placement, library: &Library) -> Vec<TextBbox> {
+    placement
+        .elements
+        .iter()
+        .filter(|el| !el.is_power_source && !el.lib_id.starts_with("power:"))
+        .map(|el| {
+            let (ox, oy) = el.origin.to_mm();
+            let world = library
+                .lookup(&el.lib_id)
+                .and_then(Symbol::body_bbox)
+                .map_or(
+                    spice_route::Bbox {
+                        x0: ox - 2.54,
+                        y0: oy - 2.54,
+                        x1: ox + 2.54,
+                        y1: oy + 2.54,
+                    },
+                    |local| body_bbox_to_world(local, ox, oy, el.orientation),
+                );
+            bbox_as_text(world)
+        })
+        .collect()
+}
+
+/// Interface-label rotation obstacles for a sheet (V13 item 2B): every
+/// visible host symbol body plus every foreign rail-glyph body (`glyph_bodies`,
+/// as [`TextBbox`]), so a global label rotates clear of both rather than
+/// reading into a triangle or a body. Shared by `emit_root`,
+/// `emit_child_sheet`, and the refinement gate so all three measure the
+/// same rotated-label geometry the final decoration emits.
+pub(crate) fn label_rotation_obstacles(
+    placement: &Placement,
+    library: &Library,
+    glyph_bodies: &[spice_route::Bbox],
+) -> Vec<TextBbox> {
+    let mut out = host_symbol_body_bboxes(placement, library);
+    out.extend(glyph_bodies.iter().copied().map(bbox_as_text));
+    out
+}
+
 /// Heuristic Power/Ground classification from the net name alone.
 /// Mirrors rules 1 and 3 of `spice_layout::net_class::classify_nets`.
 pub(crate) fn classify_net_by_name(name: &str) -> spice_layout::net_class::NetClass {
@@ -1625,11 +1736,12 @@ pub(crate) struct LabelSpec {
 /// - The label anchor must not coincide with a foreign-net pin
 ///   coordinate (V11 silent-short guard) or with a port marker
 ///   (`extra_pins`) that already names the net at that coord.
-#[allow(clippy::cast_possible_truncation)]
+#[allow(clippy::cast_possible_truncation, clippy::too_many_lines)]
 pub(crate) fn label_specs(
     nets: &std::collections::BTreeMap<String, Vec<(f64, f64, u16)>>,
     extra_pins: &[(String, f64, f64)],
     property_bboxes: &[TextBbox],
+    body_obstacles: &[TextBbox],
 ) -> Vec<LabelSpec> {
     // Coordinates already carrying a port marker (sheet pin position
     // on the parent, hierarchical_label on a child) name the net by
@@ -1751,15 +1863,23 @@ pub(crate) fn label_specs(
         let _ = idx;
         let (fx, fy, fang) = uniq[0];
         if uniq.len() == 1 && !net_touches_port {
-            // Global labels carry a chevron; their bbox differs from a
-            // plain label, so we keep the body-clearing rotation as-is
-            // (the property-text avoidance below targets plain labels,
-            // where the regression appears).
+            // Interface global label. Prefer the body-clearing outward
+            // rotation, but rotate away if it would overlap a foreign
+            // power-glyph body, a host symbol body, or property text
+            // (V13 item 2 — a `in` label reading into a GND triangle).
+            // The chevron-aware picker keeps every currently-clean
+            // fixture byte-identical (preferred tried first).
+            let obstacles: Vec<TextBbox> = property_bboxes
+                .iter()
+                .chain(body_obstacles.iter())
+                .copied()
+                .collect();
+            let rot = global_label_rotation_avoiding(net, (fx, fy), label_rot(fang), &obstacles);
             out.push(LabelSpec {
                 net: net.clone(),
                 x: fx,
                 y: fy,
-                rot: label_rot(fang),
+                rot,
                 is_global: true,
             });
         } else {
@@ -1799,8 +1919,9 @@ fn dangling_pin_labels(
     scope: &str,
     extra_pins: &[(String, f64, f64)],
     property_bboxes: &[TextBbox],
+    body_obstacles: &[TextBbox],
 ) -> Vec<Sexpr> {
-    let specs = label_specs(nets, extra_pins, property_bboxes);
+    let specs = label_specs(nets, extra_pins, property_bboxes, body_obstacles);
     // Reproduce the previous per-net UUID-seed scheme: globals seeded by
     // net order index; plain labels by `idx*2` (+1 for the second of a
     // name-jump pair). Net order matches `label_specs` since both walk
@@ -2051,27 +2172,7 @@ fn nudge_property_text(items: &mut [Sexpr], placement: &Placement, library: &Lib
 
     // Symbol body bboxes (world) for every visible host symbol — a
     // nudged property must not land on any body (V13.1 analogue).
-    let bodies: Vec<TextBbox> = placement
-        .elements
-        .iter()
-        .filter(|el| !el.is_power_source && !el.lib_id.starts_with("power:"))
-        .map(|el| {
-            let (ox, oy) = el.origin.to_mm();
-            let world = library
-                .lookup(&el.lib_id)
-                .and_then(Symbol::body_bbox)
-                .map_or(
-                    spice_route::Bbox {
-                        x0: ox - 2.54,
-                        y0: oy - 2.54,
-                        x1: ox + 2.54,
-                        y1: oy + 2.54,
-                    },
-                    |local| body_bbox_to_world(local, ox, oy, el.orientation),
-                );
-            bbox_as_text(world)
-        })
-        .collect();
+    let bodies: Vec<TextBbox> = host_symbol_body_bboxes(placement, library);
 
     // Visible symbol-internal pin-name / pin-number text bboxes (world)
     // for every host symbol — a nudged property must also clear these
@@ -2575,6 +2676,71 @@ fn label_rotation_avoiding(
     // Order: preferred first (keeps the existing body-clearing choice
     // and every non-colliding fixture byte-identical), then the two
     // perpendiculars, then the opposite.
+    for cand in [
+        preferred,
+        (preferred + 90) % 360,
+        (preferred + 270) % 360,
+        (preferred + 180) % 360,
+    ] {
+        if !collides(cand) {
+            return cand;
+        }
+    }
+    preferred
+}
+
+/// World-frame AABB of a `(global_label …)` drawn at `anchor`, rotated
+/// `rot_deg` CCW on screen. Identical to [`text_bbox`] except it adds a
+/// `0.6·size` chevron lead on *both* ends of the tag, matching the V13
+/// verifier's `TextKind::GlobalLabel` model — so the emitter's
+/// avoidance check agrees with the test that grades it.
+fn global_label_bbox(text: &str, anchor: (f64, f64), rot_deg: u16) -> TextBbox {
+    let size = 1.27_f64;
+    #[allow(clippy::cast_precision_loss)]
+    let chars = text.chars().count() as f64;
+    let width = chars * 0.6 * size + 0.8 * size;
+    let height = 1.4 * size;
+    let chevron = 0.6 * size;
+    let (lx, rx, ty, by) = (-chevron, width + chevron, -height / 2.0, height / 2.0);
+    let theta = f64::from(rot_deg).to_radians();
+    let (s, c) = (theta.sin(), theta.cos());
+    let corners = [(lx, ty), (rx, ty), (rx, by), (lx, by)];
+    let (mut x0, mut y0, mut x1, mut y1) = (
+        f64::INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NEG_INFINITY,
+    );
+    for (px, py) in corners {
+        let wx = anchor.0 + c * px + s * py;
+        let wy = anchor.1 - s * px + c * py;
+        x0 = x0.min(wx);
+        y0 = y0.min(wy);
+        x1 = x1.max(wx);
+        y1 = y1.max(wy);
+    }
+    TextBbox { x0, y0, x1, y1 }
+}
+
+/// Pick a `(global_label …)` rotation clearing every obstacle bbox
+/// (foreign power-glyph bodies, host symbol bodies, property text),
+/// preferring the body-clearing `preferred` outward rotation so a
+/// currently-clean fixture stays byte-identical. Falls through the two
+/// perpendiculars then the opposite before giving up and returning
+/// `preferred` (a label overlap is a quality defect, never a
+/// correctness one, so we never fail to label). Uses the chevron-aware
+/// [`global_label_bbox`] so the emitter's choice matches the V13
+/// verifier's global-label model.
+fn global_label_rotation_avoiding(
+    text: &str,
+    anchor: (f64, f64),
+    preferred: u16,
+    obstacles: &[TextBbox],
+) -> u16 {
+    let collides = |rot: u16| {
+        let b = global_label_bbox(text, anchor, rot);
+        obstacles.iter().any(|o| b.intersects(*o))
+    };
     for cand in [
         preferred,
         (preferred + 90) % 360,
