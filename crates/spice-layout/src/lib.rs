@@ -997,6 +997,7 @@ fn apply_user_constraints(
         place,
         subckts: _,
         sheet_instances: _,
+        ports: _,
     } = checked;
 
     // Index elements by refdes for O(1) lookups.

@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use spice_policy::CheckedNetlist;
-use spice_resolve::{ElementKind, ElementRole};
+use spice_resolve::{ElementKind, ElementRole, PortDir};
 
 use crate::net_class::{NetClass, NetClassMap};
 
@@ -139,6 +139,23 @@ fn no_source_fallback(
             leaf_input_elements.insert(owner);
         } else if lo == "out" || lo == "output" || lo.starts_with("vout") {
             leaf_output_elements.insert(owner);
+        }
+    }
+
+    // Declared `*@port <net>=<dir>` directives reinforce the same
+    // left/right bias by POSITION only (never orientation): an `Input`
+    // port seeds every element on its net toward the left (root layer),
+    // an `Output` port toward the right (terminal sink). `Bidir` gets no
+    // bias. Additive to the name-based sets above — for a fixture with no
+    // `*@port` this loop is empty, so placement is byte-identical.
+    for port in &checked.ports {
+        let Some(members) = net_to_elements.get(port.net.as_str()) else {
+            continue;
+        };
+        match port.dir {
+            PortDir::Input => leaf_input_elements.extend(members.iter().copied()),
+            PortDir::Output => leaf_output_elements.extend(members.iter().copied()),
+            PortDir::Bidir => {}
         }
     }
 

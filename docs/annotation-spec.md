@@ -458,6 +458,51 @@ The directive is file-scoped; place it once, typically near the top
 of the netlist. It is a no-op at simulation time (the leading `*`
 makes the whole line a SPICE comment, per §8).
 
+### 4.8 `port` — declared I/O terminal
+
+Block-form only:
+
+```
+*@port <net>=<dir>
+```
+
+Declares a net as a circuit **input**, **output**, or **bidirectional**
+terminal. `<dir>` is one of `input`, `output`, `bidir`. The net name is
+matched against the nets any element connects to; a `*@port` naming a
+net that no element touches is an **E010** hard error (the typo guard,
+analogous to `E001` for an unknown refdes). A missing or unrecognised
+direction is an **E912** hard error.
+
+```
+*@port in=input       ← left-facing input terminal on net `in`
+*@port out=output     ← right-facing output terminal on net `out`
+*@port bus=bidir      ← bidirectional terminal on net `bus`
+```
+
+Semantics:
+
+- **A directional terminal.** The emitter renders a
+  `(global_label "<net>" (shape input|output|bidirectional) …)` on the
+  net. `bidir` maps to the KiCad shape token `bidirectional`. This
+  **replaces** the plain / interface label the net would otherwise
+  carry — the net gets exactly one label of any kind (invariant V4), a
+  directional terminal *or* a plain label, never both. This is how an
+  output net that would otherwise emit an unadorned plain `(label …)`
+  (e.g. a two-pin `out` net) becomes a right-facing output terminal.
+- **A soft placement bias.** An `input` port nudges its net's elements
+  toward the left (source) side of the sheet; an `output` port toward
+  the right (sink) side; `bidir` applies no positional bias. This only
+  reinforces the existing signal-flow X-layering (invariant V6) — it is
+  a soft position hint, never an orientation change.
+- **Not an ERC driver.** A `*@port` is a readability + position marker
+  only. It never adds or removes a `PWR_FLAG` and never synthesizes a
+  driving symbol (invariant V3). A genuinely undriven net keeps its
+  existing stock `PWR_FLAG`; declaring it a port does not change its
+  ERC status.
+
+The directive is a no-op at simulation time (the leading `*` makes the
+whole line a SPICE comment, per §8).
+
 ---
 
 ## 5. Constraint resolution
@@ -652,6 +697,9 @@ The converter reports, in this order:
   port-name left-hand side is used on an element that is not a
   `.subckt` instance (so there is no port list to bind against).
   See §4.2.
+- **E010** `*@port` names a net that no element connects to — the
+  typo guard for the `port` directive (§4.8), analogous to `E001`
+  for an unknown refdes. Raised by the resolve pass.
 - **W101** conflicting `place` constraints (which one was kept)
 - **W102** `align` cluster has fewer than two members
 - **W103** annotation on a line the parser did not recognize as an
@@ -688,6 +736,9 @@ into the typed AST, before the semantic passes above run.
   conversion stops. The parser raises it for a malformed/missing
   `version=`; the CLI version-handshake pass raises it (with the
   same code) for a well-formed but unsupported declared version.
+- **E912** `*@port` is malformed — missing its `<net>=<dir>` pair, or
+  the declared direction is not one of `input` / `output` / `bidir`
+  (§4.8). A real blocking error raised by the parser.
 - **W900** a `.subckt` was never closed by `.ends` (closed
   implicitly at end of file)
 - **W907** malformed BJT line — `Q…` needs at least three nodes and

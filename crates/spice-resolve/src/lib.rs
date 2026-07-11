@@ -38,7 +38,7 @@ use crate::default_pinmap::{DefaultPinmapError, synthesize as synthesize_default
 use kicad_symbols::{Library, Pin, Symbol};
 use spice_diagnostics::{Diagnostic, Label, Severity, Span};
 use spice_parser::ast::{Annotation, Element, Netlist, SpannedAnnotation, SpannedTag, Subckt, Tag};
-pub use spice_parser::ast::{Axis, ElementKind, PinRef, PinmapEntry, Relation, Value};
+pub use spice_parser::ast::{Axis, ElementKind, PinRef, PinmapEntry, PortDir, Relation, Value};
 
 // ---------------------------------------------------------------------------
 // Public output types
@@ -62,6 +62,10 @@ pub struct ResolvedNetlist {
     /// the parent schematic. Nested X instances (X inside a subckt
     /// body) are not yet supported.
     pub sheet_instances: Vec<SheetInstance>,
+    /// Top-level `*@port <net>=<dir>` directives. The emitter renders a
+    /// directional terminal on each net; the placer biases the net's
+    /// elements toward the left/right X-layer.
+    pub ports: Vec<PortSpec>,
 }
 
 /// Port list and resolved body for a `.subckt` definition.
@@ -144,6 +148,14 @@ pub struct AlignSpec {
     pub scope: SheetScope,
 }
 
+/// A resolved `*@port <net>=<dir>` directive.
+#[derive(Debug, Clone)]
+pub struct PortSpec {
+    pub net: String,
+    pub dir: PortDir,
+    pub span: Option<Span>,
+}
+
 /// A pass-through `;@ place=` tag.
 #[derive(Debug, Clone)]
 pub struct PlaceSpec {
@@ -167,6 +179,7 @@ pub struct PlaceSpec {
 /// least one fatal diagnostic. (When that becomes a real need, this
 /// signature can be widened to `(ResolvedNetlist, Vec<Diagnostic>)`
 /// without breaking the error path.)
+#[allow(clippy::too_many_lines)]
 pub fn resolve(netlist: &Netlist, library: &Library) -> Result<ResolvedNetlist, Vec<Diagnostic>> {
     let mut diags: Vec<Diagnostic> = Vec::new();
     let mut out_elements: Vec<ResolvedElement> = Vec::new();
@@ -287,6 +300,13 @@ pub fn resolve(netlist: &Netlist, library: &Library) -> Result<ResolvedNetlist, 
         )
         .collect();
 
+    // `*@port` — top-level scope only (subckt-body ports are out of
+    // scope; child sheets already carry hierarchical labels). The net a
+    // port names must be touched by some element (pre-ignore, so a port
+    // on an ignored source's net still resolves); an unknown net is a
+    // hard error (E010, the typo guard analogous to E001).
+    let ports = collect_ports(netlist, &mut diags);
+
     if diags.iter().any(|d| d.severity == Severity::Error) {
         return Err(diags);
     }
@@ -298,7 +318,40 @@ pub fn resolve(netlist: &Netlist, library: &Library) -> Result<ResolvedNetlist, 
         place,
         subckts,
         sheet_instances,
+        ports,
     })
+}
+
+/// Collect top-level `*@port <net>=<dir>` directives, validating that
+/// each named net is touched by at least one element (pre-ignore).
+/// Unknown nets raise `E010`.
+fn collect_ports(netlist: &Netlist, diags: &mut Vec<Diagnostic>) -> Vec<PortSpec> {
+    let known_nets: HashSet<&str> = netlist
+        .elements
+        .iter()
+        .flat_map(|e| e.nodes.iter().map(String::as_str))
+        .collect();
+    let mut ports = Vec::new();
+    for a in &netlist.annotations {
+        let Annotation::Port { net, dir } = &a.annotation else {
+            continue;
+        };
+        if known_nets.contains(net.as_str()) {
+            ports.push(PortSpec {
+                net: net.clone(),
+                dir: *dir,
+                span: a.span,
+            });
+        } else {
+            diags.push(make_diag(
+                Severity::Error,
+                "E010",
+                format!("`*@port` names net `{net}` that no element connects to"),
+                a.span,
+            ));
+        }
+    }
+    ports
 }
 
 fn has_explicit_symbol_tag(element: &Element) -> bool {
@@ -768,7 +821,7 @@ fn collect_symbol_defaults(annotations: &[SpannedAnnotation]) -> Vec<BlockSymbol
                 glob: for_glob.as_str(),
                 pinmap: pinmap.as_deref(),
             }),
-            Annotation::Align { .. } | Annotation::SpecVersion(_) => None,
+            Annotation::Align { .. } | Annotation::SpecVersion(_) | Annotation::Port { .. } => None,
         })
         .collect()
 }
@@ -820,7 +873,9 @@ fn collect_align(annotations: &[SpannedAnnotation], scope: &SheetScope) -> Vec<A
                 span: a.span,
                 scope: scope.clone(),
             }),
-            Annotation::SymbolDefault { .. } | Annotation::SpecVersion(_) => None,
+            Annotation::SymbolDefault { .. }
+            | Annotation::SpecVersion(_)
+            | Annotation::Port { .. } => None,
         })
         .collect()
 }

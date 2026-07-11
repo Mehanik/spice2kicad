@@ -162,9 +162,9 @@ implementation. When in doubt, prefer the simpler option.
    visible to `grep`.
 
 7. **KISS over completeness.** Cut anything that doesn't have a real
-   use case. v0.1 has six directives (`symbol`, `pinmap`, `place`,
-   `align`, `power`, `ignore`); features without justification go
-   to §9 of the spec ("Open questions / deferred"). Add them when
+   use case. v0.1 has seven directives (`symbol`, `pinmap`, `place`,
+   `align`, `power`, `ignore`, `port`); features without justification
+   go to §9 of the spec ("Open questions / deferred"). Add them when
    real users complain — not before.
 
 8. **Hard errors on typos, soft warnings on conflicts.** An unknown
@@ -189,7 +189,7 @@ Two carriers, both invisible to SPICE simulators:
 R1 in out 1k  ;@ <directive>=<value>          ← trailing tag on element
 ```
 
-Six directives:
+Seven directives:
 
 | Directive | Form              | Purpose                                          |
 | --------- | ----------------- | ------------------------------------------------ |
@@ -199,6 +199,7 @@ Six directives:
 | `align`   | block             | Force horizontal/vertical co-alignment of N parts |
 | `power`   | trailing          | Treat a voltage source as a power rail           |
 | `ignore`  | trailing          | Hide simulation-only element from the schematic  |
+| `port`    | block             | Declare a net as a circuit input/output terminal |
 
 Layout phases (later phases never override earlier):
 1. Structural (`.subckt`, `.include`)

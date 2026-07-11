@@ -395,6 +395,7 @@ mod tests {
             place: resolved.place,
             subckts: resolved.subckts,
             sheet_instances: Vec::new(),
+            ports: Vec::new(),
         };
         let (checked, _w) = check(top).expect("policy check failed");
         let placement = place_with(

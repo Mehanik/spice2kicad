@@ -212,6 +212,20 @@ pub enum Annotation {
     /// The version-handshake pass (in the CLI pipeline) rejects a
     /// declared version the converter does not support.
     SpecVersion(String),
+    /// `*@port <net>=<dir>` — declares a net as a circuit I/O terminal.
+    /// The emitter renders a directional `(global_label … (shape …))`
+    /// on the net (replacing its plain/global label), and the placer
+    /// biases the net's elements toward the left (`Input`) or right
+    /// (`Output`) X-layer.
+    Port { net: String, dir: PortDir },
+}
+
+/// Direction of a declared `*@port` terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PortDir {
+    Input,
+    Output,
+    Bidir,
 }
 
 #[derive(Debug, Clone)]

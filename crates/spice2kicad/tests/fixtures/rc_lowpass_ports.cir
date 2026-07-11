@@ -1,0 +1,14 @@
+* RC low-pass filter — single-pole, 1.6 kHz corner, with I/O ports.
+* Demonstrates the `*@port` directive: `out` is a 2-pin internal net
+* that without the directive emits a plain `(label "out")`; declaring
+* it an output turns it into a right-facing output terminal (V4: the
+* directional global_label REPLACES the plain label, never both).
+*@symbol Device:R_US for=R*
+*@symbol Device:C for=C*
+*@port in=input
+*@port out=output
+V1 in  0   AC 1   ;@ ignore
+R1 in  out 1k
+C1 out 0   100n
+.ac dec 10 1 1Meg
+.end

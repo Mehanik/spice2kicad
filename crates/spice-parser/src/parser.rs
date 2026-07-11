@@ -23,7 +23,7 @@ use spice_diagnostics::{Diagnostic, FileId, Label, Span};
 
 use crate::ast::{
     Annotation, Axis, Directive, Element, ElementKind, Model, Netlist, PinRef, PinmapEntry,
-    Relation, SpannedAnnotation, SpannedTag, Subckt, Tag, Value,
+    PortDir, Relation, SpannedAnnotation, SpannedTag, Subckt, Tag, Value,
 };
 use crate::lexer::{LineKind, LogicalLine, RawTag, Scanned, Word};
 use crate::{ParseOutcome, ParseResult};
@@ -397,6 +397,16 @@ fn collect_positional(words: &[Word], params: &mut Vec<(String, Value)>) -> Vec<
     out
 }
 
+/// Render a parsed `key=value` right-hand side back to its string form,
+/// for directives whose value is a bare keyword/glob rather than a
+/// number (`for=`, `pinmap=`, `version=`, `port` direction).
+fn value_as_string(v: &Value) -> String {
+    match v {
+        Value::String(s) | Value::Expr(s) => s.clone(),
+        Value::Number(n) => format!("{n}"),
+    }
+}
+
 fn is_identifier(s: &str) -> bool {
     let mut chars = s.chars();
     match chars.next() {
@@ -732,21 +742,12 @@ fn parse_block_annotation(line: &LogicalLine, diags: &mut Vec<Diagnostic>) -> Op
                 ));
                 return None;
             };
-            let for_glob = match for_value {
-                Value::String(s) => s.clone(),
-                Value::Number(n) => format!("{n}"),
-                Value::Expr(e) => e.clone(),
-            };
+            let for_glob = value_as_string(for_value);
             let pinmap = params
                 .iter()
                 .find(|(k, _)| k.eq_ignore_ascii_case("pinmap"))
                 .and_then(|(_, v)| {
-                    let s = match v {
-                        Value::String(s) => s.clone(),
-                        Value::Number(n) => format!("{n}"),
-                        Value::Expr(e) => e.clone(),
-                    };
-                    parse_pinmap_entries(&s, line.span, line.span, diags)
+                    parse_pinmap_entries(&value_as_string(v), line.span, line.span, diags)
                 });
             Some(Annotation::SymbolDefault {
                 lib_id,
@@ -788,11 +789,7 @@ fn parse_block_annotation(line: &LogicalLine, diags: &mut Vec<Diagnostic>) -> Op
             let version = params
                 .iter()
                 .find(|(k, _)| k.eq_ignore_ascii_case("version"))
-                .map(|(_, v)| match v {
-                    Value::String(s) => s.clone(),
-                    Value::Number(n) => format!("{n}"),
-                    Value::Expr(e) => e.clone(),
-                })
+                .map(|(_, v)| value_as_string(v))
                 .filter(|s| !s.is_empty());
             let Some(version) = version else {
                 diags.push(error(
@@ -803,6 +800,40 @@ fn parse_block_annotation(line: &LogicalLine, diags: &mut Vec<Diagnostic>) -> Op
                 return None;
             };
             Some(Annotation::SpecVersion(version))
+        }
+        "port" => {
+            // `*@port <net>=<dir>` — declared I/O terminal. Parsed as a
+            // single `key=value` where key = net name, value = direction.
+            // A bare `*@port <net>` (no `=<dir>`) leaves no key=value
+            // pair and is malformed → E912.
+            let tail = &line.words[1..];
+            let mut params: Vec<(String, Value)> = Vec::new();
+            let _positional = collect_positional(tail, &mut params);
+            let Some((net, dir_value)) = params.first() else {
+                diags.push(error(
+                    "E912",
+                    "*@port requires <net>=<input|output|bidir>",
+                    Label::new(line.span, ""),
+                ));
+                return None;
+            };
+            let dir = match value_as_string(dir_value).to_ascii_lowercase().as_str() {
+                "input" => PortDir::Input,
+                "output" => PortDir::Output,
+                "bidir" => PortDir::Bidir,
+                other => {
+                    diags.push(error(
+                        "E912",
+                        format!("unknown port direction `{other}` (want input|output|bidir)"),
+                        Label::new(line.span, ""),
+                    ));
+                    return None;
+                }
+            };
+            Some(Annotation::Port {
+                net: net.clone(),
+                dir,
+            })
         }
         other => {
             diags.push(Diagnostic::warning(

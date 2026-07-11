@@ -167,10 +167,15 @@ fn emit_schematic_target(
     // align/place. Subckt bodies are placed independently.
     let top_subckts = resolved.subckts.clone();
     let top_sheet_instances = resolved.sheet_instances.clone();
+    // Top-level `*@port` terminals: cloned for the emitter (directional
+    // global_label) and moved into the placer input (left/right X-layer
+    // bias). Empty when the file declares no `*@port`.
+    let top_ports = resolved.ports.clone();
     let top_resolved = spice_resolve::ResolvedNetlist {
         elements: resolved.elements,
         align: resolved.align,
         place: resolved.place,
+        ports: resolved.ports,
         subckts: top_subckts.clone(),
         // Carry the sheet instances through to placement. The top-level
         // element placer ignores them for positioning (sheets are placed
@@ -334,7 +339,9 @@ fn emit_schematic_target(
         })
         .collect();
 
-    let rendered = kicad_emitter::emit_root(&placement, &library, &sheet_blocks)?;
+    let port_pairs: Vec<(String, spice_resolve::PortDir)> =
+        top_ports.iter().map(|p| (p.net.clone(), p.dir)).collect();
+    let rendered = kicad_emitter::emit_root(&placement, &library, &sheet_blocks, &port_pairs)?;
 
     let Some(out_path) = cli.output.clone() else {
         // No output file: dump parent to stdout, drop children.

@@ -35,8 +35,8 @@ use std::collections::{HashMap, HashSet};
 
 use spice_diagnostics::{Diagnostic, Label, Severity, Span};
 use spice_resolve::{
-    AlignSpec, PlaceSpec, Relation, ResolvedElement, ResolvedNetlist, SheetInstance, SheetScope,
-    SubcktPorts,
+    AlignSpec, PlaceSpec, PortSpec, Relation, ResolvedElement, ResolvedNetlist, SheetInstance,
+    SheetScope, SubcktPorts,
 };
 
 // ---------------------------------------------------------------------------
@@ -63,6 +63,10 @@ pub struct CheckedNetlist {
     pub place: Vec<PlaceSpec>,
     pub subckts: Vec<SubcktPorts>,
     pub sheet_instances: Vec<SheetInstance>,
+    /// Declared `*@port` terminals, carried through unvalidated (the
+    /// resolver already checked the net names). The layout pass uses
+    /// these to bias input/output nets toward the left/right X-layer.
+    pub ports: Vec<PortSpec>,
 }
 
 // ---------------------------------------------------------------------------
@@ -89,6 +93,7 @@ pub fn check(
         place,
         subckts,
         sheet_instances,
+        ports,
     } = resolved;
 
     let mut diags: Vec<Diagnostic> = Vec::new();
@@ -254,6 +259,7 @@ pub fn check(
             place: clean_place,
             subckts,
             sheet_instances,
+            ports,
         },
         diags,
     ))

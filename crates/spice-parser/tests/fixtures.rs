@@ -115,7 +115,9 @@ fn diff_pair_align_and_place() {
         .iter()
         .filter_map(|a| match &a.annotation {
             Annotation::Align { axis, refdes } => Some((axis, refdes.clone())),
-            Annotation::SymbolDefault { .. } | Annotation::SpecVersion(_) => None,
+            Annotation::SymbolDefault { .. }
+            | Annotation::SpecVersion(_)
+            | Annotation::Port { .. } => None,
         })
         .collect();
     assert_eq!(aligns.len(), 2);

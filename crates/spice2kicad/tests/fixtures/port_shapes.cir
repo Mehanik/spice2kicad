@@ -1,0 +1,13 @@
+* `*@port` direction coverage — input / output / bidir on internal
+* 2-pin nets. Each of ni/no/nb is a 2-pin node that WITHOUT a port
+* directive emits a plain `(label …)`; the directive must turn each
+* into a directional `(global_label … (shape input|output|bidirectional))`.
+*@symbol Device:R_US for=R*
+*@port ni=input
+*@port no=output
+*@port nb=bidir
+R1 src ni 1k
+R2 ni  no 1k
+R3 no  nb 1k
+R4 nb  0  1k
+.end

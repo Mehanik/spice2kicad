@@ -7,7 +7,7 @@
 mod common;
 
 use common::{has_annotation, parse_ok};
-use spice_parser::ast::{Annotation, Axis};
+use spice_parser::ast::{Annotation, Axis, PortDir};
 
 // ─── .subckt ─────────────────────────────────────────────────────────────────
 
@@ -366,6 +366,95 @@ fn block_annotation_inside_subckt_lands_in_subckt() {
             }
         )),
         "subckt annotation not found"
+    );
+}
+
+// ─── *@port <net>=<dir> (I/O terminal declaration, spec §4) ──────────────────
+
+#[test]
+fn block_annotation_port_output() {
+    // `*@port out=output` parses into an `Annotation::Port` AST node
+    // (preserved first-class, not dropped as a comment) carrying the
+    // net name and direction.
+    let nl = parse_ok("* t\n*@port out=output\n");
+    assert!(
+        has_annotation(&nl, |a| matches!(
+            a,
+            Annotation::Port { net, dir: PortDir::Output }
+            if net == "out"
+        )),
+        "Port(out, output) not found"
+    );
+}
+
+#[test]
+fn block_annotation_port_input() {
+    let nl = parse_ok("* t\n*@port in=input\n");
+    assert!(
+        has_annotation(&nl, |a| matches!(
+            a,
+            Annotation::Port { net, dir: PortDir::Input }
+            if net == "in"
+        )),
+        "Port(in, input) not found"
+    );
+}
+
+#[test]
+fn block_annotation_port_bidir() {
+    let nl = parse_ok("* t\n*@port bus=bidir\n");
+    assert!(
+        has_annotation(&nl, |a| matches!(
+            a,
+            Annotation::Port { net, dir: PortDir::Bidir }
+            if net == "bus"
+        )),
+        "Port(bus, bidir) not found"
+    );
+}
+
+#[test]
+fn block_annotation_port_inside_subckt_lands_in_subckt() {
+    // Like `*@align`, a block `*@port` inside a `.subckt` body lands in
+    // that subckt's annotations, not at the top level.
+    let src = "* t\n.subckt BLK a b\n*@port a=input\n.ends\n";
+    let nl = parse_ok(src);
+    assert!(
+        nl.annotations.is_empty(),
+        "top-level annotations must be empty"
+    );
+    let sub = nl.subckts.iter().find(|s| s.name == "BLK").expect("BLK");
+    assert!(
+        sub.annotations.iter().any(|a| matches!(
+            &a.annotation,
+            Annotation::Port {
+                dir: PortDir::Input,
+                ..
+            }
+        )),
+        "subckt port annotation not found"
+    );
+}
+
+#[test]
+fn port_malformed_direction_is_e912() {
+    // A direction keyword that is not input/output/bidir is a hard
+    // syntax error (blocks conversion), mirroring the `*@align` axis
+    // check (E904) and the `*@spec` handshake (E911).
+    let diags = common::parse_err("* t\n*@port out=sideways\nR1 in out 1k\n");
+    assert!(
+        diags.iter().any(|d| d.code == "E912"),
+        "malformed port direction must fire E912: {diags:?}"
+    );
+}
+
+#[test]
+fn port_missing_direction_is_e912() {
+    // `*@port out` with no `=<dir>` at all is malformed → E912.
+    let diags = common::parse_err("* t\n*@port out\nR1 in out 1k\n");
+    assert!(
+        diags.iter().any(|d| d.code == "E912"),
+        "*@port without a direction must fire E912: {diags:?}"
     );
 }
 

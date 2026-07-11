@@ -385,7 +385,13 @@ fn v13_overlap_count(placement: &Placement, library: &Library) -> usize {
     let negative_rails = spice_layout::net_class::negative_rail_nets(placement);
     let glyph_bodies = rail_glyph_body_bboxes(&net_pins, library, &negative_rails);
     let label_obstacles = label_rotation_obstacles(placement, library, &glyph_bodies);
-    let specs = label_specs(&net_pins, &[], &props, &label_obstacles);
+    let specs = label_specs(
+        &net_pins,
+        &[],
+        &props,
+        &label_obstacles,
+        &std::collections::BTreeMap::new(),
+    );
     // World body bboxes (as TextBboxes) for the label↔body check.
     let bodies: Vec<TextBbox> = placement
         .elements

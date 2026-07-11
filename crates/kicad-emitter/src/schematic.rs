@@ -32,13 +32,23 @@
 //! placer's internal coordinates remain Y-up to match the rest of
 //! `spice-layout`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::EmitError;
 use crate::sexpr::Sexpr;
 use kicad_symbols::{Library, Orientation, PinElectrical, RawSexpr, Rotation, Symbol};
 use spice_layout::{PlacedElement, Placement};
+use spice_parser::ast::PortDir;
 use uuid::Uuid;
+
+/// KiCad `(shape …)` token for a declared `*@port` direction.
+pub(crate) fn port_shape_token(dir: PortDir) -> &'static str {
+    match dir {
+        PortDir::Input => "input",
+        PortDir::Output => "output",
+        PortDir::Bidir => "bidirectional",
+    }
+}
 
 const SCHEMA_VERSION: &str = "20231120";
 const GENERATOR: &str = "spice2kicad";
@@ -54,7 +64,7 @@ pub const PAGE_MARGIN_MM: f64 = 25.4;
 const UUID_NAMESPACE: Uuid = Uuid::from_u128(0x7363_6932_6b69_6361_6432_6b69_6361_6431);
 
 pub fn emit(placement: &Placement, library: &Library) -> Result<String, EmitError> {
-    emit_root(placement, library, &[])
+    emit_root(placement, library, &[], &[])
 }
 
 /// One top-level `X<n>` SPICE instance lowered to a KiCad hierarchical
@@ -105,7 +115,9 @@ pub fn emit_root(
     placement: &Placement,
     library: &Library,
     sheets: &[SheetBlock],
+    ports: &[(String, PortDir)],
 ) -> Result<String, EmitError> {
+    let port_dirs: BTreeMap<String, PortDir> = ports.iter().cloned().collect();
     let mut items: Vec<Sexpr> = Vec::with_capacity(placement.elements.len() * 4 + sheets.len() + 8);
     items.push(atom("kicad_sch"));
     items.push(list(vec![atom("version"), atom(SCHEMA_VERSION)]));
@@ -192,6 +204,7 @@ pub fn emit_root(
         &extra_pins,
         &property_bboxes,
         &label_body_obstacles,
+        &port_dirs,
     ) {
         items.push(label);
     }
@@ -319,6 +332,7 @@ pub fn emit_child_sheet(child: &ChildSheet<'_>, library: &Library) -> Result<Str
         &extra_pins,
         &child_props,
         &label_body_obstacles,
+        &BTreeMap::new(),
     ) {
         items.push(label);
     }
@@ -514,7 +528,15 @@ fn no_connect(x: f64, y: f64, scope: &str, idx: usize) -> Sexpr {
 /// no wire exists to anchor a plain label (ERC `label_dangling`
 /// fires on a wireless plain label, but accepts a global label as
 /// an external interface marker).
-fn global_label_simple(text: &str, x: f64, y: f64, rot_deg: u16, scope: &str, idx: usize) -> Sexpr {
+fn global_label_simple(
+    text: &str,
+    x: f64,
+    y: f64,
+    rot_deg: u16,
+    scope: &str,
+    idx: usize,
+    shape: &str,
+) -> Sexpr {
     let uuid = Uuid::new_v5(
         &UUID_NAMESPACE,
         format!("glabel:{scope}:{idx}:{text}").as_bytes(),
@@ -523,7 +545,7 @@ fn global_label_simple(text: &str, x: f64, y: f64, rot_deg: u16, scope: &str, id
     list(vec![
         atom("global_label"),
         qstring(text),
-        list(vec![atom("shape"), atom("input")]),
+        list(vec![atom("shape"), atom(shape)]),
         list(vec![
             atom("at"),
             atom(&format_coord(x)),
@@ -1709,6 +1731,11 @@ pub(crate) struct LabelSpec {
     pub y: f64,
     pub rot: u16,
     pub is_global: bool,
+    /// KiCad `(shape …)` token for a global label. Only meaningful when
+    /// `is_global` is `true`; ignored for plain labels. The one-pin
+    /// interface case and the un-annotated path use `"input"`; a
+    /// declared `*@port` overrides it with its direction's token.
+    pub shape: &'static str,
 }
 
 /// Build the structured [`LabelSpec`] list naming each signal net. The
@@ -1742,6 +1769,7 @@ pub(crate) fn label_specs(
     extra_pins: &[(String, f64, f64)],
     property_bboxes: &[TextBbox],
     body_obstacles: &[TextBbox],
+    ports: &BTreeMap<String, PortDir>,
 ) -> Vec<LabelSpec> {
     // Coordinates already carrying a port marker (sheet pin position
     // on the parent, hierarchical_label on a child) name the net by
@@ -1862,6 +1890,28 @@ pub(crate) fn label_specs(
         });
         let _ = idx;
         let (fx, fy, fang) = uniq[0];
+        // A declared `*@port <net>=<dir>` renders exactly one directional
+        // `(global_label … (shape …))` on the net, REPLACING whatever
+        // plain / interface label the 1-pin/≥2-pin heuristic below would
+        // have chosen (V4: ≤ 1 label per net). Anchored at the leftmost
+        // body pin, body-clearing rotation like the interface case.
+        if let Some(dir) = ports.get(net) {
+            let obstacles: Vec<TextBbox> = property_bboxes
+                .iter()
+                .chain(body_obstacles.iter())
+                .copied()
+                .collect();
+            let rot = global_label_rotation_avoiding(net, (fx, fy), label_rot(fang), &obstacles);
+            out.push(LabelSpec {
+                net: net.clone(),
+                x: fx,
+                y: fy,
+                rot,
+                is_global: true,
+                shape: port_shape_token(*dir),
+            });
+            continue;
+        }
         if uniq.len() == 1 && !net_touches_port {
             // Interface global label. Prefer the body-clearing outward
             // rotation, but rotate away if it would overlap a foreign
@@ -1881,6 +1931,7 @@ pub(crate) fn label_specs(
                 y: fy,
                 rot,
                 is_global: true,
+                shape: "input",
             });
         } else {
             // V13: prefer the body-clearing outward rotation, but if that
@@ -1894,6 +1945,7 @@ pub(crate) fn label_specs(
                 y: fy,
                 rot,
                 is_global: false,
+                shape: "input",
             });
             if net_touches_port && uniq.len() >= 2 {
                 let (lx, ly, lang) = uniq[uniq.len() - 1];
@@ -1904,6 +1956,7 @@ pub(crate) fn label_specs(
                     y: ly,
                     rot: rot2,
                     is_global: false,
+                    shape: "input",
                 });
             }
         }
@@ -1920,8 +1973,9 @@ fn dangling_pin_labels(
     extra_pins: &[(String, f64, f64)],
     property_bboxes: &[TextBbox],
     body_obstacles: &[TextBbox],
+    ports: &BTreeMap<String, PortDir>,
 ) -> Vec<Sexpr> {
-    let specs = label_specs(nets, extra_pins, property_bboxes, body_obstacles);
+    let specs = label_specs(nets, extra_pins, property_bboxes, body_obstacles, ports);
     // Reproduce the previous per-net UUID-seed scheme: globals seeded by
     // net order index; plain labels by `idx*2` (+1 for the second of a
     // name-jump pair). Net order matches `label_specs` since both walk
@@ -1938,7 +1992,7 @@ fn dangling_pin_labels(
         let idx = net_idx.get(spec.net.as_str()).copied().unwrap_or(0);
         if spec.is_global {
             out.push(global_label_simple(
-                &spec.net, spec.x, spec.y, spec.rot, scope, idx,
+                &spec.net, spec.x, spec.y, spec.rot, scope, idx, spec.shape,
             ));
         } else {
             let nth = plain_seen.entry(spec.net.as_str()).or_insert(0);

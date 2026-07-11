@@ -153,6 +153,7 @@ fn cross_sheet_netlist(
             elements: vec![make_element(sub_r)],
         }],
         sheet_instances: vec![],
+        ports: vec![],
     }
 }
 
@@ -197,6 +198,7 @@ fn no_e004_same_sheet_root_control() {
         place: vec![],
         subckts: vec![],
         sheet_instances: vec![],
+        ports: vec![],
     };
     let (out, warns) = check(n).expect("clean");
     assert_eq!(out.align.len(), 1);
@@ -226,6 +228,7 @@ fn no_e004_same_sheet_subckt_control() {
             elements: vec![make_element("R5"), make_element("R6")],
         }],
         sheet_instances: vec![],
+        ports: vec![],
     };
     let (out, _warns) = check(n).expect("clean");
     assert_eq!(out.align.len(), 1);
@@ -255,6 +258,7 @@ fn e004_sheet_instance_is_root_scoped() {
             subckt_name: "AMP".to_owned(),
             nodes: vec![],
         }],
+        ports: vec![],
     };
     let diags = check(n).expect_err("fatal");
     assert!(codes_of(&diags).contains(&"E004"));
@@ -417,6 +421,7 @@ fn idempotence_after_cleanup() {
         place: out.place.clone(),
         subckts: out.subckts.clone(),
         sheet_instances: out.sheet_instances.clone(),
+        ports: out.ports.clone(),
     };
     let (out2, warns) = check(again).expect("idempotent");
     assert!(warns.is_empty());
@@ -555,6 +560,7 @@ proptest! {
             place: out.place,
             subckts: out.subckts,
             sheet_instances: out.sheet_instances,
+            ports: out.ports,
         };
         let (_, warns) = check(again).expect("re-check ok");
         prop_assert!(warns.is_empty(), "stray warnings on re-check: {:?}", warns.iter().map(|w| w.code).collect::<Vec<_>>());

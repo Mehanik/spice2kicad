@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 use kicad_symbols::Library;
 use spice_diagnostics::{FileId, Severity};
 use spice_parser::ast::{
-    Annotation, Axis, Element, ElementKind, Netlist, PinRef, PinmapEntry, Relation,
+    Annotation, Axis, Element, ElementKind, Netlist, PinRef, PinmapEntry, PortDir, Relation,
     SpannedAnnotation, SpannedTag, Subckt, Tag, Value,
 };
 use spice_resolve::{ElementRole, ResolvedNetlist, resolve};
@@ -577,6 +577,65 @@ fn port_name_pinmap_on_primitive_is_e009() {
     ])));
     let codes = err_codes(&nl_with(vec![e]));
     assert!(codes.iter().any(|c| c == "E009"), "got {codes:?}");
+}
+
+// ---------------------------------------------------------------------------
+// `*@port` — declared I/O terminals (spec §4)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn port_directive_carries_net_and_direction() {
+    // Resolve carries each declared port's net identity + direction on
+    // `ResolvedNetlist.ports`, for the emitter (directional terminal)
+    // and the layout position hint to consume.
+    let src = "* t\n\
+               *@port in=input\n\
+               *@port out=output\n\
+               R1 in out 1k\n\
+               C1 out 0 100n\n";
+    let r = parse_and_resolve(src);
+    let dir_of = |net: &str| r.ports.iter().find(|p| p.net == net).map(|p| p.dir);
+    assert_eq!(
+        dir_of("in"),
+        Some(PortDir::Input),
+        "in port missing/wrong: {:?}",
+        r.ports
+    );
+    assert_eq!(
+        dir_of("out"),
+        Some(PortDir::Output),
+        "out port missing/wrong: {:?}",
+        r.ports
+    );
+}
+
+#[test]
+fn port_bidir_direction_resolves() {
+    let src = "* t\n\
+               *@port mid=bidir\n\
+               R1 in mid 1k\n\
+               R2 mid 0 1k\n";
+    let r = parse_and_resolve(src);
+    assert_eq!(
+        r.ports.iter().find(|p| p.net == "mid").map(|p| p.dir),
+        Some(PortDir::Bidir),
+        "bidir port missing/wrong: {:?}",
+        r.ports
+    );
+}
+
+#[test]
+fn port_unknown_net_is_e010() {
+    // A `*@port` naming a net that no element connects to is a hard
+    // error (typo guard, analogous to E001 for an unknown refdes).
+    let src = "* t\n\
+               *@port nonexistent=input\n\
+               R1 in out 1k\n";
+    let codes = parse_and_resolve_codes(src);
+    assert!(
+        codes.iter().any(|c| c == "E010"),
+        "unknown-net port must fire E010: {codes:?}"
+    );
 }
 
 #[test]
