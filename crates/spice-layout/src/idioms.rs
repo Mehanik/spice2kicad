@@ -51,14 +51,40 @@
 //! single pair `(R1, R2)` (the lower-indexed greedy match) rather than
 //! an overlapping `(R1,R2)+(R2,R3)`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use spice_policy::CheckedNetlist;
-use spice_resolve::ElementKind;
+use spice_resolve::{ElementKind, ResolvedElement};
 
-use kicad_symbols::Orientation;
+use kicad_symbols::{Orientation, Symbol};
 
+use crate::net_class::{NetClass, classify_nets};
 use crate::{GridPoint, Placement, WorldExtent, vertical_stride_cells, world_extent};
+
+/// True for a two-terminal passive (`R` / `C` / `L`) — the element kinds
+/// the parallel-pair and shared-node idioms treat as stackable loads.
+fn is_two_terminal_passive(e: &ResolvedElement) -> bool {
+    e.nodes.len() == 2
+        && matches!(
+            e.kind,
+            ElementKind::Resistor | ElementKind::Capacitor | ElementKind::Inductor
+        )
+}
+
+/// World `x` mm of the pin of placed element `pe` that connects to SPICE
+/// `net`, given its resolved `symbol`. `None` if `pe` has no terminal on
+/// `net`. Pin-anchored (resolves the KiCad pin # via `pin_mapping`, then
+/// the orientation-transformed pin set). Only `x` is returned because the
+/// sole consumer (shared-node centering) centers on the pin's column; the
+/// vertical drop is computed from grid origins, not the pin's world `y`.
+fn world_pin_x_of(pe: &crate::PlacedElement, symbol: &Symbol, net: &str) -> Option<f64> {
+    let ti = pe.nodes.iter().position(|n| n == net)?;
+    let want = pe.pin_mapping.get(ti)?;
+    pe.world_pin_mm(symbol)
+        .into_iter()
+        .find(|(num, _, _)| num == want)
+        .map(|(_, x, _)| x)
+}
 
 /// A detected resistor-divider pair, by element index into
 /// `Placement.elements` / `CheckedNetlist.elements`. `upper` is the
@@ -187,31 +213,323 @@ pub(crate) fn apply(
     pairs: &[DividerPair],
 ) {
     for &DividerPair { upper, lower } in pairs {
-        // Respect any element already pinned by a stronger (user or V7)
-        // constraint — never override it.
-        if pinned[upper] || pinned[lower] {
+        stack_below(placement, pinned, checked, upper, lower);
+    }
+}
+
+/// Stack `lower` one grid-snapped vertical stride below `upper`, sharing
+/// `upper`'s X column, both at identity orientation, and pin both. A
+/// no-op if either is already pinned by a stronger (user / V7) constraint.
+///
+/// This is the common mechanism behind the divider and parallel-pair
+/// idioms: an X-shared, stride-separated vertical column (exactly what a
+/// user `*@align vertical` writes). It emits *relative* geometry only —
+/// never a page coordinate. For vertical two-terminal passives the local
+/// pin-x offset is 0, so sharing the origin's X column == sharing the
+/// connecting pins' X (pin-anchored).
+fn stack_below(
+    placement: &mut Placement,
+    pinned: &mut [bool],
+    checked: &CheckedNetlist,
+    upper: usize,
+    lower: usize,
+) {
+    if pinned[upper] || pinned[lower] {
+        return;
+    }
+    // The vertical stride covers both resolved extents plus clearance,
+    // snapped to the grid, so bodies/pins/value-text never clip.
+    let upper_ext: WorldExtent =
+        world_extent(&checked.elements[upper].symbol, Orientation::IDENTITY, None);
+    let lower_ext: WorldExtent =
+        world_extent(&checked.elements[lower].symbol, Orientation::IDENTITY, None);
+    let stride = vertical_stride_cells(&upper_ext, &lower_ext);
+
+    // Anchor the column at the upper member's seed coordinate (its
+    // band-correct X/Y from `place_seed`), then drop the lower one
+    // stride below in the same column.
+    let anchor = placement.elements[upper].origin;
+    placement.elements[upper].orientation = Orientation::IDENTITY;
+    placement.elements[lower].orientation = Orientation::IDENTITY;
+    placement.elements[lower].origin = GridPoint::new(anchor.x, anchor.y + stride);
+    pinned[upper] = true;
+    pinned[lower] = true;
+}
+
+// ===========================================================================
+// Idiom 1 — PARALLEL two-terminal pair
+// ===========================================================================
+
+/// A detected parallel pair: two two-terminal passives sharing **both**
+/// of their (distinct) nets. `a < b` by element index.
+///
+/// DEFERRED (not wired into the placer): a position-only same-column
+/// parallel stack shorts one shared net past the other's pin when a
+/// shared net is ground (V11), and the clean fix needs an orientation
+/// flip the flow-wall forbids. See `lib::apply_position_idioms`. The
+/// detector + its unit tests are retained to lock the detection semantics
+/// for a v0.2 that owns the flip.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ParallelPair {
+    pub a: usize,
+    pub b: usize,
+}
+
+/// Detect every parallel two-terminal-passive pair in `checked`.
+///
+/// A parallel pair is two passives (`R`/`C`/`L`), each exactly
+/// two-terminal, that connect the **same two distinct nets** (share both
+/// terminals). This is the deliberate complement of [`detect_dividers`]
+/// (which requires sharing *exactly one* net): here we require sharing
+/// *both*. Self-loops (both terminals on one net) are rejected. Greedy
+/// lowest-index matching, each element used at most once, deterministic
+/// order (sorted by `a`). The conventional schematic stacks a parallel
+/// pair vertically, adjacent — but that stack is a V11 short under the
+/// orientation wall, so this detector is currently **deferred** (unit
+/// tested, not wired). See [`ParallelPair`] and
+/// `lib::apply_position_idioms`.
+#[allow(dead_code)]
+pub(crate) fn detect_parallel_pairs(checked: &CheckedNetlist) -> Vec<ParallelPair> {
+    let elems = &checked.elements;
+
+    // Unordered net-pair {n0, n1} -> passive element indices connecting
+    // exactly those two distinct nets.
+    let mut by_net_pair: HashMap<(&str, &str), Vec<usize>> = HashMap::new();
+    for (i, e) in elems.iter().enumerate() {
+        if !is_two_terminal_passive(e) {
             continue;
         }
+        let (n0, n1) = (e.nodes[0].as_str(), e.nodes[1].as_str());
+        if n0 == n1 {
+            continue; // self-loop, not a parallel pair
+        }
+        let key = if n0 <= n1 { (n0, n1) } else { (n1, n0) };
+        by_net_pair.entry(key).or_default().push(i);
+    }
 
-        // Both members keep identity orientation (matching the align
-        // path, which pins members before `pick_orientations`). The
-        // vertical stride covers both resolved extents plus clearance,
-        // snapped to the grid, so bodies/pins/value-text never clip.
-        let upper_ext: WorldExtent =
-            world_extent(&checked.elements[upper].symbol, Orientation::IDENTITY, None);
-        let lower_ext: WorldExtent =
-            world_extent(&checked.elements[lower].symbol, Orientation::IDENTITY, None);
-        let stride = vertical_stride_cells(&upper_ext, &lower_ext);
+    let mut keys: Vec<(&str, &str)> = by_net_pair.keys().copied().collect();
+    keys.sort_unstable();
 
-        // Anchor the column at the upper member's seed coordinate (its
-        // band-correct X/Y from `place_seed`), then drop the lower one
-        // stride below in the same column.
-        let anchor = placement.elements[upper].origin;
-        placement.elements[upper].orientation = Orientation::IDENTITY;
-        placement.elements[lower].orientation = Orientation::IDENTITY;
-        placement.elements[lower].origin = GridPoint::new(anchor.x, anchor.y + stride);
-        pinned[upper] = true;
-        pinned[lower] = true;
+    let mut out: Vec<ParallelPair> = Vec::new();
+    for key in keys {
+        let mut idxs = by_net_pair[&key].clone();
+        idxs.sort_unstable();
+        // Greedy consecutive pairing: (idxs[0], idxs[1]), (idxs[2], …).
+        for chunk in idxs.chunks(2) {
+            if let [a, b] = *chunk {
+                out.push(ParallelPair { a, b });
+            }
+        }
+    }
+    out.sort_unstable_by_key(|p| p.a);
+    out
+}
+
+// ===========================================================================
+// Idiom 2 — COLLECTOR-LOAD above transistor
+// ===========================================================================
+
+/// A resistor acting as a BJT collector load: exactly one of its two
+/// terminals is on a transistor's collector net (and the other is not any
+/// collector net). `transistor` is the lowest-index BJT owning that
+/// collector net.
+///
+/// DEFERRED (not wired into the placer): repositioning the collector
+/// resistor ripples the busiest crossing/wire-length ratchets across
+/// `diff_pair` / `common_emitter` / `multivibrator`, and V7 symmetry
+/// already pins `RC1`/`RC2` on `diff_pair`. See
+/// `lib::apply_position_idioms`. The detector + its unit tests are
+/// retained to lock the detection semantics for a v0.2.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CollectorLoad {
+    pub resistor: usize,
+    pub transistor: usize,
+}
+
+/// Detect every collector-load resistor in `checked`.
+///
+/// Strict discriminator (matching the unit tests): a two-terminal
+/// `Resistor` with **exactly one** terminal on some BJT's **collector**
+/// net (SPICE terminal 0 of a `Bjt`, `nodes[0]`), the other terminal on a
+/// non-collector net. A base-net resistor (`nodes[1]`) or emitter-net
+/// resistor (`nodes[2]`) is rejected; a resistor bridging two distinct
+/// collectors is rejected. Deterministic order (sorted by resistor idx).
+///
+/// **Deferred** (unit tested, not wired) — see [`CollectorLoad`] and
+/// `lib::apply_position_idioms`.
+#[allow(dead_code)]
+pub(crate) fn detect_collector_loads(checked: &CheckedNetlist) -> Vec<CollectorLoad> {
+    let elems = &checked.elements;
+
+    // Collector net -> lowest-index BJT owning it.
+    let mut collector_of: HashMap<&str, usize> = HashMap::new();
+    for (i, e) in elems.iter().enumerate() {
+        if e.kind == ElementKind::Bjt {
+            if let Some(c) = e.nodes.first() {
+                collector_of.entry(c.as_str()).or_insert(i);
+            }
+        }
+    }
+
+    let mut out: Vec<CollectorLoad> = Vec::new();
+    for (i, e) in elems.iter().enumerate() {
+        if e.kind != ElementKind::Resistor || e.nodes.len() != 2 {
+            continue;
+        }
+        let (n0, n1) = (e.nodes[0].as_str(), e.nodes[1].as_str());
+        let c0 = collector_of.contains_key(n0);
+        let c1 = collector_of.contains_key(n1);
+        let coll_net = match (c0, c1) {
+            (true, false) => n0,
+            (false, true) => n1,
+            _ => continue, // neither, or both -> not a clean collector load
+        };
+        out.push(CollectorLoad {
+            resistor: i,
+            transistor: collector_of[coll_net],
+        });
+    }
+    out.sort_unstable_by_key(|h| (h.resistor, h.transistor));
+    out
+}
+
+// ===========================================================================
+// Idiom 3 — SHARED-NODE centering
+// ===========================================================================
+
+/// A shared-node center: a two-terminal passive `element` sitting on a
+/// signal net shared by `transistors` (>= 2 BJTs) — a differential-pair
+/// tail / shared-emitter node. `net` is the shared node's name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SharedNodeCenter {
+    pub element: usize,
+    pub transistors: Vec<usize>,
+    pub net: String,
+}
+
+/// Detect every shared-node-center idiom in `checked`.
+///
+/// Predicate: a net whose touching elements include **>= 2 BJTs** and
+/// **exactly one** two-terminal passive, AND the net is neither a power
+/// nor a ground/rail net (the rail guard is load-bearing — without it any
+/// ground node with two transistor emitters plus a passive would mis-fire).
+/// Deterministic order (iterated by net name). `transistors` is sorted by
+/// element index.
+pub(crate) fn detect_shared_node_centers(checked: &CheckedNetlist) -> Vec<SharedNodeCenter> {
+    let elems = &checked.elements;
+    let classes = classify_nets(checked);
+
+    // Net -> element indices touching it (an element counted once even if
+    // it touches the net on two terminals).
+    let mut net_members: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (i, e) in elems.iter().enumerate() {
+        let mut seen: HashSet<&str> = HashSet::new();
+        for node in &e.nodes {
+            if seen.insert(node.as_str()) {
+                net_members.entry(node.as_str()).or_default().push(i);
+            }
+        }
+    }
+
+    let mut nets: Vec<&str> = net_members.keys().copied().collect();
+    nets.sort_unstable();
+
+    let mut out: Vec<SharedNodeCenter> = Vec::new();
+    for net in nets {
+        // Rail guard: a shared tail/emitter node is a *signal* net, never
+        // a supply or ground rail. Excludes the multivibrator's `0` node.
+        if matches!(classes.get(net), Some(NetClass::Power | NetClass::Ground)) {
+            continue;
+        }
+        let members = &net_members[net];
+        let transistors: Vec<usize> = members
+            .iter()
+            .copied()
+            .filter(|&i| elems[i].kind == ElementKind::Bjt)
+            .collect();
+        if transistors.len() < 2 {
+            continue;
+        }
+        let passives: Vec<usize> = members
+            .iter()
+            .copied()
+            .filter(|&i| is_two_terminal_passive(&elems[i]))
+            .collect();
+        if passives.len() != 1 {
+            continue;
+        }
+        out.push(SharedNodeCenter {
+            element: passives[0],
+            transistors,
+            net: net.to_string(),
+        });
+    }
+    out
+}
+
+/// Apply shared-node centers: X-center the passive's shared-net pin at the
+/// midpoint of the transistors' pins on that net, and drop it one grid
+/// stride below the lowest transistor. Only the passive is moved and
+/// pinned; the transistors are *read*, never moved. Honours existing pins.
+pub(crate) fn apply_shared_centers(
+    placement: &mut Placement,
+    pinned: &mut [bool],
+    checked: &CheckedNetlist,
+    hits: &[SharedNodeCenter],
+) {
+    for hit in hits {
+        let el = hit.element;
+        if pinned[el] {
+            continue;
+        }
+        // Midpoint X of the transistors' pins on the shared net, and the
+        // lowest (largest-Y) transistor origin for the vertical drop.
+        let mut sum_x = 0.0_f64;
+        let mut count = 0_u32;
+        let mut max_q_y = i32::MIN;
+        for &t in &hit.transistors {
+            if let Some(x) = world_pin_x_of(
+                &placement.elements[t],
+                &checked.elements[t].symbol,
+                &hit.net,
+            ) {
+                sum_x += x;
+                count += 1;
+            }
+            max_q_y = max_q_y.max(placement.elements[t].origin.y);
+        }
+        if count == 0 {
+            continue;
+        }
+        let mid = sum_x / f64::from(count);
+
+        // Identity orientation, then shift X so the passive's shared-net
+        // pin lands on the midpoint (pin-anchored centering).
+        placement.elements[el].orientation = Orientation::IDENTITY;
+        let Some(cur_x) = world_pin_x_of(
+            &placement.elements[el],
+            &checked.elements[el].symbol,
+            &hit.net,
+        ) else {
+            continue;
+        };
+        #[allow(clippy::cast_possible_truncation)]
+        let dx_cells = ((mid - cur_x) / GridPoint::STEP_MM).round() as i32;
+
+        // One stride below the lowest transistor.
+        let el_ext = world_extent(&checked.elements[el].symbol, Orientation::IDENTITY, None);
+        let t0 = hit.transistors[0];
+        let q_ext = world_extent(
+            &checked.elements[t0].symbol,
+            placement.elements[t0].orientation,
+            None,
+        );
+        let stride = vertical_stride_cells(&q_ext, &el_ext);
+        placement.elements[el].origin =
+            GridPoint::new(placement.elements[el].origin.x + dx_cells, max_q_y + stride);
+        pinned[el] = true;
     }
 }
 
@@ -398,6 +716,253 @@ C1 mid 0 100n
         assert!(
             pairs.is_empty(),
             "R-C series must not be a resistor divider, got {pairs:?}"
+        );
+    }
+
+    // ===================================================================
+    // Canonical-placement idiom detectors (Tier-2 V6/V7). These tests are
+    // RED until the following detectors land in this module, mirroring the
+    // `detect_dividers` shape (pure netlist inspection, deterministic
+    // output, strict / low-false-positive). The expected public-in-crate
+    // API each test binds to (implementer must match these names):
+    //
+    //   pub(crate) struct ParallelPair { pub a: usize, pub b: usize }
+    //   pub(crate) fn detect_parallel_pairs(&CheckedNetlist)
+    //       -> Vec<ParallelPair>;
+    //     Two two-terminal passives sharing BOTH of their (distinct) nets.
+    //
+    //   pub(crate) struct CollectorLoad { pub resistor: usize,
+    //                                     pub transistor: usize }
+    //   pub(crate) fn detect_collector_loads(&CheckedNetlist)
+    //       -> Vec<CollectorLoad>;
+    //     A two-terminal resistor whose non-rail pin shares a net with a
+    //     BJT COLLECTOR terminal (SPICE terminal 0 of a `Bjt`).
+    //
+    //   pub(crate) struct SharedNodeCenter { pub element: usize,
+    //                                        pub transistors: Vec<usize> }
+    //   pub(crate) fn detect_shared_node_centers(&CheckedNetlist)
+    //       -> Vec<SharedNodeCenter>;
+    //     An element on a net whose OTHER members are >= 2 transistors (a
+    //     shared tail/emitter node).
+    // ===================================================================
+
+    /// Refdes of the element at `idx`.
+    fn refdes_at(checked: &CheckedNetlist, idx: usize) -> String {
+        checked.elements[idx].refdes.clone()
+    }
+
+    /// Parallel pairs mapped to sorted refdes pairs, order-independent.
+    fn parallel_refdes(checked: &CheckedNetlist, pairs: &[ParallelPair]) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = pairs
+            .iter()
+            .map(|p| {
+                let a = refdes_at(checked, p.a);
+                let b = refdes_at(checked, p.b);
+                if a <= b { (a, b) } else { (b, a) }
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// Collector-load hits mapped to `(resistor, transistor)` refdes.
+    fn collector_refdes(checked: &CheckedNetlist, hits: &[CollectorLoad]) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = hits
+            .iter()
+            .map(|h| {
+                (
+                    refdes_at(checked, h.resistor),
+                    refdes_at(checked, h.transistor),
+                )
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// Shared-node hits mapped to `(element, sorted transistor refdes)`.
+    fn shared_refdes(
+        checked: &CheckedNetlist,
+        hits: &[SharedNodeCenter],
+    ) -> Vec<(String, Vec<String>)> {
+        let mut out: Vec<(String, Vec<String>)> = hits
+            .iter()
+            .map(|h| {
+                let mut ts: Vec<String> = h
+                    .transistors
+                    .iter()
+                    .map(|&i| refdes_at(checked, i))
+                    .collect();
+                ts.sort();
+                (refdes_at(checked, h.element), ts)
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    // ---- Idiom 1: PARALLEL two-terminal pair --------------------------
+
+    /// R ‖ C sharing BOTH nets (the `common_emitter` RE‖CE case: both on
+    /// nets `e` and `0`) is a parallel pair.
+    #[test]
+    fn detects_parallel_r_and_c() {
+        let src = "\
+parallel r and c
+*@symbol Device:R for=R*
+*@symbol Device:C for=C*
+RE e 0 1k
+CE e 0 100u
+.end
+";
+        let checked = checked_of(src);
+        let pairs = detect_parallel_pairs(&checked);
+        assert_eq!(
+            parallel_refdes(&checked, &pairs),
+            vec![("CE".to_string(), "RE".to_string())],
+            "R‖C sharing both nets must be detected as a parallel pair"
+        );
+    }
+
+    /// Two resistors sharing BOTH nets are a parallel pair too.
+    #[test]
+    fn detects_parallel_r_and_r() {
+        let src = "\
+parallel resistors
+*@symbol Device:R for=R*
+R1 a b 1k
+R2 a b 2k
+.end
+";
+        let checked = checked_of(src);
+        let pairs = detect_parallel_pairs(&checked);
+        assert_eq!(
+            parallel_refdes(&checked, &pairs),
+            vec![("R1".to_string(), "R2".to_string())]
+        );
+    }
+
+    /// NEAR-MISS: two elements sharing exactly ONE net (a series / divider
+    /// topology) are NOT parallel — the both-nets test must reject them.
+    #[test]
+    fn series_pair_is_not_parallel() {
+        let src = "\
+series not parallel
+*@symbol Device:R for=R*
+*@symbol Device:C for=C*
+R1 in mid 1k
+C1 mid 0 100n
+.end
+";
+        let checked = checked_of(src);
+        let pairs = detect_parallel_pairs(&checked);
+        assert!(
+            pairs.is_empty(),
+            "elements sharing only one net must not be a parallel pair, got {pairs:?}"
+        );
+    }
+
+    // ---- Idiom 2: COLLECTOR-LOAD above transistor ---------------------
+
+    /// A resistor whose non-rail pin is on a BJT collector net is a
+    /// collector load. `RE` (on the emitter net) and `RB` (on the base
+    /// net) are near-misses that must NOT be reported.
+    #[test]
+    fn detects_collector_load_only() {
+        let src = "\
+collector load with emitter/base near-misses
+*@symbol Device:R for=R*
+*@symbol Device:Q_NPN_BCE for=Q*
+Q1 c b e QMOD
+RC vcc c 3k3
+RB vcc b 47k
+RE e 0 1k
+.model QMOD NPN (BF=100 IS=1e-15)
+.end
+";
+        let checked = checked_of(src);
+        let hits = detect_collector_loads(&checked);
+        assert_eq!(
+            collector_refdes(&checked, &hits),
+            vec![("RC".to_string(), "Q1".to_string())],
+            "only the collector-net resistor RC is a collector load; RB (base) \
+             and RE (emitter) must be rejected, got {:?}",
+            collector_refdes(&checked, &hits)
+        );
+    }
+
+    /// NEAR-MISS: a resistor on the emitter net (no terminal on any
+    /// collector net) must not be reported as a collector load.
+    #[test]
+    fn emitter_resistor_is_not_a_collector_load() {
+        let src = "\
+emitter resistor only
+*@symbol Device:R for=R*
+*@symbol Device:Q_NPN_BCE for=Q*
+Q1 c b e QMOD
+RE e 0 1k
+.model QMOD NPN (BF=100 IS=1e-15)
+.end
+";
+        let checked = checked_of(src);
+        let hits = detect_collector_loads(&checked);
+        assert!(
+            hits.is_empty(),
+            "an emitter-net resistor must not be a collector load, got {:?}",
+            collector_refdes(&checked, &hits)
+        );
+    }
+
+    // ---- Idiom 3: SHARED-NODE centering -------------------------------
+
+    /// Two BJTs sharing an emitter (tail) node, with a resistor also on
+    /// that node, is the differential-pair tail: RTAIL centers under
+    /// {Q1, Q2}.
+    #[test]
+    fn detects_shared_tail_node() {
+        let src = "\
+diff-pair tail
+*@symbol Device:R for=R*
+*@symbol Device:Q_NPN_BCE for=Q*
+Q1 c1 in1 tail QMOD
+Q2 c2 in2 tail QMOD
+RTAIL tail vee 2k2
+.model QMOD NPN (BF=100 IS=1e-15)
+.end
+";
+        let checked = checked_of(src);
+        let hits = detect_shared_node_centers(&checked);
+        assert_eq!(
+            shared_refdes(&checked, &hits),
+            vec![(
+                "RTAIL".to_string(),
+                vec!["Q1".to_string(), "Q2".to_string()]
+            )],
+            "RTAIL on a node shared by two transistors must center under them"
+        );
+    }
+
+    /// NEAR-MISS: a node touched by only ONE transistor is not a shared
+    /// tail — the >= 2 transistor requirement must reject it.
+    #[test]
+    fn single_transistor_node_is_not_shared() {
+        let src = "\
+single transistor emitter
+*@symbol Device:R for=R*
+*@symbol Device:C for=C*
+*@symbol Device:Q_NPN_BCE for=Q*
+Q1 c b e QMOD
+RE e 0 1k
+CE e 0 100u
+.model QMOD NPN (BF=100 IS=1e-15)
+.end
+";
+        let checked = checked_of(src);
+        let hits = detect_shared_node_centers(&checked);
+        assert!(
+            hits.is_empty(),
+            "a node with only one transistor must not be a shared-tail center, got {:?}",
+            shared_refdes(&checked, &hits)
         );
     }
 }

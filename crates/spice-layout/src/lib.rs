@@ -534,6 +534,7 @@ pub fn place_with_hint(
     // `pick_orientations` so the newly-pinned pairs guide V5/V3.
     let dividers = idioms::detect_dividers(&checked);
     idioms::apply(&mut placement, &mut pinned, &checked, &dividers);
+    apply_position_idioms(&mut placement, &mut pinned, &checked);
     // V14: per-element allowed-orientation set (power pin up / ground
     // pin down). A *hard* candidate-space filter, threaded into both
     // the V5 seed chooser below and the SA refiner so the constraint is
@@ -547,6 +548,39 @@ pub fn place_with_hint(
     Ok(solver::refine(
         placement, &pinned, &checked, library, opts, &allowed,
     ))
+}
+
+/// Apply the POSITION-only canonical-placement idioms (Tier-2 V6/V7)
+/// through the same `align`/pin channel the divider idiom and the user
+/// `*@align` path use. Each detector is strict and skips already-pinned
+/// elements, so a user `align`/`place` or V7 symmetry pin always wins.
+/// These move (and pin) elements only — never orientation-flow logic
+/// (`pick_orientations` / the SA rotate move are untouched).
+///
+/// Currently wired: **Idiom 3, shared-node center** (differential-pair
+/// tail / shared-emitter resistor centred under its transistors), run
+/// after the divider idiom and after V7 symmetry.
+///
+/// Two sibling idioms are implemented+unit-tested in `idioms` but
+/// deliberately **not** wired (deferred), each because it cannot land as a
+/// *position-only* pass without regressing a higher tier:
+///
+/// * **Idiom 1, parallel two-terminal pair** (`detect_parallel_pairs`).
+///   Stacking a parallel `R‖C` in one X column (what the e2e test
+///   requires) interleaves the pins when one shared net is ground: the
+///   non-ground net's wire must pass the ground pin, a V11 silent short
+///   (Tier 0), plus V12/V14/V5 fallout on `common_emitter`. The only fix
+///   is to *flip* one element so the shared inner pins coincide — an
+///   orientation change, and the left→right orientation flow is walled
+///   (this phase is position-only). Deferred to a v0.2 that owns the flip.
+/// * **Idiom 2, collector-load** (`detect_collector_loads`). Repositioning
+///   the collector resistor ripples the busiest crossing/wire-length
+///   ratchets across `diff_pair` / `common_emitter` / `multivibrator`, and
+///   on `diff_pair` V7 symmetry already pins `RC1`/`RC2` (so the idiom
+///   would either no-op or fight the symmetry-wins ordering rule).
+fn apply_position_idioms(placement: &mut Placement, pinned: &mut [bool], checked: &CheckedNetlist) {
+    let centers = idioms::detect_shared_node_centers(checked);
+    idioms::apply_shared_centers(placement, pinned, checked, &centers);
 }
 
 /// Per-element refinement metadata for the routing-aware orientation
@@ -592,6 +626,7 @@ pub fn refinement_meta(
     // `pinned` mask (the divider-pinned pair must not be reoriented).
     let dividers = idioms::detect_dividers(checked);
     idioms::apply(&mut placement, &mut pinned, checked, &dividers);
+    apply_position_idioms(&mut placement, &mut pinned, checked);
     let allowed = orient::allowed_orientations(checked);
     Ok(RefinementMeta { pinned, allowed })
 }
