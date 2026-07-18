@@ -225,14 +225,18 @@ fn path_bbox(body: &str) -> Option<Bbox> {
 /// known-failing inputs, to be deleted from this list (never softened into
 /// a count) when the underlying defect is fixed.
 ///
-/// * `rc_lowpass_ports` — R1's `Reference` ("R1") and `Value` ("1k") text
-///   each clip C1's rendered **pin-number** text by (0.06, 0.79) mm and
-///   (0.06, 0.73) mm. The model-side V13 verifiers cannot see this: they
-///   compare labels against bodies and property text, and never model a
-///   symbol's own pin-number/pin-name glyphs at all. Fixing it means
-///   teaching the placer that a symbol's pin text is occupied space —
-///   a placement change, out of scope for a test-only commit.
-const EXCLUDED_FIXTURES: &[&str] = &["rc_lowpass_ports"];
+/// Currently empty: every fixture is held to the zero-overlap assertion.
+///
+/// (Historical entry, resolved: `rc_lowpass_ports` used to have R1's
+/// `Reference` ("R1") and `Value` ("1k") text each clipping C1's rendered
+/// **pin-number** text by (0.06, 0.79) mm and (0.06, 0.73) mm. The cause
+/// was R1's *orientation*, not R1↔C1 distance: at `rot 180` KiCad renders
+/// R1's fields on its left, i.e. inside the 3.81 mm channel between R1 and
+/// C1, right on top of C1's left-side pin-number glyphs. The legalizer
+/// work now seeds R1 at `rot 0`, so its fields render outward and clear
+/// C1's pin numbers by 7.12 mm. R1↔C1 spacing is 3 grid cells before and
+/// after — it was never the variable.)
+const EXCLUDED_FIXTURES: &[&str] = &[];
 
 /// Overlap tolerance, mm. Matches the prototype: sub-0.05 mm slivers are
 /// stroke-width artefacts, not legibility defects.
