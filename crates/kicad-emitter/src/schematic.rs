@@ -198,12 +198,22 @@ pub fn emit_root(
     }
     let property_bboxes = placement_property_bboxes(placement);
     let label_body_obstacles = label_rotation_obstacles(placement, library, &glyph_bodies);
+    // Symbol-internal pin-name / pin-number text is fixed geometry — a
+    // label can move off it, but it cannot move off a label — so labels
+    // avoid it too. It is passed separately from the body/property set
+    // because it is strictly lower priority: overprinting a pin number is
+    // a lesser defect than reading into a symbol body, and scoring the two
+    // classes equally makes the chooser trade a body overlap for a
+    // pin-text one. (Kept out of `label_rotation_obstacles` so the
+    // phase-4.5 refinement gate keeps measuring what it measured before.)
+    let label_pin_texts = host_pin_text_bboxes(placement, library);
     for label in dangling_pin_labels(
         &net_pins,
         "root",
         &extra_pins,
         &property_bboxes,
         &label_body_obstacles,
+        &label_pin_texts,
         &port_dirs,
     ) {
         items.push(label);
@@ -326,12 +336,14 @@ pub fn emit_child_sheet(child: &ChildSheet<'_>, library: &Library) -> Result<Str
     }
     let child_props = placement_property_bboxes(child.placement);
     let label_body_obstacles = label_rotation_obstacles(child.placement, library, &glyph_bodies);
+    let child_pin_texts = host_pin_text_bboxes(child.placement, library);
     for label in dangling_pin_labels(
         &net_pins,
         &child.name,
         &extra_pins,
         &child_props,
         &label_body_obstacles,
+        &child_pin_texts,
         &BTreeMap::new(),
     ) {
         items.push(label);
@@ -1801,8 +1813,15 @@ pub(crate) fn label_specs(
     extra_pins: &[(String, f64, f64)],
     property_bboxes: &[TextBbox],
     body_obstacles: &[TextBbox],
+    pin_texts: &[TextBbox],
+    anchor_search: bool,
     ports: &BTreeMap<String, PortDir>,
 ) -> Vec<LabelSpec> {
+    // Labels chosen so far. A label reading into another label is just as
+    // unreadable as one reading into a body, and nothing else models this
+    // pair — each net is decided independently — so accumulate them here
+    // and let later nets avoid earlier ones.
+    let mut placed_labels: Vec<TextBbox> = Vec::new();
     // Coordinates already carrying a port marker (sheet pin position
     // on the parent, hierarchical_label on a child) name the net by
     // themselves. Adding a `(label …)` on top is redundant and worse,
@@ -1931,9 +1950,16 @@ pub(crate) fn label_specs(
             let obstacles: Vec<TextBbox> = property_bboxes
                 .iter()
                 .chain(body_obstacles.iter())
+                .chain(placed_labels.iter())
                 .copied()
                 .collect();
-            let rot = global_label_rotation_avoiding(net, (fx, fy), label_rot(fang), &obstacles);
+            let rot = global_label_rotation_avoiding(
+                net,
+                (fx, fy),
+                label_rot(fang),
+                &obstacles,
+                pin_texts,
+            );
             out.push(LabelSpec {
                 net: net.clone(),
                 x: fx,
@@ -1942,6 +1968,13 @@ pub(crate) fn label_specs(
                 is_global: true,
                 shape: port_shape_token(*dir),
             });
+            if let Some(spec) = out.last() {
+                placed_labels.push(if spec.is_global {
+                    global_label_bbox(&spec.net, (spec.x, spec.y), spec.rot)
+                } else {
+                    plain_label_bbox(&spec.net, (spec.x, spec.y), spec.rot)
+                });
+            }
             continue;
         }
         if uniq.len() == 1 && !net_touches_port {
@@ -1954,9 +1987,16 @@ pub(crate) fn label_specs(
             let obstacles: Vec<TextBbox> = property_bboxes
                 .iter()
                 .chain(body_obstacles.iter())
+                .chain(placed_labels.iter())
                 .copied()
                 .collect();
-            let rot = global_label_rotation_avoiding(net, (fx, fy), label_rot(fang), &obstacles);
+            let rot = global_label_rotation_avoiding(
+                net,
+                (fx, fy),
+                label_rot(fang),
+                &obstacles,
+                pin_texts,
+            );
             out.push(LabelSpec {
                 net: net.clone(),
                 x: fx,
@@ -1965,6 +2005,13 @@ pub(crate) fn label_specs(
                 is_global: true,
                 shape: "input",
             });
+            if let Some(spec) = out.last() {
+                placed_labels.push(if spec.is_global {
+                    global_label_bbox(&spec.net, (spec.x, spec.y), spec.rot)
+                } else {
+                    plain_label_bbox(&spec.net, (spec.x, spec.y), spec.rot)
+                });
+            }
         } else {
             // V13: prefer the body-clearing outward rotation, but if that
             // makes the label text overlap a Reference/Value bbox (e.g.
@@ -1978,20 +2025,36 @@ pub(crate) fn label_specs(
             let obstacles: Vec<TextBbox> = property_bboxes
                 .iter()
                 .chain(body_obstacles.iter())
+                .chain(placed_labels.iter())
                 .copied()
                 .collect();
-            let rot = label_rotation_avoiding(net, (fx, fy), label_rot(fang), &obstacles);
+            // A plain label names its net, so ANY pin on that net is an
+            // equally valid, equally V11-correct anchor. Prefer the first
+            // pin (keeps every already-clean fixture byte-identical), but
+            // when no rotation there clears the obstacles, try the net's
+            // other pins before settling for a collision — some anchors
+            // simply have no clean direction available.
+            let (ax, ay, arot) =
+                best_plain_label_anchor(net, &uniq, &obstacles, pin_texts, anchor_search);
             out.push(LabelSpec {
                 net: net.clone(),
-                x: fx,
-                y: fy,
-                rot,
+                x: ax,
+                y: ay,
+                rot: arot,
                 is_global: false,
                 shape: "input",
             });
+            if let Some(spec) = out.last() {
+                placed_labels.push(if spec.is_global {
+                    global_label_bbox(&spec.net, (spec.x, spec.y), spec.rot)
+                } else {
+                    plain_label_bbox(&spec.net, (spec.x, spec.y), spec.rot)
+                });
+            }
             if net_touches_port && uniq.len() >= 2 {
                 let (lx, ly, lang) = uniq[uniq.len() - 1];
-                let rot2 = label_rotation_avoiding(net, (lx, ly), label_rot(lang), &obstacles);
+                let rot2 =
+                    label_rotation_avoiding(net, (lx, ly), label_rot(lang), &obstacles, pin_texts);
                 out.push(LabelSpec {
                     net: net.clone(),
                     x: lx,
@@ -2000,6 +2063,13 @@ pub(crate) fn label_specs(
                     is_global: false,
                     shape: "input",
                 });
+                if let Some(spec) = out.last() {
+                    placed_labels.push(if spec.is_global {
+                        global_label_bbox(&spec.net, (spec.x, spec.y), spec.rot)
+                    } else {
+                        plain_label_bbox(&spec.net, (spec.x, spec.y), spec.rot)
+                    });
+                }
             }
         }
     }
@@ -2015,9 +2085,18 @@ fn dangling_pin_labels(
     extra_pins: &[(String, f64, f64)],
     property_bboxes: &[TextBbox],
     body_obstacles: &[TextBbox],
+    pin_texts: &[TextBbox],
     ports: &BTreeMap<String, PortDir>,
 ) -> Vec<Sexpr> {
-    let specs = label_specs(nets, extra_pins, property_bboxes, body_obstacles, ports);
+    let specs = label_specs(
+        nets,
+        extra_pins,
+        property_bboxes,
+        body_obstacles,
+        pin_texts,
+        true,
+        ports,
+    );
     // Reproduce the previous per-net UUID-seed scheme: globals seeded by
     // net order index; plain labels by `idx*2` (+1 for the second of a
     // name-jump pair). Net order matches `label_specs` since both walk
@@ -2541,6 +2620,9 @@ fn nudge_power_glyph_value_text(items: &mut [Sexpr], placement: &Placement, libr
     let pin_texts = host_pin_text_bboxes(placement, library);
     let port_names = sheet_port_name_bboxes(items);
     let host_texts = host_property_text_bboxes(items);
+    // Labels are already placed by the time this pass runs, so a glyph's
+    // net name must dodge them (`GND` reading into an `in` label).
+    let (_, label_texts, _) = emitted_text_obstacles(items);
 
     // Anchors already chosen by this pass become obstacles for later
     // glyphs so two glyph labels never stack.
@@ -2579,6 +2661,7 @@ fn nudge_power_glyph_value_text(items: &mut [Sexpr], placement: &Placement, libr
                 + pin_texts.iter().map(area).sum::<f64>()
                 + port_names.iter().map(area).sum::<f64>()
                 + host_texts.iter().map(area).sum::<f64>()
+                + label_texts.iter().map(area).sum::<f64>()
                 + chosen_text.iter().map(area).sum::<f64>()
         };
 
@@ -2907,30 +2990,118 @@ fn plain_label_bbox(text: &str, anchor: (f64, f64), rot_deg: u16) -> TextBbox {
     TextBbox { x0, y0, x1, y1 }
 }
 
+/// Pick the `(anchor, rotation)` for a plain label that best clears the
+/// obstacle sets, searching the net's pins in order.
+///
+/// A plain `(label …)` names the net it sits on, so every pin of that net
+/// is an equally valid anchor — moving between them cannot change
+/// connectivity (V11) or the label count (V4). The first pin with a fully
+/// clean rotation wins, which keeps every already-clean fixture
+/// byte-identical; only when no pin/rotation pair is clean does the
+/// lexicographically least-overlapping one (bodies+properties first,
+/// pin-text second) get used.
+fn best_plain_label_anchor(
+    net: &str,
+    pins: &[(f64, f64, u16)],
+    obstacles: &[TextBbox],
+    pin_texts: &[TextBbox],
+    anchor_search: bool,
+) -> (f64, f64, u16) {
+    let label_rot = |pin_angle: u16| -> u16 { (pin_angle + 180) % 360 };
+    let pins: &[(f64, f64, u16)] = if anchor_search { pins } else { &pins[..1] };
+    let score_of = |px: f64, py: f64, rot: u16| -> (f64, f64) {
+        let b = plain_label_bbox(net, (px, py), rot);
+        (area_against(b, obstacles), area_against(b, pin_texts))
+    };
+    let rots = |pang: u16| {
+        let p = label_rot(pang);
+        [p, (p + 90) % 360, (p + 270) % 360, (p + 180) % 360]
+    };
+    // Pass 1: an anchor/rotation clean of everything.
+    for &(px, py, pang) in pins {
+        for cand in rots(pang) {
+            if score_of(px, py, cand) == (0.0, 0.0) {
+                return (px, py, cand);
+            }
+        }
+    }
+    // Pass 2: clean of bodies/properties on the FIRST pin — the historical
+    // choice — before considering a different anchor for pin-text's sake.
+    if let Some(&(px, py, pang)) = pins.first() {
+        for cand in rots(pang) {
+            if score_of(px, py, cand).0 == 0.0 {
+                return (px, py, cand);
+            }
+        }
+    }
+    // Pass 3: least-overlapping over every anchor/rotation.
+    let mut best = None;
+    let mut best_score = (f64::INFINITY, f64::INFINITY);
+    for &(px, py, pang) in pins {
+        for cand in rots(pang) {
+            let score = score_of(px, py, cand);
+            if score < best_score {
+                best_score = score;
+                best = Some((px, py, cand));
+            }
+        }
+    }
+    best.unwrap_or_else(|| {
+        let (px, py, pang) = pins[0];
+        (px, py, label_rot(pang))
+    })
+}
+
+/// Total intersection area of `b` against every box in `obstacles`.
+fn area_against(b: TextBbox, obstacles: &[TextBbox]) -> f64 {
+    obstacles
+        .iter()
+        .map(|o| {
+            let w = (b.x1.min(o.x1) - b.x0.max(o.x0)).max(0.0);
+            let h = (b.y1.min(o.y1) - b.y0.max(o.y0)).max(0.0);
+            w * h
+        })
+        .sum()
+}
+
 fn label_rotation_avoiding(
     text: &str,
     anchor: (f64, f64),
     preferred: u16,
     props: &[TextBbox],
+    pin_texts: &[TextBbox],
 ) -> u16 {
-    let collides = |rot: u16| {
+    let overlap_area = |rot: u16| -> (f64, f64) {
         let b = plain_label_bbox(text, anchor, rot);
-        props.iter().any(|p| b.intersects(*p))
+        (area_against(b, props), area_against(b, pin_texts))
     };
     // Order: preferred first (keeps the existing body-clearing choice
     // and every non-colliding fixture byte-identical), then the two
-    // perpendiculars, then the opposite.
-    for cand in [
+    // perpendiculars, then the opposite. When none is clean, take the
+    // least-overlapping rather than blindly returning `preferred`, which
+    // can be the worst of the four.
+    let candidates = [
         preferred,
         (preferred + 90) % 360,
         (preferred + 270) % 360,
         (preferred + 180) % 360,
-    ] {
-        if !collides(cand) {
-            return cand;
+    ];
+    if let Some(c) = candidates.iter().find(|&&c| overlap_area(c) == (0.0, 0.0)) {
+        return *c;
+    }
+    if let Some(c) = candidates.iter().find(|&&c| overlap_area(c).0 == 0.0) {
+        return *c;
+    }
+    let mut best = preferred;
+    let mut best_area = (f64::INFINITY, f64::INFINITY);
+    for cand in candidates {
+        let area = overlap_area(cand);
+        if area < best_area {
+            best_area = area;
+            best = cand;
         }
     }
-    preferred
+    best
 }
 
 /// World-frame AABB of a `(global_label …)` drawn at `anchor`, rotated
@@ -2978,17 +3149,11 @@ fn global_label_rotation_avoiding(
     anchor: (f64, f64),
     preferred: u16,
     obstacles: &[TextBbox],
+    pin_texts: &[TextBbox],
 ) -> u16 {
-    let overlap_area = |rot: u16| -> f64 {
+    let overlap_area = |rot: u16| -> (f64, f64) {
         let b = global_label_bbox(text, anchor, rot);
-        obstacles
-            .iter()
-            .map(|o| {
-                let w = (b.x1.min(o.x1) - b.x0.max(o.x0)).max(0.0);
-                let h = (b.y1.min(o.y1) - b.y0.max(o.y0)).max(0.0);
-                w * h
-            })
-            .sum()
+        (area_against(b, obstacles), area_against(b, pin_texts))
     };
     let candidates = [
         preferred,
@@ -2996,13 +3161,21 @@ fn global_label_rotation_avoiding(
         (preferred + 270) % 360,
         (preferred + 180) % 360,
     ];
+    // Pass 1: fully clean (bodies/properties AND pin text).
+    if let Some(c) = candidates.iter().find(|&&c| overlap_area(c) == (0.0, 0.0)) {
+        return *c;
+    }
+    // Pass 2: clean of bodies/properties, tolerating pin text. This is the
+    // historical rule, kept as-is so no already-clean fixture moves just
+    // because pin text became a (lower-priority) obstacle.
+    if let Some(c) = candidates.iter().find(|&&c| overlap_area(c).0 == 0.0) {
+        return *c;
+    }
+    // Pass 3: least-overlapping, bodies/properties dominating pin text.
     let mut best = preferred;
-    let mut best_area = f64::INFINITY;
+    let mut best_area = (f64::INFINITY, f64::INFINITY);
     for cand in candidates {
         let area = overlap_area(cand);
-        if area == 0.0 {
-            return cand;
-        }
         if area < best_area {
             best_area = area;
             best = cand;

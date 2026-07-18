@@ -390,6 +390,15 @@ fn v13_overlap_count(placement: &Placement, library: &Library) -> usize {
         &[],
         &props,
         &label_obstacles,
+        // Empty pin-text set and anchor search off: this gate deliberately
+        // measures the same label geometry it measured before labels
+        // gained pin-text avoidance and multi-anchor placement. Enabling
+        // either here changes what the gate scores, which reshuffles
+        // orientation choices and regresses common_emitter V5 /
+        // opamp_inverting_real V13. Aligning the gate with decoration is a
+        // real improvement but a separate, tier-sensitive change.
+        &[],
+        false,
         &std::collections::BTreeMap::new(),
     );
     // World body bboxes (as TextBboxes) for the label↔body check.

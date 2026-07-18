@@ -1633,6 +1633,134 @@ fn v13_property_text_no_pin_text_overlap() {
 }
 
 #[test]
+fn v13_labels_clear_power_glyph_value_text() {
+    // V13 part (6): a label's text must not overprint a power glyph's
+    // visible net-name `Value` text. Labels are emitted on signal nets and
+    // glyphs on rails, so every such pair is cross-net by construction.
+    //
+    // This pair class had no verifier until the renderer-measured audit
+    // found `GND`x`in` on common_emitter and `VCC`x`c1` on multivibrator
+    // surviving a suite whose every budget already read 0 — the classes
+    // that ARE checked were all clean. Budget 0 from the outset: the
+    // glyph-value nudge pass now takes labels as obstacles, so there is
+    // nothing to ratchet down from.
+    let mut failures: Vec<String> = Vec::new();
+    for name in SHEETS {
+        let src = fixtures_dir().join(format!("{name}.cir"));
+        let tmp = tempdir(name);
+        let sch = spice_to_kicad(&src, &tmp).expect("spice2kicad");
+        let root = parse(&sch);
+        let labels = labels_with_kind(&root);
+        let glyph_values = power_glyph_value_text_bboxes(&root);
+        let mut hits = 0;
+        for (lname, anchor, rot, kind) in &labels {
+            let lbox = text_bbox(lname, *anchor, 1.27, *rot, *kind);
+            for (gname, gbox) in &glyph_values {
+                if lbox.intersects(gbox) {
+                    eprintln!("{name}: label {lname:?} overlaps glyph value {gname}");
+                    hits += 1;
+                }
+            }
+        }
+        if hits > 0 {
+            failures.push(format!(
+                "{name}: {hits} label↔glyph-value overlaps > budget 0"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "V13(6) regressions:\n  {}",
+        failures.join("\n  "),
+    );
+}
+
+#[test]
+fn v13_labels_no_mutual_overlap() {
+    // V13 part (8): no two labels may overprint each other. Each net's
+    // label is chosen independently, so nothing prevented two of them
+    // landing on the same spot until `label_specs` started accumulating
+    // the labels it had already placed as obstacles.
+    //
+    // Found by the renderer-measured audit (`out1`x`out2` on
+    // opamp_definition_level) after multi-anchor placement moved one onto
+    // the other — a good illustration of why this class needs its own
+    // check rather than being assumed impossible. Budget 0.
+    let mut failures: Vec<String> = Vec::new();
+    for name in SHEETS {
+        let src = fixtures_dir().join(format!("{name}.cir"));
+        let tmp = tempdir(name);
+        let sch = spice_to_kicad(&src, &tmp).expect("spice2kicad");
+        let root = parse(&sch);
+        let labels = labels_with_kind(&root);
+        let boxes: Vec<(&String, Bbox)> = labels
+            .iter()
+            .map(|(n, anchor, rot, kind)| (n, text_bbox(n, *anchor, 1.27, *rot, *kind)))
+            .collect();
+        let mut hits = 0;
+        for i in 0..boxes.len() {
+            for j in (i + 1)..boxes.len() {
+                if boxes[i].1.intersects(&boxes[j].1) {
+                    eprintln!(
+                        "{name}: label {:?} overlaps label {:?}",
+                        boxes[i].0, boxes[j].0
+                    );
+                    hits += 1;
+                }
+            }
+        }
+        if hits > 0 {
+            failures.push(format!("{name}: {hits} label↔label overlaps > budget 0"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "V13(8) regressions:\n  {}",
+        failures.join("\n  "),
+    );
+}
+
+#[test]
+fn v13_labels_clear_pin_text() {
+    // V13 part (7): a label's text must not overprint visible
+    // symbol-internal pin-name / pin-number text. Pin text is fixed
+    // geometry belonging to the symbol body, so the label is the side that
+    // must move — `label_rotation_obstacles` now includes it at the
+    // emitter's call site.
+    //
+    // Also previously unverified; the renderer-measured audit found the
+    // `1` pin number under the `out` label on opamp_inverting_real.
+    // Budget 0.
+    let mut failures: Vec<String> = Vec::new();
+    for name in SHEETS {
+        let src = fixtures_dir().join(format!("{name}.cir"));
+        let tmp = tempdir(name);
+        let sch = spice_to_kicad(&src, &tmp).expect("spice2kicad");
+        let root = parse(&sch);
+        let labels = labels_with_kind(&root);
+        let pintexts = pin_text_bboxes(&root);
+        let mut hits = 0;
+        for (lname, anchor, rot, kind) in &labels {
+            let lbox = text_bbox(lname, *anchor, 1.27, *rot, *kind);
+            for (tname, tbox) in &pintexts {
+                if lbox.intersects(tbox) {
+                    eprintln!("{name}: label {lname:?} overlaps pin-text {tname}");
+                    hits += 1;
+                }
+            }
+        }
+        if hits > 0 {
+            failures.push(format!("{name}: {hits} label↔pin-text overlaps > budget 0"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "V13(7) regressions:\n  {}",
+        failures.join("\n  "),
+    );
+}
+
+#[test]
 fn v13_property_text_no_mutual_overlap() {
     // V13 part (4): no two VISIBLE on-sheet text bboxes may overlap —
     // host Reference/Value vs each other AND vs power-glyph net-name
