@@ -1250,9 +1250,12 @@ fn crossing_count_within_budget_across_fixtures() {
     // from the prior R7 marks: common_emitter 4→3, diff_pair 1→0,
     // opamp_inverting_real 1→0. multivibrator holds at 4, rc_lowpass at
     // 0. Never raise.
+    //
+    // Crossing-aware V11/V12 detour selection (`conflict::CrossPass`)
+    // then lowered common_emitter 3→2. Never raise.
     let budgets: &[(&str, u32)] = &[
         ("rc_lowpass", 0),
-        ("common_emitter", 3),
+        ("common_emitter", 2),
         ("multivibrator", 4),
         ("diff_pair", 0),
         ("opamp_inverting_real", 0),
