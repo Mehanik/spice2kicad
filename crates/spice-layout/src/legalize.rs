@@ -169,11 +169,90 @@ fn footprints(
         .collect()
 }
 
+/// How far a single element may be shoved, in grid cells. Generous
+/// enough to escape an oversized neighbour (an opamp triangle is ~4 cells
+/// across), bounded so a hopeless case terminates instead of wandering.
+const MAX_SHOVE_CELLS: i32 = 12;
+
+/// Everything the per-element shove needs that does not change as
+/// elements settle. Grouped so `shove_one` takes a readable argument
+/// list instead of eight positional parameters.
+struct ShoveCtx<'a> {
+    checked: &'a CheckedNetlist,
+    /// Tight extents (body ∪ pin reach) — the legality geometry.
+    extents: &'a [WorldExtent],
+    /// Roomy extents (plus value text and the ADR-14 glyph zone) — a
+    /// preference, not a requirement. See `legalize` for why.
+    roomy: &'a [WorldExtent],
+    ring: &'a [(i32, i32)],
+}
+
+/// Find the nearest legal position for element `i`, or `None` if no
+/// candidate within `MAX_SHOVE_CELLS` clears the already-settled
+/// footprints without regressing V11.
+///
+/// Mutates `placement` only transiently: each candidate is trialled in
+/// place so V11 can be *measured* rather than predicted, and the original
+/// origin is always restored before returning.
+fn shove_one(
+    placement: &mut Placement,
+    i: usize,
+    ctx: &ShoveCtx<'_>,
+    settled: &[(usize, Footprint)],
+) -> Option<(GridPoint, Footprint)> {
+    let ext = ctx.extents[i];
+    let origin = placement.elements[i].origin;
+    // Baseline V11 count, so a shove can be required not to worsen it.
+    let base_coincidences = crate::solver::foreign_pin_coincidences(placement, ctx.checked);
+    let mut fallback = None;
+
+    for &(dx, dy) in ctx.ring {
+        let cand = GridPoint {
+            x: origin.x + dx,
+            y: origin.y + dy,
+        };
+        let f = footprint_at(ext, cand);
+        if settled.iter().any(|&(_, other)| f.overlaps(other)) {
+            continue;
+        }
+        // A shove must never land a pin on a foreign net's pin. That is
+        // V11, Tier 0: coincident pins are electrically joined, so the
+        // "fix" would short two nets — strictly worse than the overlap it
+        // resolves. Measured, not assumed: without this check the
+        // legalizer merged common_emitter's collector and emitter nets
+        // into one, which ERC does not even flag because a short is
+        // electrically valid.
+        placement.elements[i].origin = cand;
+        let ok =
+            crate::solver::foreign_pin_coincidences(placement, ctx.checked) <= base_coincidences;
+        placement.elements[i].origin = origin;
+        if !ok {
+            continue;
+        }
+        // Legal. Prefer it if it also leaves room for text/glyphs.
+        let roomy_f = footprint_at(ctx.roomy[i], cand);
+        let roomy_clear = settled.iter().all(|&(j, _)| {
+            !roomy_f.overlaps(footprint_at(ctx.roomy[j], placement.elements[j].origin))
+        });
+        if roomy_clear {
+            return Some((cand, f));
+        }
+        if fallback.is_none() {
+            fallback = Some((cand, f));
+        }
+    }
+    fallback
+}
+
 /// Shove overlapping elements apart until no two footprints overlap.
 ///
 /// Returns the number of elements moved. Pinned elements are never
 /// touched: a user directive or a symmetry pair outranks legality, and
 /// quietly overriding one would defeat the point of the annotation.
+// Callers always build `prefs` with the default hasher (`net_class::
+// vertical_prefs`), so generalising over `BuildHasher` would add a type
+// parameter no caller can vary. Same call shape as `glyph_geom`.
+#[allow(clippy::implicit_hasher)]
 pub fn legalize(
     placement: &mut Placement,
     pinned: &[bool],
@@ -181,11 +260,6 @@ pub fn legalize(
     _library: &Library,
     prefs: &std::collections::HashMap<String, crate::net_class::VertPref>,
 ) -> usize {
-    // How far a single element may be shoved. Generous enough to escape
-    // an oversized neighbour (an opamp triangle is ~4 cells across),
-    // bounded so a hopeless case terminates instead of wandering.
-    const MAX_SHOVE_CELLS: i32 = 12;
-
     let extents: Vec<WorldExtent> = placement
         .elements
         .iter()
@@ -237,6 +311,12 @@ pub fn legalize(
         })
         .collect();
     let ring = displacement_ring(MAX_SHOVE_CELLS);
+    let ctx = ShoveCtx {
+        checked,
+        extents: &extents,
+        roomy: &roomy,
+        ring: &ring,
+    };
     let mut settled: Vec<(usize, Footprint)> = Vec::new();
     let mut moved = 0usize;
 
@@ -248,14 +328,12 @@ pub fn legalize(
         if placement.elements[i].is_power_source {
             continue;
         }
-        let ext = extents[i];
         let origin = placement.elements[i].origin;
-        let here = footprint_at(ext, origin);
-        let clashes = |f: Footprint, settled: &[(usize, Footprint)]| {
-            settled.iter().any(|&(_, other)| f.overlaps(other))
-        };
+        let here = footprint_at(extents[i], origin);
 
-        if !clashes(here, &settled) || pinned.get(i).copied().unwrap_or(false) {
+        if !settled.iter().any(|&(_, other)| here.overlaps(other))
+            || pinned.get(i).copied().unwrap_or(false)
+        {
             // Legal where it is, or immovable. A pinned element that
             // clashes stays put and is reported by the postcondition —
             // the user's instruction wins over our tidiness.
@@ -263,69 +341,24 @@ pub fn legalize(
             continue;
         }
 
-        // Baseline V11 count, so a shove can be required not to worsen it.
-        let base_coincidences = crate::solver::foreign_pin_coincidences(placement, checked);
-        let mut chosen = None;
-        let mut fallback = None;
-        for &(dx, dy) in &ring {
-            let cand = GridPoint {
-                x: origin.x + dx,
-                y: origin.y + dy,
-            };
-            let f = footprint_at(ext, cand);
-            if clashes(f, &settled) {
-                continue;
+        if let Some((cand, f)) = shove_one(placement, i, &ctx, &settled) {
+            if cand != origin {
+                placement.elements[i].origin = cand;
+                moved += 1;
             }
-            // A shove must never land a pin on a foreign net's pin. That
-            // is V11, Tier 0: coincident pins are electrically joined, so
-            // the "fix" would short two nets — strictly worse than the
-            // overlap it resolves. Measured, not assumed: without this
-            // check the legalizer merged common_emitter's collector and
-            // emitter nets into one, which ERC does not even flag because
-            // a short is electrically valid.
-            let saved = placement.elements[i].origin;
-            placement.elements[i].origin = cand;
-            let ok =
-                crate::solver::foreign_pin_coincidences(placement, checked) <= base_coincidences;
-            placement.elements[i].origin = saved;
-            if !ok {
-                continue;
-            }
-            // Legal. Prefer it if it also leaves room for text/glyphs.
-            let roomy_f = footprint_at(roomy[i], cand);
-            let roomy_clear = settled.iter().all(|&(j, _)| {
-                !roomy_f.overlaps(footprint_at(roomy[j], placement.elements[j].origin))
-            });
-            if roomy_clear {
-                chosen = Some((cand, f));
-                break;
-            }
-            if fallback.is_none() {
-                fallback = Some((cand, f));
-            }
-        }
-        let chosen = chosen.or(fallback);
-        match chosen {
-            Some((cand, f)) => {
-                if cand != origin {
-                    placement.elements[i].origin = cand;
-                    moved += 1;
-                }
-                settled.push((i, f));
-            }
-            None => {
-                // No legal spot within reach. Leave it and let the
-                // postcondition report an overlap rather than teleport
-                // the element somewhere absurd.
-                log::debug!(
-                    "legalize: no legal position within {MAX_SHOVE_CELLS} cells for element {i}                      ({:.2},{:.2})..({:.2},{:.2})",
-                    here.x0,
-                    here.y0,
-                    here.x1,
-                    here.y1
-                );
-                settled.push((i, here));
-            }
+            settled.push((i, f));
+        } else {
+            // No legal spot within reach. Leave it and let the
+            // postcondition report an overlap rather than teleport
+            // the element somewhere absurd.
+            log::debug!(
+                "legalize: no legal position within {MAX_SHOVE_CELLS} cells for element {i} ({:.2},{:.2})..({:.2},{:.2})",
+                here.x0,
+                here.y0,
+                here.x1,
+                here.y1
+            );
+            settled.push((i, here));
         }
     }
     // Tier-0 safety net. Coincident pins are electrically joined, so a
