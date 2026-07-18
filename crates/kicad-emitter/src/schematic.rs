@@ -1642,6 +1642,21 @@ pub(crate) fn placement_obstacles(
     placement: &Placement,
     library: &Library,
 ) -> Vec<spice_route::Bbox> {
+    placement_obstacles_with_refdes(placement, library)
+        .into_iter()
+        .map(|(_, bbox)| bbox)
+        .collect()
+}
+
+/// As [`placement_obstacles`], but tagging each obstacle with the refdes
+/// of the element whose body it is. The phase-4.5 refinement needs the
+/// attribution so it can tell *which* element to try re-orienting when a
+/// wire spears a body (V12); the plain bbox list drops that mapping
+/// because it filters elements out.
+pub(crate) fn placement_obstacles_with_refdes(
+    placement: &Placement,
+    library: &Library,
+) -> Vec<(String, spice_route::Bbox)> {
     /// Half-extent (mm) fallback for symbols whose body bbox is
     /// unavailable (sheet stubs, missing libraries).
     const SYM_HALF_MM: f64 = 2.54;
@@ -1670,7 +1685,7 @@ pub(crate) fn placement_obstacles(
                     },
                     |local| body_bbox_to_world(local, ox, oy, el.orientation),
                 );
-            Some(bbox)
+            Some((el.refdes.clone(), bbox))
         })
         .collect()
 }

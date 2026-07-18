@@ -28,7 +28,8 @@ use spice_layout::{Placement, RefinementMeta};
 
 use crate::schematic::{
     LabelObstacles, TextBbox, collect_net_pins, label_rotation_obstacles, label_specs,
-    placement_obstacles, placement_property_bboxes, rail_glyph_body_bboxes, text_bbox, trial_route,
+    placement_obstacles_with_refdes, placement_property_bboxes, rail_glyph_body_bboxes, text_bbox,
+    trial_route,
 };
 use crate::v5::{PinProbe, Violation, count_outward_violations};
 
@@ -76,14 +77,18 @@ pub fn refine_orientations(placement: &mut Placement, library: &Library, meta: &
 
     // Baseline measurement of the placement as received.
     let mut baseline = measure(placement, library);
-    if baseline.v5 == 0 {
+    // Nothing to chase only when BOTH the Tier-1 V12 count and the
+    // Tier-2 V5 count are already zero. Returning on `v5 == 0` alone
+    // would skip the pass on a placement whose only defect is a wire
+    // speared through a body — the higher-tier problem.
+    if baseline.v5 == 0 && baseline.v12 == 0 {
         return;
     }
 
     // Greedy single-element descent first: cheap, each accepted step
     // *strictly* reduces real V5, so it converges in at most `v5` steps.
     greedy_descent(placement, library, meta, &mut baseline);
-    if baseline.v5 == 0 {
+    if baseline.v5 == 0 && baseline.v12 == 0 {
         return;
     }
 
@@ -118,12 +123,17 @@ fn greedy_descent(
             let Some(allowed) = meta.allowed.get(i) else {
                 continue;
             };
-            // Skip elements that cannot currently contribute a V5
-            // violation: only those whose own pins are flagged in the
-            // baseline are worth re-orienting. This bounds the
-            // trial-route count without losing any improvable element.
+            // Skip elements that cannot currently contribute a V5 or a
+            // V12 violation: only those whose own pins are flagged, or
+            // whose body a wire currently spears, are worth re-orienting.
+            // This bounds the trial-route count without losing any
+            // improvable element. V12 offenders must be included — an
+            // element can be speared without having any V5 violation of
+            // its own, and filtering on V5 alone made those unreachable.
             let refdes = &placement.elements[i].refdes;
-            if !baseline.offenders.iter().any(|v| &v.refdes == refdes) {
+            let is_v5_offender = baseline.offenders.iter().any(|v| &v.refdes == refdes);
+            let is_v12_offender = baseline.v12_offenders.contains(refdes);
+            if !is_v5_offender && !is_v12_offender {
                 continue;
             }
 
@@ -142,20 +152,35 @@ fn greedy_descent(
                 let m = measure(placement, library);
                 placement.elements[i].orientation = current;
 
-                // Accept when the (V13, V5) pair strictly improves and no
-                // equal-/higher-tier guard regresses. V13 is Tier 1 and V5
-                // Tier 2, so V13 leads: a candidate that removes a label
-                // overlap wins even if V5 is unchanged, and one that adds
-                // a label overlap is never taken for a V5 gain. Selection
-                // is lexicographic for the same reason.
-                if (m.v13, m.v5) < (baseline.v13, baseline.v5)
+                // Accept when the (V13, V12, V5) triple strictly improves
+                // and no equal-/higher-tier guard regresses. V13 and V12
+                // are Tier 1, V5 is Tier 2, so the Tier-1 counts lead:
+                // a candidate that removes a label overlap or a wire
+                // speared through a body wins even if V5 is unchanged,
+                // and one that adds either is never taken for a V5 gain.
+                // Selection is lexicographic for the same reason.
+                //
+                // V12 belongs in the objective, not just the guard. It
+                // used to appear only as the `m.v12 <= baseline.v12`
+                // non-regression check, which meant the search could
+                // never *seek* a V12 fix — it only ever landed one as a
+                // side effect of a V5 improvement that happened to
+                // straighten the same wire. That is a tier inversion:
+                // a Tier-1 defect was reachable only while a Tier-2
+                // gradient still pointed at it, so any change that
+                // flattened V5 first (e.g. a router fix that removes V5
+                // violations outright) silently stranded the V12
+                // crossing. Keeping the `<=` guard as well means V12 can
+                // now only fall, never rise — no sideways trade against
+                // V13 within the tier.
+                if (m.v13, m.v12, m.v5) < (baseline.v13, baseline.v12, baseline.v5)
                     && m.v11 <= baseline.v11
                     && m.overlap <= baseline.overlap
                     && m.v12 <= baseline.v12
                 {
                     let take = match &best {
                         None => true,
-                        Some((_, bm)) => (m.v13, m.v5) < (bm.v13, bm.v5),
+                        Some((_, bm)) => (m.v13, m.v12, m.v5) < (bm.v13, bm.v12, bm.v5),
                     };
                     if take {
                         best = Some((cand, m));
@@ -167,7 +192,7 @@ fn greedy_descent(
                 placement.elements[i].orientation = orient;
                 *baseline = m;
                 improved_this_sweep = true;
-                if baseline.v13 == 0 && baseline.v5 == 0 {
+                if baseline.v13 == 0 && baseline.v12 == 0 && baseline.v5 == 0 {
                     return;
                 }
             }
@@ -291,17 +316,20 @@ fn joint_search(
             placement.elements[i].orientation = cand[k][counter[k]];
         }
         let m = measure(placement, library);
-        if (m.v13, m.v5) < (baseline.v13, baseline.v5)
+        // Same lexicographic (V13, V12, V5) objective as `greedy_descent`
+        // — Tier-1 counts lead, Tier-2 V5 breaks ties. See the rationale
+        // there for why V12 must be in the key and not only the guard.
+        if (m.v13, m.v12, m.v5) < (baseline.v13, baseline.v12, baseline.v5)
             && m.v11 <= baseline.v11
             && m.overlap <= baseline.overlap
             && m.v12 <= baseline.v12
         {
             let take = match &best {
                 None => true,
-                Some((_, bm)) => (m.v13, m.v5) < (bm.v13, bm.v5),
+                Some((_, bm)) => (m.v13, m.v12, m.v5) < (bm.v13, bm.v12, bm.v5),
             };
             if take {
-                let reached_zero = m.v13 == 0 && m.v5 == 0;
+                let reached_zero = m.v13 == 0 && m.v12 == 0 && m.v5 == 0;
                 let chosen: Vec<Orientation> = active
                     .iter()
                     .map(|&i| placement.elements[i].orientation)
@@ -340,7 +368,11 @@ fn joint_search(
 }
 
 /// The metrics the acceptance gate compares. `offenders` carries the V5
-/// violations so the sweep can skip elements that aren't offending.
+/// violations so the sweep can skip elements that aren't offending, and
+/// `v12_offenders` does the same for V12: the refdes of every element
+/// whose body a wire currently spears. Without the latter the sweep
+/// could only ever fix a V12 crossing on an element that *also* had a
+/// V5 violation — see the tier-inversion note on the acceptance gate.
 /// `v13` is the combined label↔body + label↔property-text overlap count
 /// (V13 parts 1 and 2), measured on the exact labels the emitter will
 /// plant ([`label_specs`]).
@@ -351,6 +383,7 @@ struct Measure {
     v12: usize,
     v13: usize,
     offenders: Vec<Violation>,
+    v12_offenders: Vec<String>,
 }
 
 /// Trial-route `placement` and measure V5, V11 residue, symbol-body
@@ -360,7 +393,7 @@ fn measure(placement: &Placement, library: &Library) -> Measure {
     let pins = pin_probes(placement, library);
     let offenders = count_outward_violations(&pins, &route.segments);
     let overlap = symbol_overlap_count(placement, library);
-    let v12 = v12_crossing_count(placement, library, &route.segments);
+    let (v12, v12_offenders) = v12_crossings(placement, library, &route.segments);
     let v13 = v13_overlap_count(placement, library);
     Measure {
         v5: offenders.len(),
@@ -369,6 +402,7 @@ fn measure(placement: &Placement, library: &Library) -> Measure {
         v12,
         v13,
         offenders,
+        v12_offenders,
     }
 }
 
@@ -529,21 +563,27 @@ fn symbol_overlap_count(placement: &Placement, library: &Library) -> usize {
 /// element's body bbox (V12). `placement_obstacles` already excludes
 /// power glyphs / suppressed rail sources and adds the router's clearance
 /// margin, so an interior intersection here is a genuine V12 crossing.
-fn v12_crossing_count(
+fn v12_crossings(
     placement: &Placement,
     library: &Library,
     segments: &[crate::v5::WireSegment],
-) -> usize {
-    let obstacles = placement_obstacles(placement, library);
+) -> (usize, Vec<String>) {
+    let obstacles = placement_obstacles_with_refdes(placement, library);
     let mut count = 0;
-    for bbox in &obstacles {
+    let mut offenders: Vec<String> = Vec::new();
+    for (refdes, bbox) in &obstacles {
+        let mut hit = false;
         for (a, b) in segments {
             if bbox.intersects_segment(a.0, a.1, b.0, b.1) {
                 count += 1;
+                hit = true;
             }
         }
+        if hit {
+            offenders.push(refdes.clone());
+        }
     }
-    count
+    (count, offenders)
 }
 
 /// Transform a symbol-local body bbox into a world-frame `Bbox`, using

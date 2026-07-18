@@ -109,11 +109,29 @@ pub fn route_two_pin_with_outward(
         if ok_a && ok_b {
             return vec![single];
         }
-        // Outward direction conflicts with the collinear axis: detour
-        // perpendicular via the constrained endpoint that fails. We
-        // emit a stub from `a` (or `b`) outward, then return to the
-        // collinear axis and run to the destination.
-        return route_with_stub(a, out_a, b, out_b);
+        // Outward direction conflicts with the collinear axis. Stubbing
+        // here cannot help: `a` and `b` share an axis, so the failing
+        // outward direction is either anti-parallel to `a → b` (the
+        // continuation retraces the stub exactly) or perpendicular to it
+        // (the continuation steps straight back onto the shared axis).
+        // Either way the stub is fully re-covered by the very next leg,
+        // leaving `single` plus a dangling 1.27 mm stem off the pin — no
+        // V5 compliance bought, just a whisker that inflates the content
+        // bbox (V15) and can spear a neighbouring body (V12).
+        //
+        // Returning `single` is connectivity-equivalent to the stub route
+        // and matches the output the router has always *effectively*
+        // produced: the whisker used to be emitted and then deleted by
+        // `cleanup::coalesce_collinear`, which fused the out-and-back pair
+        // into a zero-length segment. That collapse is now rejected — it
+        // was severing real branches on 3-pin nets (see the note in
+        // `cleanup::try_merge`) — so the whisker has to not be generated
+        // in the first place rather than be cleaned up after the fact.
+        //
+        // Deliberately scoped to the collinear case. In the non-collinear
+        // fallback below the stub is *not* necessarily re-covered, so
+        // `route_with_stub` still runs there.
+        return vec![single];
     }
     // Non-collinear: two L candidates.
     let horizontal_first = [

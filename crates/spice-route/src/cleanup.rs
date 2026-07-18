@@ -103,6 +103,35 @@ fn try_merge(
     junctions: &[(f64, f64)],
     barriers: &dyn BarrierSet,
 ) -> Option<Segment> {
+    // The `(other_a - other_b).abs() > EPS` term in both arms below
+    // guards against a merge that collapses to nothing.
+    //
+    // This function rewrites a matched pair as the span between their two
+    // *far* endpoints. When the two segments share an endpoint and are
+    // exact duplicates, those far endpoints coincide, so the "merge"
+    // produces a ZERO-LENGTH segment — which the following
+    // `drop_zero_length` deletes outright, taking the wire with it.
+    //
+    // That is a Tier-0 defect, not a cosmetic one. It is exactly how the
+    // third leg of a 3-pin Steiner tree went missing whenever the Steiner
+    // point landed *on* one of the pins: the other two legs each emit
+    // their own identical copy of the drop to that pin, the pair
+    // collapses to nothing, and the pin is left with no wire at all — a
+    // silently split net. Regression test:
+    // `tests/steiner.rs::three_collinear_pins_with_steiner_on_a_pin_stay_connected`.
+    //
+    // Rejecting the pair is safe: `collapse_collinear_overlaps` runs next
+    // and folds genuine duplicates into their true interval union.
+    //
+    // NOTE (deliberately narrow): this rejects only the *degenerate*
+    // outcome. The far-endpoint rule is unsound for partially overlapping
+    // pairs too — it yields the set difference rather than the union,
+    // silently shortening the run — but those cases sever no net on any
+    // current fixture, and broadening the guard measurably perturbs the
+    // phase-4.5 orientation oracle (which trial-routes with this very
+    // code), shifting placements and surfacing unrelated latent router
+    // defects. Left as a follow-up; the union is the correct long-term
+    // rule.
     let a_horiz = (a.y1 - a.y2).abs() < EPS;
     let a_vert = (a.x1 - a.x2).abs() < EPS;
     let b_horiz = (b.y1 - b.y2).abs() < EPS;
@@ -117,6 +146,7 @@ fn try_merge(
             (a.x1, b.x2, a.x2, b.x1),
         ] {
             if (ax - bx).abs() < EPS
+                && (other_a - other_b).abs() > EPS
                 && !is_junction((ax, a.y1), junctions)
                 && !is_barrier((ax, a.y1), barriers)
             {
@@ -145,6 +175,7 @@ fn try_merge(
             (a.y1, b.y2, a.y2, b.y1),
         ] {
             if (ay - by).abs() < EPS
+                && (other_a - other_b).abs() > EPS
                 && !is_junction((a.x1, ay), junctions)
                 && !is_barrier((a.x1, ay), barriers)
             {

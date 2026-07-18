@@ -387,3 +387,170 @@ fn route_pipeline_emits_junction_for_three_pin_t() {
     assert!((2..=3).contains(&wires), "got {wires} wires");
     assert_eq!(count_starting(&r, "(junction"), 1);
 }
+
+// ----- Endpoint reachability (Tier 0) -----
+
+/// Like [`signal_net`] but with an explicit outward direction on every
+/// pin, so tests can reproduce real placer geometry (e.g. three
+/// upward-facing top pins sitting on one horizontal line).
+fn signal_net_outward(name: &str, pins: &[(f64, f64)], outward: Direction) -> NetSpec {
+    let mut net = signal_net(name, pins);
+    for p in &mut net.pins {
+        p.outward = outward;
+    }
+    net
+}
+
+fn qk(v: f64) -> i64 {
+    #[allow(clippy::cast_possible_truncation)]
+    let k = (v * 1000.0).round() as i64;
+    k
+}
+
+/// Collect the routed wire segments the pipeline emitted, parsed back
+/// out of the S-expression stream as `((x1,y1),(x2,y2))` endpoint pairs.
+fn emitted_wires(r: &spice_route::RouteResult) -> Vec<((i64, i64), (i64, i64))> {
+    r.sexprs
+        .iter()
+        .map(std::string::ToString::to_string)
+        .filter(|s| s.starts_with("(wire"))
+        .map(|s| {
+            let nums: Vec<f64> = s
+                .replace(['(', ')'], " ")
+                .split_whitespace()
+                .filter_map(|t| t.parse::<f64>().ok())
+                .collect();
+            assert_eq!(nums.len(), 4, "unexpected wire sexpr: {s}");
+            ((qk(nums[0]), qk(nums[1])), (qk(nums[2]), qk(nums[3])))
+        })
+        .collect()
+}
+
+/// Assert every pin of `net` is connected to every other pin through
+/// the emitted wires, using KiCad's actual connectivity rule: a
+/// `SCH_LINE` connects only at `{m_start, m_end}`
+/// (`eeschema/sch_line.cpp`, `SCH_LINE::GetConnectionPoints`). A branch
+/// that merely *touches* a trunk's interior is a SPLIT NET, so
+/// reachability is computed over shared segment **endpoints** only.
+fn assert_all_pins_endpoint_reachable(net: &NetSpec, r: &spice_route::RouteResult) {
+    fn find(
+        parent: &mut std::collections::HashMap<(i64, i64), (i64, i64)>,
+        x: (i64, i64),
+    ) -> (i64, i64) {
+        let p = *parent.entry(x).or_insert(x);
+        if p == x {
+            return x;
+        }
+        let root = find(parent, p);
+        parent.insert(x, root);
+        root
+    }
+    let wires = emitted_wires(r);
+    // Union-find over quantised endpoints.
+    let mut parent: std::collections::HashMap<(i64, i64), (i64, i64)> =
+        std::collections::HashMap::new();
+    for (a, b) in &wires {
+        let (ra, rb) = (find(&mut parent, *a), find(&mut parent, *b));
+        if ra != rb {
+            parent.insert(ra, rb);
+        }
+    }
+
+    let pin_keys: Vec<(i64, i64)> = net.pins.iter().map(|p| (qk(p.x_mm), qk(p.y_mm))).collect();
+    for (pin, key) in net.pins.iter().zip(&pin_keys) {
+        assert!(
+            parent.contains_key(key),
+            "pin at ({}, {}) is not an endpoint of any emitted wire — \
+             its branch was dropped. wires: {wires:?}",
+            pin.x_mm,
+            pin.y_mm
+        );
+    }
+    let root0 = find(&mut parent, pin_keys[0]);
+    for (pin, key) in net.pins.iter().zip(&pin_keys).skip(1) {
+        assert_eq!(
+            find(&mut parent, *key),
+            root0,
+            "pin at ({}, {}) is not endpoint-reachable from the first pin — \
+             net \"{}\" is split. wires: {wires:?}",
+            pin.x_mm,
+            pin.y_mm,
+            net.name
+        );
+    }
+}
+
+#[test]
+fn three_collinear_pins_with_steiner_on_a_pin_stay_connected() {
+    // Regression: the exact `R1 / R2 / C1` geometry from a three-element
+    // RC low-pass. All three `out` pins are top pins on one horizontal
+    // line, and the median-of-medians Steiner point lands EXACTLY on the
+    // middle pin (40.64, 26.67). Each of the outer two legs then emits
+    // its own copy of the shared drop down to that pin, and the
+    // duplicate pair used to be "merged" end-to-end into a zero-length
+    // stub and deleted — silently severing the middle pin.
+    let nets = [signal_net_outward(
+        "out",
+        &[(27.94, 26.67), (48.26, 26.67), (40.64, 26.67)],
+        Direction::Up,
+    )];
+    let r = route(RouteRequest {
+        nets: &nets,
+        scope: "root",
+        library: None,
+        sheet_uuid: "test-uuid",
+        project_name: "test",
+        obstacles: &[],
+        bounds: None,
+    });
+    assert_all_pins_endpoint_reachable(&nets[0], &r);
+}
+
+#[test]
+fn three_pin_nets_stay_connected_across_steiner_degeneracies() {
+    // Sweep the *degenerate* Steiner arrangements — the ones where the
+    // median-of-medians point coincides with a pin, so the other two legs
+    // each emit their own copy of the same drop and that duplicate pair
+    // reaches cleanup. Every arrangement must keep all three pins
+    // endpoint-reachable.
+    //
+    // Scoped to collinear/degenerate layouts on purpose. Topologies whose
+    // branch genuinely *crosses* a trunk (rather than meeting it
+    // end-to-end) hit a separate, pre-existing gap: nothing in the
+    // pipeline splits a true crossing into shared endpoints, and
+    // `coalesce_collinear` will merge a trunk straight through the
+    // crossing point. That is out of scope here and unaffected by this
+    // fix — it reproduces identically on the unfixed router.
+    let cases: &[(&str, [(f64, f64); 3])] = &[
+        (
+            "steiner-on-middle-pin",
+            [(0.0, 0.0), (25.4, 0.0), (12.7, 0.0)],
+        ),
+        ("steiner-on-end-pin", [(0.0, 0.0), (12.7, 0.0), (25.4, 0.0)]),
+        ("all-vertical", [(0.0, 0.0), (0.0, 25.4), (0.0, 12.7)]),
+        (
+            "duplicate-drop-both-sides",
+            [(-12.7, 0.0), (12.7, 0.0), (0.0, 0.0)],
+        ),
+    ];
+    for outward in [
+        Direction::Up,
+        Direction::Down,
+        Direction::Left,
+        Direction::Right,
+    ] {
+        for (label, pins) in cases {
+            let nets = [signal_net_outward(label, pins, outward)];
+            let r = route(RouteRequest {
+                nets: &nets,
+                scope: "root",
+                library: None,
+                sheet_uuid: "test-uuid",
+                project_name: "test",
+                obstacles: &[],
+                bounds: None,
+            });
+            assert_all_pins_endpoint_reachable(&nets[0], &r);
+        }
+    }
+}
