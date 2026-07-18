@@ -1137,6 +1137,66 @@ Each phase is independently testable and ratchet-safe (no phase may
 Detailed narratives of past failures. CLAUDE.md keeps the one-line
 *rule* each one yields; the full story lives here.
 
+### Phase-4.5 gate alignment — why the gate stays upstream of decoration
+
+The phase-4.5 refinement gate (ADR-11) scores each candidate orientation
+by trial-routing it and counting V5, V11, V12, symbol overlap and V13. Its
+V13 term models the labels the emitter *would* plant, via the emitter's own
+`label_specs`. After a run of text-geometry fixes made the emitter's label
+and field models renderer-faithful, the gate's model was left behind, and
+aligning the two looked like obvious cleanup. It was measured, and it is
+strictly worse.
+
+**What was tried.** Three increments, each verified against the suite and
+against `kicad-cli sch export svg` ink:
+
+1. *Flavour-correct label bboxes* in the gate (`plain_label_bbox` /
+   `global_label_bbox` instead of one generic centred box).
+2. *Same obstacle classes the verifiers grade* — foreign rail-glyph
+   bodies, symbol pin text, label-vs-label.
+3. *Same `label_specs` inputs decoration passes* — real pin-text set,
+   `anchor_search: true`.
+
+**What happened.** With all three, measured V13 stayed at 0 across every
+fixture while V5 regressed: `common_emitter` 0 → 1 and
+`opamp_inverting_real` 1 → 2. A pure Tier-2 loss bought nothing.
+
+**Why.** Alignment was only ever partial, and could not be otherwise. The
+gate scores **pre-nudge** property anchors, because the real ones are
+chosen later by `nudge_property_text`, which consumes the emitted item
+list the gate does not build. Making the *label* side faithful while the
+*property* side stayed upstream produced a model that is wrong in a new,
+more pessimistic way: it sees label/property collisions that decoration
+then resolves — property text nudges away across a 24-candidate grid, and
+a plain label may take any of four rotations at any pin on its net — so the
+gate refused genuine V5 improvements to dodge overlaps that never reach
+the page.
+
+**The rule.** A partially-aligned model is worse than a consistently
+misaligned one. If the gate cannot model every decoration pass, keep every
+part of it one step upstream rather than mixing horizons. Closing the gap
+for real means simulating the whole decoration text pipeline per candidate
+— route, labels, property nudge, glyph-value nudge. That is feasible (the
+gate already trial-routes with the real router) but is its own project.
+
+**Also tried and rejected: reordering decoration.** If labels were placed
+*after* the property nudge they would see final property geometry, removing
+the gate's excuse. Measured: it regresses V13. Labels are pin-anchored —
+they may only sit at a pin of their own net — whereas property text roams a
+candidate grid around its own symbol. Labels are therefore the *tighter*
+constraint and must be placed first, with the freer pass adapting. The
+existing order is correct, and the intuition that "properties are more
+constrained" is backwards.
+
+**What did land.** The gate's accept/select rule now honours the documented
+tier order: it minimises `(V13, V5)` lexicographically instead of
+minimising V5 subject to `V13 <= baseline`. Under the old rule the refiner
+could *keep* an existing Tier-1 label overlap while chasing a Tier-2 V5
+gain; it now prefers removing the overlap and can never accept a V5 gain
+that introduces one. With the current upstream V13 model this is a no-op on
+every fixture — it removes a latent tier-order violation rather than
+changing today's output.
+
 ### V14 / power-glyph orientation — Attempt A and Attempt B
 
 V14 ("power-glyph orientation: GND down, VCC up") is a **hard

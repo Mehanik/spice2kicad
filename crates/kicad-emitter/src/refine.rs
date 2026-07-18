@@ -142,17 +142,20 @@ fn greedy_descent(
                 let m = measure(placement, library);
                 placement.elements[i].orientation = current;
 
-                // Strict V5 improvement, no regression on any
-                // equal-/higher-tier guard.
-                if m.v5 < baseline.v5
+                // Accept when the (V13, V5) pair strictly improves and no
+                // equal-/higher-tier guard regresses. V13 is Tier 1 and V5
+                // Tier 2, so V13 leads: a candidate that removes a label
+                // overlap wins even if V5 is unchanged, and one that adds
+                // a label overlap is never taken for a V5 gain. Selection
+                // is lexicographic for the same reason.
+                if (m.v13, m.v5) < (baseline.v13, baseline.v5)
                     && m.v11 <= baseline.v11
                     && m.overlap <= baseline.overlap
                     && m.v12 <= baseline.v12
-                    && m.v13 <= baseline.v13
                 {
                     let take = match &best {
                         None => true,
-                        Some((_, bm)) => m.v5 < bm.v5,
+                        Some((_, bm)) => (m.v13, m.v5) < (bm.v13, bm.v5),
                     };
                     if take {
                         best = Some((cand, m));
@@ -164,7 +167,7 @@ fn greedy_descent(
                 placement.elements[i].orientation = orient;
                 *baseline = m;
                 improved_this_sweep = true;
-                if baseline.v5 == 0 {
+                if baseline.v13 == 0 && baseline.v5 == 0 {
                     return;
                 }
             }
@@ -288,24 +291,23 @@ fn joint_search(
             placement.elements[i].orientation = cand[k][counter[k]];
         }
         let m = measure(placement, library);
-        if m.v5 < baseline.v5
+        if (m.v13, m.v5) < (baseline.v13, baseline.v5)
             && m.v11 <= baseline.v11
             && m.overlap <= baseline.overlap
             && m.v12 <= baseline.v12
-            && m.v13 <= baseline.v13
         {
             let take = match &best {
                 None => true,
-                Some((_, bm)) => m.v5 < bm.v5,
+                Some((_, bm)) => (m.v13, m.v5) < (bm.v13, bm.v5),
             };
             if take {
-                let reached_zero = m.v5 == 0;
+                let reached_zero = m.v13 == 0 && m.v5 == 0;
                 let chosen: Vec<Orientation> = active
                     .iter()
                     .map(|&i| placement.elements[i].orientation)
                     .collect();
                 best = Some((chosen, m));
-                // Can't beat zero V5 — stop enumerating early.
+                // Can't beat zero on both — stop enumerating early.
                 if reached_zero {
                     break 'enumerate;
                 }
@@ -370,11 +372,30 @@ fn measure(placement: &Placement, library: &Library) -> Measure {
     }
 }
 
-/// Count V13 label overlaps the emitter would produce for `placement`:
-/// a label's text bbox intersecting (1) any symbol body bbox, or (2) any
-/// Reference/Value property-text bbox. Uses the emitter's own
-/// [`label_specs`] / [`text_bbox`] / [`placement_property_bboxes`] so the
-/// gate measures exactly what the verifier grades.
+/// Count V13 label overlaps for `placement`: a label's text bbox against
+/// (1) any symbol body bbox, or (2) any Reference/Value property bbox.
+///
+/// This is a deliberate *approximation* of decoration, not a replica of
+/// it, and the gap is load-bearing — see the ADR-11 post-mortem in
+/// `docs/layout-adr.md`. The gate necessarily scores PRE-nudge property
+/// anchors (`placement_property_bboxes`), because the real anchors are
+/// chosen later by `nudge_property_text`, which needs the emitted item
+/// list this function does not have. It therefore also passes an empty
+/// pin-text set and `anchor_search: false`, keeping the whole model
+/// consistently one step upstream of decoration.
+///
+/// Making the label side faithful while the property side stays upstream
+/// was measured and is strictly worse: the gate then sees label/property
+/// overlaps that decoration goes on to resolve (property text nudges away;
+/// labels have four rotations at every pin on their net), and refuses real
+/// V5 improvements to avoid those phantoms. common_emitter V5 0 -> 1 and
+/// opamp_inverting_real 1 -> 2, with measured V13 already 0 in both cases.
+///
+/// Closing the gap for real means simulating the whole decoration text
+/// pipeline per candidate orientation — route, labels, property nudge,
+/// glyph-value nudge. That is feasible (the gate already trial-routes with
+/// the real router) but is its own project. Until then, prefer the
+/// consistently-upstream model over a half-aligned one.
 fn v13_overlap_count(placement: &Placement, library: &Library) -> usize {
     let net_pins = collect_net_pins(placement, library, &[]);
     let props = placement_property_bboxes(placement);
@@ -390,13 +411,7 @@ fn v13_overlap_count(placement: &Placement, library: &Library) -> usize {
         &[],
         &props,
         &label_obstacles,
-        // Empty pin-text set and anchor search off: this gate deliberately
-        // measures the same label geometry it measured before labels
-        // gained pin-text avoidance and multi-anchor placement. Enabling
-        // either here changes what the gate scores, which reshuffles
-        // orientation choices and regresses common_emitter V5 /
-        // opamp_inverting_real V13. Aligning the gate with decoration is a
-        // real improvement but a separate, tier-sensitive change.
+        // Consistently upstream of decoration — see the doc comment.
         &[],
         false,
         &std::collections::BTreeMap::new(),
