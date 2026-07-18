@@ -695,6 +695,21 @@ invariant here.
   fixed `(0 0 0)`, not visible content). This is a categorical floor,
   not a quality gradient: it needs no per-fixture ratchet budget, a
   hard `min ≥ margin` assertion suffices.
+
+  **The invariant is `min ≥ margin`, not `min == margin`.** Normalising
+  the content bbox to land exactly on the margin is merely the simplest
+  way to satisfy it, not the requirement. The distinction is
+  load-bearing for position stability (ADR-4): because the shift is
+  recomputed from the content bbox on every run, adding one element can
+  extend the bbox and re-anchor the frame, panning every existing
+  element uniformly — measured as `Δ = (+5.08, −1.27) mm` applied to
+  both parts of a 2-element circuit when a third was added, with grid
+  coordinates bit-identical throughout. That is invisible to the placer
+  and unfixable there, since any uniform pre-translation cancels in the
+  normalisation. A cached page shift may therefore be *preferred* over
+  re-normalising, provided the result still satisfies `min ≥ margin` and
+  stays inside the usable area — that is V15-conformant, and a verifier
+  demanding equality is over-specified.
   Verifier: `crates/spice2kicad/tests/placement_quality.rs::v15_*`
   collects every instance-section coordinate of every emitted sheet
   (excluding `lib_symbols`) and asserts the content bbox's top-left
