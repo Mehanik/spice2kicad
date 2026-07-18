@@ -237,6 +237,9 @@ pub fn emit_root(
     nudge_property_text(&mut items, placement, library);
     nudge_power_glyph_value_text(&mut items, placement, library);
 
+    // Correctness self-check, after every wire is final.
+    report_disconnected_nets(&items, &net_pins, None);
+
     let mut root = Sexpr::List(items);
     translate_into_page(&mut root);
     Ok(root.to_pretty())
@@ -374,6 +377,8 @@ pub fn emit_child_sheet(child: &ChildSheet<'_>, library: &Library) -> Result<Str
     // DECORATION-phase text-nudge (V13 part 4) — see `emit_root`.
     nudge_property_text(&mut items, child.placement, library);
     nudge_power_glyph_value_text(&mut items, child.placement, library);
+
+    report_disconnected_nets(&items, &net_pins, Some(&child.name));
 
     let mut root = Sexpr::List(items);
     translate_into_page(&mut root);
@@ -2252,6 +2257,147 @@ fn field_render_rotation(orient: Orientation) -> u16 {
 /// capacitor / opamp Reference & Value are the only visible ones. The
 /// reading direction comes from [`field_render_rotation`], not from the
 /// field's own `(at … 0)`.
+/// Union-find root of `k`, with path compression.
+fn uf_find(
+    parent: &mut std::collections::BTreeMap<(i64, i64), (i64, i64)>,
+    k: (i64, i64),
+) -> (i64, i64) {
+    let p = *parent.entry(k).or_insert(k);
+    if p == k {
+        return k;
+    }
+    let r = uf_find(parent, p);
+    parent.insert(k, r);
+    r
+}
+
+/// Report every net the emitted wires fail to fully connect.
+///
+/// A dropped connection leaves the file well-formed while making the
+/// circuit WRONG, so this is loud. `sheet` names the child sheet, if any.
+fn report_disconnected_nets(
+    items: &[Sexpr],
+    net_pins: &std::collections::BTreeMap<String, Vec<(f64, f64, u16)>>,
+    sheet: Option<&str>,
+) {
+    for net in disconnected_nets(items, net_pins) {
+        let where_ = sheet.map_or_else(String::new, |s| format!(" on sheet {s}"));
+        eprintln!(
+            "spice2kicad: ERROR: net {net:?}{where_} is not fully connected in the \
+             emitted schematic — at least one of its pins has no wire path to the \
+             others. This is a converter bug; the schematic is electrically wrong."
+        );
+    }
+}
+
+/// Names of nets whose pins the emitted wires do **not** all connect.
+///
+/// A placement the router finds awkward can leave a pin off its net
+/// entirely, and nothing downstream notices: the file is well-formed, it
+/// opens, and the circuit is simply wrong. Two separate placer
+/// experiments produced exactly that — `COUT` emitted as
+/// `unconnected-_COUT-Pad1_` instead of joining net `/c` — so this is a
+/// live hazard, not a theoretical one. The invariant suite catches it via
+/// `kicad-cli sch erc`, but a user converting their own netlist got no
+/// signal at all.
+///
+/// Deliberately conservative — it only reports a net when it is *sure*:
+///
+/// * Power/Ground nets are skipped. They carry no wires by design (V10
+///   routes them as `power:*` glyphs), so "no wire joins these pins" is
+///   the correct output, not a defect.
+/// * A net with fewer than two pins cannot be disconnected.
+/// * Pins are treated as connected when they share a wire-graph
+///   component, where a wire joins its own endpoints and swallows any pin
+///   lying on its span (endpoint or interior — KiCad connects both).
+/// * A net carrying two or more same-name labels is skipped: labels join
+///   islands by name, which this coordinate-only walk cannot see.
+///
+/// The residual risk is therefore false *negatives*, never false
+/// positives: anything it reports is a genuinely dropped connection.
+fn disconnected_nets(
+    items: &[Sexpr],
+    net_pins: &std::collections::BTreeMap<String, Vec<(f64, f64, u16)>>,
+) -> Vec<String> {
+    #[allow(clippy::cast_possible_truncation)]
+    let key = |x: f64, y: f64| -> (i64, i64) {
+        ((x * 1000.0).round() as i64, (y * 1000.0).round() as i64)
+    };
+    let (_, _, wires) = emitted_text_obstacles(items);
+    // Count labels per name so multi-label nets can be skipped.
+    let mut label_counts: std::collections::BTreeMap<&str, usize> =
+        std::collections::BTreeMap::new();
+    for item in items {
+        if matches!(head_of(item), Some("label" | "global_label")) {
+            if let Sexpr::List(parts) = item {
+                if let Some(Sexpr::QString(n) | Sexpr::Atom(n)) = parts.get(1) {
+                    *label_counts.entry(n.as_str()).or_default() += 1;
+                }
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    for (net, pins) in net_pins {
+        if pins.len() < 2 {
+            continue;
+        }
+        if matches!(
+            classify_net_by_name(net),
+            spice_layout::net_class::NetClass::Power | spice_layout::net_class::NetClass::Ground
+        ) {
+            continue;
+        }
+        if label_counts.get(net.as_str()).copied().unwrap_or(0) >= 2 {
+            continue;
+        }
+        // Union-find over wire endpoints, with each pin absorbed into any
+        // wire whose span covers it.
+        let mut parent: std::collections::BTreeMap<(i64, i64), (i64, i64)> =
+            std::collections::BTreeMap::new();
+        let union = |parent: &mut std::collections::BTreeMap<_, _>, a, b| {
+            let (ra, rb) = (uf_find(parent, a), uf_find(parent, b));
+            if ra != rb {
+                parent.insert(ra, rb);
+            }
+        };
+        for &(a, b) in &wires {
+            union(&mut parent, key(a.0, a.1), key(b.0, b.1));
+        }
+        // Absorb each pin into every wire whose span covers it.
+        let on_span = |px: f64, py: f64, a: (f64, f64), b: (f64, f64)| -> bool {
+            let eps = 1e-6;
+            if (a.1 - b.1).abs() < eps && (py - a.1).abs() < eps {
+                return px >= a.0.min(b.0) - eps && px <= a.0.max(b.0) + eps;
+            }
+            if (a.0 - b.0).abs() < eps && (px - a.0).abs() < eps {
+                return py >= a.1.min(b.1) - eps && py <= a.1.max(b.1) + eps;
+            }
+            false
+        };
+        let mut roots = Vec::new();
+        let mut any_off_wire = false;
+        for &(px, py, _) in pins {
+            let mut joined = None;
+            for &(a, b) in &wires {
+                if on_span(px, py, a, b) {
+                    joined = Some(uf_find(&mut parent, key(a.0, a.1)));
+                    break;
+                }
+            }
+            match joined {
+                Some(r) => roots.push(r),
+                None => any_off_wire = true,
+            }
+        }
+        // Every pin must sit on the wire graph, in one component.
+        if any_off_wire || roots.windows(2).any(|w| w[0] != w[1]) {
+            out.push(net.clone());
+        }
+    }
+    out
+}
+
 pub(crate) fn placement_property_bboxes(placement: &Placement) -> Vec<TextBbox> {
     let mut out = Vec::new();
     for el in &placement.elements {
@@ -3799,5 +3945,78 @@ mod tests {
         };
         let out = emit(&placement, &fixture_library()).expect("emit");
         assert!(out.contains("(mirror y)"), "got:\n{out}");
+    }
+
+    /// A positive control for the connectivity self-check: an unfired
+    /// guard is worth nothing, so prove it fires.
+    fn wire(x1: f64, y1: f64, x2: f64, y2: f64) -> Sexpr {
+        list(vec![
+            atom("wire"),
+            list(vec![
+                atom("pts"),
+                list(vec![
+                    atom("xy"),
+                    atom(&format_coord(x1)),
+                    atom(&format_coord(y1)),
+                ]),
+                list(vec![
+                    atom("xy"),
+                    atom(&format_coord(x2)),
+                    atom(&format_coord(y2)),
+                ]),
+            ]),
+        ])
+    }
+
+    #[test]
+    fn disconnected_nets_accepts_a_wired_net() {
+        let items = vec![wire(0.0, 0.0, 10.0, 0.0)];
+        let mut nets = std::collections::BTreeMap::new();
+        nets.insert("sig".to_string(), vec![(0.0, 0.0, 0u16), (10.0, 0.0, 0u16)]);
+        assert!(disconnected_nets(&items, &nets).is_empty());
+    }
+
+    #[test]
+    fn disconnected_nets_accepts_a_pin_on_a_wire_interior() {
+        // KiCad connects a pin landing mid-span, not only at an endpoint.
+        let items = vec![wire(0.0, 0.0, 10.0, 0.0)];
+        let mut nets = std::collections::BTreeMap::new();
+        nets.insert(
+            "sig".to_string(),
+            vec![(0.0, 0.0, 0u16), (5.0, 0.0, 0u16), (10.0, 0.0, 0u16)],
+        );
+        assert!(disconnected_nets(&items, &nets).is_empty());
+    }
+
+    #[test]
+    fn disconnected_nets_reports_a_pin_with_no_wire() {
+        // The measured failure mode: one pin left off the net entirely.
+        let items = vec![wire(0.0, 0.0, 10.0, 0.0)];
+        let mut nets = std::collections::BTreeMap::new();
+        nets.insert(
+            "sig".to_string(),
+            vec![(0.0, 0.0, 0u16), (10.0, 0.0, 0u16), (50.0, 50.0, 0u16)],
+        );
+        assert_eq!(disconnected_nets(&items, &nets), vec!["sig".to_string()]);
+    }
+
+    #[test]
+    fn disconnected_nets_reports_two_islands() {
+        // Both pins are on wires, but the wires never meet.
+        let items = vec![wire(0.0, 0.0, 5.0, 0.0), wire(20.0, 0.0, 25.0, 0.0)];
+        let mut nets = std::collections::BTreeMap::new();
+        nets.insert("sig".to_string(), vec![(0.0, 0.0, 0u16), (25.0, 0.0, 0u16)]);
+        assert_eq!(disconnected_nets(&items, &nets), vec!["sig".to_string()]);
+    }
+
+    #[test]
+    fn disconnected_nets_skips_power_and_ground() {
+        // Rails carry no wires by design (V10 routes them as glyphs), so
+        // "no wire joins these pins" is correct output, not a defect.
+        let items: Vec<Sexpr> = vec![];
+        let mut nets = std::collections::BTreeMap::new();
+        nets.insert("VCC".to_string(), vec![(0.0, 0.0, 0u16), (9.0, 9.0, 0u16)]);
+        nets.insert("0".to_string(), vec![(1.0, 1.0, 0u16), (8.0, 8.0, 0u16)]);
+        assert!(disconnected_nets(&items, &nets).is_empty());
     }
 }

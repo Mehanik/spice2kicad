@@ -213,10 +213,21 @@ fn emit_schematic_target(
         .then_some(cli.output.as_deref())
         .flatten()
         .map(spice_layout::sidecar::sidecar_path_for);
+    // A cache hit must prove it came from THIS netlist. The sidecar is
+    // keyed by output path, so without this check converting a second
+    // netlist to a path a first one used inherits its positions — the
+    // hint drags shared refdes to coordinates chosen for a different
+    // circuit, which measurably left a net disconnected
+    // (`opamp_definition_level` net `out1`, after `opamp_inverting` wrote
+    // the same path). Identity is the source path, so *editing* a netlist
+    // still hits — which is the whole point of the cache. A mismatch is
+    // an ordinary cache miss, never an error.
+    let expected_circuit = spice_layout::sidecar::source_id(&cli.input);
     let hint = sidecar_path
         .as_deref()
         .and_then(|p| fs::read_to_string(p).ok())
         .and_then(|text| spice_layout::sidecar::Sidecar::from_json(&text))
+        .filter(|s| s.circuit == expected_circuit)
         .map(|s| s.to_hint())
         .unwrap_or_default();
 
@@ -272,7 +283,8 @@ fn emit_schematic_target(
     // run. Removed refdeses simply do not appear in the new snapshot, so
     // they drop out of the cache (ADR-4 step 2).
     if let Some(ref sc_path) = sidecar_path {
-        let snapshot = spice_layout::sidecar::Sidecar::from_placement(&placement);
+        let snapshot =
+            spice_layout::sidecar::Sidecar::from_placement(&placement).with_source(&cli.input);
         fs::write(sc_path, snapshot.to_json())
             .with_context(|| format!("writing layout cache {}", sc_path.display()))?;
     }

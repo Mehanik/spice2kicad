@@ -276,3 +276,40 @@ fn removing_an_element_drops_it_from_the_sidecar() {
     );
     assert!(without_r2.positions.contains_key("R1"));
 }
+
+#[test]
+fn cache_from_a_different_circuit_is_a_miss_not_a_corruption() {
+    // The sidecar is keyed by OUTPUT PATH, so converting a second netlist
+    // to a path a first one used would otherwise inherit its positions.
+    // That is not cosmetic: the stale hint drags elements to coordinates
+    // chosen for a different circuit, and the router could then fail to
+    // connect a net at all — measured as `opamp_definition_level`'s net
+    // `out1` coming out disconnected after `opamp_inverting` had written
+    // the same path, which KiCad's own netlist export confirmed as
+    // `unconnected-`. The sidecar now carries a circuit fingerprint and a
+    // mismatch is an ordinary cache miss.
+    let dir = tempdir("cross_circuit");
+    let shared = dir.join("shared.kicad_sch");
+
+    // Prime the sidecar with a DIFFERENT circuit.
+    convert("opamp_inverting", &shared, false);
+    assert!(
+        sidecar_path(&shared).is_file(),
+        "first run wrote no sidecar"
+    );
+
+    // Convert the target circuit over the top of it.
+    convert("opamp_definition_level", &shared, false);
+    let poisoned = symbol_positions(&shared);
+
+    // And convert it again with no cache in play at all.
+    let clean_dir = tempdir("cross_circuit_clean");
+    let clean = clean_dir.join("clean.kicad_sch");
+    convert("opamp_definition_level", &clean, true);
+    let expected = symbol_positions(&clean);
+
+    assert_eq!(
+        poisoned, expected,
+        "a sidecar left by a different circuit changed this circuit's placement"
+    );
+}

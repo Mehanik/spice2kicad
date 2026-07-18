@@ -31,7 +31,7 @@ use crate::{GridPoint, Placement};
 /// Schema version of the sidecar. Bumped if the on-disk shape changes
 /// in a way an older reader could misinterpret; readers ignore files
 /// whose `version` they do not understand (treated as "no hint").
-pub const SIDECAR_VERSION: u32 = 1;
+pub const SIDECAR_VERSION: u32 = 2;
 
 /// One element's cached placement: grid coordinates plus orientation.
 ///
@@ -91,7 +91,40 @@ impl SidecarEntry {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Sidecar {
     pub version: u32,
+    /// Source netlist these positions were computed from.
+    ///
+    /// The cache is keyed by *output path*, so without this a second
+    /// netlist written to the same path inherits the first one's
+    /// placement. That is not merely untidy: the hint drags shared
+    /// refdes to coordinates chosen for a different circuit, and the
+    /// router can then fail to connect a net at all — measured on
+    /// `opamp_definition_level`, whose net `out1` came out disconnected
+    /// after `opamp_inverting` had written the same output path, which
+    /// KiCad's own netlist export confirmed as `unconnected-`.
+    ///
+    /// Identity is the *source path*, deliberately, not a digest of the
+    /// element set. The whole point of this cache (ADR-4) is that
+    /// **editing** a netlist leaves untouched elements where they were,
+    /// so anything that changes when the circuit is edited would defeat
+    /// it — a refdes-set fingerprint invalidates the cache the moment a
+    /// part is added, which is precisely when position stability matters
+    /// most. Same file re-converted → hit; a different file written to
+    /// the same output → miss.
+    #[serde(default)]
+    pub circuit: String,
     pub positions: BTreeMap<String, SidecarEntry>,
+}
+
+/// Canonical identity string for a source netlist path.
+///
+/// Canonicalised where possible so `./x.cir` and `x.cir` agree; falls
+/// back to the path as given when the file cannot be resolved.
+#[must_use]
+pub fn source_id(source: &Path) -> String {
+    std::fs::canonicalize(source)
+        .unwrap_or_else(|_| source.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
 }
 
 impl Sidecar {
@@ -110,8 +143,18 @@ impl Sidecar {
             .collect();
         Self {
             version: SIDECAR_VERSION,
+            circuit: String::new(),
             positions,
         }
+    }
+
+    /// Stamp the source netlist this placement came from. Separate from
+    /// [`Sidecar::from_placement`] so callers that only need the
+    /// positions are unaffected.
+    #[must_use]
+    pub fn with_source(mut self, source: &Path) -> Self {
+        self.circuit = source_id(source);
+        self
     }
 
     /// Serialise to pretty JSON.
