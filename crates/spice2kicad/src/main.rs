@@ -10,6 +10,7 @@ use spice_diagnostics::{Diagnostic, Severity};
 use spice_layout::LayoutOptions;
 
 mod render;
+mod verify;
 
 use render::SourceMap;
 
@@ -63,6 +64,16 @@ struct Cli {
     /// scratch. Schematic target with an `--output` path only.
     #[arg(long)]
     no_layout_cache: bool,
+
+    /// Skip the post-emit connectivity check.
+    ///
+    /// By default the converter re-reads the schematic it just wrote
+    /// through `kicad-cli` and confirms every net connects the same pins
+    /// the SPICE source did. That check is the only thing standing
+    /// between a modelling bug and a silently wrong circuit, so turn it
+    /// off only when `kicad-cli` is unavailable or the cost matters.
+    #[arg(long)]
+    no_verify: bool,
 }
 
 fn load_library(paths: &[PathBuf]) -> Result<Library> {
@@ -382,6 +393,53 @@ fn emit_schematic_target(
         let body = kicad_emitter::emit_child_sheet(&child, &library)?;
         let path = parent_dir.join(format!("{name}.kicad_sch"));
         fs::write(&path, &body).with_context(|| format!("writing {}", path.display()))?;
+    }
+
+    // Let KiCad judge what we wrote. Everything upstream reasons about a
+    // *model* of KiCad; models drift, and when they do the file is
+    // well-formed, opens fine, and the circuit is wrong. The written file
+    // stays on disk either way — it is the artifact you debug with.
+    if !cli.no_verify && verify::kicad_cli_available() {
+        let expected: std::collections::BTreeMap<String, Vec<String>> = checked_for_sheets
+            .elements
+            .iter()
+            .filter(|el| !matches!(el.role, spice_resolve::ElementRole::Power(_)))
+            .map(|el| {
+                (
+                    el.refdes.to_ascii_uppercase(),
+                    el.nodes.iter().map(|n| n.to_ascii_lowercase()).collect(),
+                )
+            })
+            .collect();
+        match verify::check_connectivity(&out_path, &expected) {
+            Ok(report) if report.is_clean() => {}
+            Ok(report) => {
+                eprintln!(
+                    "spice2kicad: ERROR: the emitted schematic does not wire up the                      source circuit."
+                );
+                for group in &report.missing {
+                    eprintln!("  net in the source but split in the schematic: {group:?}");
+                }
+                for group in &report.extra {
+                    eprintln!("  net in the schematic but not the source: {group:?}");
+                }
+                for refdes in &report.dropped {
+                    eprintln!("  element missing from the schematic: {refdes}");
+                }
+                eprintln!(
+                    "  This is a converter bug. {} was written and left in place for                      debugging; do not use it as a schematic.",
+                    out_path.display()
+                );
+                return Err(anyhow!(
+                    "emitted schematic does not match the source netlist"
+                ));
+            }
+            Err(e) => {
+                // A verification that cannot run is a warning, not a
+                // failure: it says nothing about the schematic.
+                eprintln!("spice2kicad: warning: could not verify connectivity: {e}");
+            }
+        }
     }
 
     Ok(())
