@@ -67,12 +67,21 @@ fn count_labels(root: &Value, kind: &str) -> BTreeMap<String, usize> {
     out
 }
 
+/// Fixtures graded for label policy. Mirrors the list in
+/// `electrical_safety.rs`: the port and hierarchical-sheet fixtures were
+/// emitted but graded by nothing. `opamp_definition_level` is excluded
+/// there for routing defects; V4 is independent of those, so it is graded
+/// here.
 const SHEETS: &[&str] = &[
     "rc_lowpass",
     "common_emitter",
     "multivibrator",
     "diff_pair",
     "opamp_inverting_real",
+    "opamp_inverting",
+    "opamp_definition_level",
+    "port_shapes",
+    "rc_lowpass_ports",
 ];
 
 #[test]

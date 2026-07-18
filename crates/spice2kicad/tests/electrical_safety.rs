@@ -296,12 +296,30 @@ fn label_positions(root: &Value) -> Vec<(String, Pt)> {
     out
 }
 
+/// Every fixture the invariant suite grades.
+///
+/// This deliberately covers *all* emitted sheets, not just the classic
+/// five: four fixtures (`opamp_inverting`, `opamp_definition_level`,
+/// `port_shapes`, `rc_lowpass_ports`) were converted by the CLI but
+/// graded by nothing, so defects in the port and hierarchical-sheet paths
+/// — exercised by the newest features — were invisible to the suite.
 const SHEETS: &[&str] = &[
     "rc_lowpass",
     "common_emitter",
     "multivibrator",
     "diff_pair",
     "opamp_inverting_real",
+    "opamp_inverting",
+    "port_shapes",
+    "rc_lowpass_ports",
+    // NOT YET GRADED: `opamp_definition_level`. Adding it trips V12 (4
+    // wires crossing foreign symbol bodies) and V5 (6 first-segment
+    // outward violations) — real defects in the busiest fixture, not
+    // measurement artefacts. Recording them would mean writing non-zero
+    // ratchet literals, which the budget policy allows only with an
+    // explicit sign-off, so the fixture stays ungraded until the routing
+    // defects are fixed or the budgets are approved. Everything else here
+    // grades at zero.
 ];
 
 /// Per-fixture crossing budget. After the V11/V12 cascade + Steiner-
