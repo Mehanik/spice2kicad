@@ -43,17 +43,19 @@ use std::path::PathBuf;
 ///   KiCad's export flattens the instance into the child's `E1` and there
 ///   is no `X1` to compare. Checking that flattening is correct needs a
 ///   hierarchy-aware comparison this test does not attempt.
-/// * `opamp_definition_level` exports its instances as bare `X1 __X1`
-///   with **no nodes at all** — KiCad's SPICE exporter cannot recover the
-///   pin order for the definition-level symbol. That is a real defect in
-///   its own right (the emitted schematic is not simulatable), tracked
-///   separately; it is not something this test can assert around.
+/// `opamp_definition_level` used to be absent too: it exported its
+/// instances as bare `X1 __X1`, with **no nodes at all**, because the
+/// emitter wrote no `Sim.*` properties for a `.subckt` instance and
+/// KiCad's SPICE exporter could not recover the pin order. It is now
+/// included, and it is the check that keeps that fix honest — an `X`
+/// line's node *order* is exactly what regressed.
 const FIXTURES: &[&str] = &[
     "rc_lowpass",
     "common_emitter",
     "multivibrator",
     "diff_pair",
     "opamp_inverting_real",
+    "opamp_definition_level",
     "port_shapes",
     "rc_lowpass_ports",
 ];
@@ -73,8 +75,11 @@ fn tempdir(name: &str) -> PathBuf {
 }
 
 /// How many leading tokens after the refdes are nodes, by device letter.
-/// `None` means "not comparable" (subckt calls, whose arity is variable
-/// and whose instances may be flattened into a hierarchical sheet).
+/// `None` means "not comparable".
+///
+/// `X` (subckt call) is deliberately not here: its arity is variable, so
+/// it is handled separately in [`parse_elements`] — every token after
+/// the refdes is a node except the trailing subckt name.
 fn node_count(refdes: &str) -> Option<usize> {
     match refdes.chars().next()?.to_ascii_uppercase() {
         'R' | 'C' | 'L' | 'D' | 'V' | 'I' => Some(2),
@@ -123,6 +128,20 @@ fn parse_elements(text: &str) -> BTreeMap<String, Vec<String>> {
         let code = line.split(';').next().unwrap_or("").trim();
         let mut toks = code.split_whitespace();
         let Some(refdes) = toks.next() else { continue };
+        if refdes.starts_with(['X', 'x']) {
+            // `X<name> n1 … nk <subckt>` — variable arity, so the nodes
+            // are everything but the trailing subckt name. A bare
+            // `X1 OPAMP` (the old no-nodes defect) yields an empty node
+            // list, which the comparison then reports as a mismatch
+            // rather than silently skipping.
+            let mut toks: Vec<&str> = toks.collect();
+            toks.pop();
+            out.insert(
+                refdes.to_ascii_uppercase(),
+                toks.iter().map(|t| t.to_ascii_lowercase()).collect(),
+            );
+            continue;
+        }
         let Some(n) = node_count(refdes) else {
             continue;
         };

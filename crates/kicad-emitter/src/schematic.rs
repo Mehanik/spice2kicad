@@ -734,7 +734,7 @@ fn child_symbol_instance(el: &PlacedElement, instance_refdeses: &[String]) -> Se
     let value_text = el.value.as_deref().unwrap_or(&el.refdes);
     let (vx, vy) = property_anchor(x_mm, y_mm, el.orientation, 2.54, 2.54);
     fields.push(value_property(value_text, vx, vy));
-    for prop in sim_properties(&el.lib_id, value_text, &el.pin_mapping) {
+    for prop in sim_properties(&el.refdes, &el.lib_id, value_text, &el.pin_mapping) {
         fields.push(prop);
     }
     fields.push(child_instances_block(&el.refdes, instance_refdeses));
@@ -996,7 +996,7 @@ fn symbol_instance(el: &PlacedElement) -> Sexpr {
     let value_text = el.value.as_deref().unwrap_or(&el.refdes);
     let (vx, vy) = property_anchor(x_mm, y_mm, el.orientation, 2.54, 2.54);
     fields.push(value_property(value_text, vx, vy));
-    for prop in sim_properties(&el.lib_id, value_text, &el.pin_mapping) {
+    for prop in sim_properties(&el.refdes, &el.lib_id, value_text, &el.pin_mapping) {
         fields.push(prop);
     }
     fields.push(instances_block(&el.refdes));
@@ -1019,7 +1019,14 @@ fn symbol_instance(el: &PlacedElement) -> Sexpr {
 /// `SIM_MODEL_SERIALIZER::GeneratePins` in KiCad). For a BJT
 /// (model pins C,B,E,S), `pin_mapping[0]` is the symbol pin number
 /// for the C terminal, etc.
-fn sim_properties(lib_id: &str, value: &str, pin_mapping: &[String]) -> Vec<Sexpr> {
+fn sim_properties(refdes: &str, lib_id: &str, value: &str, pin_mapping: &[String]) -> Vec<Sexpr> {
+    // A `.subckt` instance mapped to a flat symbol via `;@ symbol=`.
+    // Without annotation kicad-cli emits `X1 __X1` — an instance with no
+    // nodes at all, so the exported netlist's connectivity is
+    // unrecoverable. See `subckt_sim_properties`.
+    if refdes.starts_with(['X', 'x']) {
+        return subckt_sim_properties(value, pin_mapping);
+    }
     // Strip the `Lib:` prefix.
     let bare = lib_id.split_once(':').map_or(lib_id, |(_, name)| name);
     // Model-pin name table per device family, in SPICE-terminal order.
@@ -1103,6 +1110,66 @@ fn sim_properties(lib_id: &str, value: &str, pin_mapping: &[String]) -> Vec<Sexp
         props.push(sim_property("Sim.Pins", &pins_text));
     }
     props
+}
+
+/// `Sim.*` properties for a `.subckt` instance (`X…`) drawn as a flat
+/// symbol.
+///
+/// KiCad *has* a first-class subcircuit model (`Sim.Device=SUBCKT`,
+/// empty `Sim.Type`, SPICE letter `X` — `sim_model.cpp` DEVICE_T /
+/// TYPE::SUBCKT). It is deliberately **not** what we emit, and the
+/// reason is measured, not assumed. A `SIM_MODEL_SUBCKT` learns its
+/// port order *only* by parsing a `.subckt` header out of the file
+/// named by `Sim.Library` (`SPICE_MODEL_PARSER_SUBCKT::ReadModel`).
+/// With no library there are no model pins, and `Sim.Pins` cannot
+/// create any — `SIM_MODEL::AssignSymbolPinNumberToModelPin` only
+/// *renumbers* pins that already exist. Checked against the installed
+/// kicad-cli 9.0.2 on `opamp_definition_level`, whose subckt ports are
+/// `inp inn out vcc vee` on symbol pins 3 2 1 8 4:
+///
+/// * `Sim.Device=SUBCKT` alone            → `X1 OPAMP` (no nodes)
+/// * `+ Sim.Pins`, no `Sim.Library`       → `X1 /out1 /inv1 GND VEE VCC OPAMP`
+///   — nodes appear, but in ascending *symbol pin number* order, which
+///   is the wrong port order. The model-pin names in `Sim.Pins` are
+///   ignored entirely (substituting nonsense names changes nothing).
+/// * `+ Sim.Library`                      → `X1 GND /inv1 /out1 VCC VEE OPAMP`,
+///   correct — but only because the library supplied the port order.
+///
+/// So SUBCKT is correct only with a `Sim.Library`, and whether to emit
+/// one (it needs a generated sidecar carrying the `.subckt` bodies) is
+/// an open spec §9 question, out of scope here.
+///
+/// KiCad's raw-SPICE model reaches the same result without a library.
+/// `SIM_MODEL_RAW_SPICE` treats each `Sim.Pins` entry as
+/// `<symbol-pin-number>=<model-pin-INDEX>` and *creates* model pins on
+/// demand (`SIM_MODEL_RAW_SPICE::AssignSymbolPinNumberToModelPin`),
+/// then emits nets in model-pin-index order
+/// (`SPICE_GENERATOR_RAW_SPICE::ItemPins`). Since model-pin index `i`
+/// is exactly SPICE terminal `i`, `pin_mapping` — which already maps
+/// SPICE terminal order to KiCad pin numbers — is precisely the data
+/// needed. `type="X"` makes `ItemName` keep the `X1` refdes and
+/// `model="<subckt>"` is appended after the nodes, reproducing the
+/// source line verbatim.
+///
+/// Caveat (deliberate, tracked in spec §9): with no `Sim.Library` the
+/// exported netlist has the right `X` line but no `.subckt` body, so it
+/// is correct-by-connectivity without being standalone-simulatable.
+fn subckt_sim_properties(subckt: &str, pin_mapping: &[String]) -> Vec<Sexpr> {
+    if pin_mapping.is_empty() {
+        return Vec::new();
+    }
+    let pins = pin_mapping
+        .iter()
+        .enumerate()
+        .map(|(i, sym_pin)| format!("{sym_pin}={}", i + 1))
+        .collect::<Vec<_>>()
+        .join(" ");
+    vec![
+        sim_property("Sim.Device", "SPICE"),
+        sim_property("Sim.Type", ""),
+        sim_property("Sim.Pins", &pins),
+        sim_property("Sim.Params", &format!(r#"type="X" model="{subckt}""#)),
+    ]
 }
 
 fn sim_property(name: &str, value: &str) -> Sexpr {
