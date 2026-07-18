@@ -1166,6 +1166,20 @@ geometrically legal (not only when the metropolis test already passed),
 force-accepted any strict reduction, and tracked `best` by
 `(overlaps, cost)`.
 
+**CORRECTION (added later).** The ERC errors below were almost certainly
+NOT caused by the SA change. A latent router defect was live at the time:
+a branch ending on the mid-span of an unbroken trunk emits an
+electrically split net, because KiCad connects wires only at segment
+endpoints (`SCH_LINE::GetConnectionPoints`; fixed in `24a138c`). Any
+placement perturbation that landed a Steiner vertex inside a body
+triggered it, and three separate perturbations during that session all
+produced "a dropped connection". So a wrong *semantics model* did not
+merely hide defects — it manufactured phantom Tier-0 regressions that
+vetoed legitimate placer work. That is the strongest argument for
+grading against KiCad's own output rather than our model of it. The
+entry's other conclusion — that the overlap is a seed defect the SA
+cannot reach — still stands and was confirmed independently.
+
 Result: it changed `opamp_inverting_real`'s layout — rotations and
 mirrors included — and produced **ERC errors** (`pin_not_connected`,
 `pin_not_driven`). Tier 0 is traded for nothing, so it was reverted
@@ -1182,6 +1196,45 @@ an oversized body never lands on a neighbour to begin with. That is the
 same "placement under-models decoration's deterministic consequences"
 shape as the other two walls, and the same staged oracle work is the way
 in.
+
+### Legalization belongs after refinement, not before the annealer
+
+The placer had no owner for "this placement is legal". CLAUDE.md makes
+categorical properties hard *filters*, but a filter governs *moves* and
+cannot repair an infeasible *start*, so an overlapping seed simply
+propagated: `opamp_definition_level` placed two resistors inside opamp
+triangles, the annealer reported `2 movable / 8 elements`, and nothing
+downstream could fix it.
+
+A shove-to-nearest-legal pass was added. Placing it **after the seed**
+looked obvious and was wrong. Measured, with the pass disabled versus
+enabled: `electrical_safety` 23/24 → 17/24 while `placement_quality`
+went 23/24 → 24/24. It was buying one Tier-2 crossing at the cost of a
+Tier-0 short plus four Tier-1 invariants — a trade the ordering rule
+forbids outright.
+
+The mechanism is worth recording because no guard could have caught it.
+The pass moved `RC` and `CE`, neither anywhere near the eventual fault.
+That perturbed the annealer onto a different trajectory, which left
+`RE`'s ground pin under net `e`'s trunk, and the router speared it —
+`wire (63.500,52.070)→(63.500,59.690)` on net `E` through pin `RE.2` on
+`GND`. The violation is *wire-vs-pin in emitted geometry*; every
+placement-side guard measures *pin-vs-pin on the resolved placement*, and
+`spice-layout` cannot consult the router without a crate cycle. A
+placement pass cannot police what the router will later do with its
+output.
+
+Its founding premise was also false: the SA's gate admits moves that
+*reduce* overlap, so the annealer resolves seed overlaps unaided —
+`no_symbol_symbol_overlap_across_fixtures` passes on every fixture with
+the seed pass removed.
+
+**The rule.** Legalization runs *after* refinement, gated on the
+placement actually being illegal: a no-op where the annealer already
+succeeded, and the postcondition's owner where it genuinely fails. More
+generally — a corrective pass inserted *upstream* of an optimiser does
+not merely add its own effect, it redirects everything downstream, and
+the cost of that redirection is unbounded by anything the pass can see.
 
 ### Phase-4.5 gate alignment — why the gate stays upstream of decoration
 
