@@ -312,22 +312,35 @@ const SHEETS: &[&str] = &[
     "opamp_inverting",
     "port_shapes",
     "rc_lowpass_ports",
-    // NOT YET GRADED: `opamp_definition_level`. Adding it trips V12 (4
-    // wires crossing foreign symbol bodies) and V5 (6 first-segment
-    // outward violations) — real defects in the busiest fixture, not
-    // measurement artefacts. Recording them would mean writing non-zero
-    // ratchet literals, which the budget policy allows only with an
-    // explicit sign-off, so the fixture stays ungraded until the routing
-    // defects are fixed or the budgets are approved. Everything else here
-    // grades at zero.
+    "opamp_definition_level",
 ];
 
 /// Per-fixture crossing budget. After the V11/V12 cascade + Steiner-
 /// junction-move step + maze fallback, every router-fixable case is
 /// gone across all five v0.1 fixtures. A non-zero budget here would
 /// be a regression: every fixture should route clean.
-fn v12_crossing_budget(_name: &str) -> usize {
-    0
+fn v12_crossing_budget(name: &str) -> usize {
+    match name {
+        // OWED, NOT ACCEPTED. These 4 crossings are a *consequence* of a
+        // placement fault, not a routing one: RF1 overlaps X2's body and
+        // RF2 overlaps X1's, which puts a resistor pin strictly inside a
+        // foreign body, at which point the router logs `skipping V12
+        // enforcement` and stops trying. See the ADR-11 post-mortem
+        // "Symbol-body overlap on `opamp_definition_level` is a *seed*
+        // defect" — the annealer cannot reach it (`2 movable / 8
+        // elements`), so the fix belongs in bands/layers sizing slots from
+        // real body extents.
+        //
+        // Recorded as a non-zero ratchet on explicit sign-off, under the
+        // budget policy's new-geometry exception: this fixture had no
+        // grading at all until now, so a regression here was previously
+        // silent. The literal is the exact measured count — zero slack —
+        // and MUST ratchet down to 0 when the seed defect is fixed. It is
+        // never a licence to route this fixture worse.
+        "opamp_definition_level" => 4,
+        // Every other fixture routes clean, and must stay that way.
+        _ => 0,
+    }
 }
 
 #[test]
@@ -2059,6 +2072,11 @@ fn v5_violation_budget(name: &str) -> usize {
         // follow the ratchet-down policy. A regression trips the test.
         "multivibrator" => 4,
         "opamp_inverting_real" => 1,
+        // Same single root cause as this fixture's V12 budget above: the
+        // RF/X body overlap in the structural seed. Recorded on explicit
+        // sign-off at the exact measured count; ratchets down to 0 with
+        // the seed fix.
+        "opamp_definition_level" => 6,
         // common_emitter, diff_pair, rc_lowpass, and any other fixture:
         // zero violations.
         _ => 0,
