@@ -11,6 +11,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod text_metrics;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -485,9 +487,7 @@ impl Symbol {
                 if !show || text.is_empty() || text == "~" {
                     continue;
                 }
-                #[allow(clippy::cast_precision_loss)]
-                let chars = text.chars().count() as f64;
-                let twidth = chars * 0.6 * SIZE + 0.8 * SIZE;
+                let twidth = crate::text_metrics::text_width(text, SIZE);
                 let cx = p.x + ux * along;
                 let cy = p.y + uy * along;
                 // Long axis of the text lies along the shaft (KiCad

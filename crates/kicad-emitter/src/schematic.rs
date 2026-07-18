@@ -2076,9 +2076,7 @@ impl TextBbox {
 /// the emitter's collision check agrees with the test that grades it.
 pub(crate) fn text_bbox(text: &str, anchor: (f64, f64), rot_deg: u16) -> TextBbox {
     let size = 1.27_f64;
-    #[allow(clippy::cast_precision_loss)]
-    let chars = text.chars().count() as f64;
-    let width = chars * 0.6 * size + 0.8 * size;
+    let width = kicad_symbols::text_metrics::text_width(text, size);
     let height = 1.4 * size;
     let (lx, rx, ty, by) = (0.0, width, -height / 2.0, height / 2.0);
     let theta = f64::from(rot_deg).to_radians();
@@ -2388,9 +2386,7 @@ fn nudge_property_text(items: &mut [Sexpr], placement: &Placement, library: &Lib
 /// per-char advance match [`text_bbox`].
 fn centered_text_bbox(text: &str, anchor: (f64, f64)) -> TextBbox {
     let size = 1.27_f64;
-    #[allow(clippy::cast_precision_loss)]
-    let chars = text.chars().count() as f64;
-    let width = chars * 0.6 * size + 0.8 * size;
+    let width = kicad_symbols::text_metrics::text_width(text, size);
     let height = 1.4 * size;
     TextBbox {
         x0: anchor.0 - width / 2.0,
@@ -2897,9 +2893,7 @@ fn set_property_anchor(items: &mut [Sexpr], refdes: &str, key: &str, x: f64, y: 
 /// the ~0.34 mm standoff lead and uses the em-box height).
 fn plain_label_bbox(text: &str, anchor: (f64, f64), rot_deg: u16) -> TextBbox {
     let size = 1.27_f64;
-    #[allow(clippy::cast_precision_loss)]
-    let chars = text.chars().count() as f64;
-    let width = chars * 0.6 * size + 0.8 * size;
+    let width = kicad_symbols::text_metrics::text_width(text, size);
     // Em-box height plus KiCad's label standoff from the wire.
     let depth = 1.4 * size + 0.35;
     let (ax, ay) = anchor;
@@ -2946,9 +2940,7 @@ fn label_rotation_avoiding(
 /// avoidance check agrees with the test that grades it.
 fn global_label_bbox(text: &str, anchor: (f64, f64), rot_deg: u16) -> TextBbox {
     let size = 1.27_f64;
-    #[allow(clippy::cast_precision_loss)]
-    let chars = text.chars().count() as f64;
-    let width = chars * 0.6 * size + 0.8 * size;
+    let width = kicad_symbols::text_metrics::text_width(text, size);
     let height = 1.4 * size;
     let chevron = 0.6 * size;
     let (lx, rx, ty, by) = (-chevron, width + chevron, -height / 2.0, height / 2.0);

@@ -795,15 +795,12 @@ fn resolved_body_bbox(library: &Library, sym: &Value) -> Option<(String, Bbox)> 
     Some((refdes, Bbox { x0, y0, x1, y1 }))
 }
 
-/// Estimated rendered width (mm) of a left-justified value text at the
-/// default 1.27 mm size. Mirrors the emitter's `text_bbox` width
-/// formula (`chars * 0.6 * size + 0.8 * size`) so the verifier measures
-/// the same box the renderer draws.
+/// Rendered width (mm) of a left-justified value text at the default
+/// 1.27 mm size, from Newstroke's real per-glyph advances — the same
+/// metric the emitter's `text_bbox` uses, so the verifier measures the
+/// box the renderer actually draws.
 fn value_text_width_mm(text: &str) -> f64 {
-    let size = 1.27_f64;
-    #[allow(clippy::cast_precision_loss)]
-    let chars = text.chars().count() as f64;
-    chars * 0.6 * size + 0.8 * size
+    kicad_symbols::text_metrics::text_width(text, 1.27)
 }
 
 /// World-frame AABB of a placed element's `(property "Value" …)` text,

@@ -1000,9 +1000,7 @@ enum TextKind {
 /// shape (matches what eeschema considers the field's visible bbox
 /// for collision purposes).
 fn text_bbox(text: &str, anchor: Pt, size_mm: f64, orientation_deg: u16, kind: TextKind) -> Bbox {
-    #[allow(clippy::cast_precision_loss)]
-    let chars = text.chars().count() as f64;
-    let width = chars * 0.6 * size_mm + 0.8 * size_mm;
+    let width = kicad_symbols::text_metrics::text_width(text, size_mm);
     let height = 1.4 * size_mm;
     // A plain label does not straddle its anchor. KiCad runs the file
     // angle through `EDA_ANGLE::KeepUpright()` (180 → 0, 270 → 90) and
