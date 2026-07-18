@@ -19,6 +19,8 @@ use spice_policy::CheckedNetlist;
 use crate::Placement;
 
 mod anneal;
+
+pub(crate) use anneal::foreign_pin_coincidences;
 mod force;
 mod rng;
 

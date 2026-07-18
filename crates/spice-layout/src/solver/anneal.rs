@@ -342,7 +342,7 @@ fn orientation_allowed(orient: Orientation, allowed: &[Orientation]) -> bool {
 /// not count. A coordinate hosting ≥ 2 distinct foreign nets counts
 /// once, so the metric is a coordinate count, not a pair count — enough
 /// for the monotone "never get worse" SA filter.
-fn foreign_pin_coincidences(placement: &Placement, checked: &CheckedNetlist) -> usize {
+pub(crate) fn foreign_pin_coincidences(placement: &Placement, checked: &CheckedNetlist) -> usize {
     use std::collections::HashMap;
 
     // coord (in integer micrometres, grid-exact) → set of net names.

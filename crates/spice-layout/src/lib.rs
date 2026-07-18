@@ -28,6 +28,7 @@ pub mod cost;
 pub mod glyph_geom;
 mod idioms;
 pub mod layers;
+pub mod legalize;
 pub mod net_class;
 pub mod orient;
 pub mod sheets;
@@ -354,8 +355,8 @@ const ALIGN_TEXT_GAP_MM: f64 = 2.0 * GridPoint::STEP_MM;
 /// axis. The extent unions the orientation-transformed body bbox, the
 /// reach of every pin stem, and (on +X) an estimate of the value-text
 /// width so neighbours clear it.
-#[derive(Debug, Clone, Copy)]
-struct WorldExtent {
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct WorldExtent {
     min_x: f64,
     max_x: f64,
     min_y: f64,
@@ -415,7 +416,7 @@ fn world_extent(symbol: &Symbol, orientation: Orientation, value: Option<&str>) 
 /// that whole zone clear as a HARD spacing floor (same mechanism and
 /// tier as the existing body/pin no-overlap, V6 Tier-1). Adds only
 /// outward spacing; never narrows the orientation set (V5 untouched).
-fn world_extent_with_glyphs(
+pub(crate) fn world_extent_with_glyphs(
     element: &spice_resolve::ResolvedElement,
     orientation: Orientation,
     value: Option<&str>,
@@ -516,6 +517,13 @@ pub fn place_with_hint(
     hint: &Hint,
 ) -> Result<Placement, Vec<Diagnostic>> {
     let (mut placement, mut pinned) = place_seed(&checked)?;
+    // Snapshot the pins that come from *user* directives, before the
+    // cache hint, V7 symmetry and the idiom detector add their own.
+    // Legality outranks all three of those — they are Tier-2 aesthetic
+    // heuristics and a cache is a convenience — but it must never
+    // override an explicit `*@place` / `*@align`, so only this mask is
+    // treated as immovable when legalizing.
+    let user_pinned = pinned.clone();
     apply_hint(&mut placement, &mut pinned, hint);
     // V7: detect structural symmetry in the netlist and mirror paired
     // elements about a common vertical axis. Runs after V6 archetype
@@ -542,9 +550,30 @@ pub fn place_with_hint(
     // "consistency requirement").
     let allowed = orient::allowed_orientations(&checked);
     pick_orientations(&mut placement, &pinned, &checked, &allowed);
+
+    // Legalize the seed before refinement. The doctrine makes categorical
+    // properties hard *filters*, but a filter governs moves and cannot
+    // repair an infeasible start: when the seed hands the annealer
+    // overlapping bodies it can only decline to worsen them, which is how
+    // `opamp_definition_level` shipped two resistors inside opamp
+    // triangles with `2 movable / 8 elements`.
+    let glyph_prefs = net_class::vertical_prefs(&checked);
+    legalize::legalize(
+        &mut placement,
+        &user_pinned,
+        &checked,
+        library,
+        &glyph_prefs,
+    );
+
     if !opts.refine {
         return Ok(placement);
     }
+    // Only the seed is legalized. The SA's own gate forbids *increasing*
+    // the overlap count, so starting it from a legal placement keeps it
+    // legal — whereas shoving elements again afterwards undoes the
+    // positioning the annealer just optimised, which measurably cost two
+    // V13 text-overlap invariants and a crossing.
     Ok(solver::refine(
         placement, &pinned, &checked, library, opts, &allowed,
     ))
