@@ -1137,6 +1137,52 @@ Each phase is independently testable and ratchet-safe (no phase may
 Detailed narratives of past failures. CLAUDE.md keeps the one-line
 *rule* each one yields; the full story lives here.
 
+### Symbol-body overlap on `opamp_definition_level` is a *seed* defect
+
+`opamp_definition_level` places RF1 overlapping X2's body and RF2
+overlapping X1's (~2.0 x 1.3 mm each). The consequences cascade: a
+resistor pin ends up strictly inside a foreign symbol body, at which
+point the router logs
+
+    v12-placer: net index 4 has own pin (...) strictly inside a foreign
+    symbol body; skipping V12 enforcement
+
+and gives up on V12 for that net — yielding 4 wires crossing foreign
+bodies and 6 V5 violations. All of it traces to the one placement
+overlap, which is why the fixture cannot yet join the graded set.
+
+**The annealer cannot fix it.** With `RUST_LOG=debug` the SA reports
+`2 movable / 8 elements` and `best cost X (started X)` — it never moves.
+The overlap is baked into the structural seed (classify -> bands ->
+layers), and RF/X are not in the movable set.
+
+**Attempt (reverted): let the SA escape an overlapping seed.**
+`symbol_overlap_count` is used only as a ratchet — `trial <= current` —
+so the annealer can avoid *adding* an overlap but is never obliged to
+*remove* one, and `cost::overlap` measures uniform CELL boxes rather than
+real bodies (a recorded TODO), so an oversized opamp exerts no extra
+repulsion. The attempt measured overlaps whenever the move was
+geometrically legal (not only when the metropolis test already passed),
+force-accepted any strict reduction, and tracked `best` by
+`(overlaps, cost)`.
+
+Result: it changed `opamp_inverting_real`'s layout — rotations and
+mirrors included — and produced **ERC errors** (`pin_not_connected`,
+`pin_not_driven`). Tier 0 is traded for nothing, so it was reverted
+despite a genuine side gain (text struck by wires 15 -> 12). It also did
+not fix the target: the overlaps survived, because the elements involved
+are not movable in the first place.
+
+**The rule.** Do not attack seed-quality defects from inside the SA. The
+annealer only refines what the seed hands it, and widening its acceptance
+rules to compensate reaches Tier-0 correctness before it reaches the
+defect. The fix belongs in the structural seed: bands/layers must size
+their slots from real symbol body extents rather than uniform cells, so
+an oversized body never lands on a neighbour to begin with. That is the
+same "placement under-models decoration's deterministic consequences"
+shape as the other two walls, and the same staged oracle work is the way
+in.
+
 ### Phase-4.5 gate alignment — why the gate stays upstream of decoration
 
 The phase-4.5 refinement gate (ADR-11) scores each candidate orientation
