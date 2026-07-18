@@ -343,6 +343,14 @@ pub fn legalize(
 
         if let Some((cand, f)) = shove_one(placement, i, &ctx, &settled) {
             if cand != origin {
+                log::debug!(
+                    "legalize: shove element {i} ({}) ({},{}) -> ({},{})",
+                    checked.elements.get(i).map_or("?", |e| e.refdes.as_str()),
+                    origin.x,
+                    origin.y,
+                    cand.x,
+                    cand.y
+                );
                 placement.elements[i].origin = cand;
                 moved += 1;
             }

@@ -551,32 +551,64 @@ pub fn place_with_hint(
     let allowed = orient::allowed_orientations(&checked);
     pick_orientations(&mut placement, &pinned, &checked, &allowed);
 
-    // Legalize the seed before refinement. The doctrine makes categorical
-    // properties hard *filters*, but a filter governs moves and cannot
-    // repair an infeasible start: when the seed hands the annealer
-    // overlapping bodies it can only decline to worsen them, which is how
-    // `opamp_definition_level` shipped two resistors inside opamp
-    // triangles with `2 movable / 8 elements`.
     let glyph_prefs = net_class::vertical_prefs(&checked);
-    legalize::legalize(
-        &mut placement,
-        &user_pinned,
-        &checked,
-        library,
-        &glyph_prefs,
-    );
-
     if !opts.refine {
+        legalize_if_needed(&mut placement, &user_pinned, &checked, library, &glyph_prefs);
         return Ok(placement);
     }
-    // Only the seed is legalized. The SA's own gate forbids *increasing*
-    // the overlap count, so starting it from a legal placement keeps it
-    // legal — whereas shoving elements again afterwards undoes the
-    // positioning the annealer just optimised, which measurably cost two
-    // V13 text-overlap invariants and a crossing.
-    Ok(solver::refine(
-        placement, &pinned, &checked, library, opts, &allowed,
-    ))
+    let mut placement = solver::refine(placement, &pinned, &checked, library, opts, &allowed);
+    // Legalization is a **last resort, after refinement** — not a seed pass.
+    //
+    // The original argument for legalizing the seed was that a hard filter
+    // governs moves and cannot repair an infeasible start, so an annealer
+    // handed overlapping bodies could only decline to worsen them. That
+    // premise turned out to be false in practice: the SA's gate admits
+    // moves that *reduce* the overlap count, so it resolves seed overlaps
+    // on its own, and every fixture ends refinement with zero overlaps
+    // whether or not the seed was legalized.
+    //
+    // What legalizing the seed *did* do was perturb the SA's starting
+    // point, sending it down a different trajectory. On `common_emitter`
+    // that trajectory put RE's ground pin directly under the net-`e`
+    // trunk, so the router speared it — a Tier-0 V11 short — and cost
+    // three more Tier-1 V12/V13 text and obstacle invariants elsewhere,
+    // in exchange for one Tier-2 crossing. CLAUDE.md's ordering rule
+    // forbids that trade outright, and the placer cannot even see the
+    // regression: it lives in emitted geometry (glyph and flag pins,
+    // routed wires) that `spice-layout` has no access to.
+    //
+    // Running the pass *after* refinement removes the trade entirely. When
+    // the SA has already produced a legal placement — every fixture today
+    // — the pass finds nothing to shove and is a bit-exact no-op, so it
+    // cannot perturb anything. When the SA genuinely fails to clear an
+    // overlap, the postcondition still has an owner. Legality stops being
+    // something the optimiser is merely discouraged from violating without
+    // that guarantee costing correctness.
+    legalize_if_needed(&mut placement, &user_pinned, &checked, library, &glyph_prefs);
+    Ok(placement)
+}
+
+/// Run the legalizer only when the placement actually violates the
+/// no-overlap postcondition.
+///
+/// The guard is not an optimization — it is what makes the pass safe to
+/// run at all. `legalize` is deterministic and already leaves a legal
+/// placement untouched, but checking first makes "no fixture is perturbed
+/// unless it is already broken" explicit rather than an emergent property
+/// of the shove loop, and it keeps the debug log quiet on the common path.
+fn legalize_if_needed(
+    placement: &mut Placement,
+    user_pinned: &[bool],
+    checked: &spice_policy::CheckedNetlist,
+    library: &Library,
+    glyph_prefs: &HashMap<String, crate::net_class::VertPref>,
+) {
+    let overlaps = legalize::overlap_count(placement, checked, library);
+    if overlaps == 0 {
+        return;
+    }
+    log::debug!("legalize: {overlaps} overlapping footprint pair(s) survived refinement");
+    legalize::legalize(placement, user_pinned, checked, library, glyph_prefs);
 }
 
 /// Apply the POSITION-only canonical-placement idioms (Tier-2 V6/V7)
