@@ -11,6 +11,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod text_geom;
 pub mod text_metrics;
 
 use std::collections::BTreeMap;

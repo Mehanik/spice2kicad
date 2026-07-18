@@ -1871,6 +1871,17 @@ pub(crate) struct LabelSpec {
     pub shape: &'static str,
 }
 
+/// Renderer-faithful footprint a [`LabelSpec`] will occupy once emitted.
+/// Used to feed each already-chosen label back in as an obstacle for the
+/// next one.
+fn label_spec_bbox(spec: &LabelSpec) -> TextBbox {
+    if spec.is_global {
+        global_label_bbox(&spec.net, (spec.x, spec.y), spec.rot, spec.shape)
+    } else {
+        plain_label_bbox(&spec.net, (spec.x, spec.y), spec.rot)
+    }
+}
+
 /// An axis-aligned wire segment in world millimetres.
 pub(crate) type WireSeg = ((f64, f64), (f64, f64));
 
@@ -2065,10 +2076,12 @@ pub(crate) fn label_specs(
                 .chain(placed_labels.iter())
                 .copied()
                 .collect();
+            let shape = port_shape_token(*dir);
             let rot = global_label_rotation_avoiding(
                 net,
                 (fx, fy),
                 label_rot(fang),
+                shape,
                 &obstacles,
                 pin_texts,
                 wires,
@@ -2079,14 +2092,10 @@ pub(crate) fn label_specs(
                 y: fy,
                 rot,
                 is_global: true,
-                shape: port_shape_token(*dir),
+                shape,
             });
             if let Some(spec) = out.last() {
-                placed_labels.push(if spec.is_global {
-                    global_label_bbox(&spec.net, (spec.x, spec.y), spec.rot)
-                } else {
-                    plain_label_bbox(&spec.net, (spec.x, spec.y), spec.rot)
-                });
+                placed_labels.push(label_spec_bbox(spec));
             }
             continue;
         }
@@ -2107,6 +2116,7 @@ pub(crate) fn label_specs(
                 net,
                 (fx, fy),
                 label_rot(fang),
+                "input",
                 &obstacles,
                 pin_texts,
                 wires,
@@ -2120,11 +2130,7 @@ pub(crate) fn label_specs(
                 shape: "input",
             });
             if let Some(spec) = out.last() {
-                placed_labels.push(if spec.is_global {
-                    global_label_bbox(&spec.net, (spec.x, spec.y), spec.rot)
-                } else {
-                    plain_label_bbox(&spec.net, (spec.x, spec.y), spec.rot)
-                });
+                placed_labels.push(label_spec_bbox(spec));
             }
         } else {
             // V13: prefer the body-clearing outward rotation, but if that
@@ -2159,11 +2165,7 @@ pub(crate) fn label_specs(
                 shape: "input",
             });
             if let Some(spec) = out.last() {
-                placed_labels.push(if spec.is_global {
-                    global_label_bbox(&spec.net, (spec.x, spec.y), spec.rot)
-                } else {
-                    plain_label_bbox(&spec.net, (spec.x, spec.y), spec.rot)
-                });
+                placed_labels.push(label_spec_bbox(spec));
             }
             if net_touches_port && uniq.len() >= 2 {
                 let (lx, ly, lang) = uniq[uniq.len() - 1];
@@ -2184,11 +2186,7 @@ pub(crate) fn label_specs(
                     shape: "input",
                 });
                 if let Some(spec) = out.last() {
-                    placed_labels.push(if spec.is_global {
-                        global_label_bbox(&spec.net, (spec.x, spec.y), spec.rot)
-                    } else {
-                        plain_label_bbox(&spec.net, (spec.x, spec.y), spec.rot)
-                    });
+                    placed_labels.push(label_spec_bbox(spec));
                 }
             }
         }
@@ -2259,33 +2257,20 @@ impl TextBbox {
     }
 }
 
-/// World-frame AABB of left-justified text drawn at `anchor`, rotated
-/// `rot_deg` CCW on screen. Matches the V13 verifier's `text_bbox`
-/// (size 1.27 mm, width = 0.6·n·size + 0.8·size, height = 1.4·size) so
-/// the emitter's collision check agrees with the test that grades it.
+/// World-frame AABB of left-justified text (a `(justify left)` property
+/// field) drawn at `anchor`, rotated `rot_deg` CCW on screen.
+///
+/// Delegates to the shared [`kicad_symbols::text_geom`] model the V13
+/// verifiers grade against, so the emitter's collision check agrees with
+/// the test — including the descender allowance below the baseline that
+/// the emitter's former private copy omitted.
 pub(crate) fn text_bbox(text: &str, anchor: (f64, f64), rot_deg: u16) -> TextBbox {
-    let size = 1.27_f64;
-    let width = kicad_symbols::text_metrics::text_width(text, size);
-    let height = 1.4 * size;
-    let (lx, rx, ty, by) = (0.0, width, -height / 2.0, height / 2.0);
-    let theta = f64::from(rot_deg).to_radians();
-    let (s, c) = (theta.sin(), theta.cos());
-    let corners = [(lx, ty), (rx, ty), (rx, by), (lx, by)];
-    let (mut x0, mut y0, mut x1, mut y1) = (
-        f64::INFINITY,
-        f64::INFINITY,
-        f64::NEG_INFINITY,
-        f64::NEG_INFINITY,
-    );
-    for (px, py) in corners {
-        let wx = anchor.0 + c * px + s * py;
-        let wy = anchor.1 - s * px + c * py;
-        x0 = x0.min(wx);
-        y0 = y0.min(wy);
-        x1 = x1.max(wx);
-        y1 = y1.max(wy);
-    }
-    TextBbox { x0, y0, x1, y1 }
+    text_geom_bbox(
+        text,
+        anchor,
+        rot_deg,
+        kicad_symbols::text_geom::TextKind::LeftProperty,
+    )
 }
 
 /// The direction a symbol's `Reference` / `Value` field text actually
@@ -2649,7 +2634,7 @@ fn emitted_text_obstacles(items: &[Sexpr]) -> EmittedObstacles {
                     }
                 }
             }
-            Some("label" | "global_label") => {
+            Some("label" | "global_label" | "hierarchical_label") => {
                 if let Some(b) = label_text_bbox(item) {
                     labels.push(b);
                 }
@@ -3195,13 +3180,14 @@ fn sexpr_num(s: &Sexpr) -> Option<f64> {
     }
 }
 
-/// Text bbox of a `(label …)` / `(global_label …)` sexpr (name at idx 1),
-/// using each flavour's own renderer-faithful model: a plain label is
-/// bottom-justified about an upright text angle ([`plain_label_bbox`]),
-/// a global label is vertically centred and carries a chevron lead on
-/// both ends ([`global_label_bbox`]). Sharing one generic centred box
-/// for both — as this used to — let the nudge pass drop property text
-/// onto labels it believed it was clearing.
+/// Text bbox of a `(label …)` / `(global_label …)` /
+/// `(hierarchical_label …)` sexpr (name at idx 1), using each flavour's
+/// own renderer-faithful model: a plain label is bottom-justified about
+/// an upright text angle ([`plain_label_bbox`]), a tag-bordered label
+/// carries its `GetSchematicTextOffset` lead ahead of the anchor, in the
+/// reading direction only. Sharing one generic centred box for both — as
+/// this used to — let the nudge pass drop property text onto labels it
+/// believed it was clearing.
 fn label_text_bbox(node: &Sexpr) -> Option<TextBbox> {
     let Sexpr::List(items) = node else {
         return None;
@@ -3211,10 +3197,33 @@ fn label_text_bbox(node: &Sexpr) -> Option<TextBbox> {
         _ => return None,
     };
     let (x, y, rot) = sexpr_at(node)?;
-    Some(if head_of(node) == Some("global_label") {
-        global_label_bbox(name, (x, y), rot)
-    } else {
-        plain_label_bbox(name, (x, y), rot)
+    Some(match head_of(node) {
+        Some("global_label") => {
+            global_label_bbox(name, (x, y), rot, sexpr_shape(node).unwrap_or("input"))
+        }
+        Some("hierarchical_label") => text_geom_bbox(
+            name,
+            (x, y),
+            rot,
+            kicad_symbols::text_geom::TextKind::hier_label(),
+        ),
+        _ => plain_label_bbox(name, (x, y), rot),
+    })
+}
+
+/// The `(shape …)` token of a label sexpr, if present.
+fn sexpr_shape(node: &Sexpr) -> Option<&str> {
+    let Sexpr::List(items) = node else {
+        return None;
+    };
+    items.iter().find_map(|n| match n {
+        Sexpr::List(inner) if matches!(inner.first(), Some(Sexpr::Atom(a)) if a == "shape") => {
+            match inner.get(1) {
+                Some(Sexpr::Atom(s) | Sexpr::QString(s)) => Some(s.as_str()),
+                _ => None,
+            }
+        }
+        _ => None,
     })
 }
 
@@ -3300,19 +3309,12 @@ fn set_property_anchor(items: &mut [Sexpr], refdes: &str, key: &str, x: f64, y: 
 /// the box below is a strict superset of the measured glyph ink (it drops
 /// the ~0.34 mm standoff lead and uses the em-box height).
 fn plain_label_bbox(text: &str, anchor: (f64, f64), rot_deg: u16) -> TextBbox {
-    let size = 1.27_f64;
-    let width = kicad_symbols::text_metrics::text_width(text, size);
-    // Em-box height plus KiCad's label standoff from the wire.
-    let depth = 1.4 * size + 0.35;
-    let (ax, ay) = anchor;
-    let (x0, y0, x1, y1) = match rot_deg % 360 {
-        90 => (ax - depth, ay - width, ax, ay),
-        180 => (ax - width, ay - depth, ax, ay),
-        270 => (ax - depth, ay, ax, ay + width),
-        // 0 and any non-cardinal value (which KiCad snaps to 0).
-        _ => (ax, ay - depth, ax + width, ay),
-    };
-    TextBbox { x0, y0, x1, y1 }
+    text_geom_bbox(
+        text,
+        anchor,
+        rot_deg,
+        kicad_symbols::text_geom::TextKind::PlainLabel,
+    )
 }
 
 /// Pick the `(anchor, rotation)` for a plain label that best clears the
@@ -3470,35 +3472,47 @@ fn label_rotation_avoiding(
     best
 }
 
-/// World-frame AABB of a `(global_label …)` drawn at `anchor`, rotated
-/// `rot_deg` CCW on screen. Identical to [`text_bbox`] except it adds a
-/// `0.6·size` chevron lead on *both* ends of the tag, matching the V13
-/// verifier's `TextKind::GlobalLabel` model — so the emitter's
-/// avoidance check agrees with the test that grades it.
-fn global_label_bbox(text: &str, anchor: (f64, f64), rot_deg: u16) -> TextBbox {
-    let size = 1.27_f64;
-    let width = kicad_symbols::text_metrics::text_width(text, size);
-    let height = 1.4 * size;
-    let chevron = 0.6 * size;
-    let (lx, rx, ty, by) = (-chevron, width + chevron, -height / 2.0, height / 2.0);
-    let theta = f64::from(rot_deg).to_radians();
-    let (s, c) = (theta.sin(), theta.cos());
-    let corners = [(lx, ty), (rx, ty), (rx, by), (lx, by)];
-    let (mut x0, mut y0, mut x1, mut y1) = (
-        f64::INFINITY,
-        f64::INFINITY,
-        f64::NEG_INFINITY,
-        f64::NEG_INFINITY,
+/// World-frame AABB of a `(global_label …)` of the given `(shape …)`
+/// drawn at `anchor`, rotated `rot_deg` CCW on screen.
+///
+/// Delegates to the shared [`kicad_symbols::text_geom`] model — the same
+/// one the V13 verifiers grade against — so the emitter reserves the
+/// footprint KiCad actually draws. It used to carry its own copy that
+/// straddled the anchor with a symmetric `0.6·size` chevron lead on both
+/// ends; KiCad instead pushes the text *along the reading direction*
+/// only, by `0.375·height` (plus `0.75·height` for the arrow-headed
+/// shapes). The old box therefore reserved ~2.5 mm of empty space
+/// *behind* the anchor while real ink escaped past its far end.
+fn global_label_bbox(text: &str, anchor: (f64, f64), rot_deg: u16, shape: &str) -> TextBbox {
+    text_geom_bbox(
+        text,
+        anchor,
+        rot_deg,
+        kicad_symbols::text_geom::TextKind::global_label(Some(shape)),
+    )
+}
+
+/// Adapt a [`kicad_symbols::text_geom`] box into the emitter's
+/// [`TextBbox`] at the default 1.27 mm text size.
+fn text_geom_bbox(
+    text: &str,
+    anchor: (f64, f64),
+    rot_deg: u16,
+    kind: kicad_symbols::text_geom::TextKind,
+) -> TextBbox {
+    let b = kicad_symbols::text_geom::text_bbox(
+        text,
+        anchor,
+        kicad_symbols::text_geom::DEFAULT_TEXT_SIZE_MM,
+        rot_deg,
+        kind,
     );
-    for (px, py) in corners {
-        let wx = anchor.0 + c * px + s * py;
-        let wy = anchor.1 - s * px + c * py;
-        x0 = x0.min(wx);
-        y0 = y0.min(wy);
-        x1 = x1.max(wx);
-        y1 = y1.max(wy);
+    TextBbox {
+        x0: b.x0,
+        y0: b.y0,
+        x1: b.x1,
+        y1: b.y1,
     }
-    TextBbox { x0, y0, x1, y1 }
 }
 
 /// Pick a `(global_label …)` rotation clearing every obstacle bbox
@@ -3514,12 +3528,13 @@ fn global_label_rotation_avoiding(
     text: &str,
     anchor: (f64, f64),
     preferred: u16,
+    shape: &str,
     obstacles: &[TextBbox],
     pin_texts: &[TextBbox],
     wires: &[WireSeg],
 ) -> u16 {
     let overlap_area = |rot: u16| -> (f64, f64, f64) {
-        let b = global_label_bbox(text, anchor, rot);
+        let b = global_label_bbox(text, anchor, rot, shape);
         (
             area_against(b, obstacles),
             area_against(b, pin_texts),
