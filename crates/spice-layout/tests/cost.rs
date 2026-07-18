@@ -184,13 +184,33 @@ fn overlap_full_when_origins_coincide() {
     let checked = checked_from_resolved(rn);
     let p = manual_placement(&checked, &[(0, 0), (0, 0)]);
     let bd = breakdown(&p, &checked, fixture_library());
-    // CELL_W * CELL_H * STEP_MM² = 6 * 6 * 1.27² = 58.0644 mm².
-    let expected = 6.0 * 6.0 * STEP_MM * STEP_MM;
+
+    // Two identical footprints stacked on one origin overlap by exactly
+    // one footprint's area. The expectation is derived from the symbol
+    // rather than written as a literal: this test previously asserted
+    // `CELL_W * CELL_H * STEP_MM²`, and when `overlap` moved from uniform
+    // cells to real body ∪ pin-reach footprints the literal was simply
+    // stale — it was pinning the implementation, not the contract.
+    let sym = fixture_library()
+        .lookup("Device:R_US")
+        .expect("fixture library has Device:R_US");
+    let (mut hw, mut hh) = (0.0_f64, 0.0_f64);
+    let b = sym.body_bbox().expect("R_US has a body");
+    for (lx, ly) in [(b.x0, b.y0), (b.x0, b.y1), (b.x1, b.y0), (b.x1, b.y1)] {
+        hw = hw.max(lx.abs());
+        hh = hh.max(ly.abs());
+    }
+    for pin in sym.pins_in(kicad_symbols::Orientation::IDENTITY) {
+        hw = hw.max(pin.x.abs());
+        hh = hh.max(pin.y.abs());
+    }
+    let expected = (2.0 * hw) * (2.0 * hh);
     assert!(
         (bd.overlap - expected).abs() < 1e-9,
-        "overlap {} expected {}",
+        "overlap {} expected {expected} (one R_US footprint: {:.3} x {:.3} mm)",
         bd.overlap,
-        expected
+        2.0 * hw,
+        2.0 * hh,
     );
 }
 

@@ -350,12 +350,19 @@ pub fn route(req: RouteRequest<'_>) -> RouteResult {
     // Collapse redundant collinear same-net overlaps (nested / duplicate
     // stubs the end-to-end merge above cannot touch, e.g. the three
     // co-directional verticals on a Steiner trunk sharing a start
-    // point), then re-add interior-T junction dots so every mid-span
-    // same-net branch reads as connected. Electrically inert: the
-    // collapse's union is a pointwise subset of the members' span and
-    // the junctions only make same-net incidences explicit.
+    // point), then normalise every interior attachment into a real
+    // endpoint and re-add junction dots. The collapse is electrically
+    // inert (its union is a pointwise subset of the members' span); the
+    // split is what makes same-net branches actually connected, and the
+    // dots are decoration over geometry that is already connected.
     cleanup::collapse_collinear_overlaps(&mut routed);
     cleanup::drop_zero_length(&mut routed);
+    // Correctness normalisation, and it must run before the junction
+    // pass: KiCad connects wires only at endpoints, so any branch left
+    // ending on a trunk's interior is a SPLIT NET no matter how it looks
+    // or how many dots sit on it.
+    cleanup::split_at_interior_attachments(&mut routed);
+    cleanup::prune_stale_junctions(&mut routed);
     cleanup::add_connection_junctions(&mut routed);
     let junctions = cleanup::dedup_junctions(&routed);
     // Serialise routed nets to s-exprs.

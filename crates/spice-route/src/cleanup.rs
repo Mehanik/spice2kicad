@@ -343,11 +343,17 @@ pub fn collapse_collinear_overlaps(routed: &mut [RoutedNet]) {
 /// end-to-end) need no dot; three (a T, whether the trunk is split at
 /// `p` or passes through it) or four (a cross) do.
 ///
-/// This covers both the split-T case produced by
-/// [`collapse_collinear_overlaps`] (three endpoints coincide) and a
-/// mid-span T where a branch endpoint lands on an unbroken trunk
-/// interior. Each [`RoutedNet`] is a single net by construction, so
-/// every incidence examined here is same-net.
+/// These dots are **decoration on top of already-connected geometry**,
+/// never a connectivity mechanism. KiCad wires connect only at their
+/// endpoints (`SCH_LINE::GetConnectionPoints`,
+/// `../kicad-source/eeschema/sch_line.cpp:717`), so a dot on an unbroken
+/// trunk's interior connects nothing at all — an earlier version of this
+/// comment claimed otherwise, and that false premise is how a mid-span T
+/// shipped as an electrically split net. [`split_at_interior_attachments`]
+/// runs first and guarantees every attachment is a real endpoint; by the
+/// time this pass runs, a three-ray point is always genuinely connected
+/// and the dot merely makes it legible. Each [`RoutedNet`] is a single
+/// net by construction, so every incidence examined here is same-net.
 ///
 /// Idempotent against pre-existing junctions (e.g. own-pin anchors from
 /// `conflict::anchor_own_pin_endpoints`): a point already recorded is
@@ -376,17 +382,7 @@ pub fn add_connection_junctions(routed: &mut [RoutedNet]) {
             .collect();
         let mut add: Vec<(f64, f64)> = Vec::new();
         for &(px, py) in &candidates {
-            let mut rays = 0usize;
-            for s in &net.segments {
-                let at_a = (s.x1 - px).abs() < EPS && (s.y1 - py).abs() < EPS;
-                let at_b = (s.x2 - px).abs() < EPS && (s.y2 - py).abs() < EPS;
-                if at_a || at_b {
-                    rays += 1;
-                } else if point_strictly_interior(s, px, py) {
-                    rays += 2;
-                }
-            }
-            if rays >= 3 {
+            if rays_at(&net.segments, px, py) >= 3 {
                 let k = (qk1(px), qk1(py));
                 if existing.insert(k) {
                     add.push((px, py));
@@ -395,6 +391,24 @@ pub fn add_connection_junctions(routed: &mut [RoutedNet]) {
         }
         net.junctions.extend(add);
     }
+}
+
+/// Number of *rays* meeting at `(px, py)` — KiCad's junction rule.
+///
+/// A segment ending there contributes one; a segment whose strict
+/// interior contains it contributes two, since it passes through.
+fn rays_at(segments: &[Segment], px: f64, py: f64) -> usize {
+    let mut rays = 0usize;
+    for s in segments {
+        let at_a = (s.x1 - px).abs() < EPS && (s.y1 - py).abs() < EPS;
+        let at_b = (s.x2 - px).abs() < EPS && (s.y2 - py).abs() < EPS;
+        if at_a || at_b {
+            rays += 1;
+        } else if point_strictly_interior(s, px, py) {
+            rays += 2;
+        }
+    }
+    rays
 }
 
 /// True iff `(px, py)` lies on the strict interior (exclusive of both
@@ -408,6 +422,108 @@ fn point_strictly_interior(s: &Segment, px: f64, py: f64) -> bool {
         (py - s.y1).abs() < EPS && px > s.x1.min(s.x2) + EPS && px < s.x1.max(s.x2) - EPS
     } else {
         false
+    }
+}
+
+/// Split every segment at any same-net segment endpoint lying in its
+/// **strict interior**, so that every attachment point is an endpoint of
+/// every segment passing through it.
+///
+/// This is a correctness normalisation, not a tidying pass. KiCad wires
+/// connect *only* at their endpoints — `SCH_LINE::GetConnectionPoints`
+/// returns exactly `{m_start, m_end}`
+/// (`../kicad-source/eeschema/sch_line.cpp:717`). A branch that ends on
+/// the mid-span of an unbroken trunk is therefore **electrically
+/// disconnected**, however connected it looks, and a `(junction …)` dot
+/// there changes nothing: a dot merges items that already have a
+/// connection point at its coordinate, and a trunk's interior is not one.
+/// KiCad's own editor maintains this invariant by breaking segments as
+/// you draw; a file written externally with an unbroken T is silently
+/// split into two nets on load.
+///
+/// That is not hypothetical. `common_emitter` emitted net `c` as two
+/// islands — `COUT` came out as `unconnected-_COUT-Pad1_` in
+/// `kicad-cli sch export netlist` — because the conflict passes migrated
+/// a Steiner T onto a trunk's interior and the coalescer, seeing a stale
+/// junction list, then merged the trunk straight across the live
+/// attachment. Splitting that one wire by hand restored the correct
+/// netlist exactly.
+///
+/// Running this last makes the invariant hold regardless of what any
+/// earlier pass did to the geometry, which matters because the conflict
+/// and coalesce passes rewrite segments freely and will keep doing so.
+/// It is pointwise-identical ink: the drawn result is unchanged, only the
+/// segmentation differs, so wire length, crossings and every geometric
+/// invariant are untouched.
+pub fn split_at_interior_attachments(routed: &mut [RoutedNet]) {
+    for net in routed.iter_mut() {
+        // Iterate to a fixed point: splitting can expose a further
+        // attachment on one of the halves. Bounded well above any real
+        // net's segment count so a pathological input cannot spin.
+        for _ in 0..64 {
+            let points: Vec<(f64, f64)> = net
+                .segments
+                .iter()
+                .flat_map(|s| [(s.x1, s.y1), (s.x2, s.y2)])
+                .collect();
+            let mut split_any = false;
+            let mut next: Vec<Segment> = Vec::with_capacity(net.segments.len());
+            for seg in &net.segments {
+                // Split at the attachment nearest the start, so repeated
+                // passes peel one piece at a time deterministically.
+                let mut best: Option<(f64, f64)> = None;
+                let mut best_d = f64::INFINITY;
+                for &(px, py) in &points {
+                    if point_strictly_interior(seg, px, py) {
+                        let d = (px - seg.x1).abs() + (py - seg.y1).abs();
+                        if d < best_d {
+                            best_d = d;
+                            best = Some((px, py));
+                        }
+                    }
+                }
+                match best {
+                    Some((px, py)) => {
+                        split_any = true;
+                        next.push(Segment {
+                            x1: seg.x1,
+                            y1: seg.y1,
+                            x2: px,
+                            y2: py,
+                        });
+                        next.push(Segment {
+                            x1: px,
+                            y1: py,
+                            x2: seg.x2,
+                            y2: seg.y2,
+                        });
+                    }
+                    None => next.push(*seg),
+                }
+            }
+            net.segments = next;
+            if !split_any {
+                break;
+            }
+        }
+    }
+}
+
+/// Drop recorded junctions that no longer sit where three or more rays
+/// meet.
+///
+/// The conflict passes rewrite segments without maintaining
+/// `RoutedNet::junctions` (they touch it only to anchor own pins), so a
+/// junction can outlive the geometry that justified it — `common_emitter`
+/// emitted a dot stranded in the middle of R2's body, on no wire at all.
+/// Recomputing validity at the end of the pipeline is robust against
+/// every earlier pass, where fixing each rewrite site individually would
+/// not be.
+pub fn prune_stale_junctions(routed: &mut [RoutedNet]) {
+    for net in routed.iter_mut() {
+        let segments = net.segments.clone();
+        net.junctions
+            .retain(|&(px, py)| rays_at(&segments, px, py) >= 3);
     }
 }
 
