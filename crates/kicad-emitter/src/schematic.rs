@@ -522,6 +522,36 @@ fn no_connect(x: f64, y: f64, scope: &str, idx: usize) -> Sexpr {
     ])
 }
 
+/// The `(justify …)` token a label needs so KiCad renders it in the
+/// direction the placer chose.
+///
+/// KiCad pushes a label's file angle through `EDA_ANGLE::KeepUpright()`
+/// before deriving the spin style, which collapses 180 → 0 and 270 → 90
+/// (`../kicad-source/libs/kimath/src/geometry/eda_angle.cpp:23-37`,
+/// `sch_io/kicad_sexpr/sch_io_kicad_sexpr_parser.cpp:4647-4657`). The
+/// angle token therefore cannot express a leftward- or downward-reading
+/// label on its own: the direction is carried by the *horizontal
+/// justification*, which `SCH_LABEL_BASE::GetSpinStyle()` reads back
+/// (`right` ⇒ the LEFT / BOTTOM spin styles — `sch_label.cpp:394-441`).
+/// `(effects …)` is emitted after `(at …)`, so this justify wins over
+/// the justification `SetSpinStyle` applied while parsing the angle.
+///
+/// Vertical justification differs by flavour: `SetSpinStyle` leaves a
+/// plain label bottom-justified (text sits above its wire), while
+/// `SCH_GLOBALLABEL::SetSpinStyle` re-centres it (`sch_label.cpp:2075`).
+fn label_justify(rot_deg: u16, vert_bottom: bool) -> Sexpr {
+    let mut items = vec![atom("justify")];
+    items.push(atom(if matches!(rot_deg, 180 | 270) {
+        "right"
+    } else {
+        "left"
+    }));
+    if vert_bottom {
+        items.push(atom("bottom"));
+    }
+    list(items)
+}
+
 /// `(global_label …)` — chevron-bordered marker. V4 reserves this
 /// kind for two cases: (1) nets that genuinely cross a sheet
 /// boundary (v0.1 emits none); (2) one-pin "interface" nets where
@@ -558,6 +588,7 @@ fn global_label_simple(
                 atom("font"),
                 list(vec![atom("size"), atom("1.27"), atom("1.27")]),
             ]),
+            label_justify(rot_deg, false),
         ]),
         list(vec![atom("uuid"), qstring(&uuid)]),
     ])
@@ -588,6 +619,7 @@ fn label_simple(text: &str, x: f64, y: f64, rot_deg: u16, scope: &str, idx: usiz
                 atom("font"),
                 list(vec![atom("size"), atom("1.27"), atom("1.27")]),
             ]),
+            label_justify(rot_deg, true),
         ]),
         list(vec![atom("uuid"), qstring(&uuid)]),
     ])
@@ -1938,7 +1970,17 @@ pub(crate) fn label_specs(
             // makes the label text overlap a Reference/Value bbox (e.g.
             // the inverting-amp `out` label landing on the feedback
             // resistor's Value), rotate the label to a clear direction.
-            let rot = label_rotation_avoiding(net, (fx, fy), label_rot(fang), property_bboxes);
+            // Symbol bodies are obstacles here for the same reason they
+            // are on the global-label path above: with the renderer-
+            // faithful `plain_label_bbox`, a label reading into a
+            // neighbouring body is a real V13(1) overlap, not a modelling
+            // artefact.
+            let obstacles: Vec<TextBbox> = property_bboxes
+                .iter()
+                .chain(body_obstacles.iter())
+                .copied()
+                .collect();
+            let rot = label_rotation_avoiding(net, (fx, fy), label_rot(fang), &obstacles);
             out.push(LabelSpec {
                 net: net.clone(),
                 x: fx,
@@ -1949,7 +1991,7 @@ pub(crate) fn label_specs(
             });
             if net_touches_port && uniq.len() >= 2 {
                 let (lx, ly, lang) = uniq[uniq.len() - 1];
-                let rot2 = label_rotation_avoiding(net, (lx, ly), label_rot(lang), property_bboxes);
+                let rot2 = label_rotation_avoiding(net, (lx, ly), label_rot(lang), &obstacles);
                 out.push(LabelSpec {
                     net: net.clone(),
                     x: lx,
@@ -2717,6 +2759,42 @@ fn set_property_anchor(items: &mut [Sexpr], refdes: &str, key: &str, x: f64, y: 
 /// through the perpendicular rotations (±90) and finally 180° before
 /// giving up and returning `preferred` (a property overlap is a
 /// quality defect, never a correctness one, so we never fail to label).
+/// World-frame AABB of a plain `(label …)` as KiCad actually draws it.
+///
+/// This deliberately differs from [`text_bbox`]'s "rotate a centred box
+/// about the anchor" model, which does not describe a label's rendering:
+///
+/// * The *advance* direction does follow `rot_deg` (0 → +x, 90 → −y,
+///   180 → −x, 270 → +y), and [`text_bbox`] already got that right.
+/// * The *perpendicular* extent does not rotate with it. KeepUpright
+///   pins the drawn text angle to 0 or 90, and `SetSpinStyle` leaves the
+///   label bottom-justified, so the body always sits on the −y side of a
+///   horizontal label and the −x side of a vertical one — never straddling
+///   the anchor. Modelling it as centred claims half a text height of
+///   coverage on the wire side that KiCad never draws, and misses half a
+///   text height on the other.
+///
+/// Verified against `kicad-cli sch export svg` for all four rotations;
+/// the box below is a strict superset of the measured glyph ink (it drops
+/// the ~0.34 mm standoff lead and uses the em-box height).
+fn plain_label_bbox(text: &str, anchor: (f64, f64), rot_deg: u16) -> TextBbox {
+    let size = 1.27_f64;
+    #[allow(clippy::cast_precision_loss)]
+    let chars = text.chars().count() as f64;
+    let width = chars * 0.6 * size + 0.8 * size;
+    // Em-box height plus KiCad's label standoff from the wire.
+    let depth = 1.4 * size + 0.35;
+    let (ax, ay) = anchor;
+    let (x0, y0, x1, y1) = match rot_deg % 360 {
+        90 => (ax - depth, ay - width, ax, ay),
+        180 => (ax - width, ay - depth, ax, ay),
+        270 => (ax - depth, ay, ax, ay + width),
+        // 0 and any non-cardinal value (which KiCad snaps to 0).
+        _ => (ax, ay - depth, ax + width, ay),
+    };
+    TextBbox { x0, y0, x1, y1 }
+}
+
 fn label_rotation_avoiding(
     text: &str,
     anchor: (f64, f64),
@@ -2724,7 +2802,7 @@ fn label_rotation_avoiding(
     props: &[TextBbox],
 ) -> u16 {
     let collides = |rot: u16| {
-        let b = text_bbox(text, anchor, rot);
+        let b = plain_label_bbox(text, anchor, rot);
         props.iter().any(|p| b.intersects(*p))
     };
     // Order: preferred first (keeps the existing body-clearing choice

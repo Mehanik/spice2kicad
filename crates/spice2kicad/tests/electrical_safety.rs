@@ -1004,6 +1004,25 @@ fn text_bbox(text: &str, anchor: Pt, size_mm: f64, orientation_deg: u16, kind: T
     let chars = text.chars().count() as f64;
     let width = chars * 0.6 * size_mm + 0.8 * size_mm;
     let height = 1.4 * size_mm;
+    // A plain label does not straddle its anchor. KiCad runs the file
+    // angle through `EDA_ANGLE::KeepUpright()` (180 → 0, 270 → 90) and
+    // `SCH_LABEL_BASE::SetSpinStyle` leaves the text bottom-justified, so
+    // the body always sits on the −y side of a horizontal label and the
+    // −x side of a vertical one, offset by the standoff — while the
+    // *advance* direction still follows the full 0/90/180/270 angle.
+    // The generic rotate-a-centred-box path below cannot express that.
+    // Measured against `kicad-cli sch export svg` for all four rotations.
+    if matches!(kind, TextKind::PlainLabel) {
+        let depth = height + 0.35;
+        let (ax, ay) = anchor;
+        let (x0, y0, x1, y1) = match orientation_deg % 360 {
+            90 => (ax - depth, ay - width, ax, ay),
+            180 => (ax - width, ay - depth, ax, ay),
+            270 => (ax - depth, ay, ax, ay + width),
+            _ => (ax, ay - depth, ax + width, ay),
+        };
+        return Bbox { x0, y0, x1, y1 };
+    }
     let chevron_lead = match kind {
         TextKind::GlobalLabel => 0.6 * size_mm,
         _ => 0.0,

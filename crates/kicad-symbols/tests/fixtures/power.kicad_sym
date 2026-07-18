@@ -8,7 +8,8 @@
   (generator "kicad_symbol_editor")
   (symbol "VCC"
     (power)
-    (pin_names (offset 0))
+    (pin_numbers (hide yes))
+    (pin_names (offset 0) (hide yes))
     (exclude_from_sim no)
     (in_bom yes)
     (on_board yes)
@@ -33,7 +34,8 @@
         (number "1" (effects (font (size 1.27 1.27)))))))
   (symbol "GND"
     (power)
-    (pin_names (offset 0))
+    (pin_numbers (hide yes))
+    (pin_names (offset 0) (hide yes))
     (exclude_from_sim no)
     (in_bom yes)
     (on_board yes)
@@ -59,7 +61,8 @@
         (number "1" (effects (font (size 1.27 1.27)))))))
   (symbol "VEE"
     (power)
-    (pin_names (offset 0))
+    (pin_numbers (hide yes))
+    (pin_names (offset 0) (hide yes))
     (exclude_from_sim no)
     (in_bom yes)
     (on_board yes)
@@ -88,7 +91,8 @@
         (number "1" (effects (font (size 1.27 1.27)))))))
   (symbol "VDD"
     (power)
-    (pin_names (offset 0))
+    (pin_numbers (hide yes))
+    (pin_names (offset 0) (hide yes))
     (exclude_from_sim no)
     (in_bom yes)
     (on_board yes)
@@ -113,7 +117,8 @@
         (number "1" (effects (font (size 1.27 1.27)))))))
   (symbol "+5V"
     (power)
-    (pin_names (offset 0))
+    (pin_numbers (hide yes))
+    (pin_names (offset 0) (hide yes))
     (exclude_from_sim no)
     (in_bom yes)
     (on_board yes)
@@ -138,7 +143,8 @@
         (number "1" (effects (font (size 1.27 1.27)))))))
   (symbol "+12V"
     (power)
-    (pin_names (offset 0))
+    (pin_numbers (hide yes))
+    (pin_names (offset 0) (hide yes))
     (exclude_from_sim no)
     (in_bom yes)
     (on_board yes)
