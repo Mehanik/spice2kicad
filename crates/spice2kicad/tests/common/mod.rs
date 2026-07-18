@@ -15,6 +15,7 @@
 #![allow(dead_code)]
 
 pub mod sexp;
+pub mod text_model;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;

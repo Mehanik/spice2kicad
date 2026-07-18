@@ -27,6 +27,7 @@ mod common;
 use std::path::PathBuf;
 
 use common::spice_to_kicad;
+use common::text_model::{Bbox, Pt, TextKind, text_bbox};
 use kicad_symbols::{Orientation, PinElectrical, Rotation};
 use lexpr::Value;
 
@@ -77,61 +78,6 @@ fn find_child<'a>(v: &'a Value, name: &str) -> Option<&'a Value> {
 
 fn children<'a>(v: &'a Value, name: &str) -> Vec<&'a Value> {
     list_iter(v).filter(|c| head(c) == Some(name)).collect()
-}
-
-type Pt = (f64, f64);
-
-#[derive(Debug, Clone, Copy)]
-struct Bbox {
-    x0: f64,
-    y0: f64,
-    x1: f64,
-    y1: f64,
-}
-
-impl Bbox {
-    /// AABB intersection. Inclusive on edges; coincident-edge cases
-    /// (a label touching a body's edge at a pin coordinate) are
-    /// *quality* defects, not correctness ones, so the verifier
-    /// treats them as overlap when both bboxes have non-zero area.
-    fn intersects(&self, other: &Bbox) -> bool {
-        self.x0 < other.x1 && self.x1 > other.x0 && self.y0 < other.y1 && self.y1 > other.y0
-    }
-
-    fn intersects_segment(&self, a: Pt, b: Pt) -> bool {
-        // Strict-interior test mirroring `spice_route::types::Bbox`.
-        let eps = 0.1;
-        let xlo = self.x0 + eps;
-        let xhi = self.x1 - eps;
-        let ylo = self.y0 + eps;
-        let yhi = self.y1 - eps;
-        if xlo >= xhi || ylo >= yhi {
-            return false;
-        }
-        let (x1, y1) = a;
-        let (x2, y2) = b;
-        if x1.max(x2) <= xlo || x1.min(x2) >= xhi {
-            return false;
-        }
-        if y1.max(y2) <= ylo || y1.min(y2) >= yhi {
-            return false;
-        }
-        if (x1 - x2).abs() < f64::EPSILON {
-            x1 > xlo && x1 < xhi && y1.min(y2) < yhi && y1.max(y2) > ylo
-        } else if (y1 - y2).abs() < f64::EPSILON {
-            y1 > ylo && y1 < yhi && x1.min(x2) < xhi && x1.max(x2) > xlo
-        } else {
-            // The router only emits axis-aligned segments; treat
-            // diagonals (shouldn't exist) as non-intersecting.
-            false
-        }
-    }
-
-    #[allow(dead_code)]
-    fn contains(&self, p: Pt) -> bool {
-        let eps = 0.1;
-        p.0 > self.x0 + eps && p.0 < self.x1 - eps && p.1 > self.y0 + eps && p.1 < self.y1 - eps
-    }
 }
 
 const SYM_HALF_MM: f64 = 2.54;
@@ -992,112 +938,6 @@ fn v11_no_foreign_pin_coincidence() {
 // V13 text-bbox machinery shared by parts (1), (2), and (3).
 // ---------------------------------------------------------------------------
 
-/// Which kind of text we're sizing a bbox for. Determines anchor
-/// semantics (left vs centred) and any flavour-specific padding
-/// (chevron lead for global labels).
-#[derive(Debug, Clone, Copy)]
-enum TextKind {
-    /// Plain `(label …)` — KiCad anchors the text at the left edge.
-    PlainLabel,
-    /// `(global_label …)` — chevron-bordered tag; the chevron adds an
-    /// extra `~0.6 × size` of horizontal lead on the anchor side.
-    GlobalLabel,
-    /// `(property "Reference" …)` text — anchor centred or left
-    /// depending on `(justify …)`. The emitter now writes `justify
-    /// left` (V13 Step 5) so we model it as left-anchored.
-    PropertyReference,
-    /// `(property "Value" …)` text — same anchor rules as Reference.
-    PropertyValue,
-    /// A `(property "Value" …)` with NO `(justify …)` token — KiCad
-    /// centres such a field horizontally about its anchor. Power-glyph
-    /// net-name labels (`GND`/`VCC`/`VEE`) are emitted without a justify,
-    /// so they render centred, not left-anchored. Modelling them as
-    /// left-anchored over-estimates their rightward reach (a sliver into
-    /// a neighbour to the right that KiCad never actually draws).
-    CenteredValue,
-}
-
-/// Approximate the rendered text bbox of a label or property string.
-///
-/// References: KiCad's Newstroke font has an average advance of
-/// roughly 0.6 × glyph height (see `../kicad-source/eeschema/sch_field.cpp`
-/// and `../kicad-source/eeschema/sch_label.cpp`); we add 0.8 × size of
-/// slack to absorb hinting variance and the small lead/trail margins
-/// KiCad's renderer applies. Height is taken as 1.4 × size to cover
-/// ascender + descender + line spacing.
-///
-/// `orientation_deg` rotates the unrotated bbox about the anchor and
-/// the function returns the axis-aligned bounding box of the rotated
-/// shape (matches what eeschema considers the field's visible bbox
-/// for collision purposes).
-fn text_bbox(text: &str, anchor: Pt, size_mm: f64, orientation_deg: u16, kind: TextKind) -> Bbox {
-    let width = kicad_symbols::text_metrics::text_width(text, size_mm);
-    let height = 1.4 * size_mm;
-    // A plain label does not straddle its anchor. KiCad runs the file
-    // angle through `EDA_ANGLE::KeepUpright()` (180 → 0, 270 → 90) and
-    // `SCH_LABEL_BASE::SetSpinStyle` leaves the text bottom-justified, so
-    // the body always sits on the −y side of a horizontal label and the
-    // −x side of a vertical one, offset by the standoff — while the
-    // *advance* direction still follows the full 0/90/180/270 angle.
-    // The generic rotate-a-centred-box path below cannot express that.
-    // Measured against `kicad-cli sch export svg` for all four rotations.
-    if matches!(kind, TextKind::PlainLabel) {
-        let depth = height + 0.35;
-        let (ax, ay) = anchor;
-        let (x0, y0, x1, y1) = match orientation_deg % 360 {
-            90 => (ax - depth, ay - width, ax, ay),
-            180 => (ax - width, ay - depth, ax, ay),
-            270 => (ax - depth, ay, ax, ay + width),
-            _ => (ax, ay - depth, ax + width, ay),
-        };
-        return Bbox { x0, y0, x1, y1 };
-    }
-    let chevron_lead = match kind {
-        TextKind::GlobalLabel => 0.6 * size_mm,
-        _ => 0.0,
-    };
-    // Unrotated bbox in the anchor's local frame. Anchor is the
-    // *left edge* for left-justified text; the bbox extends to the
-    // right by `width`, half above and half below the baseline.
-    // Property text is also left-anchored (the emitter writes
-    // `(justify left)`); plain/global labels are likewise anchored
-    // on the leftmost edge for `orientation 0`.
-    let (lx, rx, ty, by) = match kind {
-        TextKind::PlainLabel | TextKind::PropertyReference | TextKind::PropertyValue => {
-            (-0.0, width, -height / 2.0, height / 2.0)
-        }
-        TextKind::CenteredValue => (-width / 2.0, width / 2.0, -height / 2.0, height / 2.0),
-        TextKind::GlobalLabel => (
-            -chevron_lead,
-            width + chevron_lead,
-            -height / 2.0,
-            height / 2.0,
-        ),
-    };
-    // Rotate the four corners about the anchor. KiCad's schematic
-    // file Y axis points DOWN on screen (eeschema renders with the
-    // Y-flip on load), and rotation tokens are CCW *on screen*. To
-    // produce a file-frame AABB matching what KiCad draws, we negate
-    // the sine component so that rot=90 maps right-extending text to
-    // upward (i.e. decreasing file Y).
-    let theta = f64::from(orientation_deg).to_radians();
-    let (s, c) = (theta.sin(), theta.cos());
-    let corners = [(lx, ty), (rx, ty), (rx, by), (lx, by)];
-    let mut x0 = f64::INFINITY;
-    let mut x1 = f64::NEG_INFINITY;
-    let mut y0 = f64::INFINITY;
-    let mut y1 = f64::NEG_INFINITY;
-    for (px, py) in corners {
-        let wx = anchor.0 + c * px + s * py;
-        let wy = anchor.1 - s * px + c * py;
-        x0 = x0.min(wx);
-        x1 = x1.max(wx);
-        y0 = y0.min(wy);
-        y1 = y1.max(wy);
-    }
-    Bbox { x0, y0, x1, y1 }
-}
-
 /// True if a `(property …)` s-expression is marked hidden in either
 /// the legacy form (`(hide)`) or the new `(effects (hide yes))` form.
 fn property_hidden(prop: &Value) -> bool {
@@ -1143,21 +983,30 @@ fn effects_font_size(node: &Value) -> Option<f64> {
     it.next().and_then(as_f64)
 }
 
+/// The `(shape …)` token of a label node, if any.
+fn label_shape(node: &Value) -> Option<&str> {
+    find_child(node, "shape").and_then(|s| list_iter(s).nth(1).and_then(as_str))
+}
+
 /// Collect every emitted plain-label and global-label as
 /// (net_name, anchor, rot_deg, kind).
 #[allow(clippy::similar_names)]
 fn labels_with_kind(root: &Value) -> Vec<(String, Pt, u16, TextKind)> {
     let mut out = Vec::new();
-    for (sx_tag, lkind) in [
-        ("label", TextKind::PlainLabel),
-        ("global_label", TextKind::GlobalLabel),
-    ] {
+    for sx_tag in ["label", "global_label"] {
         for node in children(root, sx_tag) {
             let Some(name) = list_iter(node).nth(1).and_then(as_str) else {
                 continue;
             };
             let Some((x, y, rot)) = at_xy_rot(node) else {
                 continue;
+            };
+            // A global label's chevron shape decides how far KiCad pushes
+            // the text off the anchor — calibrated in `rendered_text.rs`.
+            let lkind = if sx_tag == "label" {
+                TextKind::PlainLabel
+            } else {
+                TextKind::global_label(label_shape(node))
             };
             out.push((name.to_owned(), (x, y), rot, lkind));
         }
@@ -2905,7 +2754,7 @@ fn item3_interface_global_labels_clear_foreign_bodies() {
         let bodies = placed_symbol_bboxes(&root);
         let mut hits = 0usize;
         for (lname, anchor, rot, kind) in &labels_with_kind(&root) {
-            if !matches!(kind, TextKind::GlobalLabel) {
+            if !matches!(kind, TextKind::GlobalLabel { .. }) {
                 continue;
             }
             let lbox = text_bbox(lname, *anchor, 1.27, *rot, *kind);
