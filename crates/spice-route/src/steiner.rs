@@ -732,8 +732,10 @@ fn tree_to_segments(
 /// meet, restricted to actual pin or Steiner points (an L-bend with
 /// no third branch is not a junction).
 fn compute_junctions(segs: &[Segment], pins: &[(f64, f64)]) -> Vec<(f64, f64)> {
-    use std::collections::HashMap;
-    // Quantise to a grid so we can hash f64 endpoints reliably.
+    // BTreeMap, not HashMap: iterated below to emit junction points, so
+    // hash order would make the emitted junction order vary run to run.
+    use std::collections::BTreeMap as HashMap;
+    // Quantise to a grid so we can key f64 endpoints reliably.
     // Inputs sit on the 1.27 mm KiCad grid (max ~hundreds of mm),
     // so `x * 1000` is comfortably within i64 range.
     #[allow(clippy::cast_possible_truncation)]

@@ -285,7 +285,10 @@ fn split_union_at_endpoints(ivals: &mut [(f64, f64)]) -> Vec<(f64, f64)> {
 /// Junction lists are left untouched; [`add_connection_junctions`] and
 /// [`dedup_junctions`] run afterwards.
 pub fn collapse_collinear_overlaps(routed: &mut [RoutedNet]) {
-    use std::collections::HashMap;
+    // BTreeMap, not HashMap: this map is *iterated* to build the output
+    // segment list, so hash order would make the emitted wire order vary
+    // between runs of the same binary on the same input.
+    use std::collections::BTreeMap as HashMap;
     for net in routed.iter_mut() {
         // fixed-coord key -> (representative fixed coord, spans).
         let mut vert: HashMap<i64, (f64, Vec<(f64, f64)>)> = HashMap::new();

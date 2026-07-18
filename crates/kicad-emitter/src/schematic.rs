@@ -197,7 +197,8 @@ pub fn emit_root(
         items.push(routed);
     }
     let property_bboxes = placement_property_bboxes(placement);
-    let label_body_obstacles = label_rotation_obstacles(placement, library, &glyph_bodies);
+    let mut label_body_obstacles = label_rotation_obstacles(placement, library, &glyph_bodies);
+    label_body_obstacles.extend(host_pin_lead_bboxes(placement, library));
     // Symbol-internal pin-name / pin-number text is fixed geometry — a
     // label can move off it, but it cannot move off a label — so labels
     // avoid it too. It is passed separately from the body/property set
@@ -207,15 +208,16 @@ pub fn emit_root(
     // pin-text one. (Kept out of `label_rotation_obstacles` so the
     // phase-4.5 refinement gate keeps measuring what it measured before.)
     let label_pin_texts = host_pin_text_bboxes(placement, library);
-    for label in dangling_pin_labels(
-        &net_pins,
-        "root",
-        &extra_pins,
-        &property_bboxes,
-        &label_body_obstacles,
-        &label_pin_texts,
-        &port_dirs,
-    ) {
+    // Wires are already emitted at this point, so labels can be steered
+    // clear of being struck through by one.
+    let (_, _, label_wires) = emitted_text_obstacles(&items);
+    let root_obstacles = LabelObstacles {
+        properties: &property_bboxes,
+        bodies: &label_body_obstacles,
+        pin_texts: &label_pin_texts,
+        wires: &label_wires,
+    };
+    for label in dangling_pin_labels(&net_pins, "root", &extra_pins, &root_obstacles, &port_dirs) {
         items.push(label);
     }
 
@@ -335,17 +337,18 @@ pub fn emit_child_sheet(child: &ChildSheet<'_>, library: &Library) -> Result<Str
         items.push(routed);
     }
     let child_props = placement_property_bboxes(child.placement);
-    let label_body_obstacles = label_rotation_obstacles(child.placement, library, &glyph_bodies);
+    let mut label_body_obstacles =
+        label_rotation_obstacles(child.placement, library, &glyph_bodies);
+    label_body_obstacles.extend(host_pin_lead_bboxes(child.placement, library));
     let child_pin_texts = host_pin_text_bboxes(child.placement, library);
-    for label in dangling_pin_labels(
-        &net_pins,
-        &child.name,
-        &extra_pins,
-        &child_props,
-        &label_body_obstacles,
-        &child_pin_texts,
-        &BTreeMap::new(),
-    ) {
+    let (_, _, child_wires) = emitted_text_obstacles(&items);
+    let obs = LabelObstacles {
+        properties: &child_props,
+        bodies: &label_body_obstacles,
+        pin_texts: &child_pin_texts,
+        wires: &child_wires,
+    };
+    for label in dangling_pin_labels(&net_pins, &child.name, &extra_pins, &obs, &BTreeMap::new()) {
         items.push(label);
     }
 
@@ -497,6 +500,19 @@ fn sheet_property(name: &str, value: &str, x: f64, y: f64) -> Sexpr {
     ])
 }
 
+/// `(hierarchical_label …)` — the child-sheet side of a sheet pin.
+///
+/// The `(justify left)` is load-bearing, not decoration. KiCad offsets a
+/// hierarchical label's text outward past its own chevron
+/// (`SCH_HIERLABEL::GetSchematicTextOffset`,
+/// `../kicad-source/eeschema/sch_label.cpp:2336`) and then draws it with
+/// whatever justification the field carries. With no `(justify …)` token
+/// the text renders *centred* on that offset point, so half of it lands
+/// back on top of the chevron — measured at ~1 mm of overlap on every
+/// label of the `OPAMP` child sheet. This is the same "absent justify
+/// means centred" rule that governs power-glyph value text; an explicit
+/// `left` anchors the string at the offset point instead, reading into
+/// the sheet.
 fn hierarchical_label(text: &str, x: f64, y: f64) -> Sexpr {
     let uuid =
         Uuid::new_v5(&UUID_NAMESPACE, format!("hlabel:{text}:{x}:{y}").as_bytes()).to_string();
@@ -516,6 +532,7 @@ fn hierarchical_label(text: &str, x: f64, y: f64) -> Sexpr {
                 atom("font"),
                 list(vec![atom("size"), atom("1.27"), atom("1.27")]),
             ]),
+            list(vec![atom("justify"), atom("left")]),
         ]),
         list(vec![atom("uuid"), qstring(&uuid)]),
     ])
@@ -1782,6 +1799,29 @@ pub(crate) struct LabelSpec {
     pub shape: &'static str,
 }
 
+/// An axis-aligned wire segment in world millimetres.
+pub(crate) type WireSeg = ((f64, f64), (f64, f64));
+
+/// The geometry a label must keep clear of, grouped by priority.
+///
+/// The grouping is load-bearing, not cosmetic: the placement chooser
+/// scores these lexicographically. `properties` and `bodies` are the
+/// primary class (a label reading into a symbol body or over another
+/// string is the worst outcome), `pin_texts` is secondary, and `wires`
+/// is the final tiebreak — a thin line through a string still reads,
+/// and pin-text overlap is a graded zero-budget ratchet while wire
+/// strikes are not yet graded.
+pub(crate) struct LabelObstacles<'a> {
+    /// Visible Reference / Value text.
+    pub properties: &'a [TextBbox],
+    /// Symbol bodies, foreign rail-glyph bodies and pin leads.
+    pub bodies: &'a [TextBbox],
+    /// Symbol-internal pin name / number text.
+    pub pin_texts: &'a [TextBbox],
+    /// Already-emitted wires.
+    pub wires: &'a [WireSeg],
+}
+
 /// Build the structured [`LabelSpec`] list naming each signal net. The
 /// label carries the SPICE net name (e.g. `b`, `in`, `out`); KiCad's
 /// SPICE netlist exporter preserves the original net name only if at
@@ -1811,12 +1851,12 @@ pub(crate) struct LabelSpec {
 pub(crate) fn label_specs(
     nets: &std::collections::BTreeMap<String, Vec<(f64, f64, u16)>>,
     extra_pins: &[(String, f64, f64)],
-    property_bboxes: &[TextBbox],
-    body_obstacles: &[TextBbox],
-    pin_texts: &[TextBbox],
+    obs: &LabelObstacles<'_>,
     anchor_search: bool,
     ports: &BTreeMap<String, PortDir>,
 ) -> Vec<LabelSpec> {
+    let (property_bboxes, body_obstacles) = (obs.properties, obs.bodies);
+    let (pin_texts, wires) = (obs.pin_texts, obs.wires);
     // Labels chosen so far. A label reading into another label is just as
     // unreadable as one reading into a body, and nothing else models this
     // pair — each net is decided independently — so accumulate them here
@@ -1959,6 +1999,7 @@ pub(crate) fn label_specs(
                 label_rot(fang),
                 &obstacles,
                 pin_texts,
+                wires,
             );
             out.push(LabelSpec {
                 net: net.clone(),
@@ -1996,6 +2037,7 @@ pub(crate) fn label_specs(
                 label_rot(fang),
                 &obstacles,
                 pin_texts,
+                wires,
             );
             out.push(LabelSpec {
                 net: net.clone(),
@@ -2035,7 +2077,7 @@ pub(crate) fn label_specs(
             // other pins before settling for a collision — some anchors
             // simply have no clean direction available.
             let (ax, ay, arot) =
-                best_plain_label_anchor(net, &uniq, &obstacles, pin_texts, anchor_search);
+                best_plain_label_anchor(net, &uniq, &obstacles, pin_texts, wires, anchor_search);
             out.push(LabelSpec {
                 net: net.clone(),
                 x: ax,
@@ -2053,8 +2095,14 @@ pub(crate) fn label_specs(
             }
             if net_touches_port && uniq.len() >= 2 {
                 let (lx, ly, lang) = uniq[uniq.len() - 1];
-                let rot2 =
-                    label_rotation_avoiding(net, (lx, ly), label_rot(lang), &obstacles, pin_texts);
+                let rot2 = label_rotation_avoiding(
+                    net,
+                    (lx, ly),
+                    label_rot(lang),
+                    &obstacles,
+                    pin_texts,
+                    wires,
+                );
                 out.push(LabelSpec {
                     net: net.clone(),
                     x: lx,
@@ -2083,20 +2131,10 @@ fn dangling_pin_labels(
     nets: &std::collections::BTreeMap<String, Vec<(f64, f64, u16)>>,
     scope: &str,
     extra_pins: &[(String, f64, f64)],
-    property_bboxes: &[TextBbox],
-    body_obstacles: &[TextBbox],
-    pin_texts: &[TextBbox],
+    obs: &LabelObstacles<'_>,
     ports: &BTreeMap<String, PortDir>,
 ) -> Vec<Sexpr> {
-    let specs = label_specs(
-        nets,
-        extra_pins,
-        property_bboxes,
-        body_obstacles,
-        pin_texts,
-        true,
-        ports,
-    );
+    let specs = label_specs(nets, extra_pins, obs, true, ports);
     // Reproduce the previous per-net UUID-seed scheme: globals seeded by
     // net order index; plain labels by `idx*2` (+1 for the second of a
     // name-jump pair). Net order matches `label_specs` since both walk
@@ -2301,6 +2339,67 @@ fn property_offset_candidates(base_dy: f64) -> Vec<(f64, f64)> {
 /// 5). [`Symbol::pin_text_local_bboxes`] yields one local box per
 /// visible label; each is transformed through the placed pose exactly
 /// like the symbol body bbox.
+/// Thin world-frame boxes covering every host symbol's pin *shafts*.
+///
+/// `Symbol::body_bbox` deliberately stops at the pin roots, so a pin's
+/// drawn lead is in no obstacle set — a label can be placed reading
+/// straight across a neighbour's lead and render struck through by it
+/// (measured on `port_shapes`, where `ni` crosses R2's top lead).
+///
+/// The shaft direction is derived geometrically — from the pin tip back
+/// toward the body box — rather than from the pin angle, because the
+/// file frame applies an eeschema Y-flip to pin positions and reasoning
+/// about the transformed angle under that flip is easy to get wrong.
+///
+/// Returned as slightly-inflated boxes rather than segments so they drop
+/// into the existing label obstacle set: the intersection area is
+/// negligible, so they barely perturb least-bad ranking, but it is
+/// correctly non-zero for the "is this candidate clean?" predicates.
+fn host_pin_lead_bboxes(placement: &Placement, library: &Library) -> Vec<TextBbox> {
+    const HALF_W: f64 = 0.05;
+    let mut out = Vec::new();
+    for el in &placement.elements {
+        if el.is_power_source || el.lib_id.starts_with("power:") {
+            continue;
+        }
+        let Some(sym) = library.lookup(&el.lib_id) else {
+            continue;
+        };
+        let Some(local_body) = sym.body_bbox() else {
+            continue;
+        };
+        let (ox, oy) = el.origin.to_mm();
+        let body = body_bbox_to_world(local_body, ox, oy, el.orientation);
+        for (tp, raw) in sym.pins_in(el.orientation).iter().zip(sym.pins.iter()) {
+            if raw.length <= 0.0 {
+                continue;
+            }
+            let (tx, ty) = (ox + tp.x, oy - tp.y);
+            // Step from the tip toward the body along whichever axis the
+            // tip lies outside it on.
+            let (dx, dy) = if tx < body.x0 {
+                (raw.length, 0.0)
+            } else if tx > body.x1 {
+                (-raw.length, 0.0)
+            } else if ty < body.y0 {
+                (0.0, raw.length)
+            } else if ty > body.y1 {
+                (0.0, -raw.length)
+            } else {
+                continue; // tip inside the body — nothing drawn outside it
+            };
+            let (rx, ry) = (tx + dx, ty + dy);
+            out.push(TextBbox {
+                x0: tx.min(rx) - HALF_W,
+                y0: ty.min(ry) - HALF_W,
+                x1: tx.max(rx) + HALF_W,
+                y1: ty.max(ry) + HALF_W,
+            });
+        }
+    }
+    out
+}
+
 fn host_pin_text_bboxes(placement: &Placement, library: &Library) -> Vec<TextBbox> {
     placement
         .elements
@@ -2620,9 +2719,12 @@ fn nudge_power_glyph_value_text(items: &mut [Sexpr], placement: &Placement, libr
     let pin_texts = host_pin_text_bboxes(placement, library);
     let port_names = sheet_port_name_bboxes(items);
     let host_texts = host_property_text_bboxes(items);
-    // Labels are already placed by the time this pass runs, so a glyph's
-    // net name must dodge them (`GND` reading into an `in` label).
-    let (_, label_texts, _) = emitted_text_obstacles(items);
+    // Labels and wires are already placed by the time this pass runs, so a
+    // glyph's net name must dodge both. Without the wire term a net name
+    // could be relocated onto a wire and rendered struck through — the
+    // sibling `nudge_property_text` has always scored wires; this pass
+    // never did.
+    let (_, label_texts, wire_segs) = emitted_text_obstacles(items);
 
     // Anchors already chosen by this pass become obstacles for later
     // glyphs so two glyph labels never stack.
@@ -2663,6 +2765,16 @@ fn nudge_power_glyph_value_text(items: &mut [Sexpr], placement: &Placement, libr
                 + host_texts.iter().map(area).sum::<f64>()
                 + label_texts.iter().map(area).sum::<f64>()
                 + chosen_text.iter().map(area).sum::<f64>()
+                + {
+                    #[allow(clippy::cast_precision_loss)]
+                    let hits = wire_segs
+                        .iter()
+                        .filter(|&&(p, q)| text_crosses_segment(*b, p, q))
+                        .count() as f64;
+                    // Same weight `nudge_property_text` uses: a line struck
+                    // through a net name outranks any text-on-text sliver.
+                    hits * 100.0
+                }
         };
 
         // Default first, then the candidate sweep.
@@ -3005,13 +3117,18 @@ fn best_plain_label_anchor(
     pins: &[(f64, f64, u16)],
     obstacles: &[TextBbox],
     pin_texts: &[TextBbox],
+    wires: &[WireSeg],
     anchor_search: bool,
 ) -> (f64, f64, u16) {
     let label_rot = |pin_angle: u16| -> u16 { (pin_angle + 180) % 360 };
     let pins: &[(f64, f64, u16)] = if anchor_search { pins } else { &pins[..1] };
-    let score_of = |px: f64, py: f64, rot: u16| -> (f64, f64) {
+    let score_of = |px: f64, py: f64, rot: u16| -> (f64, f64, f64) {
         let b = plain_label_bbox(net, (px, py), rot);
-        (area_against(b, obstacles), area_against(b, pin_texts))
+        (
+            area_against(b, obstacles),
+            area_against(b, pin_texts),
+            wire_strike_penalty(b, wires),
+        )
     };
     let rots = |pang: u16| {
         let p = label_rot(pang);
@@ -3020,7 +3137,7 @@ fn best_plain_label_anchor(
     // Pass 1: an anchor/rotation clean of everything.
     for &(px, py, pang) in pins {
         for cand in rots(pang) {
-            if score_of(px, py, cand) == (0.0, 0.0) {
+            if score_of(px, py, cand) == (0.0, 0.0, 0.0) {
                 return (px, py, cand);
             }
         }
@@ -3029,14 +3146,15 @@ fn best_plain_label_anchor(
     // choice — before considering a different anchor for pin-text's sake.
     if let Some(&(px, py, pang)) = pins.first() {
         for cand in rots(pang) {
-            if score_of(px, py, cand).0 == 0.0 {
+            let sc = score_of(px, py, cand);
+            if sc.0 == 0.0 && sc.1 == 0.0 {
                 return (px, py, cand);
             }
         }
     }
     // Pass 3: least-overlapping over every anchor/rotation.
     let mut best = None;
-    let mut best_score = (f64::INFINITY, f64::INFINITY);
+    let mut best_score = (f64::INFINITY, f64::INFINITY, f64::INFINITY);
     for &(px, py, pang) in pins {
         for cand in rots(pang) {
             let score = score_of(px, py, cand);
@@ -3053,6 +3171,30 @@ fn best_plain_label_anchor(
 }
 
 /// Total intersection area of `b` against every box in `obstacles`.
+/// Penalty for a text box struck through by a wire, counted per crossing.
+///
+/// This is the *last* component of the label-placement score, below both
+/// body/property overlap and pin-text overlap. Two texts on top of each
+/// other can leave both unreadable, whereas a 0.15 mm wire crossing a
+/// string still reads — and pin-text overlap is a graded, zero-budget
+/// ratchet while wire strikes are not yet graded, so the recorded
+/// constraint wins. Ranking wires any higher makes the chooser trade a
+/// real text-on-text overlap for a cosmetic one, which it was measured
+/// doing on `opamp_inverting_real`.
+///
+/// Labels are pin-anchored and their box is offset from the anchor by the
+/// label standoff, so a label's own outgoing wire (leaving along the pin
+/// axis, opposite the reading direction) does not register here; what does
+/// is a foreign wire, or the label's own wire turning at the pin.
+fn wire_strike_penalty(b: TextBbox, wires: &[WireSeg]) -> f64 {
+    #[allow(clippy::cast_precision_loss)]
+    let hits = wires
+        .iter()
+        .filter(|&&(p, q)| text_crosses_segment(b, p, q))
+        .count() as f64;
+    hits * 100.0
+}
+
 fn area_against(b: TextBbox, obstacles: &[TextBbox]) -> f64 {
     obstacles
         .iter()
@@ -3070,10 +3212,15 @@ fn label_rotation_avoiding(
     preferred: u16,
     props: &[TextBbox],
     pin_texts: &[TextBbox],
+    wires: &[WireSeg],
 ) -> u16 {
-    let overlap_area = |rot: u16| -> (f64, f64) {
+    let overlap_area = |rot: u16| -> (f64, f64, f64) {
         let b = plain_label_bbox(text, anchor, rot);
-        (area_against(b, props), area_against(b, pin_texts))
+        (
+            area_against(b, props),
+            area_against(b, pin_texts),
+            wire_strike_penalty(b, wires),
+        )
     };
     // Order: preferred first (keeps the existing body-clearing choice
     // and every non-colliding fixture byte-identical), then the two
@@ -3086,14 +3233,20 @@ fn label_rotation_avoiding(
         (preferred + 270) % 360,
         (preferred + 180) % 360,
     ];
-    if let Some(c) = candidates.iter().find(|&&c| overlap_area(c) == (0.0, 0.0)) {
+    if let Some(c) = candidates
+        .iter()
+        .find(|&&c| overlap_area(c) == (0.0, 0.0, 0.0))
+    {
         return *c;
     }
-    if let Some(c) = candidates.iter().find(|&&c| overlap_area(c).0 == 0.0) {
+    if let Some(c) = candidates
+        .iter()
+        .find(|&&c| overlap_area(c).0 == 0.0 && overlap_area(c).1 == 0.0)
+    {
         return *c;
     }
     let mut best = preferred;
-    let mut best_area = (f64::INFINITY, f64::INFINITY);
+    let mut best_area = (f64::INFINITY, f64::INFINITY, f64::INFINITY);
     for cand in candidates {
         let area = overlap_area(cand);
         if area < best_area {
@@ -3150,10 +3303,15 @@ fn global_label_rotation_avoiding(
     preferred: u16,
     obstacles: &[TextBbox],
     pin_texts: &[TextBbox],
+    wires: &[WireSeg],
 ) -> u16 {
-    let overlap_area = |rot: u16| -> (f64, f64) {
+    let overlap_area = |rot: u16| -> (f64, f64, f64) {
         let b = global_label_bbox(text, anchor, rot);
-        (area_against(b, obstacles), area_against(b, pin_texts))
+        (
+            area_against(b, obstacles),
+            area_against(b, pin_texts),
+            wire_strike_penalty(b, wires),
+        )
     };
     let candidates = [
         preferred,
@@ -3162,18 +3320,24 @@ fn global_label_rotation_avoiding(
         (preferred + 180) % 360,
     ];
     // Pass 1: fully clean (bodies/properties AND pin text).
-    if let Some(c) = candidates.iter().find(|&&c| overlap_area(c) == (0.0, 0.0)) {
+    if let Some(c) = candidates
+        .iter()
+        .find(|&&c| overlap_area(c) == (0.0, 0.0, 0.0))
+    {
         return *c;
     }
     // Pass 2: clean of bodies/properties, tolerating pin text. This is the
     // historical rule, kept as-is so no already-clean fixture moves just
     // because pin text became a (lower-priority) obstacle.
-    if let Some(c) = candidates.iter().find(|&&c| overlap_area(c).0 == 0.0) {
+    if let Some(c) = candidates
+        .iter()
+        .find(|&&c| overlap_area(c).0 == 0.0 && overlap_area(c).1 == 0.0)
+    {
         return *c;
     }
     // Pass 3: least-overlapping, bodies/properties dominating pin text.
     let mut best = preferred;
-    let mut best_area = (f64::INFINITY, f64::INFINITY);
+    let mut best_area = (f64::INFINITY, f64::INFINITY, f64::INFINITY);
     for cand in candidates {
         let area = overlap_area(cand);
         if area < best_area {

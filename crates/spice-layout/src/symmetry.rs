@@ -162,6 +162,9 @@ fn collect_candidate_pairs(checked: &CheckedNetlist) -> Option<Vec<(usize, usize
     // Group element indices by signature. Use a BTreeMap-free approach:
     // signatures are not Ord-friendly (NetClass isn't), so collect into a
     // Vec keyed by signature via linear grouping on a stable order.
+    // HashMap is safe here despite being iterated: every candidate pair is
+    // normalised (min, max) and the final list is `sort_unstable`d, so the
+    // group traversal order cannot reach the output.
     let mut groups: HashMap<Signature, Vec<usize>> = HashMap::new();
     for i in 0..elems.len() {
         let sig = signature(i, elems, &classes, &net_endpoints);

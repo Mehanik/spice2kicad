@@ -27,8 +27,8 @@ use kicad_symbols::{Library, Orientation, Symbol};
 use spice_layout::{Placement, RefinementMeta};
 
 use crate::schematic::{
-    TextBbox, collect_net_pins, label_rotation_obstacles, label_specs, placement_obstacles,
-    placement_property_bboxes, rail_glyph_body_bboxes, text_bbox, trial_route,
+    LabelObstacles, TextBbox, collect_net_pins, label_rotation_obstacles, label_specs,
+    placement_obstacles, placement_property_bboxes, rail_glyph_body_bboxes, text_bbox, trial_route,
 };
 use crate::v5::{PinProbe, Violation, count_outward_violations};
 
@@ -406,13 +406,18 @@ fn v13_overlap_count(placement: &Placement, library: &Library) -> usize {
     let negative_rails = spice_layout::net_class::negative_rail_nets(placement);
     let glyph_bodies = rail_glyph_body_bboxes(&net_pins, library, &negative_rails);
     let label_obstacles = label_rotation_obstacles(placement, library, &glyph_bodies);
+    // Consistently upstream of decoration — see the doc comment: no
+    // pin-text set, no wires, no anchor search.
+    let obs = LabelObstacles {
+        properties: &props,
+        bodies: &label_obstacles,
+        pin_texts: &[],
+        wires: &[],
+    };
     let specs = label_specs(
         &net_pins,
         &[],
-        &props,
-        &label_obstacles,
-        // Consistently upstream of decoration — see the doc comment.
-        &[],
+        &obs,
         false,
         &std::collections::BTreeMap::new(),
     );

@@ -14,8 +14,6 @@
 //! Force-Directed Placement". The cooling schedule is the standard
 //! linear ramp from `t0` to 0 over the iteration budget.
 
-use std::collections::HashMap;
-
 use spice_policy::CheckedNetlist;
 
 use super::LayoutOptions;
@@ -137,7 +135,8 @@ pub(super) fn seed(
 /// RC where both pins of R1 also touch C1).
 fn build_edges(checked: &CheckedNetlist) -> Vec<(usize, usize, f64)> {
     // Map net name → list of element indices that touch it.
-    let mut by_net: HashMap<&str, Vec<usize>> = HashMap::new();
+    let mut by_net: std::collections::BTreeMap<&str, Vec<usize>> =
+        std::collections::BTreeMap::new();
     for (i, elem) in checked.elements.iter().enumerate() {
         for node in &elem.nodes {
             if node == "0" {
@@ -148,7 +147,10 @@ fn build_edges(checked: &CheckedNetlist) -> Vec<(usize, usize, f64)> {
     }
 
     // Pair count: edges (i, j) with i < j, weighted by net count.
-    let mut counts: HashMap<(usize, usize), f64> = HashMap::new();
+    // BTreeMap: both this and `by_net` are iterated to build the edge
+    // list, and a differing edge order changes the force-directed result.
+    let mut counts: std::collections::BTreeMap<(usize, usize), f64> =
+        std::collections::BTreeMap::new();
     for (_, mut members) in by_net {
         members.sort_unstable();
         members.dedup();

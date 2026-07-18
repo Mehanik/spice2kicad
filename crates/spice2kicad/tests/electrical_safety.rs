@@ -3100,3 +3100,40 @@ fn no_cross_net_collinear_wire_overlap() {
         failures.join("\n  "),
     );
 }
+
+#[test]
+fn conversion_is_deterministic() {
+    // Converting the same netlist twice must produce byte-identical output.
+    //
+    // It did not: iterating `HashMap`/`HashSet` in the router's stub
+    // coalescing, Steiner junction emission, conflict endpoint collection
+    // and the force-directed edge build leaked hash order into the emitted
+    // wire and junction ordering, so three runs of one binary on one input
+    // gave three different files. That silently undermines every
+    // position-comparing test (`baseline_lock` especially), makes diffing
+    // two conversions meaningless, and hands users a schematic that
+    // reshuffles for no reason.
+    //
+    // Those maps are now `BTreeMap`/`BTreeSet`. This test is the guard:
+    // any future hash-ordered iteration that reaches the output trips it.
+    for name in SHEETS {
+        let src = fixtures_dir().join(format!("{name}.cir"));
+        let first = {
+            let tmp = tempdir(name);
+            std::fs::read_to_string(spice_to_kicad(&src, &tmp).expect("spice2kicad"))
+                .expect("read first conversion")
+        };
+        for attempt in 2..=4 {
+            let tmp = tempdir(name);
+            let again = std::fs::read_to_string(spice_to_kicad(&src, &tmp).expect("spice2kicad"))
+                .expect("read repeat conversion");
+            assert!(
+                again == first,
+                "{name}: conversion #{attempt} differs from #1 \
+                 ({} vs {} bytes) — output is not deterministic",
+                again.len(),
+                first.len(),
+            );
+        }
+    }
+}

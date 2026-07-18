@@ -157,8 +157,9 @@ pub fn resolve_conflicts<S: ::std::hash::BuildHasher>(
 /// Return one entry per coordinate that carries endpoints from ≥ 2
 /// distinct routed-net indices.
 fn find_conflicts(routed: &[RoutedNet]) -> Vec<((i64, i64), Vec<usize>)> {
-    use std::collections::HashMap;
-    let mut by_point: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
+    // BTreeMap: consumed by `into_iter` into an order-sensitive Vec.
+    let mut by_point: std::collections::BTreeMap<(i64, i64), Vec<usize>> =
+        std::collections::BTreeMap::new();
     for (i, net) in routed.iter().enumerate() {
         let mut seen: std::collections::HashSet<(i64, i64)> = std::collections::HashSet::new();
         for s in &net.segments {
@@ -1450,7 +1451,8 @@ fn segments_collinearly_overlap(a: &Segment, b: &Segment) -> bool {
 fn collect_endpoint_hits(net: &RoutedNet, foreign_pins: &[(i64, i64)]) -> Vec<(i64, i64)> {
     use std::collections::HashSet;
     let pin_set: HashSet<(i64, i64)> = foreign_pins.iter().copied().collect();
-    let mut hits: HashSet<(i64, i64)> = HashSet::new();
+    // BTreeSet: drained into an order-sensitive Vec below.
+    let mut hits: std::collections::BTreeSet<(i64, i64)> = std::collections::BTreeSet::new();
     for s in &net.segments {
         for (x, y) in [(s.x1, s.y1), (s.x2, s.y2)] {
             let k = key(x, y);
