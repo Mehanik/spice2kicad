@@ -450,10 +450,22 @@ fn footprint_half_extents(
 /// but against each symbol's *actual* bbox rather than a fixed square.
 ///
 /// Enforced as a "never increase" SA filter (not a cost term, per
-/// CLAUDE.md). It is a *precise supplement* to the existing cell-bbox
-/// `overlap` cost: that cost already keeps every body within a
-/// `CELL_W × CELL_H` footprint apart, so this gate only counts a pair
-/// when **at least one body is oversized** — its real half-extent
+/// CLAUDE.md): "no two symbol footprints overlap" is categorical, and
+/// `no_symbol_symbol_overlap_across_fixtures` asserts it with no budget.
+///
+/// **Covers every pair.** It used to skip small×small pairs on the
+/// premise that the `overlap` cost "already keeps every body within a
+/// `CELL_W × CELL_H` footprint apart" — true only while that cost
+/// measured a uniform cell, which over-estimated small parts and so held
+/// the categorical property up by accident. With the cost now measuring
+/// real footprints that premise is gone: `common_emitter`'s R1×RC pair
+/// overlapped by 0.76 × 1.27 mm with the soft term seeing it and trading
+/// it away for HPWL. A soft term at a safe weight cannot hold a
+/// categorical property; the filter must.
+///
+/// The `oversized` key survives only to scope the glyph-reach
+/// reservation via `prefs_for` — do not re-narrow the pair scope with it.
+/// Historical note on that key — its real half-extent
 /// exceeds the cost's cell half-extent on the colliding axis. TWO
 /// fixture symbols are oversized, not one: the opamp triangle (~5 mm
 /// half-extent vs the cell's 3.81 mm) and the BJT `Device:Q_NPN_BCE`
@@ -522,13 +534,8 @@ fn symbol_overlap_count(
     let mut count = 0;
     for a in 0..extents.len() {
         for b in (a + 1)..extents.len() {
-            let (ax, ay, ahw, ahh, a_big) = extents[a];
-            let (bx, by, bhw, bhh, b_big) = extents[b];
-            // Only a pair touching an oversized body is the cost's blind
-            // spot; small/small pairs are the cost's job.
-            if !a_big && !b_big {
-                continue;
-            }
+            let (ax, ay, ahw, ahh, _a_big) = extents[a];
+            let (bx, by, bhw, bhh, _b_big) = extents[b];
             if (ax - bx).abs() + eps < ahw + bhw && (ay - by).abs() + eps < ahh + bhh {
                 count += 1;
             }

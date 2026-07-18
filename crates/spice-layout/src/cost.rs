@@ -54,7 +54,7 @@ use spice_resolve::{Axis, ElementRole, Relation, ResolvedElement};
 use crate::bands::{Band, BandAssignment, assign_y_bands};
 use crate::layers::assign_x_layers;
 use crate::net_class::{NetClass, classify_nets};
-use crate::{CELL_H, CELL_W, GridPoint, PlacedElement, Placement};
+use crate::{CELL_H, CELL_W, GridPoint, Placement};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -152,7 +152,7 @@ pub fn breakdown(
 
     CostBreakdown {
         hpwl: hpwl(&nets),
-        overlap: overlap(&placement.elements),
+        overlap: overlap(placement, checked),
         crossings: crossings(&nets),
         constraint_violation: constraint_violation(placement, checked, library),
         rail_direction: rail_direction(&checked.elements, &pin_world),
@@ -300,28 +300,69 @@ fn hpwl(nets: &[Net]) -> f64 {
 // Overlap
 // ---------------------------------------------------------------------------
 
-/// Area of cell-bbox intersection summed over all element pairs.
+/// Area of *footprint* intersection summed over all element pairs.
 ///
-/// Each element occupies a `CELL_W × CELL_H` grid-unit box centred on
-/// its origin. Two non-overlapping cells contribute 0; identical
-/// origins contribute `CELL_W * CELL_H` (in mm²).
+/// Each element occupies its real orientation-transformed body bbox
+/// unioned with the reach of its pin stems — the same "resolved extent"
+/// geometry `no_symbol_symbol_overlap_across_fixtures` grades and
+/// `solver::anneal::symbol_overlap_count` filters on. Elements whose
+/// library exposes no body fall back to the `CELL_W × CELL_H` cell.
 ///
-/// TODO(stage 3+): replace with real per-symbol bounding-box overlap
-/// once `kicad-symbols` exposes the symbol bbox.
+/// This used to measure a uniform cell for every element, which was
+/// wrong in both directions at once. On the narrow axis it wildly
+/// over-estimated small parts (a `Device:R_US` body is ±1.016 mm against
+/// the cell's ±3.81), and that spurious repulsion was quietly doing the
+/// work of a hard constraint — when it was removed, `common_emitter`'s
+/// R1 and RC promptly overlapped. On the pin axis it was not an
+/// over-estimate at all: ±3.81 happens to be exactly a resistor's pin
+/// reach, so the cell was accidentally modelling the footprint. Measuring
+/// body-only would therefore have thrown away load-bearing repulsion —
+/// a `Device:C` body is ±0.762 while its pins reach ±3.81, leaving
+/// capacitors almost unrepelled along the axis wires approach from.
+///
+/// Taking the footprint keeps the real win (narrow-axis packing, which
+/// measurably shortens wires) without inventing an aesthetic margin, and
+/// aligns the gradient with the property the hard filter enforces.
 #[allow(clippy::similar_names)] // half_w/h_mm and a/b coordinate pairs are conventional.
-fn overlap(elements: &[PlacedElement]) -> f64 {
-    let cell_w_mm = f64::from(CELL_W) * GridPoint::STEP_MM;
-    let cell_h_mm = f64::from(CELL_H) * GridPoint::STEP_MM;
+fn overlap(placement: &Placement, checked: &CheckedNetlist) -> f64 {
+    let cell_hw = f64::from(CELL_W) * GridPoint::STEP_MM / 2.0;
+    let cell_hh = f64::from(CELL_H) * GridPoint::STEP_MM / 2.0;
+
+    let extents: Vec<(f64, f64, f64, f64)> = placement
+        .elements
+        .iter()
+        .enumerate()
+        .map(|(i, placed)| {
+            let (ox, oy) = placed.origin.to_mm();
+            let Some(el) = checked.elements.get(i) else {
+                return (ox, oy, cell_hw, cell_hh);
+            };
+            let (mut hw, mut hh) = (0.0_f64, 0.0_f64);
+            if let Some(b) = el.symbol.body_bbox() {
+                for (lx, ly) in [(b.x0, b.y0), (b.x0, b.y1), (b.x1, b.y0), (b.x1, b.y1)] {
+                    let (rx, ry) = placed.orientation.apply_point(lx, ly);
+                    hw = hw.max(rx.abs());
+                    hh = hh.max(ry.abs());
+                }
+            }
+            for pin in el.symbol.pins_in(placed.orientation) {
+                hw = hw.max(pin.x.abs());
+                hh = hh.max(pin.y.abs());
+            }
+            if hw <= 0.0 || hh <= 0.0 {
+                return (ox, oy, cell_hw, cell_hh);
+            }
+            (ox, oy, hw, hh)
+        })
+        .collect();
 
     let mut total = 0.0;
-    for i in 0..elements.len() {
-        for j in (i + 1)..elements.len() {
-            let (ai_x, ai_y) = elements[i].origin.to_mm();
-            let (bj_x, bj_y) = elements[j].origin.to_mm();
-            let dx = (ai_x - bj_x).abs();
-            let dy = (ai_y - bj_y).abs();
-            let overlap_w = (cell_w_mm - dx).max(0.0);
-            let overlap_h = (cell_h_mm - dy).max(0.0);
+    for i in 0..extents.len() {
+        for j in (i + 1)..extents.len() {
+            let (ax, ay, ahw, ahh) = extents[i];
+            let (bx, by, bhw, bhh) = extents[j];
+            let overlap_w = (ahw + bhw - (ax - bx).abs()).max(0.0);
+            let overlap_h = (ahh + bhh - (ay - by).abs()).max(0.0);
             total += overlap_w * overlap_h;
         }
     }
@@ -1111,6 +1152,7 @@ fn net_bbox_crossings(nets: &[Net]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PlacedElement;
     use kicad_symbols::{Library, Orientation};
     use spice_diagnostics::FileId;
     use spice_policy::check;
