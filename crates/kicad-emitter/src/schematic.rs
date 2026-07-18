@@ -2101,11 +2101,42 @@ pub(crate) fn text_bbox(text: &str, anchor: (f64, f64), rot_deg: u16) -> TextBbo
     TextBbox { x0, y0, x1, y1 }
 }
 
+/// The direction a symbol's `Reference` / `Value` field text actually
+/// reads on screen, expressed as the rotation [`text_bbox`] needs.
+///
+/// A field's own `(at … 0)` token is *not* what KiCad draws. The parent
+/// symbol's transform is applied on top of it: `SCH_FIELD::GetDrawRotation`
+/// swaps horizontal ↔ vertical whenever the symbol is rotated 90° or 270°
+/// (`transform.y1 != 0`), and `SCH_FIELD::GetEffectiveHorizJustify` flips
+/// left ↔ right whenever the rendered text lands on the other side of its
+/// anchor — which is exactly what a 180° rotation or a Y mirror does
+/// (`../kicad-source/eeschema/sch_field.cpp:396-415, 446-501`).
+///
+/// Net effect, measured against `kicad-cli sch export svg` for every
+/// orientation the placer emits (rot 0/90/180/270 × mirror-y on/off): the
+/// text advances along the symbol's own rotation, and a Y mirror reflects
+/// that direction about the vertical axis — leaving vertical text (90/270)
+/// untouched and reversing horizontal text (0 ↔ 180).
+///
+/// Modelling every field as rot 0, as this code used to, is therefore
+/// wrong for *half* of all placed symbols: a Y-mirrored resistor's Value
+/// extends left of its anchor, not right, and a 270° one extends downward.
+fn field_render_rotation(orient: Orientation) -> u16 {
+    let rot = rotation_degrees(orient);
+    if orient.mirror_y {
+        (540 - rot) % 360
+    } else {
+        rot
+    }
+}
+
 /// Reference / Value property-text bboxes for every placed element, in
 /// the same world frame and offsets the emitter writes them at
 /// (Reference at local `(2.54, -2.54)`, Value at `(2.54, 2.54)`, both
-/// left-justified, rot 0). Hidden properties are excluded — the
-/// resistor/cap/opamp Reference & Value are the only visible ones.
+/// left-justified). Hidden properties are excluded — the resistor /
+/// capacitor / opamp Reference & Value are the only visible ones. The
+/// reading direction comes from [`field_render_rotation`], not from the
+/// field's own `(at … 0)`.
 pub(crate) fn placement_property_bboxes(placement: &Placement) -> Vec<TextBbox> {
     let mut out = Vec::new();
     for el in &placement.elements {
@@ -2114,12 +2145,13 @@ pub(crate) fn placement_property_bboxes(placement: &Placement) -> Vec<TextBbox> 
         if el.is_power_source {
             continue;
         }
+        let frot = field_render_rotation(el.orientation);
         let (ox, oy) = el.origin.to_mm();
         let (rx, ry) = property_anchor(ox, oy, el.orientation, 2.54, -2.54);
-        out.push(text_bbox(&el.refdes, (rx, ry), 0));
+        out.push(text_bbox(&el.refdes, (rx, ry), frot));
         let value_text = el.value.as_deref().unwrap_or(&el.refdes);
         let (vx, vy) = property_anchor(ox, oy, el.orientation, 2.54, 2.54);
-        out.push(text_bbox(value_text, (vx, vy), 0));
+        out.push(text_bbox(value_text, (vx, vy), frot));
     }
     out
 }
@@ -2314,15 +2346,21 @@ fn nudge_property_text(items: &mut [Sexpr], placement: &Placement, library: &Lib
                 c += wire_hits * 100.0;
                 c
             };
+            // The reading direction is fixed by the parent symbol's
+            // transform, not by the field's own rot-0 token — see
+            // `field_render_rotation`. Scoring candidates as rot 0 made
+            // this pass relocate text *into* the collisions it was
+            // trying to avoid whenever the symbol was mirrored or turned.
+            let frot = field_render_rotation(el.orientation);
             let mut chosen = candidates[0];
             let mut chosen_bbox = {
                 let (ax, ay) = property_anchor(ox, oy, el.orientation, chosen.0, chosen.1);
-                text_bbox(text, (ax, ay), 0)
+                text_bbox(text, (ax, ay), frot)
             };
             let mut best_cost = f64::INFINITY;
             for cand in &candidates {
                 let (ax, ay) = property_anchor(ox, oy, el.orientation, cand.0, cand.1);
-                let b = text_bbox(text, (ax, ay), 0);
+                let b = text_bbox(text, (ax, ay), frot);
                 let cost = overlap_cost(b);
                 if cost == 0.0 {
                     chosen = *cand;
@@ -2409,6 +2447,69 @@ fn sheet_port_name_bboxes(items: &[Sexpr]) -> Vec<TextBbox> {
 /// fixture or refdes constants.
 ///
 /// PWR_FLAG glyphs are skipped (their Value text is hidden).
+/// `(mirror y)` present on an emitted `(symbol …)` sexpr.
+fn sexpr_symbol_mirrored_y(sym: &Sexpr) -> bool {
+    let Sexpr::List(items) = sym else {
+        return false;
+    };
+    items.iter().any(|it| {
+        head_of(it) == Some("mirror")
+            && matches!(it, Sexpr::List(p) if matches!(p.get(1), Some(Sexpr::Atom(a)) if a == "y"))
+    })
+}
+
+/// [`field_render_rotation`] for an already-emitted `(symbol …)` sexpr.
+fn sexpr_field_render_rotation(sym: &Sexpr) -> u16 {
+    let rot = sexpr_at(sym).map_or(0, |(_, _, r)| r);
+    if sexpr_symbol_mirrored_y(sym) {
+        (540 - rot) % 360
+    } else {
+        rot
+    }
+}
+
+/// World bboxes of every visible host (non-`#PWR`) `Reference` / `Value`
+/// property, read back from the items already emitted — i.e. the anchors
+/// [`nudge_property_text`] settled on. The power-glyph value pass needs
+/// these as obstacles; without them it happily relocates a glyph's net
+/// name on top of host text that was placed moments earlier.
+fn host_property_text_bboxes(items: &[Sexpr]) -> Vec<TextBbox> {
+    let mut out = Vec::new();
+    for item in items {
+        if head_of(item) != Some("symbol") {
+            continue;
+        }
+        if sexpr_symbol_refdes(item).is_none_or(|r| r.starts_with("#PWR")) {
+            continue;
+        }
+        let frot = sexpr_field_render_rotation(item);
+        let Sexpr::List(parts) = item else { continue };
+        for p in parts {
+            if head_of(p) != Some("property") {
+                continue;
+            }
+            let Sexpr::List(pp) = p else { continue };
+            let key = match pp.get(1) {
+                Some(Sexpr::QString(k) | Sexpr::Atom(k)) => k.as_str(),
+                _ => continue,
+            };
+            if key != "Reference" && key != "Value" {
+                continue;
+            }
+            if sexpr_property_hidden(p) {
+                continue;
+            }
+            let Some(Sexpr::QString(text)) = pp.get(2) else {
+                continue;
+            };
+            if let Some((x, y, _)) = sexpr_at(p) {
+                out.push(text_bbox(text, (x, y), frot));
+            }
+        }
+    }
+    out
+}
+
 fn nudge_power_glyph_value_text(items: &mut [Sexpr], placement: &Placement, library: &Library) {
     // Candidate offsets from the glyph anchor (default first → byte
     // identical when clean). The default keeps the value at whatever
@@ -2443,6 +2544,7 @@ fn nudge_power_glyph_value_text(items: &mut [Sexpr], placement: &Placement, libr
         .collect();
     let pin_texts = host_pin_text_bboxes(placement, library);
     let port_names = sheet_port_name_bboxes(items);
+    let host_texts = host_property_text_bboxes(items);
 
     // Anchors already chosen by this pass become obstacles for later
     // glyphs so two glyph labels never stack.
@@ -2480,6 +2582,7 @@ fn nudge_power_glyph_value_text(items: &mut [Sexpr], placement: &Placement, libr
             bodies.iter().map(area).sum::<f64>()
                 + pin_texts.iter().map(area).sum::<f64>()
                 + port_names.iter().map(area).sum::<f64>()
+                + host_texts.iter().map(area).sum::<f64>()
                 + chosen_text.iter().map(area).sum::<f64>()
         };
 
@@ -2610,6 +2713,11 @@ fn sexpr_symbol_refdes(sym: &Sexpr) -> Option<&str> {
 
 /// Visible net-name `Value` text bbox of a power-glyph `(symbol …)`.
 /// Returns `None` if the Value property is hidden.
+///
+/// Power-glyph Value text is emitted with no `(justify …)`, so KiCad
+/// centres it horizontally about its anchor — hence [`centered_text_bbox`]
+/// rather than the left-anchored [`text_bbox`], matching the V13
+/// verifier's `TextKind::CenteredValue`.
 fn power_glyph_value_bbox(sym: &Sexpr) -> Option<TextBbox> {
     let Sexpr::List(items) = sym else {
         return None;
@@ -2625,8 +2733,8 @@ fn power_glyph_value_bbox(sym: &Sexpr) -> Option<TextBbox> {
                 let Some(Sexpr::QString(text)) = p.get(2) else {
                     return None;
                 };
-                let (x, y, rot) = sexpr_at(it)?;
-                return Some(text_bbox(text, (x, y), rot));
+                let (x, y, _) = sexpr_at(it)?;
+                return Some(centered_text_bbox(text, (x, y)));
             }
         }
     }
@@ -2683,7 +2791,13 @@ fn sexpr_num(s: &Sexpr) -> Option<f64> {
     }
 }
 
-/// Text bbox of a `(label …)` / `(global_label …)` sexpr (name at idx 1).
+/// Text bbox of a `(label …)` / `(global_label …)` sexpr (name at idx 1),
+/// using each flavour's own renderer-faithful model: a plain label is
+/// bottom-justified about an upright text angle ([`plain_label_bbox`]),
+/// a global label is vertically centred and carries a chevron lead on
+/// both ends ([`global_label_bbox`]). Sharing one generic centred box
+/// for both — as this used to — let the nudge pass drop property text
+/// onto labels it believed it was clearing.
 fn label_text_bbox(node: &Sexpr) -> Option<TextBbox> {
     let Sexpr::List(items) = node else {
         return None;
@@ -2693,7 +2807,11 @@ fn label_text_bbox(node: &Sexpr) -> Option<TextBbox> {
         _ => return None,
     };
     let (x, y, rot) = sexpr_at(node)?;
-    Some(text_bbox(name, (x, y), rot))
+    Some(if head_of(node) == Some("global_label") {
+        global_label_bbox(name, (x, y), rot)
+    } else {
+        plain_label_bbox(name, (x, y), rot)
+    })
 }
 
 /// Extract `((x1,y1),(x2,y2))` from a `(wire (pts (xy …) (xy …)))`
@@ -2869,21 +2987,42 @@ fn global_label_rotation_avoiding(
     preferred: u16,
     obstacles: &[TextBbox],
 ) -> u16 {
-    let collides = |rot: u16| {
+    let overlap_area = |rot: u16| -> f64 {
         let b = global_label_bbox(text, anchor, rot);
-        obstacles.iter().any(|o| b.intersects(*o))
+        obstacles
+            .iter()
+            .map(|o| {
+                let w = (b.x1.min(o.x1) - b.x0.max(o.x0)).max(0.0);
+                let h = (b.y1.min(o.y1) - b.y0.max(o.y0)).max(0.0);
+                w * h
+            })
+            .sum()
     };
-    for cand in [
+    let candidates = [
         preferred,
         (preferred + 90) % 360,
         (preferred + 270) % 360,
         (preferred + 180) % 360,
-    ] {
-        if !collides(cand) {
+    ];
+    let mut best = preferred;
+    let mut best_area = f64::INFINITY;
+    for cand in candidates {
+        let area = overlap_area(cand);
+        if area == 0.0 {
             return cand;
         }
+        if area < best_area {
+            best_area = area;
+            best = cand;
+        }
     }
-    preferred
+    // Every rotation collides with something. Returning `preferred`
+    // unconditionally — as this used to — can pick the WORST of the four
+    // (common_emitter's `in` label reading straight into a GND glyph).
+    // Fall back to the least-overlapping candidate instead; a label
+    // overlap is a quality defect, never a correctness one, so we still
+    // always return a rotation.
+    best
 }
 
 fn rotation_degrees(orient: Orientation) -> u16 {

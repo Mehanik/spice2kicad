@@ -1140,6 +1140,36 @@ fn labels_with_kind(root: &Value) -> Vec<(String, Pt, u16, TextKind)> {
 /// property bboxes. Power glyphs (`#PWR…`) are skipped — their text
 /// is part of the standard library glyph and never collides with
 /// other in-sheet text in practice.
+/// True if a `(property …)` carries an explicit `(justify …)` inside its
+/// `(effects …)`. KiCad centres a field horizontally when none is given,
+/// so this selects between the left-anchored and centred bbox models —
+/// verified against `kicad-cli sch export svg` (power-glyph net-name text
+/// is emitted without a justify and renders centred on its anchor).
+fn property_has_justify(prop: &Value) -> bool {
+    children(prop, "effects")
+        .iter()
+        .any(|e| !children(e, "justify").is_empty())
+}
+
+/// Direction a symbol's field text actually reads on screen.
+///
+/// A field's own `(at … 0)` is not what KiCad draws: the parent symbol's
+/// transform is applied on top of it. `SCH_FIELD::GetDrawRotation` swaps
+/// horizontal ↔ vertical for a 90°/270° symbol and
+/// `GetEffectiveHorizJustify` flips left ↔ right for a 180° rotation or a
+/// Y mirror (`../kicad-source/eeschema/sch_field.cpp:396-415, 446-501`).
+/// Verified against `kicad-cli sch export svg` across every orientation
+/// the placer emits. Mirrors `kicad_emitter`'s `field_render_rotation` —
+/// keep the two in step.
+fn field_render_rotation(sym: &Value) -> u16 {
+    let rot = at_xy_rot(sym).map_or(0, |(_, _, r)| r);
+    let mirrored_y = children(sym, "mirror")
+        .first()
+        .and_then(|m| list_iter(m).nth(1).and_then(as_str))
+        == Some("y");
+    if mirrored_y { (540 - rot) % 360 } else { rot }
+}
+
 fn property_bboxes(root: &Value) -> Vec<(String, Bbox)> {
     let mut out = Vec::new();
     for sym in children(root, "symbol") {
@@ -1166,15 +1196,19 @@ fn property_bboxes(root: &Value) -> Vec<(String, Bbox)> {
             let key = it.next().and_then(as_str).unwrap_or("");
             let val = it.next().and_then(as_str).unwrap_or("");
             let tkind = match key {
+                _ if !property_has_justify(prop) => TextKind::CenteredValue,
                 "Reference" => TextKind::PropertyReference,
                 "Value" => TextKind::PropertyValue,
                 _ => continue,
             };
-            let Some((px, py, prot)) = at_xy_rot(prop) else {
+            if !matches!(key, "Reference" | "Value") {
+                continue;
+            }
+            let Some((px, py, _)) = at_xy_rot(prop) else {
                 continue;
             };
             let size = effects_font_size(prop).unwrap_or(1.27);
-            let bbox = text_bbox(val, (px, py), size, prot, tkind);
+            let bbox = text_bbox(val, (px, py), size, field_render_rotation(sym), tkind);
             out.push((format!("{refdes}.{key}"), bbox));
         }
     }
@@ -1505,15 +1539,19 @@ fn visible_text_bboxes(root: &Value) -> Vec<(String, Bbox)> {
             let key = it.next().and_then(as_str).unwrap_or("");
             let val = it.next().and_then(as_str).unwrap_or("");
             let tkind = match key {
+                _ if !property_has_justify(prop) => TextKind::CenteredValue,
                 "Reference" => TextKind::PropertyReference,
                 "Value" => TextKind::PropertyValue,
                 _ => continue,
             };
-            let Some((px, py, prot)) = at_xy_rot(prop) else {
+            if !matches!(key, "Reference" | "Value") {
+                continue;
+            }
+            let Some((px, py, _)) = at_xy_rot(prop) else {
                 continue;
             };
             let size = effects_font_size(prop).unwrap_or(1.27);
-            let bbox = text_bbox(val, (px, py), size, prot, tkind);
+            let bbox = text_bbox(val, (px, py), size, field_render_rotation(sym), tkind);
             out.push((format!("{refdes}.{key}"), bbox));
         }
     }
