@@ -139,13 +139,14 @@ fn run_cleanup<S: ::std::hash::BuildHasher>(
     cleanup::collapse_collinear_overlaps(routed);
     cleanup::drop_zero_length(routed);
     cleanup::split_at_interior_attachments(routed);
+    cleanup::trim_whiskers(routed, own_pin_coords);
     cleanup::prune_stale_junctions(routed);
     cleanup::add_connection_junctions(routed);
 }
 
 /// Union-find root of `k`, with path compression. Keys are quantised
 /// wire endpoints; an unseen key is its own root.
-fn uf_find(
+pub(crate) fn uf_find(
     parent: &mut std::collections::HashMap<(i64, i64), (i64, i64)>,
     k: (i64, i64),
 ) -> (i64, i64) {
@@ -534,6 +535,14 @@ pub fn route(req: RouteRequest<'_>) -> RouteResult {
         //
         // 2. Tier 0, cross-net separation: see the note above the loop.
         //
+        // Whiskers are deliberately NOT a trigger here. A dangling stem
+        // is dead wire, so `cleanup::trim_whiskers` deletes
+        // it outright rather than paying a whole net's V5 to re-route
+        // around it. Suppressing the stub was measured as the wrong
+        // lever: it merely moved the orphan to another net
+        // (`opamp_inverting` 1 -> 2), because the larger orphans are
+        // jog/cleanup debris rather than stubs.
+        //
         // Only nets that actually hit one of these lose their stub.
         let any_broken =
             (0..routed.len()).any(|i| !net_is_connected(&routed[i], &net_pin_coords[i]));
@@ -554,19 +563,19 @@ pub fn route(req: RouteRequest<'_>) -> RouteResult {
                     suppress_outward[i] = true;
                     true
                 })
-        } else {
-            (!unresolved.is_empty())
-                .then(|| first_cross_net_overlap(&routed))
-                .flatten()
-                .is_some_and(|(a, b)| {
-                    [a.max(b), a.min(b)]
-                        .into_iter()
-                        .find(|&n| !suppress_outward[n])
-                        .is_some_and(|n| {
-                            suppress_outward[n] = true;
-                            true
-                        })
+        } else if let Some((a, b)) = (!unresolved.is_empty())
+            .then(|| first_cross_net_overlap(&routed))
+            .flatten()
+        {
+            [a.max(b), a.min(b)]
+                .into_iter()
+                .find(|&n| !suppress_outward[n])
+                .is_some_and(|n| {
+                    suppress_outward[n] = true;
+                    true
                 })
+        } else {
+            false
         };
         if !newly_suppressed || attempt + 1 == max_attempts {
             // Converged, or out of retries: keep this geometry and its

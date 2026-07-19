@@ -3031,3 +3031,105 @@ fn conversion_is_deterministic() {
         }
     }
 }
+
+/// World coordinates of every hierarchical `(sheet … (pin …))` anchor.
+///
+/// Sheet pins are connection points exactly as symbol pins are, but
+/// `world_pins_for_sheet` derives its list from resolved SPICE elements
+/// and so does not see them. Without this, every wire meeting a child
+/// sheet reads as unattached.
+fn sheet_pin_positions(root: &Value) -> Vec<Pt> {
+    let mut out = Vec::new();
+    for sheet in children(root, "sheet") {
+        for pin in children(sheet, "pin") {
+            if let Some(at) = find_child(pin, "at") {
+                let mut it = list_iter(at);
+                it.next();
+                if let (Some(x), Some(y)) = (
+                    it.next().and_then(as_f64),
+                    it.next().and_then(as_f64),
+                ) {
+                    out.push((x, y));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// No dangling whiskers: every wire end attaches to something.
+///
+/// A **whisker** is a wire endpoint that touches nothing — no pin, no
+/// sheet pin, no label anchor, no other wire. The reader sees a stray
+/// stub hanging off the drawing and goes looking for the connection it
+/// implies; there isn't one.
+///
+/// This class of defect was invisible to the suite for its entire
+/// history, which is why it recurred. Restoring the V5 collinear
+/// outward stub (`85b6469`) left three of them across the fixtures, and
+/// nothing failed — worse, two of the three were *scored as V5
+/// compliance*, because `count_outward_violations` credits any wire
+/// leaving a pin outward without asking whether its far end goes
+/// anywhere. A dangling stub is a Tier-1 readability defect and V5 is
+/// Tier-2, so this test is the one that must hold; see
+/// `cleanup::trim_whiskers` for the fix.
+///
+/// **Budget 0, and it should never rise.** Unlike the aesthetic
+/// budgets, there is no such thing as an acceptable residual whisker:
+/// a wire end either attaches or it is dead ink. The router can always
+/// satisfy this by not emitting the segment.
+#[test]
+fn no_dangling_whiskers_across_fixtures() {
+    #[allow(clippy::cast_possible_truncation)]
+    let qk = |p: Pt| ((p.0 * 1000.0).round() as i64, (p.1 * 1000.0).round() as i64);
+    let mut failures: Vec<String> = Vec::new();
+    for name in SHEETS {
+        let src = fixtures_dir().join(format!("{name}.cir"));
+        let tmp = tempdir(name);
+        let sch = spice_to_kicad(&src, &tmp).expect("spice2kicad");
+        let root = parse(&sch);
+        let wires = wire_segments(&root);
+
+        let mut anchors: HashSet<(i64, i64)> = world_pins_for_sheet(&src, &root)
+            .iter()
+            .map(|p| qk((p.x_mm, p.y_mm)))
+            .collect();
+        anchors.extend(sheet_pin_positions(&root).into_iter().map(qk));
+        anchors.extend(label_positions(&root).into_iter().map(|(_, p)| qk(p)));
+
+        let mut degree: HashMap<(i64, i64), usize> = HashMap::new();
+        for &(a, b) in &wires {
+            *degree.entry(qk(a)).or_default() += 1;
+            *degree.entry(qk(b)).or_default() += 1;
+        }
+        for (&pt, &deg) in &degree {
+            if deg != 1 || anchors.contains(&pt) {
+                continue;
+            }
+            // A lone endpoint landing on another wire's interior is a
+            // T-connection, which reads (and connects) as attached.
+            let on_interior = wires.iter().any(|&(a, b)| {
+                let (a, b) = (qk(a), qk(b));
+                if pt == a || pt == b {
+                    return false;
+                }
+                let between = |v: i64, s: i64, e: i64| v > s.min(e) && v < s.max(e);
+                (a.0 == b.0 && pt.0 == a.0 && between(pt.1, a.1, b.1))
+                    || (a.1 == b.1 && pt.1 == a.1 && between(pt.0, a.0, b.0))
+            });
+            if !on_interior {
+                failures.push(format!(
+                    "{name}: wire end at ({:.2}, {:.2}) attaches to nothing",
+                    pt.0 as f64 / 1000.0,
+                    pt.1 as f64 / 1000.0,
+                ));
+            }
+        }
+    }
+    failures.sort();
+    assert!(
+        failures.is_empty(),
+        "dangling whiskers (budget 0):\n  {}",
+        failures.join("\n  "),
+    );
+}

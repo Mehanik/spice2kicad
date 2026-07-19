@@ -607,6 +607,91 @@ pub fn prune_stale_junctions(routed: &mut [RoutedNet]) {
     }
 }
 
+/// Trim **whiskers** — wire ends attached to nothing — from every net.
+///
+/// A whisker is a segment endpoint of degree 1 that is not a pin of the
+/// net and does not land on the interior of a sibling segment (a T,
+/// which reads as connected). The reader sees a stray stub hanging off
+/// the drawing and hunts for the connection it implies.
+///
+/// Trimming is iterative: removing a dangling segment can expose a new
+/// dangling end behind it, so this runs to a fixpoint and peels whole
+/// dead-end chains, not just the last 1.27 mm of one.
+///
+/// **Connectivity-preserving by construction.** A degree-1 endpoint is
+/// a leaf: nothing electrical can reach the rest of the net through it,
+/// so deleting the segment cannot split anything that was joined. The
+/// pin and interior-touch exemptions are what make that true — they are
+/// the only two ways a leaf can be carrying a connection. Labels need
+/// no exemption because label anchors are chosen from pin coordinates
+/// (`dangling_pin_labels` in `kicad-emitter`), never from an arbitrary
+/// wire endpoint.
+///
+/// Whiskers have two upstream sources, and neither pass can see what it
+/// produced:
+///
+/// * the V5 collinear outward stub, when a later stage re-anchors the
+///   continuation on the pin instead of the stub's far end, orphaning
+///   the 1.27 mm stem (`common_emitter` RC, `diff_pair` RTAIL);
+/// * the Stage-3 jog moving a trunk and stranding a whole leg
+///   (`opamp_inverting`, ~11 mm of it).
+///
+/// Both are worth fixing at source eventually. Trimming here is the
+/// backstop that keeps a wire to nowhere off the page meanwhile, and it
+/// is strictly safer than the alternative that was measured: making
+/// whiskers a stub-suppression trigger in `route`'s retry loop merely
+/// relocated the orphan onto another net (`opamp_inverting` 1 -> 2)
+/// while spending that net's V5 to do it.
+///
+/// Runs after `split_at_interior_attachments` so a leg attached to a
+/// trunk's interior has already become a real shared endpoint of
+/// degree 2 and is not mistaken for a leaf — and before the junction
+/// passes, which then recompute dots over the surviving geometry.
+pub fn trim_whiskers<S: ::std::hash::BuildHasher>(
+    routed: &mut [RoutedNet],
+    pins_per_net: &[std::collections::HashSet<(i64, i64), S>],
+) {
+    #[allow(clippy::cast_possible_truncation)]
+    let qk = |x: f64, y: f64| ((x * 1000.0).round() as i64, (y * 1000.0).round() as i64);
+    let empty: std::collections::HashSet<(i64, i64)> = std::collections::HashSet::new();
+    for (i, net) in routed.iter_mut().enumerate() {
+        let pins = pins_per_net.get(i).map_or(&empty as &dyn BarrierSet, |s| {
+            s as &dyn BarrierSet
+        });
+        loop {
+            let mut degree: std::collections::HashMap<(i64, i64), usize> =
+                std::collections::HashMap::new();
+            for seg in &net.segments {
+                *degree.entry(qk(seg.x1, seg.y1)).or_default() += 1;
+                *degree.entry(qk(seg.x2, seg.y2)).or_default() += 1;
+            }
+            let segments = net.segments.clone();
+            let dangles = |p: (i64, i64)| {
+                if degree.get(&p).copied().unwrap_or(0) != 1 || pins.contains_qkey(p) {
+                    return false;
+                }
+                // Sole endpoint there — but a T onto a sibling still
+                // connects it.
+                !segments.iter().any(|seg| {
+                    let (a, b) = (qk(seg.x1, seg.y1), qk(seg.x2, seg.y2));
+                    if p == a || p == b {
+                        return false;
+                    }
+                    let between = |v: i64, s: i64, e: i64| v > s.min(e) && v < s.max(e);
+                    (a.0 == b.0 && p.0 == a.0 && between(p.1, a.1, b.1))
+                        || (a.1 == b.1 && p.1 == a.1 && between(p.0, a.0, b.0))
+                })
+            };
+            let before = net.segments.len();
+            net.segments
+                .retain(|seg| !dangles(qk(seg.x1, seg.y1)) && !dangles(qk(seg.x2, seg.y2)));
+            if net.segments.len() == before {
+                break;
+            }
+        }
+    }
+}
+
 /// Collapse the per-net junction lists into a single deduplicated set.
 /// Uses 0.001 mm-quantised keys so f64 noise doesn't desync identical
 /// coordinates emitted by independent Steiner trees.
