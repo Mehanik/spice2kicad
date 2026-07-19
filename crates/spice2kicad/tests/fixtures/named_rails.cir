@@ -1,0 +1,29 @@
+* Split-supply divider exercising NAMED voltage rails.
+*
+* The rail-direction convention ("signals to a positive supply go up,
+* signals to ground go down, a negative rail goes lower still") must be
+* driven by the `*@power=` tag, not by the literal names `vcc` / `0`.
+* Here the positive rail is `p5` and the negative rail is `n5` — neither
+* matches a canonical supply name — so the only thing that can classify
+* them is `;@ power=+5V` / `;@ power=-5V`.
+*
+* Expected reading of the emitted sheet:
+*   RPU  hangs UP   from `out` to the +5V rail
+*   RPD  hangs DOWN from `out` to the -5V rail
+*   CL   hangs DOWN from `out` to ground
+* and all three sit in the column of `out`.
+
+*@symbol Device:R_US for=R*
+*@symbol Device:C    for=C*
+
+VPOS p5 0 DC  5    ;@ power=+5V
+VNEG n5 0 DC -5    ;@ power=-5V
+VIN  in 0 AC  1    ;@ ignore
+
+RIN in  out 1k
+RPU p5  out 10k
+RPD out n5  10k
+CL  out 0   10n
+
+.ac dec 10 1 1Meg
+.end

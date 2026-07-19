@@ -169,32 +169,38 @@ fn assert_collector_load_column(refine: bool, rc: &str, q: &str, collector_net: 
     );
 }
 
-// Idiom 2 (collector-load) is DEFERRED: repositioning the collector
-// resistor ripples the busiest crossing/wire-length ratchets across
-// diff_pair / common_emitter / multivibrator, and on diff_pair V7
-// symmetry already pins RC1/RC2 (the idiom would fight the symmetry-wins
-// ordering). See `spice_layout::idioms::CollectorLoad` and
-// `apply_position_idioms`.
+// Idiom 2 (collector-load) is LIVE, generalised as the RAIL-STUB COLUMN
+// idiom (`spice_layout::idioms::{detect_rail_stubs,
+// apply_rail_stub_columns}`, wired from `lib::apply_rail_stub_columns`).
+//
+// It was previously deferred as "ripples the busiest ratchets + fights
+// the V7 RC1/RC2 symmetry pin". Neither held once `cost::rail_direction`
+// was un-inverted: the fixtures' crossing / wire-length / body-overlap
+// budgets are all still green, and the symmetry pin is not the obstacle
+// — `RC1`/`RC2` are pinned by the fixture's own `*@align horizontal`,
+// whose constraint is a shared *row*, so correcting their column is
+// orthogonal to it (and is exactly the reported defect).
+//
+// Note the detector is no longer BJT-specific: a stub is any two-terminal
+// element with one pin on a rail, and its column is the vertically-facing
+// pin of the multi-terminal device it terminates. A collector load is
+// simply the case where that device is a transistor.
 #[test]
-#[ignore = "Idiom 2 deferred: ripples busiest ratchets + fights V7 RC1/RC2 symmetry pin"]
 fn diff_pair_rc1_over_q1_collector_seed() {
     assert_collector_load_column(false, "RC1", "Q1", "c1");
 }
 
 #[test]
-#[ignore = "Idiom 2 deferred: ripples busiest ratchets + fights V7 RC1/RC2 symmetry pin"]
 fn diff_pair_rc1_over_q1_collector_refined() {
     assert_collector_load_column(true, "RC1", "Q1", "c1");
 }
 
 #[test]
-#[ignore = "Idiom 2 deferred: ripples busiest ratchets + fights V7 RC1/RC2 symmetry pin"]
 fn diff_pair_rc2_over_q2_collector_seed() {
     assert_collector_load_column(false, "RC2", "Q2", "c2");
 }
 
 #[test]
-#[ignore = "Idiom 2 deferred: ripples busiest ratchets + fights V7 RC1/RC2 symmetry pin"]
 fn diff_pair_rc2_over_q2_collector_refined() {
     assert_collector_load_column(true, "RC2", "Q2", "c2");
 }

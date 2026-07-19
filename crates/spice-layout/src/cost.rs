@@ -49,11 +49,11 @@ use std::collections::{HashMap, HashSet};
 
 use kicad_symbols::Library;
 use spice_policy::CheckedNetlist;
-use spice_resolve::{Axis, ElementRole, Relation, ResolvedElement};
+use spice_resolve::{Axis, Relation, ResolvedElement};
 
 use crate::bands::{Band, BandAssignment, assign_y_bands};
 use crate::layers::assign_x_layers;
-use crate::net_class::{NetClass, classify_nets};
+use crate::net_class::{NetClass, VertPref, classify_nets};
 use crate::{CELL_H, CELL_W, GridPoint, Placement};
 
 // ---------------------------------------------------------------------------
@@ -73,8 +73,9 @@ pub struct CostBreakdown {
     pub crossings: f64,
     /// `align`-variance + `place`-residual penalty, in mm² units.
     pub constraint_violation: f64,
-    /// Hinged squared distance of power-rail pins below the top edge
-    /// and of ground pins above the bottom edge, in mm².
+    /// Hinged squared distance of positive-rail pins below the top
+    /// edge and of ground / negative-rail pins above the bottom edge,
+    /// in mm². Screen Y increases downward (top = min Y).
     pub rail_direction: f64,
     /// Hinged squared distance of subckt input pins right of the left
     /// edge and of subckt output pins left of the right edge, in mm².
@@ -90,6 +91,9 @@ pub struct CostBreakdown {
     /// Sum of (yu - yd)² over each pair of elements whose
     /// `soft_y_target_frac` orders them but the placement does not.
     pub band_inversion: f64,
+    /// Squared screen-X offset of each rail stub from the column of the
+    /// node it terminates, in mm².
+    pub rail_stub_alignment: f64,
 }
 
 /// Linear-combination weights for [`total`].
@@ -106,6 +110,7 @@ pub struct CostWeights {
     pub layer_order: f64,
     pub net_bbox_crossings: f64,
     pub band_inversion: f64,
+    pub rail_stub_alignment: f64,
 }
 
 impl CostWeights {
@@ -133,6 +138,13 @@ impl CostWeights {
         layer_order: 20.0,
         net_bbox_crossings: 4.0,
         band_inversion: 100.0,
+        // Same tier and flavour as the other structural-placement
+        // terms (V6, Tier 2). Sized to match `band_misalignment`: both
+        // measure a squared millimetre displacement from a structurally
+        // implied target, one on Y and one on X, so an equal weight
+        // keeps a stub's column pull and its band pull comparable
+        // rather than letting either silently dominate.
+        rail_stub_alignment: 50.0,
     };
 }
 
@@ -155,13 +167,14 @@ pub fn breakdown(
         overlap: overlap(placement, checked),
         crossings: crossings(&nets),
         constraint_violation: constraint_violation(placement, checked, library),
-        rail_direction: rail_direction(&checked.elements, &pin_world),
+        rail_direction: rail_direction(checked, &pin_world),
         signal_flow: signal_flow(&checked.elements, &pin_world, &checked.subckts),
         band_misalignment: band_misalignment(placement, checked, None),
         soft_y_residual: soft_y_residual(placement, checked),
         layer_order: layer_order(placement, checked),
         net_bbox_crossings: net_bbox_crossings(&nets),
         band_inversion: band_inversion(placement, checked),
+        rail_stub_alignment: rail_stub_alignment(placement, checked, &pin_world),
     }
 }
 
@@ -179,6 +192,7 @@ pub fn total(breakdown: &CostBreakdown, weights: &CostWeights) -> f64 {
         + weights.layer_order * breakdown.layer_order
         + weights.net_bbox_crossings * breakdown.net_bbox_crossings
         + weights.band_inversion * breakdown.band_inversion
+        + weights.rail_stub_alignment * breakdown.rail_stub_alignment
 }
 
 // ---------------------------------------------------------------------------
@@ -648,31 +662,46 @@ fn orient(ax: f64, ay: f64, bx: f64, by: f64, cx: f64, cy: f64) -> f64 {
 // Rail direction (ζ)
 // ---------------------------------------------------------------------------
 
-/// Sum of hinged squared distances pulling rail pins to the top of
-/// the placement and ground pins to the bottom.
+/// Sum of hinged squared distances pulling positive-rail pins toward
+/// the top of the sheet and ground / negative-rail pins toward the
+/// bottom.
 ///
-/// The placement's own pin extents (`y_top` = max pin Y, `y_bot` =
-/// min pin Y) provide a self-normalising reference: there is no
-/// absolute "top of sheet" until the emitter pins one down. When the
-/// extents collapse (single row of pins) both hinges read zero.
+/// # Coordinate convention (was inverted — see below)
 ///
-/// Rails are identified by `ElementRole::Power(rail)`; ground is the
-/// literal node `"0"` per Berkeley SPICE convention. Power-source
-/// elements' own pins participate so the power-flag symbol is pulled
-/// up alongside the rail it labels.
-fn rail_direction(elements: &[ResolvedElement], pin_world: &PinWorld) -> f64 {
-    let power_rails: HashSet<&str> = elements
-        .iter()
-        .filter_map(|e| match &e.role {
-            ElementRole::Power(rail) => Some(rail.as_str()),
-            ElementRole::Normal => None,
-        })
-        .collect();
-
-    let (y_top, y_bot) = pin_extents_y(pin_world);
+/// Screen Y **increases downward**: the top of the sheet is *minimum*
+/// Y, the bottom is *maximum* Y. This is the convention
+/// [`band_misalignment`] uses (`Band::Top` tracks the smallest origin
+/// Y) and the one the emitter writes out.
+///
+/// This function used to read `pin_extents_y`'s return as
+/// `(y_top, y_bot) = (y_max, y_min)` — i.e. it called the largest Y
+/// "top". With that naming the two hinges pulled **positive rails to
+/// the screen bottom and ground to the screen top**, the exact inverse
+/// of the drawing convention. Because `rail_direction` carries weight
+/// 200 over *squared millimetres* it dominated the objective (measured
+/// on `common_emitter`: 875 160 of a 903 705 total, ~97%), so it was
+/// not a mild mis-preference — it actively fought the band terms that
+/// were pulling the right way, and every element with a single rail
+/// connection ended up on the wrong side of the device it serves.
+///
+/// # Rail identification
+///
+/// Keyed off [`crate::net_class::vertical_prefs`], not off
+/// `ElementRole::Power` + the literal node `"0"`. `vertical_prefs`
+/// already encodes the full convention — positive supplies
+/// ([`VertPref::Up`]) versus ground *and negative* supplies
+/// ([`VertPref::Down`]) — and it derives negativity from the
+/// `*@power=-…` tag as well as canonical names, so named rails
+/// (`+5V` / `-5V` / `+12V` / `-12V`) are handled generally rather than
+/// only the literal `vcc` / `0` pair. Using the same source of truth
+/// as the V14 orientation constraint also keeps the cost gradient and
+/// the hard constraint from disagreeing about which way a rail points.
+fn rail_direction(checked: &CheckedNetlist, pin_world: &PinWorld) -> f64 {
+    let prefs = crate::net_class::vertical_prefs(checked);
+    let (y_min, y_max) = pin_extents_y(pin_world);
 
     let mut total = 0.0;
-    for (i, elem) in elements.iter().enumerate() {
+    for (i, elem) in checked.elements.iter().enumerate() {
         for (term_idx, node_name) in elem.nodes.iter().enumerate() {
             let Some(kicad_pin) = elem.pin_mapping.get(term_idx) else {
                 continue;
@@ -683,13 +712,15 @@ fn rail_direction(elements: &[ResolvedElement], pin_world: &PinWorld) -> f64 {
             let Some(&(_, _, y)) = world_pins.iter().find(|(num, _, _)| num == kicad_pin) else {
                 continue;
             };
-            if power_rails.contains(node_name.as_str()) {
-                let d = (y_top - y).max(0.0);
-                total += d * d;
-            } else if node_name == "0" {
-                let d = (y - y_bot).max(0.0);
-                total += d * d;
-            }
+            let d = match prefs.get(node_name.as_str()) {
+                // Positive rail → screen top → minimum Y.
+                Some(VertPref::Up) => (y - y_min).max(0.0),
+                // Ground / negative rail → screen bottom → maximum Y.
+                Some(VertPref::Down) => (y_max - y).max(0.0),
+                // Signal net → no vertical preference.
+                None => continue,
+            };
+            total += d * d;
         }
     }
     total
@@ -711,7 +742,7 @@ fn pin_extents_y(pin_world: &PinWorld) -> (f64, f64) {
     if y_min.is_infinite() || y_max.is_infinite() {
         (0.0, 0.0)
     } else {
-        (y_max, y_min)
+        (y_min, y_max)
     }
 }
 
@@ -733,6 +764,87 @@ fn pin_extents_x(pin_world: &PinWorld) -> (f64, f64) {
     } else {
         (x_min, x_max)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Rail-stub alignment
+// ---------------------------------------------------------------------------
+
+/// Squared screen-X offset of every *rail stub* from the node it hangs
+/// off.
+///
+/// # The convention being encoded
+///
+/// A two-terminal part with one pin on a supply/ground rail and the
+/// other on a signal net is a **stub**: it does not pass a signal
+/// along, it terminates one. Schematic convention draws such a part as
+/// a straight vertical drop from the node it serves — a collector load
+/// sits *directly above* the collector, an emitter resistor and its
+/// bypass cap sit *directly below* the emitter. Drawn off-axis, the
+/// router has to jog sideways and the reader loses the "this resistor
+/// belongs to that terminal" cue.
+///
+/// [`rail_direction`] already decides which *side* (up for a positive
+/// rail, down for ground / a negative rail) a stub falls on. This term
+/// supplies the missing X: it pulls the stub's signal pin onto the
+/// column of the node it terminates.
+///
+/// # Anchor selection (structural, not topological pattern-matching)
+///
+/// For a stub on signal net `S`, the anchor is the mean X of `S`'s pins
+/// on **multi-terminal (>= 3 pin) elements** — transistors, opamps,
+/// sheet instances — falling back to every other non-stub pin on `S`
+/// when `S` touches no such element. The discriminator is pin *count*,
+/// a structural fact of the resolved symbol; nothing here matches on
+/// refdes, element kind, or a named topology, so a new circuit type
+/// needs no code change (CLAUDE.md principle 9). Preferring the active
+/// device is what makes `RC` land on `Q1`'s collector rather than
+/// halfway between `Q1` and `COUT`.
+///
+/// Stubs on `S` are excluded from `S`'s own anchor set, so two stubs on
+/// one node (an emitter resistor and its bypass capacitor) are both
+/// pulled to the device pin rather than to each other.
+///
+/// This is a **soft cost**, deliberately: "how far off-column is it" is
+/// a continuous quality gradient with no single correct value, which
+/// CLAUDE.md's decision rule assigns to the objective rather than to a
+/// candidate-space filter. It is the same flavour and tier (V6, Tier 2)
+/// as the existing `layer_order` / `band_*` terms. The competing
+/// `overlap` term keeps two stubs on one node from stacking into each
+/// other.
+fn rail_stub_alignment(
+    placement: &Placement,
+    checked: &CheckedNetlist,
+    pin_world: &PinWorld,
+) -> f64 {
+    let stubs = crate::idioms::detect_rail_stubs(checked);
+    if stubs.is_empty() {
+        return 0.0;
+    }
+    let mut total = 0.0;
+    for s in &stubs {
+        let Some(kicad_pin) = checked
+            .elements
+            .get(s.element)
+            .and_then(|e| e.pin_mapping.get(s.signal_term))
+        else {
+            continue;
+        };
+        let Some(&(_, x, _)) = pin_world
+            .get(s.element)
+            .and_then(|pins| pins.iter().find(|(n, _, _)| n == kicad_pin))
+        else {
+            continue;
+        };
+        let Some(target) =
+            crate::idioms::rail_stub_anchor_x(placement, checked, &stubs, &s.signal_net)
+        else {
+            continue;
+        };
+        let d = x - target;
+        total += d * d;
+    }
+    total
 }
 
 // ---------------------------------------------------------------------------
@@ -1153,6 +1265,7 @@ fn net_bbox_crossings(nets: &[Net]) -> f64 {
 mod tests {
     use super::*;
     use crate::PlacedElement;
+    use spice_resolve::ElementRole;
     use kicad_symbols::{Library, Orientation};
     use spice_diagnostics::FileId;
     use spice_policy::check;

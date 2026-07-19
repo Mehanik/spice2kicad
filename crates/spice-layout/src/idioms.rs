@@ -58,8 +58,8 @@ use spice_resolve::{ElementKind, ResolvedElement};
 
 use kicad_symbols::{Orientation, Symbol};
 
-use crate::net_class::{NetClass, classify_nets};
-use crate::{GridPoint, Placement, WorldExtent, vertical_stride_cells, world_extent};
+use crate::net_class::{NetClass, VertPref, classify_nets};
+use crate::{CELL_W, GridPoint, Placement, WorldExtent, vertical_stride_cells, world_extent};
 
 /// True for a two-terminal passive (`R` / `C` / `L`) — the element kinds
 /// the parallel-pair and shared-node idioms treat as stackable loads.
@@ -530,6 +530,263 @@ pub(crate) fn apply_shared_centers(
         placement.elements[el].origin =
             GridPoint::new(placement.elements[el].origin.x + dx_cells, max_q_y + stride);
         pinned[el] = true;
+    }
+}
+
+// ===========================================================================
+// Idiom 4 — RAIL STUB column
+// ===========================================================================
+
+/// A two-terminal element with exactly one pin on a supply/ground rail
+/// and the other on signal net `signal_net` (its terminal index is
+/// `signal_term`). `side` is the screen direction the rail pin faces —
+/// [`VertPref::Up`] for a positive supply, [`VertPref::Down`] for ground
+/// or a negative rail.
+///
+/// A stub does not pass a signal along, it *terminates* one: a collector
+/// load, an emitter resistor, a bypass capacitor, a pull-up. Schematic
+/// convention draws it as a straight vertical drop from the node it
+/// serves, which is what [`apply_rail_stub_columns`] enforces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RailStub {
+    pub element: usize,
+    pub signal_net: String,
+    pub signal_term: usize,
+    pub side: VertPref,
+}
+
+/// Detect every rail stub in `checked`.
+///
+/// Predicate, entirely structural (CLAUDE.md principle 9 — no refdes,
+/// element-kind or named-topology matching): the element has exactly two
+/// terminals on two *distinct* nets, exactly one of which carries a
+/// [`VertPref`] (i.e. is a power, ground or negative-supply rail per
+/// [`crate::net_class::vertical_prefs`]). An element with both terminals
+/// on rails (a decoupling capacitor, a supply source) or neither (a
+/// series element) is not a stub. Deterministic order, sorted by element
+/// index.
+pub(crate) fn detect_rail_stubs(checked: &CheckedNetlist) -> Vec<RailStub> {
+    let prefs = crate::net_class::vertical_prefs(checked);
+    let mut out = Vec::new();
+    for (i, e) in checked.elements.iter().enumerate() {
+        if e.nodes.len() != 2 {
+            continue;
+        }
+        let (a, b) = (e.nodes[0].as_str(), e.nodes[1].as_str());
+        if a == b {
+            continue; // degenerate short
+        }
+        let (pa, pb) = (prefs.get(a).copied(), prefs.get(b).copied());
+        let (signal_net, signal_term, side) = match (pa, pb) {
+            (Some(side), None) => (b, 1, side),
+            (None, Some(side)) => (a, 0, side),
+            _ => continue,
+        };
+        out.push(RailStub {
+            element: i,
+            signal_net: signal_net.to_string(),
+            signal_term,
+            side,
+        });
+    }
+    out
+}
+
+/// The X column a rail stub on `net` should occupy: the mean world X of
+/// `net`'s **vertically-facing** pins on **multi-terminal (>= 3 pin)
+/// elements**, falling back to every non-stub vertically-facing pin on
+/// `net` when the net touches no such element.
+///
+/// Preferring the active device is what makes a collector load land on
+/// the transistor's collector rather than halfway between the transistor
+/// and the next series element. The discriminator is pin *count* — a
+/// structural fact of the resolved symbol — so no circuit type needs
+/// special-casing.
+///
+/// # Why only vertically-facing anchor pins (load-bearing)
+///
+/// A stub is drawn as a vertical drop, so it can only hang off a pin
+/// that actually points up or down. Anchoring on a *horizontally*-facing
+/// pin puts the stub column straight through that pin, and the net's
+/// trunk then runs vertically across it — leaving the pin with no
+/// outward-extending first segment, which is a **V5 violation**.
+///
+/// Measured, not assumed. An earlier revision anchored on any pin and
+/// regressed V5 on three fixtures at once: `common_emitter` 0 -> 2
+/// (`Q1`'s base pin, angle 180, with the `R1`/`R2` bias divider snapped
+/// into its exact column), `multivibrator` 4 -> 5, `opamp_inverting`
+/// 0 -> 1 — all the same shape, a divider column landing on a
+/// horizontal base/input pin. Restricting the anchor to vertical pins
+/// keeps every collector/emitter stub (the cases this idiom exists for,
+/// and the ones the user reported) while leaving base-fed dividers where
+/// the layer seeder put them, which is where they must stay for the base
+/// pin to get its horizontal first segment.
+///
+/// Returns `None` when `net` has no usable anchor pin — every member is
+/// itself a stub on that net, or every candidate pin faces sideways. A
+/// `None` anchor means "no opinion": the stub keeps its seed column.
+pub(crate) fn rail_stub_anchor_x(
+    placement: &Placement,
+    checked: &CheckedNetlist,
+    stubs: &[RailStub],
+    net: &str,
+) -> Option<f64> {
+    let mut multi: Vec<f64> = Vec::new();
+    let mut any: Vec<f64> = Vec::new();
+    for (i, e) in checked.elements.iter().enumerate() {
+        // A stub is never an anchor for the net it stubs off.
+        if stubs.iter().any(|s| s.element == i && s.signal_net == net) {
+            continue;
+        }
+        let Some(ti) = e.nodes.iter().position(|n| n == net) else {
+            continue;
+        };
+        let Some(want) = e.pin_mapping.get(ti) else {
+            continue;
+        };
+        let pe = &placement.elements[i];
+        // Vertically-facing pins only (see the doc comment above).
+        let Some(pin) = e
+            .symbol
+            .pins_in(pe.orientation)
+            .into_iter()
+            .find(|p| &p.number == want)
+        else {
+            continue;
+        };
+        if pin.angle % 180 == 0 {
+            continue; // faces left/right — a stub cannot hang off it
+        }
+        let Some(x) = world_pin_x_of(pe, &e.symbol, net) else {
+            continue;
+        };
+        if e.nodes.len() >= 3 {
+            multi.push(x);
+        }
+        any.push(x);
+    }
+    let xs = if multi.is_empty() { any } else { multi };
+    if xs.is_empty() {
+        return None;
+    }
+    #[allow(clippy::cast_precision_loss)] // pin counts are tiny.
+    let mean = xs.iter().sum::<f64>() / xs.len() as f64;
+    Some(mean)
+}
+
+/// Move every unpinned rail stub into the column of the node it
+/// terminates, so the stub hangs straight off that node instead of
+/// jogging sideways to reach it.
+///
+/// Stubs are grouped by `(signal net, side)`. A group is spread
+/// symmetrically about the anchor column at a geometry-derived
+/// horizontal stride, so two stubs on the same node and the same side
+/// (an emitter resistor and its bypass capacitor) sit side by side at a
+/// legal spacing instead of stacking into each other. Stubs on the same
+/// node but opposite sides (a bias divider's top and bottom resistor)
+/// each take the anchor column outright — the conventional single-column
+/// divider — because they are separated vertically by
+/// [`crate::cost::rail_direction`].
+///
+/// Only X changes: which side of the device a stub falls on is
+/// `cost::rail_direction`'s concern, and the stub's Y is left exactly as
+/// the band seeder placed it. Elements
+/// already `pinned` by a user `align` / `place` directive, by V7
+/// symmetry, or by an earlier idiom are skipped, so an explicit
+/// annotation always wins. Stubs are *not* pinned by this pass — unlike
+/// the divider and shared-centre idioms it emits a better starting
+/// column and then lets the SA refine, because a stub column is a
+/// preference rather than a structural invariant.
+///
+/// `[crate::cost::rail_stub_alignment]` scores the same property, so the
+/// seed and the objective agree on where a stub belongs (the ADR-14
+/// single-source lesson: a seed-time placement and a refine-time score
+/// that disagree let the refiner silently undo the seed).
+pub(crate) fn apply_rail_stub_columns(
+    placement: &mut Placement,
+    pinned: &[bool],
+    checked: &CheckedNetlist,
+    stubs: &[RailStub],
+) {
+    // Group by (signal net, side), preserving element-index order.
+    let mut groups: HashMap<(&str, VertPref), Vec<&RailStub>> = HashMap::new();
+    for s in stubs {
+        groups
+            .entry((s.signal_net.as_str(), s.side))
+            .or_default()
+            .push(s);
+    }
+    let mut keys: Vec<(&str, VertPref)> = groups.keys().copied().collect();
+    keys.sort_unstable_by_key(|(net, side)| (*net, matches!(side, VertPref::Down)));
+
+    for key in keys {
+        let members = &groups[&key];
+        let Some(anchor_x) = rail_stub_anchor_x(placement, checked, stubs, key.0) else {
+            continue;
+        };
+        // A group containing ANY pinned member is left entirely alone.
+        //
+        // The pin means something stronger than this heuristic already
+        // decided that column — a position-cache hint (ADR-4), V7
+        // symmetry, or an earlier idiom. Re-spreading the group around
+        // the anchor would move the *pinned* member's neighbours out
+        // from under it and, worse, silently break position stability:
+        // measured on `tests/layout_cache.rs`, adding one resistor to
+        // the `rc_lowpass` netlist made the new `R2` land in the exact
+        // column of the already-cached `C1` (both stubs on `out`,
+        // both on the ground side), because the pinned `C1` was skipped
+        // without consuming its slot. Skipping the whole group keeps the
+        // cached frame reproducible; the newcomer simply keeps the
+        // column the layer seeder gave it, which is no worse than before
+        // this idiom existed.
+        if members.iter().any(|s| pinned[s.element]) {
+            continue;
+        }
+        let movable: Vec<&RailStub> = members.clone();
+        if movable.is_empty() {
+            continue;
+        }
+
+        // Geometry-derived horizontal stride: the widest pair of
+        // adjacent extents in the group, so no two members clip.
+        let mut stride = CELL_W;
+        for w in movable.windows(2) {
+            let a = world_extent(
+                &checked.elements[w[0].element].symbol,
+                placement.elements[w[0].element].orientation,
+                None,
+            );
+            let b = world_extent(
+                &checked.elements[w[1].element].symbol,
+                placement.elements[w[1].element].orientation,
+                None,
+            );
+            let gap_mm = a.max_x + (-b.min_x) + crate::MIN_CLEARANCE_MM;
+            stride = stride.max(crate::mm_up_to_cells(gap_mm));
+        }
+
+        // Spread symmetrically about the anchor column.
+        let count = i32::try_from(movable.len()).unwrap_or(1);
+        for (slot, s) in movable.iter().enumerate() {
+            let el = s.element;
+            let Some(cur_x) = world_pin_x_of(
+                &placement.elements[el],
+                &checked.elements[el].symbol,
+                &s.signal_net,
+            ) else {
+                continue;
+            };
+            let slot_i = i32::try_from(slot).unwrap_or(0);
+            // Offset in cells of this slot from the group centre.
+            let offset_cells = slot_i * stride - (count - 1) * stride / 2;
+            let target_x = anchor_x + f64::from(offset_cells) * GridPoint::STEP_MM;
+            #[allow(clippy::cast_possible_truncation)]
+            let dx_cells = ((target_x - cur_x) / GridPoint::STEP_MM).round() as i32;
+            placement.elements[el].origin = GridPoint::new(
+                placement.elements[el].origin.x + dx_cells,
+                placement.elements[el].origin.y,
+            );
+        }
     }
 }
 

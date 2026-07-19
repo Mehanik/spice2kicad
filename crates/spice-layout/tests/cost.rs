@@ -398,6 +398,18 @@ fn rail_direction_power_above_zero_below() {
     // R1 is connected only to ground (and an unrelated signal node);
     // V1 is the power source. With the rail and the ground tied to
     // distinct elements, the ordering is no longer mirror-symmetric.
+    //
+    // NOTE ON THE Y CONVENTION. Screen Y **increases downward** — the
+    // top of the sheet is *minimum* Y. This test previously asserted
+    // the opposite, calling `V1 @ y=8, R1 @ y=0` the "correct"
+    // placement, i.e. VCC below ground. It passed only because
+    // `cost::rail_direction` read `pin_extents_y` as `(y_max, y_min)`
+    // and so pulled positive rails to the screen bottom and ground to
+    // the screen top. The term dominates the objective (~97% of the
+    // weighted total on `common_emitter`), so that inversion was
+    // pushing every single-rail element to the wrong side of the
+    // device it serves. Both the term and this expectation are now the
+    // right way up; the assertion below is unchanged in strength.
     let rn = ResolvedNetlist {
         elements: vec![
             make_v_power("V1", "vcc"),
@@ -411,8 +423,10 @@ fn rail_direction_power_above_zero_below() {
     };
     let checked = checked_from_resolved(rn);
 
-    let p_correct = manual_placement(&checked, &[(0, 8), (0, 0)]);
-    let p_swapped = manual_placement(&checked, &[(0, 0), (0, 8)]);
+    // Correct: V1 (vcc) at the top of the sheet (min Y), R1's ground
+    // pin at the bottom (max Y). Swapped inverts them.
+    let p_correct = manual_placement(&checked, &[(0, 0), (0, 8)]);
+    let p_swapped = manual_placement(&checked, &[(0, 8), (0, 0)]);
 
     let bd_correct = breakdown(&p_correct, &checked, fixture_library());
     let bd_swapped = breakdown(&p_swapped, &checked, fixture_library());

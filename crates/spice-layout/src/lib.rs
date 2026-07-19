@@ -543,6 +543,11 @@ pub fn place_with_hint(
     let dividers = idioms::detect_dividers(&checked);
     idioms::apply(&mut placement, &mut pinned, &checked, &dividers);
     apply_position_idioms(&mut placement, &mut pinned, &checked);
+    // Idiom 4: pull each rail stub into the column of the node it
+    // terminates. Runs last among the seed idioms so it can read every
+    // stronger pin (hint / symmetry / divider / shared-centre) and skip
+    // those columns, and BEFORE `pick_orientations` like its siblings.
+    apply_rail_stub_columns(&mut placement, &pinned, &user_pinned, &checked);
     // V14: per-element allowed-orientation set (power pin up / ground
     // pin down). A *hard* candidate-space filter, threaded into both
     // the V5 seed chooser below and the SA refiner so the constraint is
@@ -654,6 +659,118 @@ fn legalize_if_needed(
 fn apply_position_idioms(placement: &mut Placement, pinned: &mut [bool], checked: &CheckedNetlist) {
     let centers = idioms::detect_shared_node_centers(checked);
     idioms::apply_shared_centers(placement, pinned, checked, &centers);
+}
+
+/// Seed pass: move rail stubs into the column of the node they
+/// terminate (idiom 4, `idioms::apply_rail_stub_columns`).
+///
+/// # Why this is a seed pass and not left to the SA
+///
+/// A stub's X comes from `assign_x_layers`, which prunes rail edges from
+/// the signal DAG — so a part whose *only* signal connection is the node
+/// it hangs off gets a column with no relation to that node. That is a
+/// **seed** defect, and `docs/layout-adr.md` ("Symbol-body overlap … is a
+/// *seed* defect") records the rule that seed defects must not be
+/// attacked from inside the annealer. Measured here too: with only the
+/// `cost::rail_stub_alignment` term added and no seed pass,
+/// `common_emitter`'s `RC` did not move at all, and `diff_pair`'s
+/// `RC1`/`RC2` *cannot* move — they are pinned by the fixture's own
+/// `*@align horizontal RC1 RC2`, so the SA never gets a vote.
+///
+/// # What may move, and the guarantee that user intent survives
+///
+/// `x_locked` marks every element whose **X** is owned by something
+/// stronger than this heuristic: anything pinned by the position-cache
+/// hint, by V7 symmetry, or by an earlier idiom (all of which are
+/// `pinned` after the seed but were not `user_pinned` by it), plus every
+/// member of an `*@align vertical` cluster, whose shared column *is* the
+/// constraint.
+///
+/// Members of an `*@align horizontal` cluster and targets of a `*@place`
+/// directive are deliberately **not** locked. `align horizontal`
+/// constrains a shared *row*; the X spread the seeder gives its members
+/// is an arbitrary by-product, and correcting it is exactly defect 4
+/// (`diff_pair`'s `RC1`/`RC2` sitting left of the transistors they load).
+/// `place=right-of` constrains an *ordering*, which survives moving both
+/// sides. To make that safe rather than merely likely, the pass is
+/// applied to a clone and **reverted wholesale** if any `place` relation
+/// no longer holds afterwards. Y is never touched, so `align horizontal`
+/// is preserved by construction.
+fn apply_rail_stub_columns(
+    placement: &mut Placement,
+    pinned: &[bool],
+    user_pinned: &[bool],
+    checked: &CheckedNetlist,
+) {
+    let stubs = idioms::detect_rail_stubs(checked);
+    if stubs.is_empty() {
+        return;
+    }
+
+    let mut x_locked: Vec<bool> = pinned
+        .iter()
+        .zip(user_pinned)
+        .map(|(p, u)| *p && !*u)
+        .collect();
+
+    let refdes_to_index: HashMap<&str, usize> = placement
+        .elements
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.refdes.as_str(), i))
+        .collect();
+    for spec in &checked.align {
+        if spec.axis != Axis::Vertical {
+            continue;
+        }
+        for r in &spec.refdes {
+            if let Some(&i) = refdes_to_index.get(r.as_str()) {
+                x_locked[i] = true;
+            }
+        }
+    }
+
+    let before = placement.clone();
+    idioms::apply_rail_stub_columns(placement, &x_locked, checked, &stubs);
+    if !place_x_relations_hold(placement, checked) {
+        log::debug!("rail-stub columns: reverted (a `place` X relation would break)");
+        *placement = before;
+    }
+}
+
+/// True when every `*@place` directive's horizontal ordering still holds.
+///
+/// Only `RightOf` / `LeftOf` constrain X; `Above` / `Below` are vertical
+/// and this pass never changes Y. Compared on element origins, which is
+/// the coordinate the stub pass actually shifts.
+fn place_x_relations_hold(placement: &Placement, checked: &CheckedNetlist) -> bool {
+    let idx: HashMap<&str, usize> = placement
+        .elements
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.refdes.as_str(), i))
+        .collect();
+    for spec in &checked.place {
+        let (Some(&t), Some(&a)) = (
+            idx.get(spec.refdes.as_str()),
+            idx.get(spec.anchor.as_str()),
+        ) else {
+            continue;
+        };
+        let (tx, ax) = (
+            placement.elements[t].origin.x,
+            placement.elements[a].origin.x,
+        );
+        let ok = match spec.relation {
+            Relation::RightOf => tx > ax,
+            Relation::LeftOf => tx < ax,
+            Relation::Above | Relation::Below => true,
+        };
+        if !ok {
+            return false;
+        }
+    }
+    true
 }
 
 /// Per-element refinement metadata for the routing-aware orientation
