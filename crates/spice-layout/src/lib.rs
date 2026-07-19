@@ -24,6 +24,7 @@
 #![forbid(unsafe_code)]
 
 pub mod bands;
+pub mod compact;
 pub mod cost;
 pub mod glyph_geom;
 mod idioms;
@@ -557,17 +558,25 @@ pub fn place_with_hint(
     pick_orientations(&mut placement, &pinned, &checked, &allowed);
 
     let glyph_prefs = net_class::vertical_prefs(&checked);
-    if !opts.refine {
-        legalize_if_needed(
-            &mut placement,
-            &user_pinned,
-            &checked,
-            library,
-            &glyph_prefs,
-        );
-        return Ok(placement);
-    }
-    let mut placement = solver::refine(placement, &pinned, &checked, library, opts, &allowed);
+    // ADR-17 stage 8 — deterministic, order-preserving compaction.
+    //
+    // This is the pass that replaced the simulated annealer. The ablation
+    // in ADR-17 measured the SA's entire contribution as *compaction* —
+    // pulling the generous structural-seed strides tight — which is
+    // deterministic work, so it is done deterministically here. Unlike the
+    // SA it is order-preserving, monotone and local, which is what makes a
+    // change's diff attributable to the change (P11).
+    //
+    // The annealer stays reachable behind `LayoutOptions::refine`
+    // (`--sa-refine`) so the ablation remains reproducible; the two are
+    // alternatives, not a pipeline, and `refine` selects the old path
+    // byte-for-byte.
+    let mut placement = if opts.refine {
+        solver::refine(placement, &pinned, &checked, library, opts, &allowed)
+    } else {
+        compact::compact(&mut placement, &pinned, &checked, library, &glyph_prefs);
+        placement
+    };
     // Legalization is a **last resort, after refinement** — not a seed pass.
     //
     // The original argument for legalizing the seed was that a hard filter

@@ -203,6 +203,7 @@ fn greedy_descent(
                 if (m.v13, m.v12, m.v5, m.bends)
                     < (baseline.v13, baseline.v12, baseline.v5, baseline.bends)
                     && m.v11 <= baseline.v11
+                    && m.severed <= baseline.severed
                     && m.overlap <= baseline.overlap
                     && m.v12 <= baseline.v12
                 {
@@ -360,6 +361,7 @@ fn joint_search(
         // function's acceptance gate: bends must stay the FINAL key.
         if (m.v13, m.v12, m.v5, m.bends) < (baseline.v13, baseline.v12, baseline.v5, baseline.bends)
             && m.v11 <= baseline.v11
+            && m.severed <= baseline.severed
             && m.overlap <= baseline.overlap
             && m.v12 <= baseline.v12
         {
@@ -437,6 +439,10 @@ struct Measure {
     /// Always the FINAL key of the acceptance tuple; see the ordering
     /// contract on `greedy_descent`'s gate.
     bends: usize,
+    /// Signal nets the trial route leaves severed — Tier 0. A pure
+    /// non-regression guard, never part of the objective tuple: there is
+    /// nothing to *seek* here, connectivity is a floor.
+    severed: usize,
     offenders: Vec<Violation>,
     v12_offenders: Vec<String>,
 }
@@ -454,6 +460,7 @@ fn measure(placement: &Placement, library: &Library) -> Measure {
     Measure {
         v5: offenders.len(),
         v11: route.v11_count,
+        severed: route.severed,
         overlap,
         v12,
         v13,

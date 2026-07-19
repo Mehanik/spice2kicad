@@ -1646,6 +1646,22 @@ pub(crate) struct TrialRoute {
     /// Number of `v11:` warnings (router could not detour off a foreign
     /// pin). Must not increase under a candidate orientation.
     pub v11_count: usize,
+    /// Number of signal nets the trial route leaves **severed** — some
+    /// pin with no wire path to the others, under KiCad's endpoint-only
+    /// join rule.
+    ///
+    /// This is Tier 0: a severed net is a schematic that does not wire up
+    /// the source circuit, and the CLI's post-emit connectivity check
+    /// refuses to ship it. The refinement gate needs it because the
+    /// router's escape hatches are not total — when a candidate
+    /// orientation boxes a pin in between a foreign pin (V11) and a
+    /// symbol body (V12), the conflict cascade can exhaust its detours
+    /// and drop the branch. Measured on `common_emitter`: rotating COUT
+    /// to 180 put its `c` pin where the only two L-routes were blocked
+    /// one by V11 and the other by Q1's body, and the net came apart.
+    /// Every other metric in `Measure` improved, so without this term the
+    /// gate accepted it.
+    pub severed: usize,
 }
 
 /// Run the *real* router over `placement` and return its wire segments
@@ -1726,15 +1742,75 @@ pub(crate) fn trial_route(placement: &Placement, library: &Library) -> TrialRout
         .iter()
         .filter(|w| w.starts_with("v11:"))
         .count();
-    let segments = result
+    let segments: Vec<crate::v5::WireSegment> = result
         .sexprs
         .iter()
         .filter_map(wire_segment_from_lexpr)
         .collect();
+    let severed = severed_net_count(&specs, &segments);
     TrialRoute {
         segments,
         v11_count,
+        severed,
     }
+}
+
+/// How many `Signal` nets in `specs` are left disconnected by `segments`.
+///
+/// Uses KiCad's own rule (`SCH_LINE::GetConnectionPoints`): wires join
+/// only where **endpoints** coincide. The router's cleanup pass has
+/// already split interior attachments into real endpoints by the time
+/// these segments exist, so a union-find over endpoints is exact.
+///
+/// Rail nets are excluded: decoration terminates them in `power:*`
+/// glyphs, which carry connectivity by net name rather than by wire, so
+/// "no wire" is the correct routing for them, not a defect.
+fn severed_net_count(
+    specs: &[spice_route::NetSpec],
+    segments: &[crate::v5::WireSegment],
+) -> usize {
+    #[allow(clippy::cast_possible_truncation)]
+    let q = |v: f64| (v * 1000.0).round() as i64;
+
+    // Union-find over quantised endpoints, shared by every net — two
+    // nets never share an endpoint in a V11-clean route, and where they
+    // do the geometry is already shorted and reported elsewhere.
+    let mut parent: std::collections::HashMap<(i64, i64), (i64, i64)> =
+        std::collections::HashMap::new();
+    fn find(
+        parent: &mut std::collections::HashMap<(i64, i64), (i64, i64)>,
+        k: (i64, i64),
+    ) -> (i64, i64) {
+        let p = *parent.entry(k).or_insert(k);
+        if p == k {
+            return k;
+        }
+        let root = find(parent, p);
+        parent.insert(k, root);
+        root
+    }
+    for &((x1, y1), (x2, y2)) in segments {
+        let (a, b) = ((q(x1), q(y1)), (q(x2), q(y2)));
+        let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+        if ra != rb {
+            parent.insert(ra, rb);
+        }
+    }
+
+    specs
+        .iter()
+        .filter(|s| matches!(s.class, spice_layout::net_class::NetClass::Signal) && s.pins.len() >= 2)
+        .filter(|s| {
+            let mut roots = s
+                .pins
+                .iter()
+                .map(|p| find(&mut parent, (q(p.x_mm), q(p.y_mm))));
+            let Some(first) = roots.next() else {
+                return false;
+            };
+            !roots.all(|r| r == first)
+        })
+        .count()
 }
 
 /// Extract `((x1,y1),(x2,y2))` from a `(wire (pts (xy …) (xy …)))`

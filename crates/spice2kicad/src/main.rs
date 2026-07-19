@@ -46,11 +46,12 @@ struct Cli {
     #[arg(short = 'l', long = "lib")]
     libs: Vec<PathBuf>,
 
-    /// Skip the stage-3 force-directed + simulated-annealing
-    /// refinement after the deterministic seed placer (default is to
-    /// run it). Schematic target only.
+    /// Use the legacy force-directed + simulated-annealing refiner
+    /// instead of the deterministic compaction pass (ADR-17 stage 2).
+    /// Retained so the SA ablation stays reproducible; the default —
+    /// deterministic compaction — is what ships. Schematic target only.
     #[arg(long)]
-    no_refine: bool,
+    sa_refine: bool,
 
     /// Iteration cap for the SA refiner (default 200).
     #[arg(long)]
@@ -210,7 +211,7 @@ fn emit_schematic_target(
     }
 
     let opts = LayoutOptions {
-        refine: !cli.no_refine,
+        refine: cli.sa_refine,
         refine_iterations: cli.refine_iterations.unwrap_or(200),
         ..LayoutOptions::default()
     };
@@ -310,12 +311,17 @@ fn emit_schematic_target(
     // orientations with the *real* router and selects the one minimising
     // the router's measured first-segment-outward (V5) violations,
     // without regressing V11/V12/symbol-overlap. It changes orientation
-    // only (never position); decoration remains a strict consumer. Skip
-    // when refinement is disabled (`--no-refine`), keeping the un-refined
-    // SA path unchanged.
-    if opts.refine {
-        kicad_emitter::refine_orientations(&mut placement, &library, &refine_meta);
-    }
+    // only (never position); decoration remains a strict consumer.
+    //
+    // It runs unconditionally. It used to be gated on `opts.refine`, which
+    // silently made `--no-refine` an ablation of TWO passes rather than
+    // one — ADR-17's own ablation table states phase 4.5 "still runs in
+    // both arms", and at the time it did not. That conflation mattered:
+    // with phase 4.5 restored, the un-annealed seed scores far better than
+    // the ADR recorded (`common_emitter` B 11 → 4, WL 121.9 → 59.7 mm).
+    // Phase 4.5 is not part of the SA and is not what `--sa-refine`
+    // selects.
+    kicad_emitter::refine_orientations(&mut placement, &library, &refine_meta);
 
     // V6: position each hierarchical-sheet instance adjacent to the
     // circuitry it shares signal nets with, rather than at a fixed
