@@ -148,6 +148,16 @@ invariant here.
   downstream of `crates/spice-layout/src/` (the placer chooses
   orientation; the router measures the consequence).
 
+  **A left→right flow preference is NOT a refinement of V5 — it can
+  contradict it.** "Series signal elements are drawn horizontal" is a
+  *proxy* for readability that on real fixtures disagrees with the
+  router's measured V5 (and with V12/V13/V16). Two attempts to encode it
+  in the placer — a seed/SA orientation tie-break, and a hard
+  `allowed`-set filter in `orient.rs` — were both measured and abandoned;
+  see the ADR-15 Stage-5 post-mortem in `docs/layout-adr.md` for the
+  per-fixture numbers. Do not treat "make it horizontal" as a V5
+  improvement.
+
 - **V6 — Structural layered placement.** The placer must infer a
   readable layout from net structure alone — without matching named
   topologies — via a three-stage pipeline:

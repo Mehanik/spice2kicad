@@ -307,7 +307,10 @@ force-directed for that cluster.
      `detect_shared_node_centers` → `apply` in
      `lib::apply_position_idioms`). The parallel-pair detector's
      *placement* effect is currently deferred (kept for its unit tests
-     only, v0.2) because it fights the signal-flow orientation wall.
+     only, v0.2) because it fights the signal-flow orientation wall
+     (ADR-15 Stage-5 post-mortem: two attempts measured and abandoned;
+     the wall is that the flow proxy disagrees with the router's
+     measured V5, not that Tier-0 V11 or phase 4.5 blocks it).
   3. **Rail-stub column** — a two-terminal element with exactly one
      rail-class pin (power/ground/negative-supply, per
      `net_class::vertical_prefs`) gets X-column-anchored under the

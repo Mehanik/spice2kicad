@@ -1540,7 +1540,7 @@ one was a wrong rule someone would otherwise have coded):
 | 2 | stub column assignment | **LANDED** — `idioms.rs` idiom 4 (column only; does *not* pin — see below) |
 | 3 | `align` shared-axis-only semantics | **NOT LANDED** — needs an annotation-spec change and owner sign-off |
 | 4 | flow hardening, positions only | **LANDED** (`b8f5df1`) — monotone flow-order gate in `anneal.rs` |
-| 5 | flow orientation via `allowed`-set filtering in `orient.rs` | **NOT STARTED** — blocked on the "flow-orientation wall" |
+| 5 | flow orientation via `allowed`-set filtering in `orient.rs` | **IMPLEMENTED, MEASURED, ABANDONED** — reverted; see the Stage-5 post-mortem below |
 | 6 | consolidation | not started |
 
 ### Measured corrections — where the design's claims do not match the code
@@ -1591,17 +1591,113 @@ Recorded deliberately, so the next reader re-derives nothing:
   re-attempts it blind. Note the `rc_lowpass_ports` B budget is at
   **2** today, past its own pre-escape mark of 3; the rejected change
   would have spent that hard-won ratchet for nothing.
-- **Stage 5 was unbuilt as of `b8f5df1`, and is being attempted now.**
-  At the commit this ADR was written against, `orient.rs` was purely
-  V14 (`allowed_orientations` at `:110`, filtering `Orientation::ALL`
-  by `satisfies_v14`) with no flow-orientation logic in the tree; work
-  on it is in flight, so check the code rather than this line for its
-  current state. The obstacle is recorded as the "flow-orientation
-  wall": a left→right
-  flow preference expressed as a seed/SA orientation tie-break regresses
-  Tier-0 V11 and is undone by the phase-4.5 V5 oracle. If Stage 5 is
-  attempted, it must be an `allowed`-set *filter* — not a tie-break —
-  so that phase 4.5 can only select from within it.
+- **Stage 5 was implemented, measured, and ABANDONED (reverted).** See
+  the dedicated post-mortem immediately below. `orient.rs` at HEAD is
+  again purely V14 (`allowed_orientations` at `:110`, filtering
+  `Orientation::ALL` by `satisfies_v14`) with no flow-orientation logic
+  in the tree.
+
+### Stage-5 post-mortem — flow orientation via `allowed`-set filtering
+
+**Status: tried, measured, reverted. Do not re-attempt as-is.**
+
+**What was implemented** (all inside `orient.rs::allowed_orientations`,
+no other crate touched):
+
+- `is_series_signal_element` — the structural discriminator: 2-terminal,
+  role is not `Power`, and NEITHER node appears in `vertical_prefs` (so
+  ground, supply and negative-supply rails are all excluded). Purely
+  pin-role-derived; no element-kind and no refdes matching, per CLAUDE.md
+  principle 9.
+- `horizontal_axis_subset` — filters the candidate set down to the
+  orientations where every mapped pin is `ScreenFacing::Horizontal`,
+  falling back to `base` when the filtered set is empty.
+- Series elements fall into the existing
+  `nodes.len() <= 2 && !has_rail_pin` early-return branch
+  (`orient.rs:140`), so intersecting with V14 is **vacuously safe**: a
+  series element has no rail pin by construction, therefore V14
+  constrains nothing and nothing is lost to the intersection.
+
+**The mechanism worked.** Both owner-reported defects were fixed:
+
+| Fixture | Element | Before | After |
+| ------- | ------- | ------ | ----- |
+| `common_emitter` | COUT | `(at 90.17 52.07 0)` (vertical) | `(at 78.74 48.26 90)` (horizontal) |
+| `rc_lowpass_ports` | R1 | `(at 41.91 35.56 180)` | rot 90 (horizontal) |
+
+The structural discriminator behaved exactly as designed: COUT went
+horizontal while CE (a bypass capacitor, i.e. a rail stub) correctly
+stayed vertical — decided from pin roles alone.
+
+**Tier 0 HELD.** V11 and V2/ERC were clean. This matters: the prior
+"flow-orientation wall" record predicted a Tier-0 V11 regression *plus*
+the phase-4.5 V5 oracle undoing the change. **Neither recurred.** The
+`allowed`-set filter genuinely is structurally different from a seed/SA
+tie-break, and it did survive phase 4.5 — exactly as this ADR argued it
+would. That half of the wall is disproven.
+
+**It failed on Tier 1 instead:**
+
+| Invariant | Fixture | Before → After | Budget |
+| --------- | ------- | -------------- | ------ |
+| V12 (foreign-body wire crossings) | `rc_lowpass` | 0 → 2 | 0 |
+| V13 (label↔body overlap) | `rc_lowpass_ports` | 0 → 1 | 0 |
+| V16 bends (B) | `common_emitter` | 4 → 11 | ratchet |
+| V16 branches (J) | `opamp_inverting_real` | 0 → 1 | ratchet |
+| V5 (Tier 2, for completeness) | `rc_lowpass` C1.1, `opamp_inverting_real` X1.1, `rc_lowpass_ports` C1.1 | 0 → 1 each | ratchet |
+
+The V13 hit is the global label `"out"` overlapping C1's body; it trips
+both the V13 verifier and the item-3 interface-label verifier, both at
+budget 0.
+
+**Root diagnosis — the durable insight:**
+
+> **Making the orientation choice hard does not make it *good* — it makes
+> it *permanent*.**
+
+On these fixtures the flow proxy genuinely DISAGREES with the router's
+measured V5. Previously phase 4.5's oracle silently reverted the bad
+choice, so the damage was invisible. Removing the oracle's ability to
+revert did not improve the choice; it merely let the disagreement surface
+downstream as router damage.
+
+**Two distinct failure modes — they need different fixes, keep them
+separate:**
+
+1. **Local (`rc_lowpass_ports`) — axis is only half the constraint.**
+   R1 did go horizontal, but the MIRROR flipped the flow: the emitted
+   `in` global label landed at x=45.72 and `out` at x=38.1, i.e. input
+   on the right, output on the left — backwards from the requested
+   convention — and the `out` label then collided with C1's body.
+   Constraining the *axis* leaves the *direction* (mirror state)
+   unconstrained, and a horizontal 2-pin element has two mirror states
+   that V5 rates identically. The obvious next increment is a
+   **port-net-facing filter** (input pin faces left, output pin faces
+   right), constraining direction rather than axis. **It was deliberately
+   NOT attempted**, because failure mode 2 blocks landing either way.
+2. **Global (`common_emitter`) — SA basin shift.** Shrinking one
+   element's allowed set perturbed the entire SA trajectory into a
+   different basin: *every* element moved (R2 55.88 → 35.56, Q1 63.5 →
+   49.53, all seven power glyphs), and B jumped 4 → 11. This is not a
+   local orientation cost and cannot be fixed by a better orientation
+   rule. It is the same placer redesign the V14 residual is waiting on
+   (ADR-14 "Known scope limits"), and it blocks landing Stage 5
+   regardless of whether mode 1 is solved.
+
+**Methodological note (this caused a false clean read).**
+`--no-fail-fast` is essential when measuring this class of change: the
+first verification run stopped at `baseline_lock` and looked clean,
+hiding all three Tier-1 regressions behind it.
+
+**Revised statement of the "flow-orientation wall".** The wall is NOT
+what was previously believed — it is not that the phase-4.5 oracle always
+undoes the change, and not that a Tier-0 V11 regression is unavoidable.
+Both were beaten by the `allowed`-set filter. The wall is that **the flow
+proxy and measured routing quality genuinely disagree**, and
+hard-constraining the proxy converts a silently-reverted bad choice into
+a permanent one — plus the SA-basin sensitivity of mode 2. Landing flow
+orientation requires the placer redesign that reconciles flow and routing
+holistically, not a better filter.
 
 ---
 
