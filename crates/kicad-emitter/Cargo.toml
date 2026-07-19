@@ -22,3 +22,9 @@ uuid.workspace = true
 
 [dev-dependencies]
 spice-diagnostics.workspace = true
+# Phase-4.5 severed-net guard regression test (`src/refine.rs` tests):
+# it needs a REAL fixture placement, so it runs the same
+# parse → resolve → policy → place chain the CLI does. No cycle —
+# none of these depend on `kicad-emitter`.
+spice-resolve.workspace = true
+spice-policy.workspace = true

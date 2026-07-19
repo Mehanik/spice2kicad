@@ -114,6 +114,46 @@ pub fn refine_orientations(placement: &mut Placement, library: &Library, meta: &
     joint_search(placement, library, meta, &mut baseline);
 }
 
+/// Phase 4.5's acceptance predicate: may the candidate measurement `m`
+/// replace `baseline`?
+///
+/// Two mechanisms, and which one a property uses is load-bearing
+/// (CLAUDE.md, "Constraints vs. costs"):
+///
+/// 1. **The lexicographic objective** `(v13, v12, v5, bends)` — the
+///    *continuous quality gradients*, in strict tier order: Tier-1 V13
+///    and V12 lead, Tier-2 V5 next, V16 bends LAST. A candidate must
+///    strictly improve this tuple to be considered at all. The ordering
+///    contract on `bends` is documented at the module head and in
+///    `docs/invariants.md` V16: bends must stay the final key.
+///
+/// 2. **Hard non-regression guards** — `severed` / `v11` / `overlap` /
+///    `v12`, each `<=` its baseline. These are *categorical* properties
+///    with one correct answer, so they filter the candidate space
+///    outright rather than trading against anything.
+///
+/// `severed` (Tier-0 connectivity) is deliberately in group 2 and MUST
+/// NOT be moved into the tuple. As a guard it is untradeable: no amount
+/// of V13/V12/V5/bend improvement can buy a severed net. As a tuple key
+/// it would become tradeable in the `best`-selection comparison the
+/// callers run over accepted candidates, and — worse — a *reduction* in
+/// `severed` could then outrank a Tier-1 V13/V12 regression. There is
+/// nothing to seek here: connectivity is a floor, not a gradient.
+///
+/// Demonstrated hazard this guard closes: on `common_emitter`, rotating
+/// `COUT` to 180 boxes its `c` pin between a foreign pin (V11 blocks one
+/// L-route) and `Q1`'s body (V12 blocks the other); the router's
+/// conflict cascade exhausts its detours and drops the branch, and the
+/// CLI's post-emit connectivity check refuses the file. See
+/// `severed_guard_tests`.
+fn accepts(baseline: &Measure, m: &Measure) -> bool {
+    (m.v13, m.v12, m.v5, m.bends) < (baseline.v13, baseline.v12, baseline.v5, baseline.bends)
+        && m.severed <= baseline.severed
+        && m.v11 <= baseline.v11
+        && m.overlap <= baseline.overlap
+        && m.v12 <= baseline.v12
+}
+
 /// Greedy single-element orientation descent: repeatedly pick, for each
 /// offending non-pinned element, the V14-allowed orientation that most
 /// reduces real V5 without regressing V11 / overlap / V12 / V13. Each
@@ -200,12 +240,7 @@ fn greedy_descent(
                 // below. Bends can therefore never buy a wire through a
                 // body or across a label. Moving them earlier would make
                 // that trade reachable — don't.
-                if (m.v13, m.v12, m.v5, m.bends)
-                    < (baseline.v13, baseline.v12, baseline.v5, baseline.bends)
-                    && m.v11 <= baseline.v11
-                    && m.overlap <= baseline.overlap
-                    && m.v12 <= baseline.v12
-                {
+                if accepts(baseline, &m) {
                     let take = match &best {
                         None => true,
                         Some((_, bm)) => {
@@ -358,11 +393,7 @@ fn joint_search(
         // `greedy_descent` — Tier-1 counts lead, Tier-2 V5 next, V16
         // bends last. See the ordering contract documented on that
         // function's acceptance gate: bends must stay the FINAL key.
-        if (m.v13, m.v12, m.v5, m.bends) < (baseline.v13, baseline.v12, baseline.v5, baseline.bends)
-            && m.v11 <= baseline.v11
-            && m.overlap <= baseline.overlap
-            && m.v12 <= baseline.v12
-        {
+        if accepts(baseline, &m) {
             let take = match &best {
                 None => true,
                 Some((_, bm)) => (m.v13, m.v12, m.v5, m.bends) < (bm.v13, bm.v12, bm.v5, bm.bends),
@@ -426,6 +457,7 @@ fn joint_search(
 /// `v13` is the combined label↔body + label↔property-text overlap count
 /// (V13 parts 1 and 2), measured on the exact labels the emitter will
 /// plant ([`label_specs`]).
+#[derive(Clone)]
 struct Measure {
     v5: usize,
     v11: usize,
@@ -437,6 +469,14 @@ struct Measure {
     /// Always the FINAL key of the acceptance tuple; see the ordering
     /// contract on `greedy_descent`'s gate.
     bends: usize,
+    /// Signal nets the trial route leaves severed — **Tier 0**. A pure
+    /// non-regression guard, never part of the objective tuple: there is
+    /// nothing to *seek* here, connectivity is a categorical floor, not a
+    /// quality gradient (CLAUDE.md "constraints vs costs"). Putting it in
+    /// the lexicographic tuple would make it tradeable against V13/V12/V5
+    /// in the `best`-selection comparison; as a `<=` guard it is instead
+    /// excluded from the candidate space outright.
+    severed: usize,
     offenders: Vec<Violation>,
     v12_offenders: Vec<String>,
 }
@@ -454,6 +494,7 @@ fn measure(placement: &Placement, library: &Library) -> Measure {
     Measure {
         v5: offenders.len(),
         v11: route.v11_count,
+        severed: route.severed,
         overlap,
         v12,
         v13,
@@ -926,5 +967,227 @@ mod tests {
     fn crossing_is_not_a_bend() {
         let segs = [((0.0, 5.0), (20.0, 5.0)), ((10.0, 0.0), (10.0, 10.0))];
         assert_eq!(bend_count(&segs), 0);
+    }
+}
+
+/// Tier-0 connectivity guard in phase 4.5's acceptance predicate.
+///
+/// The hazard: the predicate scores `(v13, v12, v5, bends)` and guards
+/// `v11` / `overlap` / `v12`, none of which can see a net the router
+/// gave up on. A candidate orientation that boxes a pin in between a
+/// foreign pin (V11 blocks one L-route) and a symbol body (V12 blocks
+/// the other) makes the router's conflict cascade exhaust its detours
+/// and drop the branch — while every metric the predicate *can* see
+/// improves. `Measure::severed` closes that, as a hard guard.
+#[cfg(test)]
+mod severed_guard_tests {
+    use super::{Measure, accepts, measure, refine_orientations};
+    use kicad_symbols::{Library, Orientation, Rotation};
+    use spice_layout::{LayoutOptions, Placement, RefinementMeta};
+
+    /// Every fixture the CLI converts, so the "refinement never ships a
+    /// severed net" assertion is not a single-fixture accident.
+    const FIXTURES: &[&str] = &[
+        "rc_lowpass",
+        "common_emitter",
+        "multivibrator",
+        "diff_pair",
+        "opamp_inverting_real",
+        "opamp_inverting",
+        "port_shapes",
+        "rc_lowpass_ports",
+        "opamp_definition_level",
+        "named_rails",
+    ];
+
+    /// A neutral baseline to perturb one field at a time.
+    fn m(v13: usize, v12: usize, v5: usize, bends: usize, severed: usize) -> Measure {
+        Measure {
+            v5,
+            v11: 0,
+            severed,
+            overlap: 0,
+            v12,
+            v13,
+            bends,
+            offenders: Vec::new(),
+            v12_offenders: Vec::new(),
+        }
+    }
+
+    /// Sanity: with `severed` held at zero the predicate is the
+    /// pre-existing one — a strict improvement of the objective tuple is
+    /// taken.
+    #[test]
+    fn a_strictly_better_candidate_is_accepted() {
+        assert!(accepts(&m(1, 1, 3, 9, 0), &m(0, 0, 1, 4, 0)));
+    }
+
+    /// THE regression this module exists for. Identical candidate, but it
+    /// severs a net: rejected, however much better everything else gets.
+    #[test]
+    fn a_candidate_that_severs_a_net_is_rejected() {
+        let baseline = m(1, 1, 3, 9, 0);
+        let severing = m(0, 0, 1, 4, 1);
+        assert!(
+            accepts(&baseline, &m(0, 0, 1, 4, 0)),
+            "control: the same candidate is accepted when it severs nothing"
+        );
+        assert!(
+            !accepts(&baseline, &severing),
+            "Tier-0: a candidate that disconnects a net must never be accepted, \
+             no matter how much V13/V12/V5/bends improve"
+        );
+    }
+
+    /// `severed` is a GUARD, not a key of the lexicographic objective.
+    ///
+    /// If it were a key, a candidate that *reduces* `severed` would be
+    /// able to outrank a Tier-1 V13/V12 regression. As a `<=` guard it
+    /// cannot: reducing `severed` buys nothing, because the objective
+    /// tuple must still strictly improve on its own.
+    #[test]
+    fn severed_is_a_guard_not_an_objective_key() {
+        let baseline = m(0, 0, 1, 4, 1);
+        // Tier-1 V13 regresses; `severed` falls 1 → 0. A tuple key would
+        // let the connectivity gain pay for the V13 loss.
+        let tier1_regression = m(3, 0, 1, 4, 0);
+        assert!(
+            !accepts(&baseline, &tier1_regression),
+            "a `severed` reduction must not buy a Tier-1 V13 regression — \
+             connectivity is a floor to hold, never a gradient to trade"
+        );
+    }
+
+    /// Build a fixture's placement exactly as the CLI does
+    /// (parse → resolve → policy → place), with no layout-cache hint.
+    fn fixture(name: &str) -> (Placement, Library, RefinementMeta) {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates/ dir");
+        let mut library = Library::default();
+        for lib in [
+            "kicad-symbols/tests/fixtures/Device.kicad_sym",
+            "kicad-symbols/tests/fixtures/Simulation_SPICE.kicad_sym",
+            "kicad-symbols/tests/fixtures/Amplifier_Operational.kicad_sym",
+            "kicad-symbols/tests/fixtures/power.kicad_sym",
+        ] {
+            library = library.merge(Library::from_file(root.join(lib)).expect("load lib"));
+        }
+        let src =
+            std::fs::read_to_string(root.join(format!("spice2kicad/tests/fixtures/{name}.cir")))
+                .expect("read fixture");
+        let outcome =
+            spice_parser::parse(&src, spice_diagnostics::FileId(0)).expect("parse fixture");
+        let resolved = spice_resolve::resolve(&outcome.netlist, &library).expect("resolve");
+        let (checked, _) = spice_policy::check(resolved).expect("policy check");
+        let meta = spice_layout::refinement_meta(&checked, &spice_layout::Hint::default())
+            .expect("refinement meta");
+        let opts = LayoutOptions {
+            refine: true,
+            refine_iterations: 200,
+            ..LayoutOptions::default()
+        };
+        let placement =
+            spice_layout::place_with_hint(checked, &library, &opts, &spice_layout::Hint::default())
+                .expect("place");
+        (placement, library, meta)
+    }
+
+    /// The demonstrated case, measured on the real fixture rather than
+    /// asserted from the ADR: on `common_emitter`, rotating `COUT` to 180
+    /// severs a signal net, and the guard rejects it.
+    ///
+    /// Master's SA does not currently *offer* this candidate a winning
+    /// objective tuple, which is exactly why the defect was latent — so
+    /// this test measures the candidate directly instead of waiting for
+    /// the search to reach it.
+    #[test]
+    fn common_emitter_cout_rot180_severs_a_net_and_the_guard_rejects_it() {
+        let (mut placement, library, meta) = fixture("common_emitter");
+        // The candidate arises on the placement phase 4.5 actually
+        // works from, i.e. after the pass has settled — that is the
+        // state the ADR measured.
+        refine_orientations(&mut placement, &library, &meta);
+        let i = placement
+            .elements
+            .iter()
+            .position(|e| e.refdes == "COUT")
+            .expect("common_emitter has COUT");
+
+        let base = measure(&placement, &library);
+        assert_eq!(base.severed, 0, "the settled placement wires up every net");
+
+        let current = placement.elements[i].orientation;
+        placement.elements[i].orientation = Orientation {
+            rotation: Rotation::R180,
+            mirror_y: false,
+        };
+        let severing = measure(&placement, &library);
+        placement.elements[i].orientation = current;
+
+        assert!(
+            severing.severed > base.severed,
+            "the ADR-17 demonstrated case must still reproduce: rotating COUT to \
+             180 boxes its `c` pin between a foreign pin and Q1's body, and the \
+             router drops the branch (got severed={})",
+            severing.severed
+        );
+        assert!(
+            !accepts(&base, &severing),
+            "the severed-net guard must reject the demonstrated COUT rot-180 \
+             candidate"
+        );
+        // …and it is the `severed` GUARD that must do the rejecting, not
+        // the objective tuple happening to disagree as well. Master's SA
+        // is what makes the tuple disagree here — that coincidence is
+        // precisely the mask this defect was hiding behind, and any
+        // future placer change can remove it. So re-ask the predicate
+        // with the REAL measured `severed` count but an objective tuple
+        // that strictly improves, i.e. the situation the ADR observed
+        // under compaction: the guard must still refuse.
+        let tempting = Measure {
+            v13: base.v13,
+            v12: base.v12,
+            v5: base.v5.saturating_sub(1),
+            bends: base.bends.saturating_sub(1),
+            ..severing
+        };
+        assert!(
+            accepts(
+                &base,
+                &Measure {
+                    severed: base.severed,
+                    ..tempting.clone()
+                }
+            ),
+            "control: with connectivity intact this tuple is strictly better and \
+             would be accepted"
+        );
+        assert!(
+            !accepts(&base, &tempting),
+            "the `severed` guard — not the objective — is what must reject the \
+             COUT rot-180 candidate; without it phase 4.5 ships a broken netlist"
+        );
+    }
+
+    /// Whatever the search picks, phase 4.5 never hands decoration a
+    /// placement whose trial route leaves a signal net disconnected.
+    #[test]
+    fn refinement_never_leaves_a_net_severed_across_fixtures() {
+        for name in FIXTURES {
+            let (mut placement, library, meta) = fixture(name);
+            assert_eq!(
+                measure(&placement, &library).severed,
+                0,
+                "{name}: the placement entering phase 4.5 is already severed"
+            );
+            refine_orientations(&mut placement, &library, &meta);
+            assert_eq!(
+                measure(&placement, &library).severed,
+                0,
+                "{name}: phase 4.5 accepted an orientation that disconnects a net"
+            );
+        }
     }
 }

@@ -412,6 +412,8 @@ dependencies = [
  "spice-diagnostics",
  "spice-layout",
  "spice-parser",
+ "spice-policy",
+ "spice-resolve",
  "spice-route",
  "thiserror",
  "uuid",

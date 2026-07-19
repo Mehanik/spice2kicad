@@ -1646,6 +1646,22 @@ pub(crate) struct TrialRoute {
     /// Number of `v11:` warnings (router could not detour off a foreign
     /// pin). Must not increase under a candidate orientation.
     pub v11_count: usize,
+    /// Number of signal nets the trial route leaves **severed** — some
+    /// pin with no wire path to the others, under KiCad's endpoint-only
+    /// join rule.
+    ///
+    /// This is Tier 0: a severed net is a schematic that does not wire up
+    /// the source circuit, and the CLI's post-emit connectivity check
+    /// refuses to ship it. The refinement gate needs it because the
+    /// router's escape hatches are not total — when a candidate
+    /// orientation boxes a pin in between a foreign pin (V11) and a
+    /// symbol body (V12), the conflict cascade can exhaust its detours
+    /// and drop the branch. Measured on `common_emitter`: rotating COUT
+    /// to 180 put its `c` pin where the only two L-routes were blocked
+    /// one by V11 and the other by Q1's body, and the net came apart.
+    /// Every other metric in `Measure` improved, so without this term the
+    /// gate accepted it.
+    pub severed: usize,
 }
 
 /// Run the *real* router over `placement` and return its wire segments
@@ -1726,15 +1742,89 @@ pub(crate) fn trial_route(placement: &Placement, library: &Library) -> TrialRout
         .iter()
         .filter(|w| w.starts_with("v11:"))
         .count();
-    let segments = result
+    let segments: Vec<crate::v5::WireSegment> = result
         .sexprs
         .iter()
         .filter_map(wire_segment_from_lexpr)
         .collect();
+    let severed = severed_net_count(&specs, &segments);
     TrialRoute {
         segments,
         v11_count,
+        severed,
     }
+}
+
+/// How many `Signal` nets in `specs` are left disconnected by `segments`.
+///
+/// Uses KiCad's own rule (`SCH_LINE::GetConnectionPoints`): wires join
+/// only where **endpoints** coincide. Two facts make a union-find over
+/// endpoints the right model here:
+///
+/// - `cleanup::split_at_interior_attachments` has already split every
+///   wire–wire interior attachment into real endpoints, so no same-net
+///   wire junction is missed;
+/// - every pin of a net is a *terminal* of the routed Steiner tree, so a
+///   pin that was routed at all is a segment endpoint.
+///
+/// It does NOT model V11's rule 2 (a pin sitting on a wire's strict
+/// interior is electrically connected). That case does not arise for a
+/// net's own terminals, and the direction of the resulting error is the
+/// safe one: it can only over-count, i.e. make this guard *decline* a
+/// candidate, never wave a genuinely severed one through.
+///
+/// Rail nets are excluded: decoration terminates them in `power:*`
+/// glyphs, which carry connectivity by net name rather than by wire, so
+/// "no wire" is the correct routing for them, not a defect.
+pub(crate) fn severed_net_count(
+    specs: &[spice_route::NetSpec],
+    segments: &[crate::v5::WireSegment],
+) -> usize {
+    fn find(
+        parent: &mut std::collections::HashMap<(i64, i64), (i64, i64)>,
+        k: (i64, i64),
+    ) -> (i64, i64) {
+        let p = *parent.entry(k).or_insert(k);
+        if p == k {
+            return k;
+        }
+        let root = find(parent, p);
+        parent.insert(k, root);
+        root
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    let q = |v: f64| (v * 1000.0).round() as i64;
+
+    // Union-find over quantised endpoints, shared by every net — two
+    // nets never share an endpoint in a V11-clean route, and where they
+    // do the geometry is already shorted and reported elsewhere.
+    let mut parent: std::collections::HashMap<(i64, i64), (i64, i64)> =
+        std::collections::HashMap::new();
+    for &((x1, y1), (x2, y2)) in segments {
+        let (a, b) = ((q(x1), q(y1)), (q(x2), q(y2)));
+        let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+        if ra != rb {
+            parent.insert(ra, rb);
+        }
+    }
+
+    specs
+        .iter()
+        .filter(|s| {
+            matches!(s.class, spice_layout::net_class::NetClass::Signal) && s.pins.len() >= 2
+        })
+        .filter(|s| {
+            let mut roots = s
+                .pins
+                .iter()
+                .map(|p| find(&mut parent, (q(p.x_mm), q(p.y_mm))));
+            let Some(first) = roots.next() else {
+                return false;
+            };
+            !roots.all(|r| r == first)
+        })
+        .count()
 }
 
 /// Extract `((x1,y1),(x2,y2))` from a `(wire (pts (xy …) (xy …)))`
@@ -4545,5 +4635,103 @@ mod tests {
         nets.insert("VCC".to_string(), vec![(0.0, 0.0, 0u16), (9.0, 9.0, 0u16)]);
         nets.insert("0".to_string(), vec![(1.0, 1.0, 0u16), (8.0, 8.0, 0u16)]);
         assert!(disconnected_nets(&items, &nets, &std::collections::BTreeMap::new()).is_empty());
+    }
+
+    /// `severed_net_count` — the Tier-0 connectivity metric phase 4.5
+    /// guards on. Fidelity matters: it must model KiCad's endpoint-only
+    /// join rule, and must not flag nets that legitimately carry no wire.
+    mod severed_net_count_tests {
+        use spice_route::{NetSpec, PinRef};
+
+        fn pin(x: f64, y: f64) -> PinRef {
+            PinRef {
+                element_idx: 0,
+                pin_number: 0,
+                x_mm: x,
+                y_mm: y,
+                outward: spice_route::Direction::Right,
+                drives: false,
+                requires_driver: false,
+                on_sheet_edge: false,
+            }
+        }
+
+        fn net(name: &str, class: spice_layout::net_class::NetClass, pins: Vec<PinRef>) -> NetSpec {
+            NetSpec {
+                name: name.to_string(),
+                class,
+                pins,
+                negative_rail: false,
+                rail_tag: None,
+                has_passive: false,
+                has_power_in: false,
+            }
+        }
+
+        fn signal(name: &str, pins: Vec<PinRef>) -> NetSpec {
+            net(name, spice_layout::net_class::NetClass::Signal, pins)
+        }
+
+        /// Two pins joined by an L of two segments share a root.
+        #[test]
+        fn a_routed_net_is_not_severed() {
+            let specs = [signal("a", vec![pin(0.0, 0.0), pin(10.0, 10.0)])];
+            let segs = [((0.0, 0.0), (0.0, 10.0)), ((0.0, 10.0), (10.0, 10.0))];
+            assert_eq!(super::super::severed_net_count(&specs, &segs), 0);
+        }
+
+        /// The branch the router dropped: one pin left with no wire at all.
+        #[test]
+        fn a_dropped_branch_is_severed() {
+            let specs = [signal(
+                "a",
+                vec![pin(0.0, 0.0), pin(10.0, 10.0), pin(30.0, 30.0)],
+            )];
+            let segs = [((0.0, 0.0), (0.0, 10.0)), ((0.0, 10.0), (10.0, 10.0))];
+            assert_eq!(super::super::severed_net_count(&specs, &segs), 1);
+        }
+
+        /// KiCad joins wires at ENDPOINTS only. Two runs that merely cross
+        /// mid-span are not connected, and the metric must agree — this is
+        /// the rule `cleanup::split_at_interior_attachments` exists to
+        /// satisfy, so anything reaching here is already split.
+        #[test]
+        fn crossing_mid_span_does_not_join() {
+            let specs = [signal("a", vec![pin(0.0, 5.0), pin(5.0, 0.0)])];
+            let segs = [((0.0, 5.0), (10.0, 5.0)), ((5.0, 0.0), (5.0, 10.0))];
+            assert_eq!(
+                super::super::severed_net_count(&specs, &segs),
+                1,
+                "a mid-span cross is not an electrical join"
+            );
+        }
+
+        /// Rail nets terminate in `power:*` glyphs, which carry
+        /// connectivity by net name. "No wire" is correct for them, not a
+        /// defect — counting them would make the guard reject every
+        /// candidate.
+        #[test]
+        fn rail_nets_are_excluded() {
+            let specs = [
+                net(
+                    "VCC",
+                    spice_layout::net_class::NetClass::Power,
+                    vec![pin(0.0, 0.0), pin(50.0, 50.0)],
+                ),
+                net(
+                    "0",
+                    spice_layout::net_class::NetClass::Ground,
+                    vec![pin(1.0, 1.0), pin(60.0, 60.0)],
+                ),
+            ];
+            assert_eq!(super::super::severed_net_count(&specs, &[]), 0);
+        }
+
+        /// A one-pin signal net has nothing to connect to.
+        #[test]
+        fn single_pin_nets_are_excluded() {
+            let specs = [signal("a", vec![pin(0.0, 0.0)])];
+            assert_eq!(super::super::severed_net_count(&specs, &[]), 0);
+        }
     }
 }
