@@ -521,12 +521,20 @@ fn bend_and_branch_counts_within_ratchet_across_fixtures() {
                 c.branches, c.raw_segments, c.runs, c.bends
             ));
         }
-        // Lower-is-better: report reclaimable slack so a fix ratchets down.
-        if c.bends < b_budget || c.branches < j_budget {
+        // Lower-is-better: report reclaimable slack so a fix ratchets
+        // down. Each component is gated INDEPENDENTLY and clamped to its
+        // stored literal, so the suggested tuple can never contain a
+        // value ABOVE the current budget. (Bug once shipped here: the
+        // hint fired when *either* component improved and then printed
+        // *both* measured values, so a fixture with B regressed and J
+        // improved advertised a tuple that RAISED B — precisely what
+        // CLAUDE.md § "Budgets are ratchets, not knobs" forbids.)
+        let b_hint = c.bends.min(b_budget);
+        let j_hint = c.branches.min(j_budget);
+        if b_hint < b_budget || j_hint < j_budget {
             eprintln!(
                 "V16 {name}: improved — you may lower the ratchet to \
-                 (\"{name}\", {}, {})",
-                c.bends, c.branches
+                 (\"{name}\", {b_hint}, {j_hint})"
             );
         }
     }
