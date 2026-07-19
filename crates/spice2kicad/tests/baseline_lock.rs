@@ -255,6 +255,19 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
     // `rc_lowpass_ports` R1 back to rot 0). True V5 violations summed
     // across fixtures fell 16 → 8; V16 (B, J) per fixture is unchanged
     // on 7 of 9 — see the commit message for the two exceptions.
+    //
+    // Regenerated again for the shared-node-centre tail stub:
+    // `spice_layout::idioms::apply_shared_centers` now seats the centred
+    // passive one grid cell BELOW the clearance stride, so its shared-net
+    // pin no longer lands on the trunk row the router picks. Only
+    // `diff_pair` has the idiom, and only its `RTAIL` (plus the five
+    // power glyphs / flags whose column follows it) moved — all by
+    // exactly +1.27 mm in Y, 6 rows of 107. Every other fixture is
+    // bit-identical, which is the evidence that this commit's V5
+    // re-baselining is a measurement correction and not a geometry
+    // regression. Buys `diff_pair` V5 1 → 0 at V16 J 0 → 1 (a three-way
+    // node drawn as a proper Steiner T instead of the trunk ending
+    // sideways on a pin).
     (
         "common_emitter",
         "#FLG1",
@@ -391,21 +404,29 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "#FLG3",
         "power:PWR_FLAG",
         66.04,
-        63.5,
+        64.77,
         180.0,
         "",
     ),
-    ("diff_pair", "#FLG4", "power:PWR_FLAG", 66.04, 76.2, 0.0, ""),
+    (
+        "diff_pair",
+        "#FLG4",
+        "power:PWR_FLAG",
+        66.04,
+        77.47,
+        0.0,
+        "",
+    ),
     ("diff_pair", "#PWR1", "power:+12V", 38.1, 31.75, 0.0, ""),
     ("diff_pair", "#PWR2", "power:+12V", 48.26, 31.75, 0.0, ""),
-    ("diff_pair", "#PWR3", "power:VEE", 43.18, 63.5, 180.0, ""),
-    ("diff_pair", "#PWR4", "power:+12V", 66.04, 63.5, 0.0, ""),
-    ("diff_pair", "#PWR5", "power:VEE", 66.04, 76.2, 180.0, ""),
+    ("diff_pair", "#PWR3", "power:VEE", 43.18, 64.77, 180.0, ""),
+    ("diff_pair", "#PWR4", "power:+12V", 66.04, 64.77, 0.0, ""),
+    ("diff_pair", "#PWR5", "power:VEE", 66.04, 77.47, 180.0, ""),
     ("diff_pair", "Q1", "Device:Q_NPN_BCE", 35.56, 49.53, 0.0, ""),
     ("diff_pair", "Q2", "Device:Q_NPN_BCE", 50.8, 49.53, 0.0, "y"),
     ("diff_pair", "RC1", "Device:R_US", 38.1, 35.56, 0.0, ""),
     ("diff_pair", "RC2", "Device:R_US", 48.26, 35.56, 0.0, "y"),
-    ("diff_pair", "RTAIL", "Device:R_US", 43.18, 59.69, 0.0, ""),
+    ("diff_pair", "RTAIL", "Device:R_US", 43.18, 60.96, 0.0, ""),
     (
         "multivibrator",
         "#FLG1",

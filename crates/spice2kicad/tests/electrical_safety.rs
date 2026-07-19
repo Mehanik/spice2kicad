@@ -1916,16 +1916,34 @@ fn v5_violation_budget(name: &str) -> usize {
     match name {
         // Ratcheted high-water marks (current measured count on master).
         //
+        // These were RE-BASELINED when the pin-angle inversion in
+        // `Symbol::pins_in` was fixed. That fix corrected the *measure*
+        // as well as the router: the old verifier read every horizontal
+        // pin's outward direction backwards, so pre-fix literals are not
+        // comparable to post-fix ones. Measured with the corrected
+        // verifier, the TOTAL across all fixtures fell 16 → 8, then to 7
+        // when the tail-trunk stub took `diff_pair` to zero.
+        //
+        // Two fixtures ratcheted DOWN to zero and stay there:
         // `opamp_inverting_real` (1 → 0) and `opamp_definition_level`
-        // (3 → 0) ratcheted to zero when the pin-angle inversion in
-        // `Symbol::pins_in` was fixed: their residuals were all
-        // horizontal opamp pins, the exact class the old measurement
-        // reported backwards, and the router was steering their outward
-        // stubs the wrong way as a result.
-        "multivibrator" => 4,
-        // common_emitter, diff_pair, rc_lowpass, opamp_inverting,
-        // opamp_inverting_real, opamp_definition_level, and any other
-        // fixture: zero violations.
+        // (3 → 0) — their residuals were all horizontal opamp pins, the
+        // exact class the old measurement reported backwards, and the
+        // router was steering their outward stubs the wrong way as a
+        // result. `diff_pair` (1 → 0) followed from the shared-node-centre
+        // trunk stub in `spice_layout::idioms`.
+        //
+        // The three below are newly VISIBLE, not newly introduced. Their
+        // emitted geometry is bit-identical to the locked baseline
+        // (`baseline_lock` shows zero differences on all three), so
+        // nothing moved — only the measurement became correct. Every one
+        // is a horizontal pin: `common_emitter`'s Q1.1 and
+        // `multivibrator`'s Q1.1/Q2.1 are BJT bases, `opamp_inverting`'s
+        // RF.1 sits on the feedback trunk. They are the same v0.2
+        // placer / channel-router work items as the rest.
+        "multivibrator" => 5,
+        "common_emitter" | "opamp_inverting" => 1,
+        // diff_pair, rc_lowpass, rc_lowpass_ports, port_shapes,
+        // opamp_inverting_real, opamp_definition_level: zero violations.
         _ => 0,
     }
 }

@@ -847,16 +847,34 @@ invariant here.
   | `rc_lowpass`             |  3 |  0 |
   | `common_emitter`         | 10 |  3 |
   | `multivibrator`          | 10 |  2 |
-  | `diff_pair`              |  2 |  0 |
+  | `diff_pair`              |  2 |  1 |
   | `opamp_inverting_real`   |  8 |  0 |
   | `opamp_inverting`        |  3 |  0 |
   | `port_shapes`            |  4 |  0 |
-  | `rc_lowpass_ports`       |  3 |  0 |
-  | `opamp_definition_level` | 10 |  2 |
+  | `rc_lowpass_ports`       |  4 |  0 |
+  | `opamp_definition_level` | 12 |  0 |
 
   Standard ratchet policy applies (CLAUDE.md § "Budgets are ratchets,
   not knobs"): these literals only ever go **down**, and the test prints
   the reclaimable value on any improvement.
+
+  Three literals moved after the `Symbol::pins_in` pin-angle fix, which
+  corrected both the router's outward stubs and the V5 measure (TOTAL V5
+  across all fixtures 16 → 8, then 7):
+
+  - `opamp_definition_level` B 10 → 12, J 2 → 0 — the fixture lost all
+    three V5 violations and both branch vertices, at the cost of two
+    bends. **Global-improvement escape**, owner signed off.
+  - `rc_lowpass_ports` B 3 → 4 — same escape. A 2-bend layout exists and
+    was verified (R1 at rot 180 puts both `out` pins on one row) but is
+    unreachable: rot 0 and rot 180 tie on (V13, V12, V5), and separating
+    them would require a bend-aware key inside phase 4.5 — i.e. making
+    V16 an in-loop objective, which this invariant forbids. Recorded as
+    a known, costed floor pending an owner decision on that rule.
+  - `diff_pair` J 0 → 1 — `idioms::apply_shared_centers` now reserves a
+    grid cell of vertical stub under the tail trunk, so the three-way
+    node is a proper Steiner T instead of the trunk ending sideways on
+    RTAIL's pin. Buys V5 1 → 0. Owner signed off.
 
   **Cross-check against the crossing ratchet.** The verifier's
   `inter_net_crossings` (4-ray vertices with no dot — excluded from both

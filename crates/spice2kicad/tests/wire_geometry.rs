@@ -475,12 +475,43 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     ("rc_lowpass", 3, 0),
     ("common_emitter", 10, 3),
     ("multivibrator", 10, 2),
-    ("diff_pair", 2, 0),
+    // J 0 → 1: `apply_shared_centers` now reserves one grid cell of
+    // vertical stub under the tail trunk, so the three-way `tail` node is
+    // drawn as a proper Steiner T instead of the trunk stopping sideways
+    // on RTAIL's pin. Buys V5 1 → 0 on this fixture. Owner-approved.
+    ("diff_pair", 2, 1),
     ("opamp_inverting_real", 8, 0),
     ("opamp_inverting", 3, 0),
     ("port_shapes", 4, 0),
-    ("rc_lowpass_ports", 3, 0),
-    ("opamp_definition_level", 10, 2),
+    // B 3 → 4, under the same global-improvement escape as
+    // `opamp_definition_level` below (TOTAL V5 16 → 7). At rot 0 the
+    // `out` net must leave C1.1 upward and enter R1.2 from below at a
+    // different X — a shape whose rectilinear minimum is provably 4
+    // bends.
+    //
+    // The retry required before taking this escape DID find a better
+    // layout: R1 at rot 180 puts both `out` pins on one row and measures
+    // B = 2 (below even the old mark of 3), V5-clean, with no V11 / V12 /
+    // V13 / overlap change. It is not reachable today — rot 0 and rot 180
+    // tie on (V13, V12, V5), so phase 4.5 keeps whichever it enumerates
+    // first, and only a bend-aware key could separate them. Adding one
+    // would make V16 an in-loop objective, which docs/invariants.md V16
+    // forbids outright; changing that rule needs owner sign-off, so the
+    // escape is taken here instead and the finding is reported rather
+    // than landed.
+    ("rc_lowpass_ports", 4, 0),
+    // B 10 → 12, J 2 → 0. The pin-angle fix in `Symbol::pins_in` stopped
+    // the router steering horizontal opamp pins inward, which removed
+    // this fixture's V5 violations (3 → 0) and both of its branch
+    // vertices, at the cost of two bends. Global-improvement escape
+    // (CLAUDE.md): TOTAL V5 across all fixtures fell 16 → 7 and no
+    // Tier-0/Tier-1 count moved anywhere. Owner signed off on the B rise;
+    // J ratchets down to its measured 0.
+    //
+    // Three literals rise in this commit and no others: this B, the
+    // `rc_lowpass_ports` B above (same escape), and the `diff_pair` J
+    // above (separately approved). Every other literal held or fell.
+    ("opamp_definition_level", 12, 0),
 ];
 
 #[test]

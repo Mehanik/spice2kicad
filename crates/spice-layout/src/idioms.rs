@@ -479,6 +479,11 @@ pub(crate) fn apply_shared_centers(
     checked: &CheckedNetlist,
     hits: &[SharedNodeCenter],
 ) {
+    /// Extra vertical clearance, in grid cells, between the lowest
+    /// transistor and the centred passive — see the comment at the
+    /// origin assignment below for why one cell is reserved.
+    const TRUNK_STUB_CELLS: i32 = 1;
+
     for hit in hits {
         let el = hit.element;
         if pinned[el] {
@@ -526,9 +531,28 @@ pub(crate) fn apply_shared_centers(
             placement.elements[t0].orientation,
             None,
         );
+        // One grid cell BELOW the clearance stride, so the passive's
+        // shared-net pin cannot land on the trunk row itself.
+        //
+        // At the bare stride the pin coincides exactly with the row the
+        // router picks for the trunk (the row is chosen *because* the pin
+        // is there). The trunk then arrives horizontally and stops dead on
+        // a pin whose outward direction is vertical — a V5 violation, and
+        // visually a wire ending sideways on a pin. Reserving a single
+        // cell of vertical clearance forces the router to drop a stub from
+        // the pin up to the trunk, which is a proper Steiner T: the form a
+        // schematic reader expects at a three-way node.
+        //
+        // The cost is one branch vertex (V16 J) in exchange for the V5
+        // violation and the sideways stub; a T is the readable form of a
+        // three-way join, so this is a genuine improvement rather than a
+        // sideways trade. Measured on `diff_pair`: V5 1 → 0, J 0 → 1, with
+        // B unchanged at 2.
         let stride = vertical_stride_cells(&q_ext, &el_ext);
-        placement.elements[el].origin =
-            GridPoint::new(placement.elements[el].origin.x + dx_cells, max_q_y + stride);
+        placement.elements[el].origin = GridPoint::new(
+            placement.elements[el].origin.x + dx_cells,
+            max_q_y + stride + TRUNK_STUB_CELLS,
+        );
         pinned[el] = true;
     }
 }
