@@ -19,9 +19,20 @@
 //! order), iterating to a fixed point under a small cap. For each at-risk,
 //! non-pinned, non-symmetry element it trial-routes each V14-allowed
 //! orientation (reusing `spice_layout::orient::allowed_orientations` — it
-//! never widens V14) and keeps a candidate ONLY if it *strictly* reduces the
-//! router's real V5 count without increasing V11 residue, symbol-body
-//! overlap, or foreign-body (V12) crossings.
+//! never widens V14) and keeps a candidate ONLY if it *strictly* improves the
+//! lexicographic objective `(V13, V12, V5, bends)` without increasing V11
+//! residue, symbol-body overlap, or foreign-body (V12) crossings.
+//!
+//! **Ordering contract for the objective** (`docs/invariants.md` V16): V16
+//! bends are the FINAL key and must stay there. They may appear in the
+//! acceptance predicate only as that last key or as a non-regression guard
+//! alongside `v11`/`overlap`/`v12` — never earlier in the tuple, and never
+//! as a weighted term. Last place is what makes the subordination
+//! structural: a candidate raising `v12` or `v13` yields a strictly greater
+//! tuple however many bends it saves, so bends can never buy a wire through
+//! a body or across a label. The quantity must also be the *ink-graph* bend
+//! count ([`bend_count`]), never a raw segment count — `cleanup.rs` splits
+//! segments for Tier-0 correctness, and a raw count would push against it.
 
 use kicad_symbols::{Library, Orientation, Symbol};
 use spice_layout::{Placement, RefinementMeta};
@@ -173,14 +184,32 @@ fn greedy_descent(
                 // crossing. Keeping the `<=` guard as well means V12 can
                 // now only fall, never rise — no sideways trade against
                 // V13 within the tier.
-                if (m.v13, m.v12, m.v5) < (baseline.v13, baseline.v12, baseline.v5)
+                //
+                // ORDERING CONTRACT (docs/invariants.md V16). V16 bends
+                // are the FINAL key of this tuple and must stay there.
+                // They may appear in this predicate in exactly two
+                // shapes — the last lexicographic key, or a
+                // non-regression guard alongside `v11`/`overlap`/`v12` —
+                // and never earlier in the tuple, never as a weighted
+                // term. Last-place lexicographic ordering is what makes
+                // the subordination structural rather than a matter of
+                // tuning: a candidate that raises `v12` or `v13` yields a
+                // strictly greater tuple no matter how many bends it
+                // saves, and is independently refused by the `<=` guards
+                // below. Bends can therefore never buy a wire through a
+                // body or across a label. Moving them earlier would make
+                // that trade reachable — don't.
+                if (m.v13, m.v12, m.v5, m.bends)
+                    < (baseline.v13, baseline.v12, baseline.v5, baseline.bends)
                     && m.v11 <= baseline.v11
                     && m.overlap <= baseline.overlap
                     && m.v12 <= baseline.v12
                 {
                     let take = match &best {
                         None => true,
-                        Some((_, bm)) => (m.v13, m.v12, m.v5) < (bm.v13, bm.v12, bm.v5),
+                        Some((_, bm)) => {
+                            (m.v13, m.v12, m.v5, m.bends) < (bm.v13, bm.v12, bm.v5, bm.bends)
+                        }
                     };
                     if take {
                         best = Some((cand, m));
@@ -324,27 +353,39 @@ fn joint_search(
             placement.elements[i].orientation = cand[k][counter[k]];
         }
         let m = measure(placement, library);
-        // Same lexicographic (V13, V12, V5) objective as `greedy_descent`
-        // — Tier-1 counts lead, Tier-2 V5 breaks ties. See the rationale
-        // there for why V12 must be in the key and not only the guard.
-        if (m.v13, m.v12, m.v5) < (baseline.v13, baseline.v12, baseline.v5)
+        // Same lexicographic (V13, V12, V5, bends) objective as
+        // `greedy_descent` — Tier-1 counts lead, Tier-2 V5 next, V16
+        // bends last. See the ordering contract documented on that
+        // function's acceptance gate: bends must stay the FINAL key.
+        if (m.v13, m.v12, m.v5, m.bends) < (baseline.v13, baseline.v12, baseline.v5, baseline.bends)
             && m.v11 <= baseline.v11
             && m.overlap <= baseline.overlap
             && m.v12 <= baseline.v12
         {
             let take = match &best {
                 None => true,
-                Some((_, bm)) => (m.v13, m.v12, m.v5) < (bm.v13, bm.v12, bm.v5),
+                Some((_, bm)) => (m.v13, m.v12, m.v5, m.bends) < (bm.v13, bm.v12, bm.v5, bm.bends),
             };
             if take {
-                let reached_zero = m.v13 == 0 && m.v12 == 0 && m.v5 == 0;
+                // Stop only when NOTHING is left to improve on ANY key,
+                // bends included. The old exit fired on
+                // (V13, V12, V5) == 0 alone, which returned the
+                // lexicographically FIRST zero-cost combination and hid
+                // every equally-clean but straighter alternative behind
+                // it — on `rc_lowpass_ports` exactly what masked R1 at
+                // rot 180 (B = 2) behind rot 0 (B = 4), since rot 0 is
+                // enumerated first and already scores a clean zero.
+                //
+                // Continuing is bounded: the enumeration is already hard
+                // capped at `MAX_COMBINATIONS`, so the worst case is
+                // unchanged and only the typical case does more work.
+                let perfect = m.v13 == 0 && m.v12 == 0 && m.v5 == 0 && m.bends == 0;
                 let chosen: Vec<Orientation> = active
                     .iter()
                     .map(|&i| placement.elements[i].orientation)
                     .collect();
                 best = Some((chosen, m));
-                // Can't beat zero on both — stop enumerating early.
-                if reached_zero {
+                if perfect {
                     break 'enumerate;
                 }
             }
@@ -390,6 +431,11 @@ struct Measure {
     overlap: usize,
     v12: usize,
     v13: usize,
+    /// V16 bend count of the trial route, as the **ink-graph** quantity
+    /// (see [`bend_count`]) — never a raw segment or route-corner count.
+    /// Always the FINAL key of the acceptance tuple; see the ordering
+    /// contract on `greedy_descent`'s gate.
+    bends: usize,
     offenders: Vec<Violation>,
     v12_offenders: Vec<String>,
 }
@@ -403,15 +449,114 @@ fn measure(placement: &Placement, library: &Library) -> Measure {
     let overlap = symbol_overlap_count(placement, library);
     let (v12, v12_offenders) = v12_crossings(placement, library, &route.segments);
     let v13 = v13_overlap_count(placement, library);
+    let bends = bend_count(&route.segments);
     Measure {
         v5: offenders.len(),
         v11: route.v11_count,
         overlap,
         v12,
         v13,
+        bends,
         offenders,
         v12_offenders,
     }
+}
+
+/// V16 bend count — the L-corners of the emitted **ink**.
+///
+/// This is deliberately the ink-graph quantity defined in
+/// `docs/invariants.md` V16 and computed by its verifier
+/// (`spice2kicad/tests/wire_geometry.rs`), NOT a raw segment or
+/// route-corner count. Group segments by line, merge
+/// touching-or-overlapping collinear spans into **maximal straight
+/// runs**, then count vertices carrying exactly two rays of opposite
+/// orientation.
+///
+/// The maximal-run merge is the load-bearing part. `spice_route`'s
+/// `cleanup::split_at_interior_attachments` is a **Tier-0 correctness**
+/// pass that deliberately INCREASES the segment count (KiCad joins wires
+/// only at endpoints), and `coalesce_collinear` /
+/// `collapse_collinear_overlaps` re-segment identical ink the other way.
+/// A raw count in the acceptance gate would therefore put optimisation
+/// pressure against a correctness pass — the metric must be invariant
+/// under re-segmentation of identical ink, and merging runs before
+/// counting is what makes it so.
+fn bend_count(segments: &[crate::v5::WireSegment]) -> usize {
+    // Quantise to µm so float noise cannot split a run.
+    #[allow(clippy::cast_possible_truncation)]
+    let q = |v: f64| (v * 1000.0).round() as i64;
+
+    // (is_vertical, fixed coordinate) -> spans along the free axis.
+    let mut lines: std::collections::BTreeMap<(bool, i64), Vec<(i64, i64)>> =
+        std::collections::BTreeMap::new();
+    for &((x1, y1), (x2, y2)) in segments {
+        let (x1, y1, x2, y2) = (q(x1), q(y1), q(x2), q(y2));
+        if x1 == x2 && y1 == y2 {
+            continue; // degenerate
+        }
+        if x1 == x2 {
+            lines
+                .entry((true, x1))
+                .or_default()
+                .push((y1.min(y2), y1.max(y2)));
+        } else if y1 == y2 {
+            lines
+                .entry((false, y1))
+                .or_default()
+                .push((x1.min(x2), x1.max(x2)));
+        }
+        // Diagonals are an outright V16 failure the verifier catches;
+        // nothing in the pipeline emits them, so they are ignored here.
+    }
+
+    // Merge each line's spans into maximal runs.
+    let mut runs: Vec<(bool, i64, i64, i64)> = Vec::new();
+    for ((vertical, fixed), mut spans) in lines {
+        spans.sort_unstable();
+        let (mut lo, mut hi) = spans[0];
+        for (a, b) in spans.into_iter().skip(1) {
+            if a <= hi {
+                hi = hi.max(b); // touching or overlapping — same run
+            } else {
+                runs.push((vertical, fixed, lo, hi));
+                (lo, hi) = (a, b);
+            }
+        }
+        runs.push((vertical, fixed, lo, hi));
+    }
+
+    // Candidate vertices: every run endpoint.
+    let mut points: Vec<(i64, i64)> = Vec::new();
+    for &(vertical, fixed, lo, hi) in &runs {
+        for end in [lo, hi] {
+            points.push(if vertical { (fixed, end) } else { (end, fixed) });
+        }
+    }
+    points.sort_unstable();
+    points.dedup();
+
+    // A bend is a 2-ray vertex with one horizontal and one vertical ray.
+    // Rays are counted as `cleanup::rays_at` does: a run ENDING here
+    // contributes one, a run whose strict INTERIOR contains it two.
+    points
+        .into_iter()
+        .filter(|&(px, py)| {
+            let (mut rays, mut has_v, mut has_h) = (0usize, false, false);
+            for &(vertical, fixed, lo, hi) in &runs {
+                let (along, across) = if vertical { (py, px) } else { (px, py) };
+                if across != fixed || along < lo || along > hi {
+                    continue;
+                }
+                rays += if along > lo && along < hi { 2 } else { 1 };
+                if vertical {
+                    has_v = true;
+                } else {
+                    has_h = true;
+                }
+            }
+            rays == 2 && has_v && has_h
+        })
+        .count()
 }
 
 /// Count V13 label overlaps for `placement`: a label's text bbox against
@@ -698,4 +843,87 @@ fn distinct_orientations(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bend_count;
+
+    /// A plain L has exactly one bend.
+    #[test]
+    fn single_l_corner_is_one_bend() {
+        let segs = [((0.0, 0.0), (0.0, 10.0)), ((0.0, 10.0), (10.0, 10.0))];
+        assert_eq!(bend_count(&segs), 1);
+    }
+
+    /// A straight run has no bends however many pieces it is cut into.
+    #[test]
+    fn collinear_run_has_no_bends() {
+        let whole = [((0.0, 0.0), (30.0, 0.0))];
+        let split = [
+            ((0.0, 0.0), (10.0, 0.0)),
+            ((10.0, 0.0), (20.0, 0.0)),
+            ((20.0, 0.0), (30.0, 0.0)),
+        ];
+        assert_eq!(bend_count(&whole), 0);
+        assert_eq!(bend_count(&split), 0);
+    }
+
+    /// The metric is invariant under re-segmentation of identical ink.
+    ///
+    /// This is the property that lets `bends` sit in phase 4.5's
+    /// acceptance gate: `spice_route::cleanup::split_at_interior_attachments`
+    /// is a Tier-0 correctness pass that deliberately splits runs at
+    /// same-net attachment points. A raw segment/corner count would move
+    /// when it runs, creating optimisation pressure against correctness.
+    /// The ink-graph count does not move.
+    #[test]
+    fn bend_count_is_invariant_under_resegmentation() {
+        // A 2-bend staple drawn as 3 maximal runs.
+        let coarse = [
+            ((0.0, 0.0), (0.0, 10.0)),
+            ((0.0, 10.0), (20.0, 10.0)),
+            ((20.0, 10.0), (20.0, 0.0)),
+        ];
+        // Identical ink, every run chopped at interior points.
+        let fine = [
+            ((0.0, 0.0), (0.0, 4.0)),
+            ((0.0, 4.0), (0.0, 10.0)),
+            ((0.0, 10.0), (7.0, 10.0)),
+            ((7.0, 10.0), (13.0, 10.0)),
+            ((13.0, 10.0), (20.0, 10.0)),
+            ((20.0, 10.0), (20.0, 6.0)),
+            ((20.0, 6.0), (20.0, 0.0)),
+        ];
+        assert_eq!(bend_count(&coarse), 2);
+        assert_eq!(bend_count(&fine), 2, "re-segmentation must not change B");
+    }
+
+    /// Overlapping duplicate ink merges into one run, adding no bends.
+    #[test]
+    fn overlapping_collinear_spans_merge() {
+        let segs = [
+            ((0.0, 0.0), (10.0, 0.0)),
+            ((5.0, 0.0), (15.0, 0.0)), // overlaps the first
+            ((15.0, 0.0), (15.0, 5.0)),
+        ];
+        assert_eq!(bend_count(&segs), 1);
+    }
+
+    /// A T-junction is a branch, not a bend: 3 rays, so it is not counted.
+    #[test]
+    fn t_junction_is_not_a_bend() {
+        let segs = [
+            ((0.0, 0.0), (20.0, 0.0)),  // trunk
+            ((10.0, 0.0), (10.0, 8.0)), // stub off its interior
+        ];
+        assert_eq!(bend_count(&segs), 0);
+    }
+
+    /// A 4-ray crossing is not a bend either.
+    #[test]
+    fn crossing_is_not_a_bend() {
+        let segs = [((0.0, 5.0), (20.0, 5.0)), ((10.0, 0.0), (10.0, 10.0))];
+        assert_eq!(bend_count(&segs), 0);
+    }
 }

@@ -97,8 +97,20 @@
 //! same tier as V5/V6/V7 — and never a hard constraint. It must stay
 //! subordinate to Tier 0/1: the globally bend-minimal route through a
 //! symbol body (V12) or across a label (V13) is *worse* than a 2-bend
-//! detour around them. That is precisely why V16 is verifier-shaped
-//! (non-regression only) and is NEVER an in-loop objective.
+//! detour around them.
+//!
+//! That subordination is enforced structurally, not by tuning. V16 must
+//! NEVER be a *weighted* term — no bend weight in `cost.rs`, no
+//! bend-minimising router pass — since in a weighted sum "subordinate"
+//! degenerates into a question of coefficients. It MAY enter phase
+//! 4.5's acceptance predicate (`kicad-emitter/src/refine.rs`) in exactly
+//! two shapes: a non-regression guard alongside `v11`/`overlap`/`v12`,
+//! or the **final** key of the lexicographic objective, strictly after
+//! `(v13, v12, v5)`. Under lexicographic comparison a candidate raising
+//! V12/V13 is strictly worse however many bends it saves, so the trade
+//! is unreachable by construction. See `docs/invariants.md` V16 for the
+//! full rule, the ink-graph metric-fidelity condition, and the accepted
+//! router → placement coupling.
 //!
 //! Known floor: bend-minimisation and V5-outward genuinely conflict.
 //! `rc_lowpass`'s two `out` pins share a Y and sit 3.81 mm apart — a
@@ -473,7 +485,13 @@ const FIXTURES: &[&str] = &[
 /// sensitivity the ink graph is built to remove.
 const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     ("rc_lowpass", 3, 0),
-    ("common_emitter", 10, 3),
+    // B 10 → 4. Phase 4.5's acceptance objective gained the V16
+    // ink-graph bend count as its FINAL lexicographic key, after
+    // (V13, V12, V5), so the refiner now separates orientations that tie
+    // on every higher-tier count by how straight the resulting ink is.
+    // COUT lands at rot 0 instead of rot 180 and Q1 unmirrors. V5 is
+    // unchanged at 1 and no Tier-0/Tier-1 count moved. Ratchet DOWN.
+    ("common_emitter", 4, 3),
     ("multivibrator", 10, 2),
     // J 0 → 1: `apply_shared_centers` now reserves one grid cell of
     // vertical stub under the tail trunk, so the three-way `tail` node is
@@ -483,23 +501,19 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     ("opamp_inverting_real", 8, 0),
     ("opamp_inverting", 3, 0),
     ("port_shapes", 4, 0),
-    // B 3 → 4, under the same global-improvement escape as
-    // `opamp_definition_level` below (TOTAL V5 16 → 7). At rot 0 the
-    // `out` net must leave C1.1 upward and enter R1.2 from below at a
-    // different X — a shape whose rectilinear minimum is provably 4
-    // bends.
+    // B 4 → 2, and the global-improvement escape that once raised this
+    // literal to 4 is WITHDRAWN — it now ratchets down past its
+    // pre-escape mark of 3. At rot 0 the `out` net must leave C1.1
+    // upward and enter R1.2 from below at a different X, a shape whose
+    // rectilinear minimum is provably 4 bends. R1 at rot 180 puts both
+    // `out` pins on one row and measures B = 2, V5-clean, with no
+    // V11 / V12 / V13 / overlap change.
     //
-    // The retry required before taking this escape DID find a better
-    // layout: R1 at rot 180 puts both `out` pins on one row and measures
-    // B = 2 (below even the old mark of 3), V5-clean, with no V11 / V12 /
-    // V13 / overlap change. It is not reachable today — rot 0 and rot 180
-    // tie on (V13, V12, V5), so phase 4.5 keeps whichever it enumerates
-    // first, and only a bend-aware key could separate them. Adding one
-    // would make V16 an in-loop objective, which docs/invariants.md V16
-    // forbids outright; changing that rule needs owner sign-off, so the
-    // escape is taken here instead and the finding is reported rather
-    // than landed.
-    ("rc_lowpass_ports", 4, 0),
+    // That better layout was found when the escape was taken but was
+    // unreachable then: rot 0 and rot 180 tie on (V13, V12, V5), so
+    // phase 4.5 kept whichever it enumerated first. The bend key now
+    // separates them, so the fixture reaches its true floor.
+    ("rc_lowpass_ports", 2, 0),
     // B 10 → 12, J 2 → 0. The pin-angle fix in `Symbol::pins_in` stopped
     // the router steering horizontal opamp pins inward, which removed
     // this fixture's V5 violations (3 → 0) and both of its branch

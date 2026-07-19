@@ -256,18 +256,29 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
     // across fixtures fell 16 → 8; V16 (B, J) per fixture is unchanged
     // on 7 of 9 — see the commit message for the two exceptions.
     //
-    // Regenerated again for the shared-node-centre tail stub:
-    // `spice_layout::idioms::apply_shared_centers` now seats the centred
-    // passive one grid cell BELOW the clearance stride, so its shared-net
-    // pin no longer lands on the trunk row the router picks. Only
-    // `diff_pair` has the idiom, and only its `RTAIL` (plus the five
-    // power glyphs / flags whose column follows it) moved — all by
-    // exactly +1.27 mm in Y, 6 rows of 107. Every other fixture is
-    // bit-identical, which is the evidence that this commit's V5
-    // re-baselining is a measurement correction and not a geometry
-    // regression. Buys `diff_pair` V5 1 → 0 at V16 J 0 → 1 (a three-way
-    // node drawn as a proper Steiner T instead of the trunk ending
-    // sideways on a pin).
+    // Regenerated again for two layout changes landing together:
+    //
+    // (a) `spice_layout::idioms::apply_shared_centers` now seats the
+    //     centred passive one grid cell BELOW the clearance stride, so
+    //     its shared-net pin no longer lands on the trunk row the router
+    //     picks. Only `diff_pair` has the idiom; its `RTAIL` and the five
+    //     power glyphs / flags whose column follows it moved +1.27 mm in
+    //     Y. Buys `diff_pair` V5 1 → 0 at V16 J 0 → 1 (a three-way node
+    //     drawn as a proper Steiner T instead of the trunk ending
+    //     sideways on a pin).
+    //
+    // (b) Phase 4.5's acceptance objective gained the V16 ink-graph bend
+    //     count as its FINAL lexicographic key, after (V13, V12, V5), so
+    //     the refiner now separates orientations that tie on every
+    //     higher-tier count by how straight the resulting ink is. This
+    //     re-picked orientations on `rc_lowpass_ports` (R1 → rot 180,
+    //     B 4 → 2) and `common_emitter` (B 10 → 4). See ADR-16 "Accepted
+    //     extension" and invariants.md V16 for why a last-place
+    //     lexicographic key cannot trade against Tier 1.
+    //
+    // V5 is unchanged or lower on every fixture; no Tier-0/Tier-1 count
+    // moved anywhere. Only `opamp_definition_level` B rose (10 → 12), on
+    // the owner-approved global-improvement escape.
     (
         "common_emitter",
         "#FLG1",
@@ -351,15 +362,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
     ),
     ("common_emitter", "CE", "Device:C", 69.85, 69.85, 0.0, ""),
     ("common_emitter", "CIN", "Device:C", 35.56, 53.34, 90.0, ""),
-    (
-        "common_emitter",
-        "COUT",
-        "Device:C",
-        90.17,
-        52.07,
-        180.0,
-        "",
-    ),
+    ("common_emitter", "COUT", "Device:C", 90.17, 52.07, 0.0, ""),
     (
         "common_emitter",
         "Q1",
@@ -367,7 +370,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         63.5,
         52.07,
         0.0,
-        "y",
+        "",
     ),
     ("common_emitter", "R1", "Device:R_US", 55.88, 35.56, 0.0, ""),
     (
@@ -924,7 +927,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "Device:R_US",
         41.91,
         35.56,
-        0.0,
+        180.0,
         "",
     ),
 ];

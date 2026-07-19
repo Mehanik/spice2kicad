@@ -820,10 +820,66 @@ invariant here.
   V5/V6/V7 — and never a hard constraint. It must stay subordinate to
   Tier 0 and Tier 1: the globally bend-minimal route *through* a symbol
   body (V12) or *across* a label (V13) is worse than a 2-bend detour
-  around them. This is exactly why V16 is **verifier-shaped**
-  (non-regression only) and is **never an in-loop objective** — no bend
-  term in `cost.rs`, no bend-minimising router pass that can outvote an
-  obstacle detour.
+  around them.
+
+  **How that subordination is enforced — by structure, not by tuning.**
+  V16 must NEVER be a *weighted* term: no bend weight in `cost.rs`, no
+  bend-minimising router pass. In a weighted sum every term is tradeable
+  against every other at some ratio, so "subordinate" degenerates into a
+  question of coefficients — and CLAUDE.md's constraints-vs-costs rule
+  already records that a soft term at a safe weight either does nothing
+  or eventually outvotes something it shouldn't. Subordination by tuning
+  is not subordination.
+
+  V16 MAY, however, enter **phase 4.5's acceptance predicate**
+  (`kicad-emitter/src/refine.rs`) in exactly two shapes:
+
+  (a) a **non-regression guard**, alongside the existing
+      `v11` / `overlap` / `v12` guards; or
+  (b) the **final key of the lexicographic objective**, strictly after
+      `(v13, v12, v5)`.
+
+  Both are safe for the same structural reason, and it is a proof rather
+  than a preference: under lexicographic comparison a candidate that
+  raises `v12` or `v13` produces a strictly greater tuple *regardless of
+  how many bends it saves*, and is independently refused by the `<=`
+  guards. There is no exchange rate to get wrong, so bends can never buy
+  a wire through a body or across a label. This is what distinguishes a
+  lexicographic last key from a weighted term — the two coincide only
+  when weights exist to trade. **Bends must not be moved earlier in the
+  tuple**, which would make exactly that trade reachable.
+
+  Conditioned on **metric fidelity**: whatever enters the gate must be
+  the ink-graph quantity defined above (maximal straight runs, then
+  2-ray H+V vertices), never a raw segment or route-corner count.
+  `cleanup.rs::split_at_interior_attachments` is a Tier-0 correctness
+  pass that deliberately *increases* segment count, so a raw count in
+  the gate would create optimisation pressure against correctness.
+  `refine.rs::bend_count` implements the ink-graph metric and its unit
+  tests assert invariance under re-segmentation.
+
+  **Provenance of this rule (read before "correcting" it).** The
+  original text here said V16 is "verifier-shaped … never an in-loop
+  objective". That formulation was found **too absolute** on design
+  review — it conflates "in-loop" with "able to trade against Tier 1",
+  which are the same thing in a weighted sum but *different* under
+  lexicographic comparison. The review was conducted by the author of
+  ADR-16 reviewing their own rule, and the amendment above was adopted
+  **on explicit project-owner sign-off**, the owner choosing
+  "reformulate the rule, take the tie-break" over keeping the absolute
+  ban. It is a doctrine change authorised by the owner — NOT an agent
+  relaxing a rule to legalise its own change. A previous run mistook it
+  for the latter and reverted approved work; do not repeat that. If you
+  believe this rule is wrong, raise it — do not silently revert it.
+
+  **Accepted side effect.** Putting bends in the gate increases
+  router → placement coupling: phase 4.5 already uses the real router as
+  its oracle, so a `spice-route` change can now shift placement through
+  the bend key as well as the V5 key. That is governed by ADR-16's
+  baseline-diff protocol (a router-only change must produce an empty
+  `baseline_lock` diff; any regeneration must show V16 (B, J)
+  non-increasing per fixture), which exists precisely to make this
+  visible.
 
   **Known floor: V16 and V5 genuinely conflict.** `rc_lowpass`'s two
   `out` pins share a Y and sit 3.81 mm apart. A 0-bend direct wire
@@ -845,36 +901,47 @@ invariant here.
   | fixture                  |  B |  J |
   | ------------------------ | -- | -- |
   | `rc_lowpass`             |  3 |  0 |
-  | `common_emitter`         | 10 |  3 |
+  | `common_emitter`         |  4 |  3 |
   | `multivibrator`          | 10 |  2 |
   | `diff_pair`              |  2 |  1 |
   | `opamp_inverting_real`   |  8 |  0 |
   | `opamp_inverting`        |  3 |  0 |
   | `port_shapes`            |  4 |  0 |
-  | `rc_lowpass_ports`       |  4 |  0 |
+  | `rc_lowpass_ports`       |  2 |  0 |
   | `opamp_definition_level` | 12 |  0 |
 
   Standard ratchet policy applies (CLAUDE.md § "Budgets are ratchets,
   not knobs"): these literals only ever go **down**, and the test prints
   the reclaimable value on any improvement.
 
-  Three literals moved after the `Symbol::pins_in` pin-angle fix, which
+  Three of these moved after the `Symbol::pins_in` pin-angle fix, which
   corrected both the router's outward stubs and the V5 measure (TOTAL V5
   across all fixtures 16 → 8, then 7):
 
   - `opamp_definition_level` B 10 → 12, J 2 → 0 — the fixture lost all
     three V5 violations and both branch vertices, at the cost of two
     bends. **Global-improvement escape**, owner signed off.
-  - `rc_lowpass_ports` B 3 → 4 — same escape. A 2-bend layout exists and
-    was verified (R1 at rot 180 puts both `out` pins on one row) but is
-    unreachable: rot 0 and rot 180 tie on (V13, V12, V5), and separating
-    them would require a bend-aware key inside phase 4.5 — i.e. making
-    V16 an in-loop objective, which this invariant forbids. Recorded as
-    a known, costed floor pending an owner decision on that rule.
+  - `rc_lowpass_ports` B 3 → 4 — same escape, since **WITHDRAWN**. The
+    verified 2-bend layout (R1 at rot 180 puts both `out` pins on one
+    row) was unreachable while rot 0 and rot 180 tied on (V13, V12, V5);
+    the bend key added above now separates them, so the fixture ratchets
+    to its true floor of **B = 2** — below even its pre-escape mark of 3.
+    The escape is no longer claimed.
   - `diff_pair` J 0 → 1 — `idioms::apply_shared_centers` now reserves a
     grid cell of vertical stub under the tail trunk, so the three-way
     node is a proper Steiner T instead of the trunk ending sideways on
     RTAIL's pin. Buys V5 1 → 0. Owner signed off.
+
+  Two further literals moved when V16 bends became phase 4.5's final
+  lexicographic key (see the subordination rule above):
+
+  - `common_emitter` B 10 → 4 — COUT lands at rot 0 rather than rot 180
+    and Q1 unmirrors, both previously tied on (V13, V12, V5). V5 is
+    unchanged at 1; no Tier-0/Tier-1 count moved. Ratchet DOWN.
+  - `rc_lowpass_ports` B 4 → 2 — as above; escape withdrawn.
+
+  Net effect of the bend key: `opamp_definition_level`'s B = 12 is the
+  only rise anywhere still standing on the global-improvement escape.
 
   **Cross-check against the crossing ratchet.** The verifier's
   `inter_net_crossings` (4-ray vertices with no dot — excluded from both

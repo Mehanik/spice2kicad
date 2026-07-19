@@ -458,9 +458,21 @@ tiers are strictly ordered.
   (structural layered placement), **V7** (symmetry-aware
   placement), **V16** (wire rectilinearity — bend/branch counts;
   a continuous gradient, hence Tier 2 by the constraints-vs-costs
-  decision rule, and verifier-shaped only: never an in-loop
-  objective, because the bend-minimal route through a body (V12)
-  or across a label (V13) is worse than a 2-bend detour).
+  decision rule). V16 must never be a **weighted** term — no bend
+  weight in `cost.rs`, no bend-minimising router pass — because
+  subordination by coefficient is not subordination. It MAY be a
+  non-regression guard in phase 4.5's acceptance predicate, or the
+  **final** lexicographic key of that predicate, strictly after
+  `(v13, v12, v5)`: under lexicographic ordering a candidate that
+  raises V12/V13 is strictly worse no matter how many bends it
+  saves, so the bend-minimal route through a body or across a
+  label is unreachable by construction. Never move it earlier in
+  the tuple, and only ever the ink-graph count (see invariants.md
+  V16 for the proof, the metric-fidelity condition, the
+  accepted router→placement coupling, and the record that this
+  reformulation was adopted on owner sign-off after design
+  review — it is authorised doctrine, not an agent relaxing a
+  rule to fit its own change).
 
 **Ordering rule (load-bearing).** A change may never regress a
 higher-priority (lower-numbered) tier to improve a

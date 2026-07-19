@@ -1500,6 +1500,60 @@ run `baseline_lock` first and treat a non-empty diff as a scope change
 rather than a nuisance. Reviewers should refuse a baseline regeneration
 that arrives without the V16 table.
 
+**Accepted extension: V16 bends as phase 4.5's final objective key.**
+
+`rc_lowpass_ports` currently costs B = 4. Its `out` net must leave C1.1
+upward and enter R1.2 from below at a different X, and the rectilinear
+minimum for that shape is provably 4 bends. Rotating R1 to 180 puts both
+`out` pins on one row and yields **B = 2** — below even the pre-pin-angle
+mark of 3 — while staying V5-clean with no V11 / V12 / V13 / overlap
+change. This was verified end-to-end by pinning the orientation through
+the layout cache and re-measuring the emitted ink, not predicted.
+
+It was unreachable because rot 0 and rot 180 **tie** on (V13, V12, V5):
+`greedy_descent` skips the fixture (neither element is a V5 or V12
+offender at the point it runs), and `joint_search` stopped at the first
+zero-cost combination it enumerated, which is rot 0. Only a bend-aware
+key can separate them.
+
+**Status: adopted on project-owner sign-off following design review.**
+The review (by ADR-16's own author, re-examining their own rule) found
+the original "never an in-loop objective" wording too absolute: it
+conflates "in-loop" with "able to trade against Tier 1", which coincide
+only in a weighted sum, not under lexicographic comparison. Presented
+with the choice, the owner selected "reformulate the rule, take the
+tie-break". Recorded explicitly because a subsequent run mistook this
+amendment for an agent rewriting doctrine to legalise its own change and
+reverted the approved work — it is not; the authorisation is the owner's.
+
+**Decision: V16 bends are now the final lexicographic key of phase 4.5's
+acceptance objective**, strictly after `(v13, v12, v5)`, with the
+existing `v11` / `overlap` / `v12` hard guards unchanged. The revised
+V16 rule and the proof that last-place lexicographic ordering makes the
+subordination structural (rather than a matter of coefficients) live in
+`docs/invariants.md` V16 — including the two permitted shapes
+(non-regression guard, or final objective key) and the requirement that
+the quantity be the **ink-graph** bend count, never a raw segment or
+corner count.
+
+Two mechanical consequences were decided with it:
+
+- `joint_search`'s early exit no longer fires on
+  `(V13, V12, V5) == 0`; it now requires bends to be zero too. The old
+  exit returned the lexicographically first zero-cost combination and
+  hid every equally-clean but straighter alternative behind it. The
+  enumeration is already hard-capped by `MAX_COMBINATIONS`, so the
+  worst case is unchanged — only the typical case does more trial
+  routing.
+- Router → placement coupling increases, since the bend key joins the V5
+  key in reading real router output. This protocol is what governs it:
+  a router-only change must still produce an empty `baseline_lock` diff,
+  and any regeneration must show V16 (B, J) non-increasing per fixture.
+
+Measured effect when it landed: `rc_lowpass_ports` B 4 → 2 and
+`common_emitter` B 10 → 4, with V5, V11, V12, V13, overlap and crossing
+counts unmoved on every fixture.
+
 ---
 
 ## What we are not deciding now
