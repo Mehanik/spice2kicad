@@ -9,5 +9,14 @@ cargo fmt --all -- --check
 echo "==> cargo clippy"
 cargo clippy --workspace --all-targets -- -D warnings
 
-echo "==> cargo test"
-cargo test --workspace --quiet
+# Tests must run under a virtual-memory cap: a placer/router regression can
+# grow segments without bound and OOM-kill the host before any single test
+# fails. `just test` sets `ulimit -v ${RUST_TEST_MAX_VSZ_KB:-4194304}` and
+# `--test-threads ${RUST_TEST_THREADS:-2}`; delegate to it so the incantation
+# lives in exactly one place, and mirror it when `just` is unavailable.
+echo "==> cargo test (capped)"
+if command -v just >/dev/null 2>&1; then
+    just test
+else
+    bash -c 'ulimit -v ${RUST_TEST_MAX_VSZ_KB:-4194304} && cargo test --workspace -- --test-threads=${RUST_TEST_THREADS:-2}'
+fi
