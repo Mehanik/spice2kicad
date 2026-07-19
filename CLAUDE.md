@@ -275,7 +275,13 @@ For full grammar, examples, and diagnostics, see
   hierarchical-sheet placement — with the routing-aware orientation
   refinement (phase 4.5) living in `kicad-emitter` (the one crate that
   can see both the placer and the real router). The constraint resolver
-  from spec §5 sits between the parser and the emitter.
+  from spec §5 sits between the parser and the emitter. The placer's
+  *direction of travel* is ADR-15 (readability-first: constructive
+  role/anchor placement — anchor / rail stub / series / terminal-net —
+  with the SA demoted to a polisher that may not undo it). Read ADR-15
+  before touching `cost.rs` weights, `idioms.rs`, or the flow gate in
+  `solver/anneal.rs`; it records which of its stages are built, and
+  which conventions were measured and rejected.
 - **Diagnostics.** Use `ariadne` for source-spanned error rendering.
   Every error/warning code in spec §7 should round-trip through
   `ariadne` with the offending line highlighted.

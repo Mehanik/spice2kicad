@@ -1435,6 +1435,176 @@ test can see this class of defect; the modelled V13 checks cannot.
 
 ---
 
+## ADR-15 — Readability-first placement: constructive role/anchor placement, demoting the SA to a polisher
+
+**Status: partially implemented** (Stages 0, 1, 2 and 4 landed; Stage 3
+not landed; Stage 5 not started). Written up after the fact — the
+decision drove a session's worth of implementation while living only in
+an agent's report. Where the as-built code differs from the design, the
+**code** is recorded as the truth and the divergence is called out
+explicitly below; do not read the "Decision" section as a description
+of current behaviour without the "Corrections" section next to it.
+
+**Context — the diagnosis.** The placer was believed to behave like an
+area/wirelength-minimising PCB placer. Measurement disproved it:
+
+- `hpwl` carries weight **1.0** (`cost.rs:127`, self-documented as "a
+  tiny regulariser") and contributed **156.21 at weight 1.0 — ~0.05% of
+  the SA objective**. It has never driven a layout.
+- The dominant term was `cost::rail_direction` (weight **200.0**,
+  `cost.rs:128`), at ~81–97% of the objective — and it carried an
+  **inverted Y convention**. `pin_extents_y` returns `(y_min, y_max)`;
+  the caller bound it as `(y_top, y_bot)`; screen Y grows *downward*.
+  The net effect was to pull positive rails to the screen bottom and
+  grounds to the top — the objective was actively optimising for an
+  upside-down schematic. Fixed in `00ea294`; the hinge now reads
+  `VertPref::Up => (y - y_min).max(0.0)` / `VertPref::Down =>
+  (y_max - y).max(0.0)` (`cost.rs:717`+).
+
+That single sign error surviving unnoticed is the symptom; the
+architectural defects behind it are:
+
+1. **An undifferentiated bag of quadratics.** `CostBreakdown` has 12
+   terms, **eight** of them squared-displacement mm² terms with weights
+   spanning **20 → 1000** (`layer_order` 20, `signal_flow` 25,
+   `band_misalignment` 50, `soft_y_residual` 50, `rail_stub_alignment`
+   50, `band_inversion` 100, `rail_direction` 200,
+   `constraint_violation` 1000), plus `overlap` (200, an *area*), and
+   three non-quadratics (`hpwl` 1, `net_bbox_crossings` 4, `crossings`
+   100). One sign error inside that sum dominates silently and nothing
+   in the suite can see it.
+2. **Categorical properties encoded as gradients.** Readability
+   conventions ("a bypass cap hangs below its device", "signal flows
+   left to right") are yes/no geometric facts. Encoding them as
+   weighted mm² penalties violates the project's own
+   constraints-vs-costs rule (CLAUDE.md) — at a safe weight, a soft
+   term routinely changes nothing.
+3. **The SA barely matters.** ~200 iterations of ±2-cell jitter on a
+   layout ~90% determined by the constructive seed. Treating it as the
+   thing that "produces" the placement misallocates every fix.
+
+**Decision — the role model.** Place constructively from *structural*
+roles, and demote the SA to a polisher that may not undo them. Roles are
+derived from **pin counts, pin angles and net classes only** — never
+refdes, element kind, or a named topology (CLAUDE.md principle 9,
+"structural placement, not pattern recognition"):
+
+- **Anchor** — an element with **≥3 pins**. Its placed pins define the
+  columns (pin X) and rows (pin Y) that other roles hang off.
+- **Rail stub** — a 2-terminal element with exactly one rail-class pin;
+  it terminates a node. Its column is the anchor-side X for the signal
+  net; its side is the rail's `VertPref`. **Implemented** as
+  `idioms.rs` idiom 4 (`detect_rail_stubs` / `apply_rail_stub_columns`)
+  — see the corrections below for how the as-built column and side
+  differ from this sentence.
+- **Series element** — 2-terminal, both pins signal-class. It lies on
+  the signal path, is drawn with a horizontal pin axis, and is placed in
+  the flow lane between its neighbours.
+- **Terminal nets** — `*@port` nets, plus the leaf-net name conventions
+  in `layers.rs::no_source_fallback` (`in`/`input`/`vin*` →
+  left, `out`/`output`/`vout*` → right), pin lanes to the far left
+  (inputs) and far right (outputs).
+
+**Key consequence — conventions are constructive assignment plus the
+`pinned` mask, not SA cost terms.** Pinning is the only mechanism in the
+tree that is *trivially hard at every stage*: the SA never proposes a
+pinned element (`anneal.rs:72` filters `movable` by `!pinned`, and
+`propose_move` only ever indexes `movable`), and phase 4.5 skips it in
+both sub-searches (`refine.rs:129` in `greedy_descent`, `refine.rs:261`
+in `joint_search`). There is no gate to keep in sync — which is exactly
+the failure mode the constraints-vs-costs rule exists to prevent, and
+exactly what bit the V14 Attempt-A post-mortem.
+
+**Corrections to the naive conventions** (derived during review; each
+one was a wrong rule someone would otherwise have coded):
+
+- **"Capacitors are horizontal" is WRONG.** The correct generalisation
+  is *series-on-signal-path elements are horizontal*. A bypass capacitor
+  (e.g. `CE`) is a **rail stub** and stays vertical. The role model
+  supplies the discriminator structurally, so no element-kind test is
+  needed.
+- **"GND-connected elements go down" is a per-terminal stub rule, not a
+  per-element rule.** A transistor that touches ground *through* an
+  emitter resistor must not sink to the bottom band. Only an element
+  whose own pin is on the rail is a stub.
+- **Two stubs on the same node cannot both be exactly on-column.** The
+  convention is nearest-on-column, with siblings spread symmetrically
+  about the anchor at the derived stride.
+
+**Staging.**
+
+| Stage | Content | Status |
+| ----- | ------- | ------ |
+| 0 | rail-direction Y-convention fix + rail-stub idiom | **LANDED** (`00ea294`) |
+| 1 | verifiers | **LANDED** — `flow_geometry.rs` F3/F4, `wire_geometry.rs` V16 |
+| 2 | stub column assignment | **LANDED** — `idioms.rs` idiom 4 (column only; does *not* pin — see below) |
+| 3 | `align` shared-axis-only semantics | **NOT LANDED** — needs an annotation-spec change and owner sign-off |
+| 4 | flow hardening, positions only | **LANDED** (`b8f5df1`) — monotone flow-order gate in `anneal.rs` |
+| 5 | flow orientation via `allowed`-set filtering in `orient.rs` | **NOT STARTED** — blocked on the "flow-orientation wall" |
+| 6 | consolidation | not started |
+
+### Measured corrections — where the design's claims do not match the code
+
+Recorded deliberately, so the next reader re-derives nothing:
+
+- **`cost::layer_order` contributes exactly nothing on every current
+  fixture.** `cost.rs:1150-1157` returns `0.0` whenever
+  `layer_asg.no_source_fallback` is set — and that flag is set on every
+  fixture we have, because they all `;@ ignore` their source, leaving
+  the layer assignment with no root. The design's premise that the soft
+  term was merely "outvoted at weight 20" is therefore **wrong**: at
+  weight 20 it is multiplied by a constant zero. This strengthens the
+  case for the Stage-4 hard gate rather than a weight bump — there was
+  never a weight that could have worked.
+- **F3 (flow inversions) already measured 0 on every fixture.** The
+  `FLOW_RATCHET` table (`flow_geometry.rs:523`) is `(0, 0)` for all ten
+  fixtures. The Stage-4 gate **protects** that property; it did not fix
+  anything. An earlier F3 draft counted rail stubs as flow pairs and
+  consequently scored the *conventional* drawing as defective — rail
+  stubs must be excluded from the pair set. Both the gate
+  (`anneal.rs:687`) and idiom 4 exclude them via
+  `idioms::detect_rail_stubs`; the F3 verifier reimplements the
+  predicate independently from the netlist (`flow_geometry.rs:229`)
+  rather than calling into the crate under test, on purpose.
+- **Idiom 4 does not pin, and does not set the stub's side.** The
+  "constructive assignment + `pinned` mask" consequence above is the
+  *design*; as built, `apply_rail_stub_columns` takes `pinned: &[bool]`
+  **immutably**, skips any group containing a pinned member
+  (`idioms.rs:766`), and mutates **X only**
+  (`origin = GridPoint::new(x + dx_cells, origin.y)`, `idioms.rs:816`).
+  The rail's `VertPref` is used only as a *grouping key*; which side of
+  the device a stub actually lands on is still decided by the soft
+  `cost::rail_direction` term. So Stage 2 delivered the column, not the
+  hard guarantee — the mask half of the decision is unbuilt.
+- **The stub column is not literally "the anchor pin's X".**
+  `rail_stub_anchor_x` (`idioms.rs:652`) uses the **mean world X of the
+  signal net's vertically-facing pins on ≥3-terminal elements**, falling
+  back to all non-stub vertically-facing pins, and excludes pins with
+  `angle % 180 == 0` (a stub cannot hang off a left/right-facing pin).
+  No anchor → the seed column is kept.
+- **Terminal-net lane pinning was implemented, measured, and
+  REJECTED.** It was the remaining Stage-4 item. Results: V16 `B` on
+  `rc_lowpass_ports` rose **2 → 3**, with **no** measurable F3/F4
+  improvement (both were already 0), and it made the owner-visible
+  defect *worse* — R1 flipped rot 180 → 270 and slid to the right of
+  C1. Recorded as tried-and-rejected with the numbers so nobody
+  re-attempts it blind. Note the `rc_lowpass_ports` B budget is at
+  **2** today, past its own pre-escape mark of 3; the rejected change
+  would have spent that hard-won ratchet for nothing.
+- **Stage 5 was unbuilt as of `b8f5df1`, and is being attempted now.**
+  At the commit this ADR was written against, `orient.rs` was purely
+  V14 (`allowed_orientations` at `:110`, filtering `Orientation::ALL`
+  by `satisfies_v14`) with no flow-orientation logic in the tree; work
+  on it is in flight, so check the code rather than this line for its
+  current state. The obstacle is recorded as the "flow-orientation
+  wall": a left→right
+  flow preference expressed as a seed/SA orientation tie-break regresses
+  Tier-0 V11 and is undone by the phase-4.5 V5 oracle. If Stage 5 is
+  attempted, it must be an `allowed`-set *filter* — not a tie-break —
+  so that phase 4.5 can only select from within it.
+
+---
+
 ## ADR-16 — The baseline-diff protocol: two instruments for a coupled loop
 
 **Status:** accepted.
