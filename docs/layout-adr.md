@@ -1828,12 +1828,116 @@ counts unmoved on every fixture.
 
 ## ADR-17 — Deterministic constructive placement with router-verified local repair
 
-**Status: proposed / owner-approved, staged.** Building ADR-17 is
-APPROVED by the project owner. It is staged with per-stage kill criteria
-(below), and each stage's escape-list is brought for sign-off **in
-advance of that stage**, not retroactively.
+**Status: RETIRED — owner decision, after Stage 2 was KILLED. Four
+parts salvaged; see "RETIRED" immediately below.** The ADR is kept, not
+deleted: its diagnosis of the coupling between the ratchet regime and a
+global optimizer, and the kill record that falsified its own central
+claim, are the durable value. Nothing below the RETIRED section is a
+plan any more — read it as a record.
 
-**Supersedes** ADR-15's "SA as polisher" *end-state*.
+*(Historical status, for context: proposed / owner-approved, staged,
+with per-stage kill criteria and per-stage escape-list sign-off.)*
+
+**Supersedes** ADR-15's "SA as polisher" *end-state* — a supersession
+that lapses with this retirement: ADR-15's as-built disposition stands.
+
+---
+
+### RETIRED — why, and what was salvaged
+
+#### Why retired
+
+**1. The SA was never the blast-radius culprit.** The control this ADR
+never ran is the **bare deterministic seed** — `--no-refine`, so no SA
+and no compaction at all. Measured on master (`56b1ab5`):
+
+| P11 case | SA (master) | seed + compaction (Stage 2) | **bare seed** |
+| -------- | ----------- | --------------------------- | ------------- |
+| `rc_lowpass` + 1 R | 5 / 5 | 5 / 5 | **5 / 5** |
+| `common_emitter` + 1 C | 17 / 17 | 16 / 17 | **17 / 17** |
+
+Removing the optimizer entirely changes nothing. Global re-basing is
+**intrinsic to any spacing-derived placement**: classify→bands→layers
+derives its strides from global structure, so one insertion re-spaces
+that element's column and every coordinate derived after it. The RNG was
+never the mechanism.
+
+> **Determinism is not locality.**
+
+This ADR's headline — "the redesign's primary product is that a change's
+diff becomes attributable to the change" — therefore does not follow
+from its proposed mechanism. Stage 2 measured the first half of that
+(deterministic compaction: no better); the seed arm closes it.
+
+**2. The SA is not doing compaction; it is basin-finding.** Conclusion
+(b) above ("where it does act, its entire measurable value is
+COMPACTION") **contradicts the table printed directly above it**, which
+shows the SA improving the V16 bend count `B` on three fixtures:
+`common_emitter` 11 → 4, `named_rails` 4 → 2, `opamp_inverting` 5 → 3.
+Bends are not wire length. The corrected picture:
+
+- **inert on 4 of 10** fixtures (`diff_pair`, `multivibrator`,
+  `opamp_definition_level`, `port_shapes` — byte-identical output);
+- **harmful on `rc_lowpass`** (B 3 vs the seed's 2, WL 17.8 vs 11.4),
+  on the `OPAMP` child sheet (X 2 vs 1), and on
+  `opamp_inverting_real` (B 8 vs 6 — a case conclusion (c) missed);
+- **load-bearing on the 3 complex fixtures** above, where it finds a
+  materially better basin, not merely a tighter one.
+
+An optimizer that is inert on 40% of inputs still stands as a criticism.
+"Its entire measurable value is compaction" does not, and Stage 2 was
+designed against that mis-statement.
+
+**3. Attributability is already solved where it matters.** Re-converting
+an *edited netlist* through the ADR-4 layout cache moves **0 of 8** user
+symbols on `common_emitter`+CB and **0 of 2** on `rc_lowpass`+R2/C2,
+with both conversions passing the CLI's post-emit connectivity check.
+(Four of `common_emitter`'s nine power glyphs report as "moved" only
+because glyph refdes are assigned in emission order and one insertion
+renumbers every later glyph — **all nine geometries are identical**:
+identity shifted, geometry did not. `rc_lowpass` genuinely relocates two
+glyph poses, but that is *decoration* re-anchoring around a new
+neighbour, downstream of placement.) So:
+
+- **users editing netlists already have attributable diffs** — the cache
+  delivers exactly the property this ADR promised;
+- **developers changing placer code can never have per-fixture locality
+  from any spacing-derived algorithm** — that workflow is governed by
+  ADR-16's two-instrument protocol, not by an algorithm change.
+
+This is now pinned by the reformulated **P11 — cache-path stability**
+(`placement_stability.rs`), which replaces the deleted basin-locality
+P11. See salvage item 3.
+
+#### What is salvaged
+
+| # | Item | Status |
+| - | ---- | ------ |
+| 1 | **Phase-4.5 Tier-0 connectivity guard.** Phase 4.5 can accept an orientation that severs a net (found during Stage 2, latent on master). Landing as a **hard guard**, not a term in the acceptance objective. | landing separately, on its own merits |
+| 2 | **Complete ADR-14's decoration reservation** — labels, Reference/Value text, PWR_FLAG bodies — as an **ADR-14 completion, NOT an "ADR-17 Stage 4"**. It is the identified cause of **4 of Stage 2's 7 breaches** and remains the standing plan for the `opamp_inverting_real` glyph residual. | in progress, re-parented to ADR-14 |
+| 3 | **The Stage-1 verifiers** (F5/P4, P5, P10, P11), with **P11 reformulated** as cache-path stability. The old basin-locality P11 is deleted: budget-0 against a measured 5/17 was a target no architecture can reach, and leaving it `#[ignore]`d was worse than deleting it. F5/P4, P5 and P10 are unchanged. | LANDED |
+| 4 | **Hand `*@place` / `*@align` annotations** for the two flow defects (`common_emitter`'s vertical `COUT`; `rc_lowpass_ports`' co-located `in`/`out`). The **zero-annotation** flow aspiration returns to v0.2, with its walls documented (MEMORY "flow-orientation wall"; ADR-15 Stage-5 post-mortem). | queued |
+
+#### Durable findings that outlive the retirement
+
+- **X spacing is slack; Y spacing is meaning.** The X-layer stride is a
+  flow-depth ordering with a generous constant floor, so closing it costs
+  nothing. The Y bands are V6's *semantic* structure (Top rail / Mid
+  signal / Bot ground); squeezing them is order-preserving and **still
+  wrong** — it collapses the signal band onto the rails and the router
+  pays in bends. Four variants measured, not tuned (`common_emitter` B):
+  X+Y squeeze **7**, X-squeeze + Y-snap **11**, least-disturbance
+  tie-break **13**, X-only **6**.
+- **Stage 4 is a precondition for any compaction attempt, not its
+  successor.** Compaction reclaims exactly the space decoration was
+  going to put labels and property text in, so it is structurally unable
+  to be safe until the decoration reservation is complete. Any future
+  attempt at spacing changes must complete salvage item 2 first.
+- **Determinism is not locality** (above). Any future attempt must make
+  locality an explicit design property with an acceptance test, not a
+  hoped-for consequence of removing the RNG.
+
+---
 
 It also **reverses ADR-15's decision to leave the pose-assignment
 mechanism with the annealer.** ADR-15 named the right mechanism —
@@ -1902,6 +2006,12 @@ states the property as a number: adding **one** bypass capacitor to
 `common_emitter` moves **17 of 17** pre-existing symbols, power glyphs
 included. Adding one series resistor to `rc_lowpass` moves 5 of 5. The
 "basin" is the whole page.
+
+> **AMENDMENT (retirement).** The number is right; the attribution is
+> wrong. The bare deterministic seed — no SA, no compaction — scores the
+> *same* 17/17 and 5/5. The blast radius is a property of
+> spacing-derived placement, not of Metropolis acceptance. See the
+> RETIRED section.
 
 ### Governance consequence
 
@@ -2190,13 +2300,13 @@ above. Three of its judgements were wrong:
 
 | Stage | Content | Status |
 | ----- | ------- | ------ |
-| 0 | This ADR; owner sign-off | **LANDED** |
-| 1 | Verifiers (F5/P4, P5, P10, P11); no behaviour change | **LANDED** |
+| 0 | This ADR; owner sign-off | **LANDED** (now RETIRED) |
+| 1 | Verifiers (F5/P4, P5, P10, P11); no behaviour change | **LANDED** — kept; P11 reformulated (salvage 3) |
 | 2 | Deterministic order-preserving compaction; SA retirement | **KILLED** — see the Stage-2 outcome below |
-| 3 | Joint flow-pose construction (position + orientation + mirror) | blocked by Stage 2 |
-| 4 | Complete decoration reservation | blocked by Stage 2 |
-| 5 | Generalized router-verified local repair (phase 4.5 promoted) | blocked by Stage 2 |
-| 6 | Consolidation; delete the superseded machinery | blocked by Stage 2 |
+| 3 | Joint flow-pose construction (position + orientation + mirror) | **ABANDONED** — flow handled by annotations (salvage 4) |
+| 4 | Complete decoration reservation | **RE-PARENTED to ADR-14** (salvage 2) |
+| 5 | Generalized router-verified local repair (phase 4.5 promoted) | **ABANDONED** — only the Tier-0 connectivity guard survives (salvage 1) |
+| 6 | Consolidation; delete the superseded machinery | **ABANDONED** — the SA stays |
 
 ### Kill criteria
 
@@ -2274,6 +2384,23 @@ being switched off alongside it.
 *Tier-0 broken* — see below. But it does mean Stage 2 was designed
 against a mis-measurement, and any future stage must re-derive its
 targets from a corrected ablation.
+
+> **AMENDMENT (ADR-17 retirement) — the "corrected" numbers in the two
+> paragraphs above are themselves a measurement artifact.** The seed
+> figures `common_emitter` B 11 → 4 and WL 121.9 → 59.7 mm were measured
+> on an **electrically broken file**: unguarded phase 4.5 rotates `COUT`
+> to 180, the router's conflict cascade drops the severed branch, and the
+> wire total is low precisely *because a wire is missing*. That is the
+> same defect diagnosed one section below. The honest seed number, with
+> the connectivity guard in place, is **B 11 / WL 127.0 mm** — i.e.
+> within noise of the original "invalid" ablation figure (B 11 /
+> WL 121.9), and it is what the Stage-2 measurement table below already
+> records for the "seed only" arm. So the ablation's *conclusion (b)*
+> still falls (see the RETIRED section: it is contradicted by its own
+> bend column, not by phase 4.5), but the phase-4.5 conflation did **not**
+> materially change the seed's score. The original numbers are left
+> above, unrewritten, because the sequence of two artifacts is the
+> lesson.
 
 #### A second Tier-0 defect found on the way: phase 4.5 can sever a net
 
@@ -2481,14 +2608,23 @@ slack, no placer behaviour changed:
   P11 measures — a chaotic map is perfectly deterministic and still
   re-bases globally on the smallest input change.
 
-- **P11** (`placement_stability.rs`) — adding ONE element to a netlist
-  moves poses only in the affected neighbourhood. `#[ignore]`d until
-  Stage 3, budgets at 0 (a target for a test that does not run, not a
-  ratchet on live behaviour — recording 5/17 as passing would enshrine
-  the defect). **This is the test ADR-15 Stage 5 needed and did not
-  have:** Stage 5's fatal basin shift was found by reading a
-  `baseline_lock` diff after the fact; with P11 in the suite it would
-  have been a named, failing assertion at the moment of the change.
+- **P11** (`placement_stability.rs`) — as landed, *basin locality*:
+  adding ONE element moves poses only in the affected neighbourhood.
+  `#[ignore]`d, budgets at 0 against a measured 5/17.
+
+  > **AMENDMENT (retirement) — this P11 is DELETED and REPLACED.** The
+  > seed-arm control shows budget-0 locality is unreachable by any
+  > spacing-derived placement, so the test was a target no architecture
+  > could hit; keeping it `#[ignore]`d in the suite was worse than
+  > deleting it. Its replacement, **P11 — cache-path stability**, asserts
+  > the achievable property users actually experience: edit a netlist,
+  > re-convert into the same output directory so the ADR-4 sidecar is
+  > read, and **zero pre-existing user symbols change pose** (measured
+  > 0/2 and 0/8), the connectivity check still passes, and no V12 / V13 /
+  > body-overlap count grows on the extended sheet. Power glyphs are
+  > matched by pose + `lib_id` rather than refdes; the emission-order
+  > refdes renumbering is a real, small, separately-fixable defect that
+  > the new test pins. **Landed LIVE.** F5/P4, P5 and P10 are unchanged.
 
 ---
 

@@ -283,23 +283,37 @@ For full grammar, examples, and diagnostics, see
   `solver/anneal.rs`; it records which of its stages are built, and
   which conventions were measured and rejected.
 
-  **ADR-17 supersedes ADR-15's end-state and is the current plan.**
-  It diagnoses the long-blocked flow-orientation and V14-glyph defects
-  as ONE property — *a constraint cannot be added to the SA without
-  global, unattributable consequences* — and replaces the SA with
-  deterministic constructive placement plus bounded router-verified
-  local repair. Status: proposed / owner-approved, staged, with
-  per-stage kill criteria; Stages 0 and 1 (this ADR + its verifiers) are
-  landed, Stage 2 onward are not. **Read ADR-17 before proposing any
-  placer change**, and in particular before adding a hard constraint or
-  a cost term — it records why the last three attempts to do so could
-  not be contained. It also carries the measured SA ablation (the SA
-  moves nothing on 4 of 10 fixtures, fixes zero crossings on all ten,
-  and on `rc_lowpass` ends worse than its own seed) and the corrected
-  V14 residual. ADR-15's role model, its verifiers-before-intervention
-  rule, and its "pinning is the only trivially-consistent hard
-  mechanism" observation all survive unchanged; its "SA as polisher"
-  prescription does not.
+  **ADR-17 is RETIRED (owner decision), with four salvaged parts.**
+  It proposed replacing the SA with deterministic constructive placement,
+  on the diagnosis that the long-blocked flow-orientation and V14-glyph
+  defects are ONE property — *a constraint cannot be added to the SA
+  without global, unattributable consequences*. Its Stage 2 was KILLED,
+  and the retirement records why the diagnosis mis-attributed the cause:
+  **the bare deterministic seed — no SA, no compaction — has the same
+  blast radius as the SA (17/17 and 5/5), so determinism is not
+  locality**; global re-basing is intrinsic to any spacing-derived
+  placement. **The SA stays.** Salvaged: (1) a Tier-0 phase-4.5
+  connectivity guard; (2) completing ADR-14's decoration reservation
+  (re-parented to ADR-14, *not* an ADR-17 stage); (3) the Stage-1
+  verifiers, with P11 reformulated as **cache-path stability**; (4) hand
+  `*@place` / `*@align` for the two flow defects, with zero-annotation
+  flow returned to v0.2.
+
+  **Still read ADR-17 before proposing any placer change**, in
+  particular before adding a hard constraint or a cost term: it records
+  why the last three attempts could not be contained, the corrected SA
+  ablation (inert on 4 of 10 fixtures, fixes zero crossings on all ten,
+  worse than its own seed on `rc_lowpass` — but genuinely load-bearing
+  for bend count on three complex fixtures), the corrected V14 residual,
+  and the two findings that outlive it: **"X spacing is slack; Y spacing
+  is meaning"**, and **a complete decoration reservation is a
+  precondition for any compaction attempt, not its successor**.
+
+  With ADR-17 retired, ADR-15's as-built disposition stands: its role
+  model, its verifiers-before-intervention rule, and its "pinning is the
+  only trivially-consistent hard mechanism" observation are unchanged,
+  and its "SA as polisher" prescription is again the direction of
+  travel — with its own Stage-5 post-mortem as the caution.
 - **Diagnostics.** Use `ariadne` for source-spanned error rendering.
   Every error/warning code in spec §7 should round-trip through
   `ariadne` with the offending line highlighted.
