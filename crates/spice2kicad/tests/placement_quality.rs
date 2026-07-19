@@ -1419,7 +1419,6 @@ fn v14_rail_pin_faces_rail() {
             // is the PWR_FLAG corner driver block, whose glyphs stand a
             // clear 8 cells off the circuit and connect by name, not by
             // wire (see `spice_route::pwrflag::emit_corner_block`).
-            const MAX_HOST_ATTACH_MM: f64 = 3.0 * 1.27;
             if (host.px - ax).hypot(host.py - ay) > MAX_HOST_ATTACH_MM {
                 continue;
             }
@@ -1982,6 +1981,13 @@ fn power_glyph_foreign_body_overlap_budget(fixture: &str) -> usize {
 /// This records the current residual as a zero-slack per-fixture ratchet
 /// (issue [3], deferred V14 placer item) so it can never get worse; a
 /// future placement redesign drives every budget to 0.
+/// A power glyph sits on its host pin, or at most
+/// `SHEET_EDGE_GLYPH_OFFSET_CELLS` (2 cells) down the pin's outward
+/// direction for the V14 forced-sideways and sheet-edge stub fallbacks.
+/// Three cells is strictly beyond every legitimate offset, so this
+/// threshold cannot exempt a glyph that really is attached to a host.
+const MAX_HOST_ATTACH_MM: f64 = 3.0 * 1.27;
+
 #[test]
 fn no_power_glyph_foreign_body_overlap_across_fixtures() {
     let library = load_test_library();

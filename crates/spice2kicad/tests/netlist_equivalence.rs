@@ -36,13 +36,13 @@ use std::path::PathBuf;
 
 /// Fixtures whose emitted netlist is compared against their source.
 ///
-/// Two are deliberately absent, and the reasons are worth recording
-/// rather than leaving as a silent gap:
+/// One is deliberately absent, and the reason is worth recording rather
+/// than leaving as a silent gap: `opamp_inverting` lowers its `.subckt`
+/// to a hierarchical sheet, so KiCad's export flattens the instance into
+/// the child's `E1` and there is no `X1` to compare. Checking that
+/// flattening is correct needs a hierarchy-aware comparison this test
+/// does not attempt.
 ///
-/// * `opamp_inverting` lowers its `.subckt` to a hierarchical sheet, so
-///   KiCad's export flattens the instance into the child's `E1` and there
-///   is no `X1` to compare. Checking that flattening is correct needs a
-///   hierarchy-aware comparison this test does not attempt.
 /// `opamp_definition_level` used to be absent too: it exported its
 /// instances as bare `X1 __X1`, with **no nodes at all**, because the
 /// emitter wrote no `Sim.*` properties for a `.subckt` instance and
