@@ -50,4 +50,4 @@ pub fn emit_schematic(placement: &Placement, library: &Library) -> Result<String
 }
 
 pub use refine::refine_orientations;
-pub use schematic::{ChildSheet, SheetBlock, SheetPort, emit_child_sheet, emit_root};
+pub use schematic::{ChildSheet, PageShift, SheetBlock, SheetPort, emit_child_sheet, emit_root};

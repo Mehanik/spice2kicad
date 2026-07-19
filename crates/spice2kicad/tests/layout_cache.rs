@@ -313,3 +313,64 @@ fn cache_from_a_different_circuit_is_a_miss_not_a_corruption() {
         "a sidecar left by a different circuit changed this circuit's placement"
     );
 }
+
+#[test]
+fn page_shift_is_cached_and_does_not_drift_toward_the_page_edge() {
+    // The V15 page shift is replayed from the layout cache so the page
+    // frame stays put across edits (see `sidecar::PageShiftEntry`). A
+    // replayed shift must never let content creep toward the page edge:
+    // the emitter keeps it only while the result still satisfies V15
+    // (`min >= margin`, inside A4) and re-normalises otherwise.
+    //
+    // Exercise the whole edit cycle repeatedly — add a part, remove it,
+    // add it back — and assert the content floor holds on every run and
+    // that the frame converges instead of walking.
+    let dir = tempdir("shift_drift");
+    let out = dir.join("rc.kicad_sch");
+    let sc = sidecar_path(&out);
+
+    let mut shifts = Vec::new();
+    for (i, source) in [BASE, PLUS_ONE, BASE, PLUS_ONE, PLUS_ONE]
+        .into_iter()
+        .enumerate()
+    {
+        convert(source, &out, false);
+
+        let parsed =
+            spice_layout::sidecar::Sidecar::from_json(&std::fs::read_to_string(&sc).unwrap())
+                .expect("sidecar parses");
+        let shift = *parsed
+            .page_shifts
+            .get(spice_layout::sidecar::ROOT_SHEET_KEY)
+            .expect("root page shift recorded");
+        shifts.push(shift);
+
+        // V15 floor holds on every run, replayed shift or not.
+        let (min_x, min_y) = symbol_positions(&out)
+            .values()
+            .fold((f64::INFINITY, f64::INFINITY), |(ax, ay), &(x, y)| {
+                (ax.min(x), ay.min(y))
+            });
+        assert!(
+            min_x >= 25.4 - 1e-6 && min_y >= 25.4 - 1e-6,
+            "run {i}: content at ({min_x}, {min_y}) breached the page margin"
+        );
+    }
+
+    // Re-converting the SAME netlist must reproduce the SAME frame: the
+    // last two runs share a source, so the shift is fixed, not walking.
+    assert_eq!(
+        shifts[3], shifts[4],
+        "page shift drifted across two identical conversions: {shifts:?}"
+    );
+    // And the frame is bounded overall — every shift seen stays within a
+    // couple of cells of the others rather than marching one way.
+    let min_x = shifts.iter().map(|s| s.cells_x).min().unwrap();
+    let max_x = shifts.iter().map(|s| s.cells_x).max().unwrap();
+    let min_y = shifts.iter().map(|s| s.cells_y).min().unwrap();
+    let max_y = shifts.iter().map(|s| s.cells_y).max().unwrap();
+    assert!(
+        max_x - min_x <= 2 && max_y - min_y <= 2,
+        "page shift is drifting across edits: {shifts:?}"
+    );
+}

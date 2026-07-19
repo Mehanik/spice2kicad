@@ -234,13 +234,32 @@ fn emit_schematic_target(
     // still hits — which is the whole point of the cache. A mismatch is
     // an ordinary cache miss, never an error.
     let expected_circuit = spice_layout::sidecar::source_id(&cli.input);
-    let hint = sidecar_path
+    let cached_sidecar = sidecar_path
         .as_deref()
         .and_then(|p| fs::read_to_string(p).ok())
         .and_then(|text| spice_layout::sidecar::Sidecar::from_json(&text))
-        .filter(|s| s.circuit == expected_circuit)
-        .map(|s| s.to_hint())
+        .filter(|s| s.circuit == expected_circuit);
+    let hint = cached_sidecar
+        .as_ref()
+        .map(spice_layout::sidecar::Sidecar::to_hint)
         .unwrap_or_default();
+    // V15 page shifts applied last run, replayed so the page frame stays
+    // put when the netlist is edited. Caching positions alone is not
+    // enough: the emitter's final page translation is recomputed from the
+    // content bounding box, so a newly added element can re-anchor the
+    // frame and pan every *existing* symbol uniformly. The emitter keeps
+    // a replayed shift only while it remains V15-conformant, and
+    // re-normalises otherwise. See `sidecar::PageShiftEntry`.
+    let cached_shift = |sheet: &str| -> Option<kicad_emitter::PageShift> {
+        cached_sidecar
+            .as_ref()?
+            .page_shifts
+            .get(sheet)
+            .map(|e| kicad_emitter::PageShift {
+                cells_x: e.cells_x,
+                cells_y: e.cells_y,
+            })
+    };
 
     // Keep a copy of the checked netlist for structural sheet placement
     // (`place_sheets` needs net classification); `place_with_hint`
@@ -290,15 +309,12 @@ fn emit_schematic_target(
     .into_iter()
     .collect();
 
-    // Rewrite the sidecar from the freshly-computed placement on every
-    // run. Removed refdeses simply do not appear in the new snapshot, so
-    // they drop out of the cache (ADR-4 step 2).
-    if let Some(ref sc_path) = sidecar_path {
-        let snapshot =
-            spice_layout::sidecar::Sidecar::from_placement(&placement).with_source(&cli.input);
-        fs::write(sc_path, snapshot.to_json())
-            .with_context(|| format!("writing layout cache {}", sc_path.display()))?;
-    }
+    // Snapshot the freshly-computed placement for the sidecar rewrite.
+    // Removed refdeses simply do not appear in the new snapshot, so they
+    // drop out of the cache (ADR-4 step 2). The file is written after
+    // emission, once the applied V15 page shifts are known.
+    let mut snapshot =
+        spice_layout::sidecar::Sidecar::from_placement(&placement).with_source(&cli.input);
 
     // Place each subckt body on its own child sheet. Only emit children
     // for subckts that actually have an instance in this file.
@@ -364,7 +380,20 @@ fn emit_schematic_target(
 
     let port_pairs: Vec<(String, spice_resolve::PortDir)> =
         top_ports.iter().map(|p| (p.net.clone(), p.dir)).collect();
-    let rendered = kicad_emitter::emit_root(&placement, &library, &sheet_blocks, &port_pairs)?;
+    let (rendered, root_shift) = kicad_emitter::emit_root(
+        &placement,
+        &library,
+        &sheet_blocks,
+        &port_pairs,
+        cached_shift(spice_layout::sidecar::ROOT_SHEET_KEY),
+    )?;
+    snapshot.page_shifts.insert(
+        spice_layout::sidecar::ROOT_SHEET_KEY.to_string(),
+        spice_layout::sidecar::PageShiftEntry {
+            cells_x: root_shift.cells_x,
+            cells_y: root_shift.cells_y,
+        },
+    );
 
     let Some(out_path) = cli.output.clone() else {
         // No output file: dump parent to stdout, drop children.
@@ -390,9 +419,24 @@ fn emit_schematic_target(
             ports: ports.clone(),
             instance_refdeses,
         };
-        let body = kicad_emitter::emit_child_sheet(&child, &library)?;
+        let (body, child_shift) =
+            kicad_emitter::emit_child_sheet(&child, &library, cached_shift(name))?;
+        snapshot.page_shifts.insert(
+            name.clone(),
+            spice_layout::sidecar::PageShiftEntry {
+                cells_x: child_shift.cells_x,
+                cells_y: child_shift.cells_y,
+            },
+        );
         let path = parent_dir.join(format!("{name}.kicad_sch"));
         fs::write(&path, &body).with_context(|| format!("writing {}", path.display()))?;
+    }
+
+    // Rewrite the layout cache now that every sheet's applied page shift
+    // is known.
+    if let Some(ref sc_path) = sidecar_path {
+        fs::write(sc_path, snapshot.to_json())
+            .with_context(|| format!("writing layout cache {}", sc_path.display()))?;
     }
 
     // Let KiCad judge what we wrote. Everything upstream reasons about a

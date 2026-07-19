@@ -31,7 +31,7 @@ use crate::{GridPoint, Placement};
 /// Schema version of the sidecar. Bumped if the on-disk shape changes
 /// in a way an older reader could misinterpret; readers ignore files
 /// whose `version` they do not understand (treated as "no hint").
-pub const SIDECAR_VERSION: u32 = 2;
+pub const SIDECAR_VERSION: u32 = 3;
 
 /// One element's cached placement: grid coordinates plus orientation.
 ///
@@ -83,6 +83,35 @@ impl SidecarEntry {
     }
 }
 
+/// The uniform page shift the emitter applied to one sheet, in whole
+/// grid cells (1.27 mm).
+///
+/// **Why this is cached (V15 / ADR-4).** The emitter's final V15 pass
+/// shifts a sheet so its content bounding box clears the page margin.
+/// Recomputing that shift from the bbox on every run makes the page
+/// frame depend on the content: add one element whose decoration
+/// extends the bbox leftward and the whole sheet re-anchors, panning
+/// every *existing* element uniformly — measured at
+/// `Δ = (+5.08, −1.27) mm` on a 2-element circuit gaining a third,
+/// with placer grid coordinates bit-identical across both runs. No
+/// placer change can fix that (any uniform pre-translation cancels in
+/// the normalisation), so the shift itself is cached and replayed.
+/// V15 is `min ≥ margin`, not `min == margin`, so replaying a shift is
+/// fully conformant; the emitter re-normalises whenever the replayed
+/// shift would push content off the page, which bounds any drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PageShiftEntry {
+    /// Horizontal shift in grid cells.
+    pub cells_x: i64,
+    /// Vertical shift in grid cells.
+    pub cells_y: i64,
+}
+
+/// Sidecar key under which the root sheet's page shift is stored. Child
+/// sheets are keyed by their subckt name, which can never collide with
+/// this (SPICE identifiers do not contain `<`/`>`).
+pub const ROOT_SHEET_KEY: &str = "<root>";
+
 /// The whole sidecar file: a version tag plus a refdes→entry map.
 ///
 /// The map is a `BTreeMap` so serialisation is deterministic (sorted
@@ -113,6 +142,13 @@ pub struct Sidecar {
     #[serde(default)]
     pub circuit: String,
     pub positions: BTreeMap<String, SidecarEntry>,
+    /// Sheet name → the V15 page shift the emitter applied last run.
+    /// The root sheet is keyed by [`ROOT_SHEET_KEY`]; each hierarchical
+    /// child sheet by its subckt name. Absent (or absent for a given
+    /// sheet) → the emitter normalises that sheet's bbox onto the page
+    /// margin, exactly as before this field existed.
+    #[serde(default)]
+    pub page_shifts: BTreeMap<String, PageShiftEntry>,
 }
 
 /// Canonical identity string for a source netlist path.
@@ -145,6 +181,7 @@ impl Sidecar {
             version: SIDECAR_VERSION,
             circuit: String::new(),
             positions,
+            page_shifts: BTreeMap::new(),
         }
     }
 
@@ -265,6 +302,31 @@ mod tests {
             assert_eq!(origin, o2);
             assert_eq!(orient, or2);
         }
+    }
+
+    #[test]
+    fn page_shifts_round_trip() {
+        let mut s = Sidecar::from_placement(&placement_fixture());
+        s.page_shifts.insert(
+            ROOT_SHEET_KEY.to_string(),
+            PageShiftEntry {
+                cells_x: 24,
+                cells_y: -8,
+            },
+        );
+        let back = Sidecar::from_json(&s.to_json()).expect("parse");
+        assert_eq!(back.page_shifts[ROOT_SHEET_KEY].cells_x, 24);
+        assert_eq!(back.page_shifts[ROOT_SHEET_KEY].cells_y, -8);
+    }
+
+    #[test]
+    fn missing_page_shifts_field_still_parses() {
+        // A v3 file written before a sheet's shift was known (or by a
+        // reader that omits the field) is a hit with no preferred shift,
+        // not a parse failure — the emitter then normalises.
+        let json = format!(r#"{{"version":{SIDECAR_VERSION},"circuit":"x.cir","positions":{{}}}}"#);
+        let parsed = Sidecar::from_json(&json).expect("parse");
+        assert!(parsed.page_shifts.is_empty());
     }
 
     #[test]

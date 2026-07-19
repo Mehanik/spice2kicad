@@ -58,13 +58,58 @@ const GENERATOR: &str = "spice2kicad";
 /// schematic grid step (1.27 mm): 25.4 mm = 20 cells.
 pub const PAGE_MARGIN_MM: f64 = 25.4;
 
+/// A4 drawable extent (mm). V15's ceiling: no emitted content coordinate
+/// may fall outside this rectangle.
+pub const PAGE_W_MM: f64 = 297.0;
+/// See [`PAGE_W_MM`].
+pub const PAGE_H_MM: f64 = 210.0;
+
+/// The uniform, grid-snapped page translation applied by
+/// [`translate_into_page`], expressed in whole grid cells (1.27 mm).
+///
+/// Cells, not millimetres, so a shift persisted to the layout cache and
+/// replayed on a later run reproduces bit-identically and stays
+/// grid-snapped by construction.
+///
+/// **Why it is reported and replayable (V15 / ADR-4).** V15 is
+/// `min ≥ margin`, *not* `min == margin` — normalising the content bbox
+/// onto the margin is merely the simplest way to satisfy it. Recomputing
+/// the normalisation every run makes the frame anchor depend on the
+/// content bbox, so adding one element re-anchors the sheet and pans
+/// every *existing* element uniformly, defeating the position-stability
+/// sidecar. Carrying the previous run's shift forward — and keeping it
+/// whenever the result is still V15-conformant — makes the page frame
+/// sticky without weakening the invariant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PageShift {
+    /// Horizontal shift in grid cells.
+    pub cells_x: i64,
+    /// Vertical shift in grid cells.
+    pub cells_y: i64,
+}
+
+impl PageShift {
+    /// Grid step (mm) one cell corresponds to.
+    const STEP_MM: f64 = 1.27;
+
+    /// The shift in millimetres.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn to_mm(self) -> (f64, f64) {
+        (
+            self.cells_x as f64 * Self::STEP_MM,
+            self.cells_y as f64 * Self::STEP_MM,
+        )
+    }
+}
+
 /// Stable namespace for v5 UUIDs emitted by spice2kicad. Picked once
 /// and frozen so two runs over the same input produce byte-identical
 /// output.
 const UUID_NAMESPACE: Uuid = Uuid::from_u128(0x7363_6932_6b69_6361_6432_6b69_6361_6431);
 
 pub fn emit(placement: &Placement, library: &Library) -> Result<String, EmitError> {
-    emit_root(placement, library, &[], &[])
+    emit_root(placement, library, &[], &[], None).map(|(text, _shift)| text)
 }
 
 /// One top-level `X<n>` SPICE instance lowered to a KiCad hierarchical
@@ -116,7 +161,8 @@ pub fn emit_root(
     library: &Library,
     sheets: &[SheetBlock],
     ports: &[(String, PortDir)],
-) -> Result<String, EmitError> {
+    preferred_shift: Option<PageShift>,
+) -> Result<(String, PageShift), EmitError> {
     let port_dirs: BTreeMap<String, PortDir> = ports.iter().cloned().collect();
     let mut items: Vec<Sexpr> = Vec::with_capacity(placement.elements.len() * 4 + sheets.len() + 8);
     items.push(atom("kicad_sch"));
@@ -253,15 +299,19 @@ pub fn emit_root(
     report_disconnected_nets(&items, &net_pins, None);
 
     let mut root = Sexpr::List(items);
-    translate_into_page(&mut root);
-    Ok(root.to_pretty())
+    let shift = translate_into_page(&mut root, preferred_shift);
+    Ok((root.to_pretty(), shift))
 }
 
 /// Emit a hierarchical-sheet child schematic. The child carries a
 /// `(hierarchical_label …)` per port at the same world-coordinate as
 /// a body-element pin connected to the same SPICE net (so the port and
 /// the body net resolve to one connectivity class).
-pub fn emit_child_sheet(child: &ChildSheet<'_>, library: &Library) -> Result<String, EmitError> {
+pub fn emit_child_sheet(
+    child: &ChildSheet<'_>,
+    library: &Library,
+    preferred_shift: Option<PageShift>,
+) -> Result<(String, PageShift), EmitError> {
     let port_driven: BTreeSet<String> = child.ports.iter().cloned().collect();
     let extra_power_lib_ids =
         power_lib_ids_for_placement(child.placement, library, &port_driven, &[], false);
@@ -396,8 +446,8 @@ pub fn emit_child_sheet(child: &ChildSheet<'_>, library: &Library) -> Result<Str
     report_disconnected_nets(&items, &net_pins, Some(&child.name));
 
     let mut root = Sexpr::List(items);
-    translate_into_page(&mut root);
-    Ok(root.to_pretty())
+    let shift = translate_into_page(&mut root, preferred_shift);
+    Ok((root.to_pretty(), shift))
 }
 
 /// Render a `(sheet …)` block plus the `(global_label …)` pieces that
@@ -3731,8 +3781,16 @@ fn instance_uuid(el: &PlacedElement) -> String {
     Uuid::new_v5(&UUID_NAMESPACE, seed.as_bytes()).to_string()
 }
 
-/// V15 — translate the entire emitted sheet so its content bounding box
-/// top-left corner lands at [`PAGE_MARGIN_MM`].
+/// V15 — translate the entire emitted sheet into the page's usable area,
+/// returning the [`PageShift`] actually applied.
+///
+/// With `preferred = None` the content bounding box's top-left corner is
+/// normalised onto [`PAGE_MARGIN_MM`]. With `preferred = Some(shift)` —
+/// the shift a previous run applied, replayed from the layout cache — that
+/// shift is reused *provided the result still satisfies V15*
+/// (`min ≥ margin` and everything inside the A4 rectangle); otherwise it
+/// falls back to normalisation. Reuse keeps the page frame sticky so that
+/// adding one element does not pan every existing element (ADR-4).
 ///
 /// This is the *single* place the placed layout is shifted into the
 /// page's usable area. It is a uniform, grid-snapped affine translation
@@ -3761,56 +3819,167 @@ fn instance_uuid(el: &PlacedElement) -> String {
 /// relative-geometry invariant (V5–V7, V10–V14) is preserved by
 /// construction. The offset is an integer number of grid cells, so all
 /// coordinates remain grid-snapped.
-fn translate_into_page(root: &mut Sexpr) {
-    let mut min = (f64::INFINITY, f64::INFINITY);
-    collect_translatable_min(root, &mut min);
-    if !min.0.is_finite() || !min.1.is_finite() {
+fn translate_into_page(root: &mut Sexpr, preferred: Option<PageShift>) -> PageShift {
+    let mut bbox = ContentBbox::EMPTY;
+    collect_translatable_bbox(root, &mut bbox);
+    let Some((min, max)) = bbox.finite() else {
         // No content coordinates (e.g. an empty sheet) — nothing to do.
-        return;
-    }
+        return PageShift::default();
+    };
     // Snap the offset to an integer number of grid cells so the result
     // stays on the KiCad grid. Round the per-axis shift to the nearest
     // cell; the content top-left then lands within one cell of the
     // margin.
-    let step = 1.27_f64;
+    let step = PageShift::STEP_MM;
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let off_cells_x = ((PAGE_MARGIN_MM - min.0) / step).round() as i64;
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let off_cells_y = ((PAGE_MARGIN_MM - min.1) / step).round() as i64;
-    #[allow(clippy::cast_precision_loss)]
-    let dx = off_cells_x as f64 * step;
-    #[allow(clippy::cast_precision_loss)]
-    let dy = off_cells_y as f64 * step;
+    let normalised = PageShift {
+        cells_x: ((PAGE_MARGIN_MM - min.0) / step).round() as i64,
+        cells_y: ((PAGE_MARGIN_MM - min.1) / step).round() as i64,
+    };
+    // Prefer the caller's (cached) shift when replaying it still leaves
+    // every coordinate V15-conformant; otherwise fall back to
+    // normalisation. This fallback is what BOUNDS the drift: a preferred
+    // shift is a fixed constant carried across runs, so it never creeps,
+    // and the moment the content grows past a page edge under it the
+    // sheet re-normalises onto the margin.
+    // The two axes are independent in both the floor and the ceiling
+    // check, so decide them separately: a preferred shift that has become
+    // untenable on X still keeps Y stable.
+    let shift = match preferred {
+        None => normalised,
+        Some(p) => PageShift {
+            cells_x: if axis_satisfies_v15(p.cells_x, min.0, max.0, PAGE_W_MM) {
+                p.cells_x
+            } else {
+                normalised.cells_x
+            },
+            cells_y: if axis_satisfies_v15(p.cells_y, min.1, max.1, PAGE_H_MM) {
+                p.cells_y
+            } else {
+                normalised.cells_y
+            },
+        },
+    };
+    let (dx, dy) = shift.to_mm();
     apply_translation(root, dx, dy);
+    shift
 }
 
-/// Recurse, folding the minimum X/Y over every translatable coordinate
-/// node (see [`translate_into_page`] for the exclusion rules).
-fn collect_translatable_min(node: &Sexpr, min: &mut (f64, f64)) {
+/// V15 conformance test for a candidate shift: every content coordinate
+/// lands at or beyond the page margin and inside the A4 drawable area.
+///
+/// Note this is `min ≥ margin`, deliberately not `min == margin` — see
+/// [`PageShift`] and `docs/invariants.md` (V15).
+#[allow(clippy::cast_precision_loss)]
+fn axis_satisfies_v15(cells: i64, min: f64, max: f64, page: f64) -> bool {
+    const EPS: f64 = 1e-6;
+    let d = cells as f64 * PageShift::STEP_MM;
+    min + d >= PAGE_MARGIN_MM - EPS && max + d <= page + EPS
+}
+
+/// Running min/max fold over the translatable content coordinates.
+#[derive(Debug, Clone, Copy)]
+struct ContentBbox {
+    min: (f64, f64),
+    max: (f64, f64),
+}
+
+impl ContentBbox {
+    const EMPTY: Self = Self {
+        min: (f64::INFINITY, f64::INFINITY),
+        max: (f64::NEG_INFINITY, f64::NEG_INFINITY),
+    };
+
+    /// `(min, max)` when at least one coordinate was seen.
+    fn finite(self) -> Option<((f64, f64), (f64, f64))> {
+        (self.min.0.is_finite() && self.min.1.is_finite()).then_some((self.min, self.max))
+    }
+
+    fn fold(&mut self, x: f64, y: f64) {
+        self.min.0 = self.min.0.min(x);
+        self.min.1 = self.min.1.min(y);
+        self.max.0 = self.max.0.max(x);
+        self.max.1 = self.max.1.max(y);
+    }
+}
+
+/// Recurse, folding the content bounding box over every translatable
+/// coordinate node (see [`translate_into_page`] for the exclusion rules).
+///
+/// One extra rule beyond the exclusions: a visible `(property …)` anchor
+/// inside a `(symbol …)` instance votes with **both** its own position and
+/// its mirror about the symbol origin — see [`fold_symbol_instance`].
+fn collect_translatable_bbox(node: &Sexpr, bbox: &mut ContentBbox) {
     let Sexpr::List(items) = node else {
         return;
     };
     match sexpr_head(items) {
         Some("lib_symbols") => return,
         // Hidden instance props (e.g. a prop parked at `(0 0 0)`) must not
-        // vote on the content min — they are still translated by
+        // vote on the content bbox — they are still translated by
         // `apply_translation`, just excluded from the bbox here.
         Some("property") if property_node_hidden(items) => return,
+        Some("symbol") => {
+            fold_symbol_instance(items, bbox);
+            return;
+        }
         Some("at" | "xy") => {
             if let Some((x, y)) = coord_pair(items) {
-                if x < min.0 {
-                    min.0 = x;
-                }
-                if y < min.1 {
-                    min.1 = y;
-                }
+                bbox.fold(x, y);
             }
             return;
         }
         _ => {}
     }
     for child in items {
-        collect_translatable_min(child, min);
+        collect_translatable_bbox(child, bbox);
+    }
+}
+
+/// Fold one `(symbol …)` instance into the content bbox, reserving room
+/// for its property text on *either* side of the body.
+///
+/// A visible Reference / Value anchor is decoration the V13 text-nudge
+/// may place on either side of the symbol, and which side it picks
+/// depends on the symbol's neighbours. Letting the anchor vote only from
+/// the side it currently sits on therefore makes the page frame — which
+/// is derived from this bbox — sensitive to a *neighbour's* arrival:
+/// adding one part flips an untouched symbol's label from its right side
+/// to its left, the content bbox grows 5.08 mm leftward, and normalising
+/// that bbox back onto the margin pans every existing symbol. (Measured:
+/// `Δ = (+5.08, −1.27) mm` on `layout_cache`'s 2-element fixture gaining
+/// a third, with placer grid coordinates bit-identical.)
+///
+/// So each property anchor votes with both its own position and its
+/// mirror about the symbol origin: the reserve is symmetric, and a label
+/// flipping sides no longer changes the bbox at all. This *widens* the
+/// bbox, so V15's floor still holds by construction — it only ever moves
+/// content further inside the page, never closer to the edge, which is
+/// exactly the `min ≥ margin` (not `min == margin`) reading of V15.
+fn fold_symbol_instance(items: &[Sexpr], bbox: &mut ContentBbox) {
+    // The instance's own `(at …)` is its origin — the mirror axis.
+    let origin = items.iter().find_map(|c| match c {
+        Sexpr::List(sub) if sexpr_head(sub) == Some("at") => coord_pair(sub),
+        _ => None,
+    });
+    for child in items {
+        let Sexpr::List(sub) = child else { continue };
+        if sexpr_head(sub) == Some("property") {
+            if property_node_hidden(sub) {
+                continue;
+            }
+            let anchor = sub.iter().find_map(|c| match c {
+                Sexpr::List(at) if sexpr_head(at) == Some("at") => coord_pair(at),
+                _ => None,
+            });
+            if let (Some((ox, oy)), Some((px, py))) = (origin, anchor) {
+                bbox.fold(px, py);
+                // Mirror about the symbol origin.
+                bbox.fold(2.0f64.mul_add(ox, -px), 2.0f64.mul_add(oy, -py));
+                continue;
+            }
+        }
+        collect_translatable_bbox(child, bbox);
     }
 }
 
@@ -3975,15 +4144,32 @@ mod tests {
             "missing lib_id in output:\n{out}"
         );
         // V15 translates the placement into the page's usable area, so
-        // the origin no longer sits at (0 0 0). The single resistor's
-        // symbol `(at …)` lands at the page margin (rotation 0 kept).
+        // the origin no longer sits at (0 0 0): it lands at or beyond the
+        // page margin (rotation 0 kept).
+        //
+        // This used to demand the origin sit EXACTLY on the margin. That
+        // was over-specified relative to V15, which `docs/invariants.md`
+        // now states as `min >= margin`, not `min == margin` — parking
+        // the bbox on the margin is just the simplest way to satisfy it.
+        // The symmetric property-text reserve in `fold_symbol_instance`
+        // legitimately leaves the body a little further inside the page
+        // (room for a Reference label on either side), and the floor is
+        // what the invariant actually asserts.
+        let origin = out
+            .split("(lib_id \"Device:R\") (at ")
+            .nth(1)
+            .and_then(|rest| rest.split(')').next())
+            .and_then(|s| {
+                let mut it = s.split_whitespace();
+                Some((
+                    it.next()?.parse::<f64>().ok()?,
+                    it.next()?.parse::<f64>().ok()?,
+                ))
+            })
+            .unwrap_or_else(|| panic!("no Device:R instance origin in output:\n{out}"));
         assert!(
-            out.contains(&format!(
-                "(at {} {} 0)",
-                format_coord(PAGE_MARGIN_MM),
-                format_coord(PAGE_MARGIN_MM + 2.54)
-            )),
-            "missing margin-translated origin in output:\n{out}"
+            origin.0 >= PAGE_MARGIN_MM - 1e-6 && origin.1 >= PAGE_MARGIN_MM - 1e-6,
+            "origin {origin:?} breaches the page margin {PAGE_MARGIN_MM}:\n{out}"
         );
         // No coordinate may be negative after the V15 translation.
         assert!(

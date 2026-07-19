@@ -710,8 +710,30 @@ invariant here.
   re-normalising, provided the result still satisfies `min ≥ margin` and
   stays inside the usable area — that is V15-conformant, and a verifier
   demanding equality is over-specified.
+
+  **Implementation (position-stable page frame).** `translate_into_page`
+  takes an optional *preferred* shift — the one the previous run applied,
+  replayed from the `.layout.json` layout cache (`sidecar::PageShiftEntry`,
+  keyed per sheet) — and keeps it, per axis, whenever the result still
+  satisfies `min ≥ margin` and the A4 ceiling; otherwise that axis falls
+  back to bbox normalisation. The fallback is what bounds drift: a
+  replayed shift is a constant carried across runs, so it cannot creep,
+  and the moment content would leave the page the sheet re-anchors.
+  Complementing it, the content bbox itself is made insensitive to
+  decoration that flips sides: a visible `(property …)` anchor inside a
+  `(symbol …)` instance votes with both its own position **and** its
+  mirror about the symbol origin (`fold_symbol_instance`). Without that
+  reserve, the V13 text-nudge moving an *untouched* symbol's Reference
+  from its right side to its left (because a newly added neighbour
+  arrived) grows the bbox 5.08 mm leftward and forces a re-anchor no
+  cached shift can absorb — that was the concrete `Δ = (+5.08, −1.27) mm`
+  pan above. The reserve only ever widens the bbox, i.e. only ever moves
+  content further *inside* the page, so the V15 floor holds by
+  construction.
   Verifier: `crates/spice2kicad/tests/placement_quality.rs::v15_*`
   collects every instance-section coordinate of every emitted sheet
-  (excluding `lib_symbols`) and asserts the content bbox's top-left
-  corner sits at the margin, no coordinate is negative, and the bbox
-  fits within the A4 (297×210) drawable rectangle.
+  (excluding `lib_symbols`) and asserts the content bbox clears the
+  margin, no coordinate is negative, and the bbox fits within the A4
+  (297×210) drawable rectangle. Position stability of the frame across
+  edits is verified by
+  `crates/spice2kicad/tests/layout_cache.rs::page_shift_is_cached_and_does_not_drift_toward_the_page_edge`.
