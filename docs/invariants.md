@@ -1,4 +1,4 @@
-# Visual quality invariants (V1–V15)
+# Visual quality invariants (V1–V16)
 
 Project-level acceptance criteria for any emitted `.kicad_sch`. These
 are not part of the user-facing annotation language (`docs/annotation-spec.md`);
@@ -750,3 +750,122 @@ invariant here.
   (297×210) drawable rectangle. Position stability of the frame across
   edits is verified by
   `crates/spice2kicad/tests/layout_cache.rs::page_shift_is_cached_and_does_not_drift_toward_the_page_edge`.
+
+- **V16 — Wire rectilinearity (bends and branches).** A schematic is
+  easy to read when its wires are minimal, straight, and connect
+  directly the elements that are connected. V16 makes that falsifiable
+  as two per-fixture counts on the emitted geometry.
+
+  **The counted quantity is bends, NOT raw segments.** The emitted
+  `(wire …)` count is a **Tier-0 correctness artifact**, not a quality
+  signal: `crates/spice-route/src/cleanup.rs` deliberately re-segments
+  identical ink — `split_at_interior_attachments` SPLITS runs at same-net
+  attachment vertices (KiCad connects wires only at *endpoints*, so more
+  segments is *more correct*), `coalesce_collinear` merges abutting
+  collinear pairs, and `collapse_collinear_overlaps` replaces overlaps
+  with a vertex-preserving non-overlapping cover. Measured on
+  `common_emitter`: 20 raw segments whose visible ink is 16 maximal
+  straight runs. A metric on raw segments would create optimization
+  pressure *against* a Tier-0 pass, so the counted quantity must be
+  **invariant under re-segmentation of identical ink**.
+
+  **The ink graph.** Take the union of every emitted wire segment; group
+  by line (same X for verticals, same Y for horizontals); merge
+  touching-or-overlapping collinear spans into **maximal straight runs**.
+  Vertices are run endpoints plus run–run incidences. Rays are counted
+  exactly as `cleanup.rs::rays_at` does: a run *ending* at the point
+  contributes one ray; a run whose *strict interior* contains it
+  contributes two (it passes through).
+
+  - **B — bend count.** Vertices with exactly 2 rays, one horizontal and
+    one vertical: the L-corners of the ink. PRIMARY per-fixture ratchet.
+  - **J — branch count.** Vertices with 3 rays (a T), plus 4-ray vertices
+    that carry a `(junction …)` dot (a same-net cross). 4-ray vertices
+    *without* a dot are **inter-net crossings** and belong to the
+    existing crossing ratchet
+    (`placement_quality.rs::crossing_count_within_budget_across_fixtures`),
+    not to J.
+
+  B and J stay **separate** ratchets. They must not be folded together: a
+  k-pin Steiner tree topologically needs ≥ k−2 branch points, so a
+  combined number would penalise trunk-and-taps — often the most readable
+  form.
+
+  Any **diagonal** wire segment is an outright failure, not a budgeted
+  count. Axis-alignment is what makes ray-counting sound, and nothing in
+  the pipeline emits diagonals today, so it is a free tripwire.
+
+  **Deliberately not ratcheted:** raw segment count (above);
+  *bends-per-net* (a gameable denominator — adding trivial nets lowers
+  the average); and any *rewarded* count of "nets routed straight"
+  (gameable — a V4 hierarchical-port name-jump label pair can mint a new
+  'straight' component out of nothing). Absolute per-fixture totals only.
+
+  **Anti-gaming, and the gates this depends on.** B and J are
+  *cost-shaped* — they count defects over the whole artifact — not
+  credit-shaped, so dead or decorative geometry can only ever ADD rays,
+  never remove a bend; there is no way to score better by drawing more.
+  That soundness is **conditional** on the lower gates staying hard.
+  With them disabled, "delete all the wires" or "replace every wire with
+  a label" would both score a perfect B = J = 0. The dependencies:
+  (1) the Tier-0 kicad-cli connectivity verification the CLI runs after
+  every conversion; (2)
+  `electrical_safety.rs::no_dangling_whiskers_across_fixtures` (budget 0);
+  (3) the V4 label policy (`labels.rs`). Do not land or trust this
+  ratchet in a tree where any of the three is weakened.
+
+  **Tier 2, and strictly subordinate.** V16 is a continuous quality
+  gradient with no single correct value, so by CLAUDE.md's
+  constraints-vs-costs decision rule it is Tier 2 — the same tier as
+  V5/V6/V7 — and never a hard constraint. It must stay subordinate to
+  Tier 0 and Tier 1: the globally bend-minimal route *through* a symbol
+  body (V12) or *across* a label (V13) is worse than a 2-bend detour
+  around them. This is exactly why V16 is **verifier-shaped**
+  (non-regression only) and is **never an in-loop objective** — no bend
+  term in `cost.rs`, no bend-minimising router pass that can outvote an
+  obstacle detour.
+
+  **Known floor: V16 and V5 genuinely conflict.** `rc_lowpass`'s two
+  `out` pins share a Y and sit 3.81 mm apart. A 0-bend direct wire
+  exists — but both pins face *up*, and V5 says a wire leaves a pin
+  along the pin's axis, which forces a 2-bend U. Both invariants are
+  Tier 2, so the tier rule does not order them; the precedence is
+  declared here: **V5-outward wins the first grid step**, and B ratchets
+  against *measured reality*, not a theoretical zero. Expect legitimate
+  per-net floors of 2 bends for same-facing aligned pins. A future
+  placer that could rotate one of the two pins would remove the conflict
+  at its source; until then, do not "fix" this by weakening V5.
+
+  **Verifier.**
+  `crates/spice2kicad/tests/wire_geometry.rs::bend_and_branch_counts_within_ratchet_across_fixtures`
+  builds the ink graph from the emitted root sheet of all nine fixtures
+  and asserts B and J against a zero-slack `&[(&str, u32, u32)]` table.
+  Measured high-water marks on `master` at the time of landing:
+
+  | fixture                  |  B |  J |
+  | ------------------------ | -- | -- |
+  | `rc_lowpass`             |  3 |  0 |
+  | `common_emitter`         | 10 |  3 |
+  | `multivibrator`          | 10 |  2 |
+  | `diff_pair`              |  2 |  0 |
+  | `opamp_inverting_real`   |  8 |  0 |
+  | `opamp_inverting`        |  3 |  0 |
+  | `port_shapes`            |  4 |  0 |
+  | `rc_lowpass_ports`       |  3 |  0 |
+  | `opamp_definition_level` | 10 |  2 |
+
+  Standard ratchet policy applies (CLAUDE.md § "Budgets are ratchets,
+  not knobs"): these literals only ever go **down**, and the test prints
+  the reclaimable value on any improvement.
+
+  **Cross-check against the crossing ratchet.** The verifier's
+  `inter_net_crossings` (4-ray vertices with no dot — excluded from both
+  B and J) was compared against
+  `placement_quality.rs::count_wire_crossings` when the literals were
+  measured. They agree exactly on all five crossing-budgeted fixtures:
+  rc_lowpass 0, common_emitter 1 (budget 2), multivibrator 4 (budget 4),
+  diff_pair 0, opamp_inverting_real 0. The one divergence is
+  `opamp_definition_level` (ink 4 vs raw 5), which carries no crossing
+  budget; there the raw counter double-counts a single ink crossing whose
+  runs `cleanup.rs` had split into several `(wire …)` segments — i.e. the
+  exact re-segmentation sensitivity the ink graph exists to remove.

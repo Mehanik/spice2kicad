@@ -10,4 +10,13 @@ Cargo.lock.bak
 
 # local conversion outputs (scratch)
 /out/
+/out-before/
 /scratch_svg/
+/scratch_svg_geom/
+
+# kicad-cli drops an ERC report next to its CWD as a side effect of
+# `sch export netlist`. `verify::export_netlist` now chdirs into the
+# schematic's own directory so this should not fire; kept as a backstop
+# for ad-hoc `kicad-cli` runs from the repo root.
+*-erc.rpt
+erc.rpt

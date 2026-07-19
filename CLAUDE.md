@@ -108,7 +108,7 @@ crates/
   spice2kicad/       CLI binary (clap)
 docs/
   annotation-spec.md   The annotation language. Authoritative.
-  invariants.md        Visual-quality invariant definitions (V1–V15).
+  invariants.md        Visual-quality invariant definitions (V1–V16).
 examples/
   rc_lowpass.cir
 ```
@@ -414,7 +414,7 @@ a one-line summary table below.
 
 ### Invariant tiers (priority ordering)
 
-V1–V15 are **not** a flat list of interchangeable budgets. Past
+V1–V16 are **not** a flat list of interchangeable budgets. Past
 fixes failed because nothing forbade *loosening one fixture's
 budget to tighten another's*, or regressing one aesthetic
 invariant to satisfy a different one. Trade-offs need a defined
@@ -447,7 +447,11 @@ tiers are strictly ordered.
   make the result look hand-drawn. Members (each self-described as
   a "quality" metric): **V5** (pin-facing orientation), **V6**
   (structural layered placement), **V7** (symmetry-aware
-  placement).
+  placement), **V16** (wire rectilinearity — bend/branch counts;
+  a continuous gradient, hence Tier 2 by the constraints-vs-costs
+  decision rule, and verifier-shaped only: never an in-loop
+  objective, because the bend-minimal route through a body (V12)
+  or across a label (V13) is worse than a 2-bend detour).
 
 **Ordering rule (load-bearing).** A change may never regress a
 higher-priority (lower-numbered) tier to improve a
@@ -555,6 +559,7 @@ Summary (full definitions + verifiers: `docs/invariants.md`):
 | V13       | Labels/text don't overlap bodies, text, or foreign-net wires    | 1    |
 | V14       | Power-glyph orientation: GND down, VCC up (rot 0)               | 1    |
 | V15       | Content lands within the page's usable area (A4)                | 1    |
+| V16       | Wire rectilinearity: bend (B) + branch (J) counts on the ink    | 2    |
 
 Full definitions + verifiers: `docs/invariants.md`.
 

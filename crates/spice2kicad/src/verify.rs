@@ -61,12 +61,26 @@ pub fn kicad_cli_available() -> bool {
 }
 
 /// Export `sch` to a SPICE netlist via `kicad-cli`.
+///
+/// Runs with the CWD set to the schematic's own directory. `kicad-cli
+/// sch export netlist` runs ERC as a side effect and drops a
+/// `<name>-erc.rpt` next to *the current working directory*, not next to
+/// its `-o` target — so without this the repo root accumulates one stray
+/// report per fixture on every test run. Both paths handed to the child
+/// are absolutised first so the CWD change cannot break a relative
+/// invocation.
 fn export_netlist(sch: &Path) -> Result<String, String> {
-    let out = sch.with_extension("verify.cir");
+    let sch_abs = std::fs::canonicalize(sch).unwrap_or_else(|_| sch.to_path_buf());
+    let out = sch_abs.with_extension("verify.cir");
+    let workdir = sch_abs
+        .parent()
+        .filter(|p| p.is_dir())
+        .map_or_else(std::env::temp_dir, Path::to_path_buf);
     let status = Command::new("kicad-cli")
+        .current_dir(&workdir)
         .args(["sch", "export", "netlist", "--format", "spice", "-o"])
         .arg(&out)
-        .arg(sch)
+        .arg(&sch_abs)
         .output()
         .map_err(|e| format!("running kicad-cli: {e}"))?;
     if !status.status.success() {
