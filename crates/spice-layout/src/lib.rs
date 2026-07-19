@@ -339,6 +339,21 @@ pub(crate) const VALUE_CHAR_MM: f64 = 0.76;
 /// full 2.54 mm, so align-clustered members crowded their neighbour.
 pub(crate) const VALUE_TEXT_OFFSET_MM: f64 = 2.54;
 
+/// Half-height (mm) of a rendered `Reference` / `Value` property text
+/// box, at the default 1.27 mm text size. The emitter's `text_bbox`
+/// model gives ~1.78 mm total height; half of that, rounded up for
+/// margin.
+///
+/// Together with [`VALUE_TEXT_OFFSET_MM`] this gives the property
+/// text's total vertical reach from the symbol origin: **3.44 mm**.
+/// That is *inside* the align path's existing 3.81 mm (3-cell) spacing
+/// floor, so reserving it is measurably a no-op on every fixture today
+/// — see the ADR-14 completion note in `docs/layout-adr.md`. It is
+/// reserved anyway because the model should be faithful *before*
+/// anything reduces that floor, which is exactly what ADR-17 Stage 2's
+/// compaction did (and why it breached four label invariants).
+pub(crate) const PROP_TEXT_HALF_H_MM: f64 = 0.9;
+
 /// Guaranteed clear horizontal gap (mm) between a left align-cluster
 /// member's rendered value text and the right member's *drawn body*
 /// (pins excluded — a pin is a connection point a wire lands on). Two
@@ -396,7 +411,21 @@ fn world_extent(symbol: &Symbol, orientation: Orientation, value: Option<&str>) 
         if chars > 0 {
             #[allow(clippy::cast_precision_loss)]
             let w = VALUE_TEXT_OFFSET_MM + (chars as f64) * VALUE_CHAR_MM;
-            grow(w, 0.0);
+            // ADR-14 completion (partial): reserve the property text as a
+            // real BOX, not a zero-height ray on +X. The emitter anchors
+            // Reference at local (2.54, -2.54) and Value at (2.54, 2.54),
+            // each drawn ~1.78 mm tall, so the text occupies a band above
+            // AND below the origin that nothing here reserved.
+            //
+            // The band is symmetric because both fields are reserved and
+            // the placer has no orientation-faithful field-direction
+            // model (the emitter's is `field_render_rotation`); symmetric
+            // is the conservative reading. The WIDTH is still the Value
+            // estimate only — a longer Reference is not modelled, and
+            // neither is label text (see the Stage-4 note below).
+            let half_h = VALUE_TEXT_OFFSET_MM + PROP_TEXT_HALF_H_MM;
+            grow(w, half_h);
+            grow(w, -half_h);
         }
     }
     WorldExtent {
@@ -1582,5 +1611,70 @@ mod si_format_tests {
         assert_eq!(format_si(1.0e-6), "1u");
         assert_eq!(format_si(1.10e3), "1.1k");
         assert_eq!(format_si(10.0e3), "10k");
+    }
+}
+
+/// The placement-side property-text reservation (ADR-14 completion, partial).
+///
+/// These assert the *model*, not an emitted layout, on purpose. The
+/// reservation's whole vertical reach (3.44 mm) currently fits inside the
+/// align path's 3.81 mm spacing floor, so it moves no fixture and no
+/// output test can pin it. Measured: exaggerating the half-height until
+/// the total reach exceeds ~3.8 mm is what first perturbs `baseline_lock`.
+/// Without these tests the term would be silently deletable.
+#[cfg(test)]
+mod property_text_reservation_tests {
+    use super::{PROP_TEXT_HALF_H_MM, VALUE_TEXT_OFFSET_MM, world_extent};
+    use kicad_symbols::{Library, Orientation};
+
+    fn resistor() -> kicad_symbols::Symbol {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates/")
+            .join("kicad-symbols/tests/fixtures/Device.kicad_sym");
+        Library::from_file(path)
+            .expect("load Device")
+            .lookup("Device:R")
+            .expect("Device:R")
+            .clone()
+    }
+
+    /// Property text is reserved as a BOX. Before this the term
+    /// was `grow(w, 0.0)` — width only, zero height — so nothing reserved
+    /// the band the Reference and Value text actually occupy above and
+    /// below the origin.
+    #[test]
+    fn property_text_reserves_height_not_just_width() {
+        let sym = resistor();
+        let bare = world_extent(&sym, Orientation::IDENTITY, None);
+        let texted = world_extent(&sym, Orientation::IDENTITY, Some("4.7k"));
+
+        assert!(
+            texted.max_x > bare.max_x,
+            "the value text must still reserve its width on +X"
+        );
+
+        let reach = VALUE_TEXT_OFFSET_MM + PROP_TEXT_HALF_H_MM;
+        assert!(
+            texted.max_y >= reach && texted.min_y <= -reach,
+            "property text must reserve its full vertical band on BOTH sides \
+             (Value below, Reference above): got min_y={} max_y={}, want ±{reach}",
+            texted.min_y,
+            texted.max_y,
+        );
+    }
+
+    /// An element with no value text reserves no property band — the term
+    /// must not become an unconditional halo on every symbol.
+    #[test]
+    fn no_value_text_reserves_no_property_band() {
+        let sym = resistor();
+        let bare = world_extent(&sym, Orientation::IDENTITY, None);
+        let empty = world_extent(&sym, Orientation::IDENTITY, Some(""));
+        assert_eq!(
+            (bare.min_y, bare.max_y),
+            (empty.min_y, empty.max_y),
+            "an empty value must reserve nothing"
+        );
     }
 }

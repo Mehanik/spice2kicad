@@ -839,6 +839,53 @@ until a fixture demonstrates the need**: today every measured count is
 already at its floor, so widening buys nothing and risks reshuffling
 layouts (the within-Tier-1 sideways trade the ratchet rule forbids).
 
+**Completion (2026-07-20) — property text reserved; label text still not.**
+Landed here rather than as a stage of ADR-17, per that ADR's retirement
+(salvaged part 2: "ADR-14's decoration reservation completed as an
+ADR-14 completion, not a stage of this ADR"). ADR-17 Stage 2's
+post-mortem found four of its seven Tier-1 breaches were label overlaps,
+because this reservation covered the glyph body and value text only —
+nothing reserved label or Reference/Value text.
+
+The *property-text* half is now modelled. `world_extent`'s text term was
+a width-only `grow(w, 0.0)` ray on +X; it is now a real box that also
+reserves the band the Reference (local y −2.54) and Value (local y
++2.54) text occupy above and below the origin. The band is symmetric
+because the placer has no orientation-faithful field-direction model —
+the emitter's is `field_render_rotation` — and symmetric is the
+conservative reading. The WIDTH is still the Value estimate only; a
+longer Reference is not modelled.
+
+**It is measurably a no-op on every fixture, and that is the finding.**
+The property text's total vertical reach is `VALUE_TEXT_OFFSET_MM +
+PROP_TEXT_HALF_H_MM` = **3.44 mm**, which fits inside the align path's
+existing **3.81 mm** (3-cell) spacing floor. Probed by exaggerating the
+half-height and watching `baseline_lock`: total reach 3.74 mm → diff
+EMPTY; 4.04 mm → 12 differences. The floor absorbs the faithful
+reservation entirely, with ~0.4 mm to spare.
+
+Consequence, and it generalises beyond this commit: **a decoration
+reservation cannot be validated in isolation.** On today's floors a
+correct one changes nothing, so no fixture-level test can distinguish it
+from its absence — hence the two `property_text_reservation_tests` unit
+tests in `spice-layout/src/lib.rs`, which assert the *model* directly.
+Without them the term would be silently deletable. This is the precise
+sense in which the reservation is a precondition for any compaction
+attempt rather than a successor to one: it buys no observable quality
+until something removes the slack, and it must be measured together with
+whatever does.
+
+**Label text remains unreserved** — the larger half. Not attempted: the
+information lives in `kicad-emitter`'s `label_specs`, which depends on
+routed geometry, so `spice-layout` cannot call it without inverting the
+crate dependency. It needs either a shared label-metrics module beside
+`glyph_geom`, or a coarse per-signal-pin reservation analogous to
+`glyph_reach` (which today skips signal pins outright, so signal pins
+reserve zero decoration space). Unlike property text, a `global_label`
+is wide enough to exceed the 3.81 mm floor, so this half is expected to
+move layouts and trip ratchets — it should come back as an escape
+request with numbers, never assumed free.
+
 ### Problem
 
 Exactly one class of converted-schematic defect remains: a power
@@ -2554,6 +2601,13 @@ consequence of removing the RNG.
    compaction legitimately believed was free.
 2. **Fix phase 4.5's connectivity gap independently** (above). Any
    non-SA layout is one bad orientation away from a severed net today.
+   **DONE** — `Measure::severed`, a hard non-regression guard beside
+   `v11`/`overlap`/`v12`, never a key of the lexicographic objective
+   (connectivity is Tier 0: a categorical floor, not a gradient). The
+   demonstrated `COUT` rot-180 candidate is pinned by a regression test
+   that measures it directly and asserts the guard alone rejects it.
+   `baseline_lock` diff EMPTY, every ratchet unchanged, as predicted.
+
 3. **Re-derive Stage 2's targets from a corrected ablation.** The
    numbers in this ADR's ablation table cannot be used; they measure two
    passes and attribute the result to one.
