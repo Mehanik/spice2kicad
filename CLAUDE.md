@@ -211,10 +211,16 @@ Layout phases (later phases never override earlier):
    placer and the real router; `spice-layout` cannot depend on
    `spice-route` without forming a cycle). After phases 1–4 and BEFORE
    Decoration, it trial-routes candidate orientations of at-risk,
-   non-pinned, non-symmetry elements with the **real router** and keeps
-   the orientation minimising the router's *measured* first-segment-
-   outward (V5) violations — subject to no V11 / V12 / symbol-overlap /
-   V13 regression. It changes element *orientation* only, never
+   non-pinned, non-symmetry elements with the **real router** and
+   accepts a candidate when the router's *measured* `(V13, V12, V5)`
+   triple strictly improves **lexicographically** — V13 and V12 (Tier 1)
+   lead the ordering, V5 (Tier 2) only breaks ties among them — subject
+   to V11 and symbol-overlap never regressing (V12 also carries its own
+   non-regression guard, so it can fall but never rise sideways against
+   a V13 gain). There is deliberately **no V5 non-regression guard**: a
+   candidate that raises V5 while lowering V13 or V12 is accepted, per
+   the tier-ordering rule (never trade a Tier-1 fix away to protect a
+   Tier-2 metric). It changes element *orientation* only, never
    position, and **never runs during or after decoration**. This is
    placement, not decoration: it owns orientation; decoration consumes
    it. See ADR-11.
@@ -388,15 +394,18 @@ stages: a *seed-time heuristic* in `pick_orientations` (the SA
 `rotate` move may override it), AND the **routing-aware
 orientation-refinement phase** (Layout phase 4.5, ADR-11) — a
 placement-stage pass in `kicad-emitter` that uses the *real router* as
-an oracle to pick the orientation minimising the router's measured
-first-segment-outward count, subject to no V11/V12/overlap/V13
-regression. This is correct precisely because a V5 violation is born
-in the router's conflict-resolution passes, invisible to any
-placement-side cost. (b) **There is no `power_pin_outward` term** in
-`CostWeights`. (c) V14 is a hard candidate filter
-(`orient::allowed_orientations`) at both the seed chooser and the SA
-rotate move; the refinement phase only selects from that same allowed
-set, so it cannot break V14.
+an oracle and accepts a candidate whose measured `(V13, V12, V5)`
+triple strictly improves lexicographically (Tier-1 V13/V12 lead, V5
+only breaks ties), subject to V11 and symbol-overlap never regressing
+(V12 also carries its own non-regression guard; **there is
+deliberately no V5 non-regression guard** — a V5 rise is accepted when
+it buys a V13 or V12 win, per the tier-ordering rule). This is correct
+precisely because a V5 violation is born in the router's
+conflict-resolution passes, invisible to any placement-side cost. (b)
+**There is no `power_pin_outward` term** in `CostWeights`. (c) V14 is
+a hard candidate filter (`orient::allowed_orientations`) at both the
+seed chooser and the SA rotate move; the refinement phase only selects
+from that same allowed set, so it cannot break V14.
 
 ## Visual quality invariants
 
@@ -651,6 +660,19 @@ just test
 just hooks         # install git pre-commit hooks
 cargo install --path crates/spice2kicad
 ```
+
+**Trap: converting twice into the same output directory is not a fresh
+conversion.** The position-stability cache (ADR-4) writes
+`<basename>.layout.json` next to the emitted `.kicad_sch` and reads it
+back on the next run, **pinning every cached element**. SA refinement
+and the phase-4.5 routing-aware orientation pass then become silent
+no-ops — so a placer change you are debugging appears to do nothing,
+and every element reports `pinned=true`. This has already cost one
+debugging session. When converting by hand to inspect placer output,
+always use a **fresh output directory** or pass **`--no-layout-cache`**
+(which both ignores and skips writing the sidecar). The CLI now prints
+a `layout cache hit (N element(s) pinned …)` line to stderr whenever it
+loads one, so a hit is no longer invisible.
 
 ## Committing during multi-agent / parallel work
 

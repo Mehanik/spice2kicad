@@ -420,10 +420,22 @@ before the final `route_nets`/glyph/label pass begins.
    count_outward_violations`. That same function is called by the V5
    verifier (`spice2kicad/tests/electrical_safety.rs`), so the oracle and
    the grader can never drift.
-3. Accept a candidate only if it *strictly* reduces total real V5 AND
-   does not increase V11 residue, symbol-body overlap, V12 foreign-body
-   crossings, or V13 label overlaps. Higher-/equal-tier invariants are
-   thus never traded for the V5 gain (CLAUDE.md tier rule).
+3. Accept a candidate whose measured `(V13, V12, V5)` triple strictly
+   improves **lexicographically** — V13 and V12 (Tier 1) lead the
+   ordering, V5 (Tier 2) only breaks ties among them — AND V11 residue
+   and symbol-body overlap do not increase (V12 also carries its own
+   `<=` non-regression guard, so a V13 gain can never buy a V12
+   regression). There is deliberately **no V5 non-regression guard**: a
+   candidate that raises V5 while lowering V13 or V12 is accepted,
+   because a Tier-1 fix must never be blocked to protect a Tier-2
+   metric (CLAUDE.md tier rule). An earlier version of this step
+   required V5 to strictly improve while only guarding V12/V13 against
+   regression; that was a **tier inversion** — a Tier-1 defect (e.g. a
+   wire speared through a body) was only reachable while a Tier-2 (V5)
+   gradient happened to point at it, so a router fix that flattened V5
+   outright could silently strand a V12 crossing. The lexicographic
+   `(V13, V12, V5)` ordering (see `refine.rs`'s `measure`/acceptance
+   code) fixed that.
 4. A cheap greedy single-element descent runs first (each accepted step
    strictly lowers V5); a bounded combinatorial joint search over the
    active set (cartesian product capped) handles violations only
@@ -801,16 +813,17 @@ regressed the opamp fixture — see the scoping comment in
   (`pwrflag.rs::flag_rotation`), on the opposite side of the pin from
   the reserved reach — the same shape as the scoped-out
   `opamp_inverting_real` `#FLG4` residual.
-- **Sideways-transformed rail pins degenerate.** `glyph_reach` maps the
+- **Sideways-transformed rail pins — resolved.** `glyph_reach` maps the
   transformed pin angle with the same table the decoration side uses
-  (`angle_to_direction` / `rails::outward_delta`) — which keeps the
-  reservation drift-free with the drawn value text, but that shared
-  convention yields the true outward direction only for *vertical*
-  pins. For a rail pin rotated horizontal the direction points toward
-  the body, so the reach lands inside the body bbox and reserves
-  nothing extra (and the decoration it mirrors would place the net
-  name there too). Latent: no fixture rotates a rail consumer
-  sideways; pinned by
+  (`angle_to_direction` / `rails::outward_delta`), keeping the
+  reservation drift-free with the drawn value text. This used to yield
+  the true outward direction only for *vertical* pins — a rail pin
+  rotated horizontal degenerated, landing inside the body bbox and
+  reserving nothing extra — because `Symbol::pins_in` reported the raw
+  `.kicad_sym` angle (inward-facing) instead of the world-outward one.
+  The `pins_in` fix (`world_outward = (180 - inward) mod 360`) makes
+  the angle genuinely outward for every orientation, so a horizontal
+  rail pin now reserves real space too; pinned by
   `spice-layout/tests/glyph_geom.rs::reach_pins_decoration_geometry_across_orientations`.
 
 All these gaps share one guard: the zero-slack output ratchet
@@ -905,7 +918,7 @@ faces the identical cycle constraint and resolves it by living in
 `kicad-emitter` — the one crate that sees *both* the placer's
 `Placement` and the real router (`crates/kicad-emitter/src/refine.rs`,
 called from the orchestrator after `place_with_hint` and before
-`emit_root`, `crates/spice2kicad/src/main.rs:233-251`). It is
+`emit_root`, `crates/spice2kicad/src/main.rs:287-298`). It is
 **placement, not decoration**: it runs before the final
 route/glyph/label pass and changes orientation only. This ADR uses the
 same boundary-crossing shape — glyph footprint is a *placement* concern
