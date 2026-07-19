@@ -105,13 +105,13 @@ pub fn canonical_axis(class: NetClass, negative_rail: bool) -> GlyphAxis {
 /// 0 → right — the same table as `kicad-emitter`'s `angle_to_direction`
 /// and `rails::outward_delta`), so the reservation lands where the
 /// glyph's value text will actually be drawn — the drift-free property
-/// ADR-14 needs. For a *vertically*-facing transformed pin (the
-/// canonical GND-down / VCC-up case every fixture exercises) this is
-/// the true outward direction. For a *horizontally*-facing transformed
-/// pin the shared convention degenerates — it points toward the body,
-/// so the reach lands inside the body bbox and reserves nothing extra
-/// (latent; no fixture rotates a rail consumer sideways — see ADR-14's
-/// "Known scope limits" amendment). Its length is
+/// ADR-14 needs. `elem.symbol.pins_in` reports the world-outward angle
+/// for every orientation (the `pins_in` fix that corrected the raw
+/// `.kicad_sym` angle, which pointed inward), so this is the true
+/// outward direction for both a *vertically*-facing transformed pin
+/// (the canonical GND-down / VCC-up case) and a *horizontally*-facing
+/// one — a rail consumer rotated sideways now reserves real space
+/// instead of degenerating into the body bbox. Its length is
 /// [`VALUE_TEXT_OFFSET_MM`] — the joint body + value-text reach — which
 /// covers the decoration footprint in the *canonical* case: a pin
 /// facing its glyph's canonical direction, with the glyph body and

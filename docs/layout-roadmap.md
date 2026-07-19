@@ -178,16 +178,14 @@ boundary:
 
 - The host *symbol's* rotation is chosen by the placer. Whether a
   power/ground pin ends up facing up, down, or sideways is therefore a
-  **placement** concern. The *intended* design (see CLAUDE.md
-  "Constraints vs. costs", authoritative) makes this a *hard
-  constraint* on the orientation candidate set: because V14 is Tier 1
-  and categorical, the filter belongs in `pick_orientations` and the
-  SA rotate move, not as a soft cost. **This is the target, not
-  today's behaviour: V14 is currently unenforced at both stages —
-  `pick_orientations` does no power/VCC/GND filtering, and there is
-  deliberately no `power_pin_outward` weight in `cost.rs`.** The
-  filter is the work this roadmap entry describes, not a shipped
-  guarantee.
+  **placement** concern. Per CLAUDE.md "Constraints vs. costs"
+  (authoritative), this is a *hard constraint* on the orientation
+  candidate set: because V14 is Tier 1 and categorical, the filter is
+  implemented in `orient::allowed_orientations` and consumed by both
+  `pick_orientations` (the seed chooser) and the SA rotate move — see
+  `crates/spice-layout/src/orient.rs` and `lib.rs`. There is
+  deliberately no `power_pin_outward` weight in `cost.rs`; the
+  candidate-space filter is a shipped guarantee, not a target.
 - Given that fixed pin direction, the glyph's *attachment* — drawn
   directly at the pin vs. detached with a short stub wire — is a
   **decoration** concern, owned by the emitter/router. When the
@@ -297,6 +295,28 @@ force-directed for that cluster.
   incompleteness: the multivibrator common-axis verifier still
   fails by roughly one cell per pair (RB/C pairs sit off the Q
   axis); tracked under CLAUDE.md V7.
+- **Done (idiom detectors, `spice-layout/src/idioms.rs`):** structural,
+  refdes-blind detectors (CLAUDE.md principle 9) that emit the same
+  constraint a user `align`/`place` would, applied before the SA
+  refiner runs and skipping anything already pinned:
+  1. **Resistor divider** — two resistors sharing a degree-2 tap net,
+     vertically aligned (`detect_dividers` → `apply`).
+  2. **Parallel pair** / **shared-node center** — two-terminal
+     passives sharing both terminals, or a passive whose free terminal
+     centers under a shared-node group (`detect_parallel_pairs`,
+     `detect_shared_node_centers` → `apply` in
+     `lib::apply_position_idioms`). The parallel-pair detector's
+     *placement* effect is currently deferred (kept for its unit tests
+     only, v0.2) because it fights the signal-flow orientation wall.
+  3. **Rail-stub column** — a two-terminal element with exactly one
+     rail-class pin (power/ground/negative-supply, per
+     `net_class::vertical_prefs`) gets X-column-anchored under the
+     mean X of its signal net's vertically-facing pins
+     (`detect_rail_stubs` → `apply_rail_stub_columns`). This is a
+     **seed-time-only** placement idiom, not an SA move; the SA
+     refiner instead sees it as the `rail_stub_alignment` soft cost
+     term (`cost.rs`) so a subsequent SA move can still improve on it
+     without ever discarding it outright.
 - **Next:** mirror-Y move in SA (the deferred ADR-3 move;
   `anneal.rs` `TODO(stage 5)`).
 

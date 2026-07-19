@@ -25,7 +25,7 @@ Verified against `crates/spice-parser/tests/*.rs`,
 | §2 | Block comment (`*@`) and trailing tag (`;@`) are the two annotation carriers | `tests/lex_edges.rs::block_annotation_top_level`, `tests/lex_edges.rs::prose_semicolon_comment_no_tags`, `src/lexer.rs::block_annotation_emits_block_line` | covered |
 | §2 | Whitespace between marker and directive name is optional (`;@symbol=` = `;@ symbol=`) | `tests/lex_edges.rs::tag_no_space_after_marker` | covered |
 | §2 (lexer) | Bare `\r` not treated as a line separator (matches ngspice `inpcom.c` `\r\n`-only zap) | `tests/lex_edges.rs::bare_cr_line_endings` | covered |
-| §2.2 | Dangling `+` continuation at start of file becomes a bogus `Other` element (documented quirk) | `tests/lex_edges.rs::continuation_at_start_of_file` | covered |
+| §2.2 | Dangling `+` continuation at start of file is flagged `W912` and dropped (no bogus `+` element) | `tests/lex_edges.rs::continuation_at_start_of_file` | covered |
 | §3.1 | Number overflow (`1e500`) parses to `Value::Number(inf)` (matches ngspice `INPevaluate`) | `tests/numbers.rs::number_overflow_input` | covered |
 | §2.3 | Tab-separated `=` in tag bodies parsed correctly | `tests/lex_edges.rs::tab_inside_tag_body` | covered |
 | §2 | Directive names and bare keys are case-insensitive ASCII (dotted-directive case: covered; tag-directive keyword case: see §3 gap) | `tests/elements.rs::case_insensitive_refdes`, `tests/directives.rs::directive_names_case_insensitive`, `tests/numbers.rs::eng_suffixes_case_insensitive` | partial [^2] |

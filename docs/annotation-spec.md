@@ -106,27 +106,28 @@ is no `*@group` directive.
 | SPICE construct                          | Schematic meaning                                                                                |
 | ---------------------------------------- | ------------------------------------------------------------------------------------------------ |
 | `.subckt foo … .ends` + `Xfoo …`         | Hierarchical sheet `foo`, one sheet-symbol per `Xfoo` instance on the parent. Internal nodes scoped. |
-| `.include "bias.cir"` *(when the file contributes ≥1 placeable element at top level)* | Visually clustered region on the parent sheet, named after the file (`bias`). Purely visual — wires may freely cross the boundary. Internal nodes share the parent scope. |
+| `.include "bias.cir"`                    | **Not implemented yet.** Parsed and preserved verbatim as an opaque structural directive; the referenced file is not expanded, and there is no visual-cluster placement pass. See below. |
 
-The two are deliberately different:
+**`.subckt` has a port list**, so the sheet-symbol has exactly those
+pins and internal nodes are hidden. Use it when the block is a
+reusable abstraction. A `.subckt` that is defined but never
+instantiated produces no schematic output.
 
-- **`.subckt` has a port list**, so the sheet-symbol has exactly those
-  pins and internal nodes are hidden. Use it when the block is a
-  reusable abstraction. A `.subckt` that is defined but never
-  instantiated produces no schematic output.
-- **`.include` has no port list**, so its visual box is permeable.
-  Use it when you only want "draw these together" without refactoring
-  shared nodes into ports.
-
-An `.include` whose contents are entirely non-placeable (model
-libraries, parameter packs, subckt definitions without instances) is
-pulled in silently and produces no cluster. This makes the common
-`.include "models/2N3904.lib"` case do the right thing.
-
-A file that needs two clusters in one logical unit should be split
-into two `.include`-d files. This is a deliberate forcing function:
-files small enough to make splitting feel heavy are also small enough
-that auto-layout handles them well.
+`.include`-as-visual-cluster is a **v0.2 target, not current
+behaviour**. The intended design — a permeable, unlabeled box around
+the file's contributed elements, wires freely crossing the boundary,
+internal nodes sharing the parent scope, silent pull-in when the file
+is entirely non-placeable (model libraries, parameter packs) — is
+spec'd in principle and recorded as ADR-10 ("cluster boundaries as
+soft attractors") in `docs/layout-adr.md`, but nothing in
+`spice-parser`, `spice-resolve`, or `spice-layout` expands `.include`
+or attracts its contents together today. Today, `.include` is
+classified as Structural (§3.1) purely so it does not accidentally
+fall into the Simulation-only bucket, but the only handling it
+receives is verbatim passthrough into any emitted netlist — it has no
+schematic effect. Treat "draw these together" clustering as
+unavailable until this lands; use `.subckt` (with a port list) if you
+need an actual placement grouping today.
 
 ### 3.1 SPICE statement classification
 
@@ -377,8 +378,10 @@ Block-form only:
 - `vertical` forces equal X coordinate; Y-order follows declaration
   order.
 - All references in one `align` directive must resolve within the
-  same parent sheet (i.e. you cannot align across an `.include`
-  boundary or across a `.subckt` instance).
+  same parent sheet (i.e. you cannot align across a `.subckt`
+  instance boundary). `.include` is not expanded (§3), so its
+  contents never enter the parsed netlist and cannot be referenced by
+  `align` at all today.
 - "Equal Y" / "equal X" applies to the **connecting pins**, not
   to the symbol centers. For uniformly-oriented parts the
   distinction is invisible; for mixed orientations the behaviour
@@ -510,8 +513,9 @@ whole line a SPICE comment, per §8).
 Layout proceeds in fixed phases. Constraints from later phases never
 override constraints from earlier phases.
 
-1. **Structural** — `.subckt` boundaries (hierarchical sheets),
-   `.include` boundaries (visual clusters).
+1. **Structural** — `.subckt` boundaries (hierarchical sheets).
+   `.include` boundaries (visual clusters) are a v0.2 target, not
+   implemented yet (§3).
 2. **Aligned** — every `align` directive fixes both the shared axis
    and the order along the free axis (declaration order).
 3. **Placed** — every `place` directive on an element not already
@@ -622,7 +626,9 @@ itself is what makes them necessary.
 *@symbol Device:R_US  for=R*
 *@symbol Device:C     for=C*
 
-.include "bias.cir"     * R1, R2 — base bias divider
+R1   vcc b   100k                          * base-bias divider
+R2   b   0   22k
+*@align vertical R1 R2
 
 Vin  in  0   AC 1                          ;@ symbol=Simulation_SPICE:VSOURCE
 C1   in  b   1u                            ;@ place=right-of Vin
@@ -637,21 +643,13 @@ Vcc  vcc 0   12                            ;@ power=vcc
 .end
 ```
 
-`bias.cir`:
-
-```spice
-* Base-bias divider for Q1
-R1   vcc b   100k
-R2   b   0   22k
-*@align vertical R1 R2
-```
-
-The two resistors of the bias divider are visually clustered (because
-they live in their own included file) and labeled `bias` on the
-parent sheet. Wires from `vcc` and node `b` cross the cluster
-boundary freely — `.include` is purely visual. The net `0` renders
-as a ground symbol automatically; `vcc` renders as a power flag
-because of the `power=vcc` directive on `Vcc`.
+The base-bias divider (`R1`, `R2`) is pinned into a column by its own
+`align vertical` directive. The net `0` renders as a ground symbol
+automatically; `vcc` renders as a power flag because of the
+`power=vcc` directive on `Vcc`. (A prior revision of this example put
+`R1`/`R2` in a separate `.include`-d file to demonstrate visual
+clustering; that feature is not implemented yet — see §3 — so the
+divider is written directly in the top-level file instead.)
 
 ---
 
