@@ -1915,19 +1915,17 @@ fn v13_pwr_flag_graphic_clear_of_power_glyphs() {
 fn v5_violation_budget(name: &str) -> usize {
     match name {
         // Ratcheted high-water marks (current measured count on master).
-        // The routing-aware orientation-refinement phase (Layout phase
-        // 4.5) drove common_emitter (3→0), diff_pair (2→0), and
-        // opamp_inverting_real (3→1) down to these values; the budgets
-        // follow the ratchet-down policy. A regression trips the test.
+        //
+        // `opamp_inverting_real` (1 → 0) and `opamp_definition_level`
+        // (3 → 0) ratcheted to zero when the pin-angle inversion in
+        // `Symbol::pins_in` was fixed: their residuals were all
+        // horizontal opamp pins, the exact class the old measurement
+        // reported backwards, and the router was steering their outward
+        // stubs the wrong way as a result.
         "multivibrator" => 4,
-        "opamp_inverting_real" => 1,
-        // Same single root cause as this fixture's V12 budget above: the
-        // RF/X body overlap in the structural seed. Ratchets down to 0
-        // with the seed fix. Lowered 6 → 3 when the collinear outward
-        // stub was restored (only X1/X2 opamp pins remain).
-        "opamp_definition_level" => 3,
-        // common_emitter, diff_pair, rc_lowpass, and any other fixture:
-        // zero violations.
+        // common_emitter, diff_pair, rc_lowpass, opamp_inverting,
+        // opamp_inverting_real, opamp_definition_level, and any other
+        // fixture: zero violations.
         _ => 0,
     }
 }

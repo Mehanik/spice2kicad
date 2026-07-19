@@ -45,72 +45,68 @@ fn gnd_prefs() -> HashMap<String, VertPref> {
 }
 
 /// Golden reach geometry for the grounded resistor at all 4 rotations
-/// × mirror states. Pin "2" sits at local `(0, -3.81)`, angle 90; the
-/// joint body + value-text reach is `VALUE_TEXT_OFFSET_MM` = 3.81 mm.
+/// × mirror states. Pin "2" sits at local `(0, -3.81)` with raw inward
+/// angle 90; the joint body + value-text reach is `VALUE_TEXT_OFFSET_MM`
+/// = 3.81 mm past the pin tip, directly away from the body.
 ///
-/// Rows where the transformed pin faces vertically (`outward: true`)
-/// reach one full offset PAST the pin tip, away from the body — the
-/// canonical case (identity row `(0, 7.62)` matches the emitted
-/// `common_emitter` R2 geometry: GND glyph on the pin, net name one
-/// offset below). Rows where it faces horizontally (`outward: false`)
-/// degenerate to the body centre `(0, 0)` — the decoration-convention
-/// blind spot documented in ADR-14's scope-limits amendment.
+/// Every row is checked twice: against the golden pair, and from first
+/// principles (correct length, and pointing away from the transformed
+/// body centre). The two horizontal-facing rotations used to be exempt
+/// from the second check and to expect the degenerate body centre
+/// `(0, 0)` — that was not a decoration convention but a symptom of the
+/// pin-angle inversion (`Symbol::pins_in` reported horizontal pins
+/// pointing backwards, so the reach walked *into* the body and landed on
+/// its centre). With the angle fixed, all eight rows are canonical and
+/// the first-principles check applies to all of them.
 #[test]
 fn reach_pins_decoration_geometry_across_orientations() {
     struct Row {
         rotation: Rotation,
         mirror_y: bool,
         expected: (f64, f64),
-        outward: bool,
     }
     let rows = [
+        // Unmirrored: the pin sweeps down / right / up / left.
         Row {
             rotation: Rotation::R0,
             mirror_y: false,
             expected: (0.0, 7.62),
-            outward: true,
         },
         Row {
             rotation: Rotation::R90,
             mirror_y: false,
-            expected: (0.0, 0.0),
-            outward: false,
+            expected: (7.62, 0.0),
         },
         Row {
             rotation: Rotation::R180,
             mirror_y: false,
             expected: (0.0, -7.62),
-            outward: true,
         },
         Row {
             rotation: Rotation::R270,
             mirror_y: false,
-            expected: (0.0, 0.0),
-            outward: false,
+            expected: (-7.62, 0.0),
         },
+        // Mirror-Y negates X, so only the two horizontal rows move.
         Row {
             rotation: Rotation::R0,
             mirror_y: true,
             expected: (0.0, 7.62),
-            outward: true,
         },
         Row {
             rotation: Rotation::R90,
             mirror_y: true,
-            expected: (0.0, 0.0),
-            outward: false,
+            expected: (-7.62, 0.0),
         },
         Row {
             rotation: Rotation::R180,
             mirror_y: true,
             expected: (0.0, -7.62),
-            outward: true,
         },
         Row {
             rotation: Rotation::R270,
             mirror_y: true,
-            expected: (0.0, 0.0),
-            outward: false,
+            expected: (7.62, 0.0),
         },
     ];
 
@@ -130,13 +126,9 @@ fn reach_pins_decoration_geometry_across_orientations() {
             row.expected,
         );
 
-        if !row.outward {
-            continue;
-        }
-        // Canonical (vertically-facing) rows: additionally prove the
-        // "outward" claims from first principles, not just the golden
-        // values — one full VALUE_TEXT_OFFSET_MM past the transformed
-        // pin tip, pointing away from the body centre.
+        // Prove the "outward" claim from first principles, not just the
+        // golden value: one full VALUE_TEXT_OFFSET_MM past the
+        // transformed pin tip, pointing away from the body centre.
         let pins = el.symbol.pins_in(orient);
         let p = pins
             .iter()

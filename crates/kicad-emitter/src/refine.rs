@@ -275,8 +275,16 @@ fn joint_search(
             }
         }
     }
-    active.sort_unstable();
+    // Truncate BEFORE sorting. `active` is built offenders-first, then
+    // neighbours, so truncating in that order keeps the elements the
+    // search actually exists to re-orient. Sorting first was a defect:
+    // on `common_emitter` the offenders (CIN=6, Q1=8) sorted *after*
+    // their six neighbours, so a `MAX_ACTIVE` of 4 cut both offenders
+    // out and the joint search enumerated 16 combinations of four
+    // elements that had no V5 violation to fix. Sort only afterwards,
+    // to keep the enumeration order deterministic.
     active.truncate(MAX_ACTIVE);
+    active.sort_unstable();
 
     // Per-active-element candidate orientations: the V14-allowed set with
     // geometrically-equivalent orientations collapsed (a symmetric 2-pin

@@ -159,6 +159,40 @@ impl Orientation {
     }
 }
 
+/// Convert a symbol-frame **inward** pin angle into the world-frame
+/// **outward** angle every downstream consumer wants.
+///
+/// Two frame facts compose here, and getting either wrong is invisible on
+/// vertical pins — which is exactly how the original bug survived:
+///
+/// 1. A `.kicad_sym` pin angle points from the connection point *toward
+///    the body* (INWARD), not away from it. Ground truth, KiCad's own
+///    `sch_pin.cpp` pin-root computation: `PIN_RIGHT` (library angle `0`)
+///    puts the root at `position + (length, 0)`, i.e. the shaft runs from
+///    the connection point in `+x` into the body. The libraries agree —
+///    `Device:Q_NPN_BCE` pin 1 sits at `(-5.08, 0)` with angle `0` (body
+///    to its right), and `power:GND`'s pin is angle `270` with the
+///    triangle below it.
+/// 2. Symbol coordinates are Y-up; the schematic world frame is Y-down.
+///
+/// So `world_outward = (360 - (inward + 180)) mod 360 = (180 - inward) mod
+/// 360`.
+///
+/// **Why this was not caught earlier.** `θ ↦ 180 - θ` fixes `90` and `270`,
+/// so for the vertical pins that dominate the fixtures (resistors,
+/// capacitors, power glyphs) the uncorrected angle is accidentally right.
+/// It is exactly inverted for the horizontal pins — transistor bases,
+/// opamp inputs and outputs — and scrambled once a rotation mixes the two.
+/// The consequence was not merely a mis-measurement: the router builds its
+/// V5 outward stubs from the same angle, so horizontal pins were being
+/// routed *inward on purpose*.
+#[must_use]
+fn world_outward_angle(inward_symbol_frame: u16) -> u16 {
+    let a = u32::from(inward_symbol_frame) % 360;
+    // safe: result in [0, 360)
+    u16::try_from((360 + 180 - a) % 360).unwrap_or(0)
+}
+
 // ---------------------------------------------------------------------------
 // Pin / Symbol / Library
 // ---------------------------------------------------------------------------
@@ -267,8 +301,18 @@ pub struct Pin {
 pub struct TransformedPin {
     pub number: String,
     pub name: String,
+    /// Position in the symbol-local frame, orientation applied. Still
+    /// Y-up: callers place it in the world with `origin.y - pin.y`.
     pub x: f64,
     pub y: f64,
+    /// The pin's **outward** direction (away from the body) in the
+    /// **world**, Y-down frame: `0` = Right, `90` = Down, `180` = Left,
+    /// `270` = Up.
+    ///
+    /// Deliberately NOT the raw `.kicad_sym` angle, which points *inward*
+    /// in a Y-up frame — see [`world_outward_angle`], which does the
+    /// conversion, for why the two differ only on horizontal pins and how
+    /// that let an inversion hide here.
     pub angle: u16,
     pub electrical: PinElectrical,
 }
@@ -408,7 +452,9 @@ impl Symbol {
         self.pins.iter().find(|p| p.number == number)
     }
 
-    /// Pins in the given orientation, with positions and angles transformed.
+    /// Pins in the given orientation, with positions transformed and
+    /// [`TransformedPin::angle`] converted to the **world outward**
+    /// convention (see that field's docs).
     pub fn pins_in(&self, orient: Orientation) -> Vec<TransformedPin> {
         self.pins
             .iter()
@@ -419,7 +465,7 @@ impl Symbol {
                     name: p.name.clone(),
                     x,
                     y,
-                    angle: orient.apply_angle(p.angle),
+                    angle: world_outward_angle(orient.apply_angle(p.angle)),
                     electrical: p.electrical,
                 }
             })
