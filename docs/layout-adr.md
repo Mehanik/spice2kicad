@@ -1954,6 +1954,14 @@ diffed. The flag is **`--no-refine`** (`crates/spice2kicad/src/main.rs`,
 `refine: !cli.no_refine`) — note it disables the FR seed + SA, *not*
 phase 4.5, which lives in `kicad-emitter` and still runs in both arms.
 
+> **CORRECTION (Stage 2) — the sentence above is WRONG, and so is every
+> "off" number in the table below.** `main.rs` gated the phase-4.5 call on
+> `if opts.refine`, so `--no-refine` ablated *both* passes. With phase 4.5
+> restored to both arms the seed scores far better than recorded
+> (`common_emitter` B 11 → 4, WL 121.9 → 59.7 mm), and conclusion (b) does
+> not survive. Do not reuse this table to size any future stage; see
+> "Stage 2 — KILLED" below for the corrected measurement.
+
 Reproduce with:
 
 ```sh
@@ -2184,11 +2192,11 @@ above. Three of its judgements were wrong:
 | ----- | ------- | ------ |
 | 0 | This ADR; owner sign-off | **LANDED** |
 | 1 | Verifiers (F5/P4, P5, P10, P11); no behaviour change | **LANDED** |
-| 2 | Deterministic order-preserving compaction; SA retirement | not started |
-| 3 | Joint flow-pose construction (position + orientation + mirror) | not started |
-| 4 | Complete decoration reservation | not started |
-| 5 | Generalized router-verified local repair (phase 4.5 promoted) | not started |
-| 6 | Consolidation; delete the superseded machinery | not started |
+| 2 | Deterministic order-preserving compaction; SA retirement | **KILLED** — see the Stage-2 outcome below |
+| 3 | Joint flow-pose construction (position + orientation + mirror) | blocked by Stage 2 |
+| 4 | Complete decoration reservation | blocked by Stage 2 |
+| 5 | Generalized router-verified local repair (phase 4.5 promoted) | blocked by Stage 2 |
+| 6 | Consolidation; delete the superseded machinery | blocked by Stage 2 |
 
 ### Kill criteria
 
@@ -2229,6 +2237,207 @@ the end of its stage, against the fixture suite.
 - **Escape lists for Stages 2, 3 and 5 are brought for sign-off in
   advance, per stage.** A stage may not discover its escapes while
   landing.
+
+### Stage 2 — KILLED, and the ablation that motivated it was invalid
+
+**Outcome, in the words the kill criterion prescribes: *the wall's true
+name is the SA, and we chose to keep it.***
+
+The attempt is preserved, unmerged, on branch `adr17-stage2-killed`
+(commit `45804dc`). Master is unchanged and green with the SA intact.
+
+#### The invalidating discovery — `--no-refine` ablated TWO passes
+
+This section's ablation states that `--no-refine` disables the FR seed +
+SA, "*not* phase 4.5, which lives in `kicad-emitter` and still runs in
+both arms". **That was false when it was written.** `main.rs` guarded the
+call:
+
+```rust
+if opts.refine {
+    kicad_emitter::refine_orientations(&mut placement, &library, &refine_meta);
+}
+```
+
+So every "SA off" number in the table above is *seed without phase 4.5*.
+The two passes were conflated, and the conclusions drawn from the
+difference were attributed entirely to the SA.
+
+Re-measured with phase 4.5 restored to both arms, the seed alone scores
+**far better** than recorded — `common_emitter` B 11 → 4 and total wire
+121.9 → 59.7 mm. Conclusion (b), "where it does act, its entire
+measurable value is COMPACTION", does not survive: most of what the
+ablation attributed to the SA was phase 4.5's orientation refinement
+being switched off alongside it.
+
+**This does not rescue the seed**, because the seed's own output is
+*Tier-0 broken* — see below. But it does mean Stage 2 was designed
+against a mis-measurement, and any future stage must re-derive its
+targets from a corrected ablation.
+
+#### A second Tier-0 defect found on the way: phase 4.5 can sever a net
+
+Phase 4.5's acceptance predicate (`refine.rs`, `Measure`) scores
+`(v13, v12, v5, bends)` and guards `v11` / `overlap` / `v12`. It has
+**no connectivity term**, so it will accept an orientation that
+disconnects the circuit.
+
+Measured on `common_emitter`: the seed layout puts `COUT` where rotating
+it to 180 improves every metric phase 4.5 can see, while boxing its `c`
+pin between a foreign pin (V11 blocks one L-route) and `Q1`'s body (V12
+blocks the other). The router's conflict cascade exhausts its detours and
+drops the branch; the CLI's post-emit connectivity check then refuses the
+file:
+
+```
+ERROR: net "c" is not fully connected in the emitted schematic
+  net in the source but split in the schematic: {"COUT.0", "Q1.0", "RC.1"}
+```
+
+The branch adds a `severed` count to `TrialRoute` / `Measure` (union-find
+over emitted endpoints, KiCad's endpoint-only join rule, signal nets
+only) as a pure non-regression guard. It closed the break. **This defect
+is independent of ADR-17 and outlives its kill** — it is latent on master
+today, masked only because the SA happens to produce layouts where the
+tempting orientation is not available. It should be fixed on its own
+merits, in its own commit, with its own baseline check.
+
+#### What was built
+
+`crates/spice-layout/src/compact.rs` — order-preserving column
+compaction, run where the SA ran (after seeding/idioms, before
+`legalize`), plus `--sa-refine` replacing `--no-refine` so the annealer
+stays reachable. Properties as specified: no RNG, columns never reorder,
+every move is `min(original, tightest_legal)` so it only removes slack,
+spacing derived from `world_extent_with_glyphs` (ADR-14's reservation
+used as-is, not widened), pinned lines frozen. Shared-net pin-alignment
+snapping is folded into the same choice: among candidates in
+`[tightest, current]`, take the one aligning the most shared-net pins,
+tightest breaking the tie.
+
+Every candidate is additionally gated on a **measured** V11 count.
+Without it, compaction merged `common_emitter`'s `c`, `e` and emitter
+bypass into one net — a silent short, exactly the failure
+`legalize::shove_one` already guards against.
+
+#### Four design variants were measured, not tuned
+
+| Variant | `common_emitter` B | `opamp_inverting_real` B/J |
+| ------- | ------------------ | -------------------------- |
+| squeeze X and Y | 7 | 7 / 1 |
+| squeeze X, snap-only Y | 11 | 6 / 0 |
+| least-disturbance tie-break | 13 | 6 / 0 |
+| **squeeze X only** (kept) | **6** | **6 / 0** |
+
+The one durable design finding: **X spacing is slack; Y spacing is
+meaning.** The X-layer stride is a flow-depth ordering with a generous
+constant floor, so closing it costs nothing. The Y bands are V6's
+*semantic* structure (Top rail / Mid signal / Bot ground), and squeezing
+them is order-preserving and still wrong — it collapses the signal band
+onto the rails and the router pays in bends. Recorded so a future stage
+does not re-derive it.
+
+#### The measurement
+
+All arms include phase 4.5 and the connectivity guard, so they are
+comparable. `B / J / X / WL(mm)`, root sheets plus the `OPAMP` child.
+
+| fixture | SA on (master) | seed only | seed + compaction |
+| ------- | -------------- | --------- | ----------------- |
+| `rc_lowpass` | 3 / 0 / 0 / 17.8 | 2 / 0 / 0 / 11.4 | 2 / 0 / 0 / 11.4 |
+| `common_emitter` | 4 / 3 / 0 / 95.2 | 11 / 1 / 0 / 127.0 | 6 / 2 / 0 / 67.3 |
+| `multivibrator` | 10 / 2 / 4 / 184.2 | 10 / 2 / 4 / 184.2 | 10 / 2 / 4 / 184.2 |
+| `diff_pair` | 2 / 1 / 0 / 24.1 | 2 / 1 / 0 / 24.1 | 2 / 1 / 0 / 24.1 |
+| `opamp_inverting_real` | 8 / 0 / 0 / 54.6 | 6 / 0 / 0 / 88.9 | 6 / 0 / 0 / 78.7 |
+| `opamp_inverting` | 3 / 0 / 0 / 33.0 | 5 / 1 / 0 / 86.4 | 2 / 1 / 1 / 47.0 |
+| `port_shapes` | 4 / 0 / 0 / 64.8 | 4 / 0 / 0 / 64.8 | 4 / 0 / 0 / 64.8 |
+| `rc_lowpass_ports` | 2 / 0 / 0 / 8.9 | 2 / 0 / 0 / 11.4 | 2 / 0 / 0 / 11.4 |
+| `opamp_definition_level` | 12 / 0 / 6 / 152.4 | 12 / 0 / 6 / 152.4 | 12 / 0 / 6 / 152.4 |
+| `named_rails` | 2 / 2 / 0 / 22.9 | 2 / 1 / 0 / 26.7 | 2 / 1 / 0 / 26.7 |
+| `OPAMP` (child) | 5 / 0 / 2 / 104.1 | 5 / 0 / 1 / 146.1 | 5 / 0 / 1 / 146.1 |
+
+Compaction is doing real, visible work — `common_emitter` B 11 → 6 and
+wire 127.0 → 67.3 mm against the bare seed, and it beats the SA outright
+on `rc_lowpass`, `opamp_inverting_real` and `opamp_inverting`. It is not
+a failure of *effect*.
+
+#### Why it was killed
+
+The criterion is "≤ current on every ratchet, at most TWO escapes, and no
+Tier-0/Tier-1 rise anywhere". Measured breaches:
+
+- **V16** (2): `common_emitter` B 4 → 6; `opamp_inverting` J 0 → 1.
+  (Four fixtures *improved* and would have ratcheted down: `rc_lowpass`
+  3 → 2, `common_emitter` J 3 → 2, `opamp_inverting_real` 8 → 6,
+  `opamp_inverting` B 3 → 2.)
+- **`electrical_safety`** (5 of 25): `v13_labels_dont_overlap_symbol_body`,
+  `v13_labels_clear_pin_text`, `v13_labels_no_mutual_overlap`,
+  `item3_interface_global_labels_clear_foreign_bodies`,
+  `v5_first_segment_extends_outward`. All Tier-1 except V5, all budget 0.
+- **`flow_geometry`** (2 of 3): `series_pose_and_terminal_order_within_ratchet`
+  (F5) and `series_discriminator_separates_stub_from_series_on_common_emitter`.
+- `baseline_lock`: 50 differences (legitimate for a layout change, and
+  ADR-16's regeneration was never reached).
+
+Seven ratchet breaches against a budget of two, four of them Tier-1
+label-overlap invariants at budget 0. `placement_quality`,
+`visual_quality` and `placement_stability` were not run to completion —
+the criterion had already been met several times over and continuing
+would have been tuning, which the stage brief forbids.
+
+The Tier-1 V13 cluster is the informative one: compaction pulls symbols
+together, and the space it reclaims is exactly the space **decoration**
+was going to put labels and property text in. ADR-14's reservation covers
+power-glyph body and value text and is documented as incomplete; nothing
+reserves label or Reference/Value text. So compaction is structurally
+unable to be safe *until Stage 4's complete decoration reservation
+exists*. **The staging order is wrong: Stage 4 is a precondition for
+Stage 2, not a successor.**
+
+#### P11 — the headline claim did not survive contact
+
+The redesign's stated primary product is attributability. Measured on the
+branch:
+
+| P11 case | master (SA) | seed + compaction |
+| -------- | ----------- | ----------------- |
+| `rc_lowpass_plus_r` | 5 / 5 | 5 / 5 |
+| `common_emitter_plus_c` | 17 / 17 | **16** / 17 |
+
+**Essentially unchanged.** This falsifies the module's own locality
+claim, and the reason is structural rather than incidental: a
+left-to-right sequential compaction sweep settles each column against the
+ones already settled, so inserting an element anywhere changes one
+column's occupancy and that change propagates through *every* column to
+its right. Order-preserving 1-D compaction is monotone and deterministic
+but it is **not local** in P11's sense.
+
+That matters well beyond Stage 2. ADR-17 argues the blast radius is the
+SA's fault and that determinism cures it. On this evidence determinism is
+**not sufficient** — a deterministic sequential sweep re-bases the page
+just as thoroughly. Any future attempt must make locality an explicit
+design property with P11 as its acceptance test, not a hoped-for
+consequence of removing the RNG.
+
+#### What it would take
+
+1. **Stage 4 first.** Complete decoration reservation — labels, property
+   text, Reference/Value — folded into the extent compaction measures.
+   Four of the seven breaches are decoration collisions in space
+   compaction legitimately believed was free.
+2. **Fix phase 4.5's connectivity gap independently** (above). Any
+   non-SA layout is one bad orientation away from a severed net today.
+3. **Re-derive Stage 2's targets from a corrected ablation.** The
+   numbers in this ADR's ablation table cannot be used; they measure two
+   passes and attribute the result to one.
+4. **Treat locality as a first-class requirement**, designed for and
+   measured by P11, not assumed from determinism.
+
+Until then the SA stays. It is inert on four fixtures, fixes no
+crossings, and costs global attributability — every criticism in this ADR
+stands — but it is currently the only thing producing a layout that
+clears all seven ratchet families at once, and on `common_emitter` it is
+load-bearing for Tier-0 correctness.
 
 ### Stage 1 — what landed, and what it measured
 
