@@ -66,6 +66,16 @@ pub struct NetSpec {
     /// (CLAUDE.md V10). Derived generally upstream via
     /// [`spice_layout::net_class::negative_rail_nets`].
     pub negative_rail: bool,
+    /// The `*@power=` / `;@ power=` tag text this net was declared with
+    /// (`+5V`, `-12V`, …), when the user declared one.
+    ///
+    /// This is the net's **resolved rail identity**, as opposed to how it
+    /// happens to be spelled. `lib_id_for` prefers it over the net name so
+    /// `VPOS p5 0 DC 5 ;@ power=+5V` draws a `power:+5V` terminal rather
+    /// than the generic `power:VCC` its unrecognised net name `p5` would
+    /// otherwise fall back to. Derived upstream via
+    /// [`spice_layout::net_class::rail_tags`].
+    pub rail_tag: Option<String>,
     /// True when the net has ≥1 `Passive` pin (resistor/cap terminal).
     /// KiCad counts a passive pin as a valid *signal-net* driver
     /// (`PT_PASSIVE` ∈ `DrivingPinTypes`), so a Signal net with a

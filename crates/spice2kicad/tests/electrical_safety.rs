@@ -3045,10 +3045,8 @@ fn sheet_pin_positions(root: &Value) -> Vec<Pt> {
             if let Some(at) = find_child(pin, "at") {
                 let mut it = list_iter(at);
                 it.next();
-                if let (Some(x), Some(y)) = (
-                    it.next().and_then(as_f64),
-                    it.next().and_then(as_f64),
-                ) {
+                if let (Some(x), Some(y)) = (it.next().and_then(as_f64), it.next().and_then(as_f64))
+                {
                     out.push((x, y));
                 }
             }

@@ -1283,10 +1283,10 @@ fn net_bbox_crossings(nets: &[Net]) -> f64 {
 mod tests {
     use super::*;
     use crate::PlacedElement;
-    use spice_resolve::ElementRole;
     use kicad_symbols::{Library, Orientation};
     use spice_diagnostics::FileId;
     use spice_policy::check;
+    use spice_resolve::ElementRole;
     use std::path::PathBuf;
     use std::sync::OnceLock;
 

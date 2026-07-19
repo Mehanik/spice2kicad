@@ -46,6 +46,7 @@ fn vcc_pin_emits_power_vcc_symbol() {
         class: NetClass::Power,
         pins: vec![pin(0, 1, 10.16, 20.32, Direction::Up)],
         negative_rail: false,
+        rail_tag: None,
         has_passive: false,
         has_power_in: false,
     };
@@ -89,6 +90,7 @@ fn ground_pin_emits_power_gnd_symbol() {
         class: NetClass::Ground,
         pins: vec![pin(0, 2, 10.16, 40.64, Direction::Down)],
         negative_rail: false,
+        rail_tag: None,
         has_passive: false,
         has_power_in: false,
     };
@@ -130,6 +132,7 @@ fn negative_rail_emits_power_vee_not_gnd() {
         class: NetClass::Ground,
         pins: vec![pin(0, 1, 10.16, 40.64, Direction::Down)],
         negative_rail: true,
+        rail_tag: None,
         has_passive: false,
         has_power_in: false,
     };
@@ -168,6 +171,7 @@ fn signal_net_does_not_emit_power_symbol() {
             pin(1, 1, 10.16, 0.0, Direction::Left),
         ],
         negative_rail: false,
+        rail_tag: None,
         has_passive: false,
         has_power_in: false,
     };
@@ -209,6 +213,7 @@ fn power_symbol_rotation_always_zero_v14() {
             class: NetClass::Ground,
             pins: vec![pin(0, 1, 10.16, 20.32, dir)],
             negative_rail: false,
+            rail_tag: None,
             has_passive: false,
             has_power_in: false,
         };
@@ -260,6 +265,7 @@ fn forced_sideways_ground_glyph_offsets_with_stub_wire() {
         class: NetClass::Ground,
         pins: vec![pin(0, 1, 10.16, 20.32, Direction::Up)],
         negative_rail: false,
+        rail_tag: None,
         has_passive: false,
         has_power_in: false,
     };
@@ -297,6 +303,7 @@ fn canonical_ground_glyph_has_no_stub_wire() {
         class: NetClass::Ground,
         pins: vec![pin(0, 1, 10.16, 20.32, Direction::Down)],
         negative_rail: false,
+        rail_tag: None,
         has_passive: false,
         has_power_in: false,
     };
@@ -322,6 +329,7 @@ fn unknown_lib_id_falls_back_to_global_label() {
         class: NetClass::Power,
         pins: vec![pin(0, 1, 10.16, 20.32, Direction::Up)],
         negative_rail: false,
+        rail_tag: None,
         has_passive: false,
         has_power_in: false,
     };
@@ -385,6 +393,7 @@ fn power_glyph_value_is_uppercase_rail_name() {
         class: NetClass::Power,
         pins: vec![pin(0, 1, 10.16, 20.32, Direction::Up)],
         negative_rail: false,
+        rail_tag: None,
         has_passive: false,
         has_power_in: false,
     };
@@ -409,6 +418,7 @@ fn negative_rail_glyph_value_is_uppercase() {
         class: NetClass::Ground,
         pins: vec![pin(0, 1, 10.16, 40.64, Direction::Down)],
         negative_rail: true,
+        rail_tag: None,
         has_passive: false,
         has_power_in: false,
     };
@@ -435,6 +445,7 @@ fn ground_net_zero_glyph_value_is_gnd() {
         class: NetClass::Ground,
         pins: vec![pin(0, 2, 10.16, 40.64, Direction::Down)],
         negative_rail: false,
+        rail_tag: None,
         has_passive: false,
         has_power_in: false,
     };
@@ -461,6 +472,7 @@ fn plus_rail_name_preserves_distinct_identity() {
         class: NetClass::Power,
         pins: vec![pin(0, 1, 10.16, 20.32, Direction::Up)],
         negative_rail: false,
+        rail_tag: None,
         has_passive: false,
         has_power_in: false,
     };

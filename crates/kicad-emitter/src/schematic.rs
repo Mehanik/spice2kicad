@@ -232,11 +232,12 @@ pub fn emit_root(
     let passive = collect_passive_nets(placement, library);
     let power_in = collect_power_in_nets(placement, library);
     let negative_rails = spice_layout::net_class::negative_rail_nets(placement);
+    let rail_tags = spice_layout::net_class::rail_tags(placement);
     // Router obstacles: host symbol bodies (V12) plus the rail-glyph
     // bodies a foreign signal wire must not spear (V13 item 2A). Glyphs
     // are foreign to every routed net (power nets are unrouted), so
     // appending them repels only foreign wires.
-    let glyph_bodies = rail_glyph_body_bboxes(&net_pins, library, &negative_rails);
+    let glyph_bodies = rail_glyph_body_bboxes(&net_pins, library, &negative_rails, &rail_tags);
     let mut obstacles = placement_obstacles(placement, library);
     obstacles.extend(glyph_bodies.iter().copied());
     for routed in route_nets(
@@ -247,6 +248,7 @@ pub fn emit_root(
         &driven,
         &requires_driver,
         &negative_rails,
+        &rail_tags,
         &passive,
         &power_in,
         &sheet_edge_pins,
@@ -275,7 +277,14 @@ pub fn emit_root(
         pin_texts: &label_pin_texts,
         wires: &label_wires,
     };
-    for label in dangling_pin_labels(&net_pins, "root", &extra_pins, &root_obstacles, &port_dirs) {
+    for label in dangling_pin_labels(
+        &net_pins,
+        "root",
+        &extra_pins,
+        &root_obstacles,
+        &port_dirs,
+        &rail_tags,
+    ) {
         items.push(label);
     }
 
@@ -296,7 +305,7 @@ pub fn emit_root(
     nudge_power_glyph_value_text(&mut items, placement, library);
 
     // Correctness self-check, after every wire is final.
-    report_disconnected_nets(&items, &net_pins, None);
+    report_disconnected_nets(&items, &net_pins, None, &rail_tags);
 
     let mut root = Sexpr::List(items);
     let shift = translate_into_page(&mut root, preferred_shift);
@@ -307,6 +316,10 @@ pub fn emit_root(
 /// `(hierarchical_label …)` per port at the same world-coordinate as
 /// a body-element pin connected to the same SPICE net (so the port and
 /// the body net resolve to one connectivity class).
+// Straight-line emission sequence (collect pins → route → labels →
+// glyphs → page frame); splitting it would only move the same steps
+// behind names with no independent meaning.
+#[allow(clippy::too_many_lines)]
 pub fn emit_child_sheet(
     child: &ChildSheet<'_>,
     library: &Library,
@@ -373,7 +386,9 @@ pub fn emit_child_sheet(
 
     let net_pins = collect_net_pins(child.placement, library, &extra_pins);
     let child_negative_rails = spice_layout::net_class::negative_rail_nets(child.placement);
-    let glyph_bodies = rail_glyph_body_bboxes(&net_pins, library, &child_negative_rails);
+    let child_rail_tags = spice_layout::net_class::rail_tags(child.placement);
+    let glyph_bodies =
+        rail_glyph_body_bboxes(&net_pins, library, &child_negative_rails, &child_rail_tags);
     let mut obstacles = placement_obstacles(child.placement, library);
     obstacles.extend(glyph_bodies.iter().copied());
     let mut driven = collect_driven_nets(child.placement, library);
@@ -395,6 +410,7 @@ pub fn emit_child_sheet(
         &driven,
         &requires_driver,
         &child_negative_rails,
+        &child_rail_tags,
         &passive,
         &power_in,
         &[],
@@ -416,7 +432,14 @@ pub fn emit_child_sheet(
         pin_texts: &child_pin_texts,
         wires: &child_wires,
     };
-    for label in dangling_pin_labels(&net_pins, &child.name, &extra_pins, &obs, &BTreeMap::new()) {
+    for label in dangling_pin_labels(
+        &net_pins,
+        &child.name,
+        &extra_pins,
+        &obs,
+        &BTreeMap::new(),
+        &child_rail_tags,
+    ) {
         items.push(label);
     }
 
@@ -443,7 +466,7 @@ pub fn emit_child_sheet(
     nudge_property_text(&mut items, child.placement, library);
     nudge_power_glyph_value_text(&mut items, child.placement, library);
 
-    report_disconnected_nets(&items, &net_pins, Some(&child.name));
+    report_disconnected_nets(&items, &net_pins, Some(&child.name), &child_rail_tags);
 
     let mut root = Sexpr::List(items);
     let shift = translate_into_page(&mut root, preferred_shift);
@@ -868,9 +891,10 @@ fn power_lib_ids_for_placement(
     // match the router's per-net glyph choice so the right lib_symbol
     // (and only that one) inlines (V3).
     let negative_rails = spice_layout::net_class::negative_rail_nets(placement);
+    let rail_tags = spice_layout::net_class::rail_tags(placement);
     for el in &placement.elements {
         for node in &el.nodes {
-            if let Some(id) = power_lib_id_for_net(node, &negative_rails) {
+            if let Some(id) = power_lib_id_for_net(node, &negative_rails, &rail_tags) {
                 out.insert(id.to_string());
             }
         }
@@ -879,7 +903,7 @@ fn power_lib_ids_for_placement(
     // exposed only through a hierarchical sheet pin still gets a
     // `power:*` glyph). Reflect those lib_ids so they inline as well.
     for net in extra_pin_nets {
-        if let Some(id) = power_lib_id_for_net(net, &negative_rails) {
+        if let Some(id) = power_lib_id_for_net(net, &negative_rails, &rail_tags) {
             out.insert(id.to_string());
         }
     }
@@ -919,11 +943,13 @@ fn placement_has_undriven_net(
     let requires_driver = collect_driver_required_nets(placement, library);
     let passive = collect_passive_nets(placement, library);
     let power_in = collect_power_in_nets(placement, library);
+    let rail_tags = spice_layout::net_class::rail_tags(placement);
+    let rail_tags = &rail_tags;
     net_pins.iter().any(|(name, pins)| {
         if pins.is_empty() || driven.contains(name) || extra_driven.contains(name) {
             return false;
         }
-        let class = classify_net_by_name(name);
+        let class = classify_net(name, rail_tags);
         let is_power_ground = !matches!(class, spice_layout::net_class::NetClass::Signal);
         // KiCad's `ispowerNet` (erc.cpp:1033) is pin-based: any net with
         // a component `power_in` pin is a power net, which accepts only a
@@ -952,9 +978,32 @@ fn placement_has_undriven_net(
     })
 }
 
+/// The `power:*` glyph for a positive-supply *spelling* — either a net
+/// name (`vcc`, `+12v`) or a `*@power=` tag (`+5V`). One table so a rail
+/// declared `;@ power=+5V` and a net literally named `+5V` cannot
+/// disagree about which terminal gets drawn.
+fn positive_rail_glyph(spelling: &str) -> &'static str {
+    match spelling.to_ascii_lowercase().as_str() {
+        "vdd" => "power:VDD",
+        "+5v" | "5v" => "power:+5V",
+        "+12v" | "12v" => "power:+12V",
+        "+3v3" | "3v3" => "power:+3V3",
+        _ => "power:VCC",
+    }
+}
+
+/// Select the `power:*` glyph for a net from its **resolved rail
+/// identity**, falling back to the net's spelling.
+///
+/// The `*@power=` tag is checked first: it is what the user declared, so
+/// `VPOS p5 0 DC 5 ;@ power=+5V` draws a `power:+5V` terminal even
+/// though the net is spelled `p5`. Keying off the spelling alone (the
+/// previous behaviour) returned `None` for any rail not literally named
+/// `vcc` / `+5v` / …, so such a rail got no glyph at all.
 fn power_lib_id_for_net(
     net_name: &str,
     negative_rails: &std::collections::BTreeSet<String>,
+    rail_tags: &std::collections::BTreeMap<String, String>,
 ) -> Option<&'static str> {
     use spice_layout::net_class::{NetClass, matches_negative_rail_name};
     // A negative supply rail renders with the distinct `power:VEE`
@@ -965,6 +1014,11 @@ fn power_lib_id_for_net(
         || matches_negative_rail_name(&net_name.to_ascii_lowercase())
     {
         return Some("power:VEE");
+    }
+    // Declared identity wins over spelling (CLAUDE.md V6). Negative tags
+    // were already consumed by `negative_rails` above.
+    if let Some(tag) = rail_tags.get(net_name) {
+        return Some(positive_rail_glyph(tag));
     }
     let class = match () {
         () if net_name == "0" => NetClass::Ground,
@@ -979,15 +1033,8 @@ fn power_lib_id_for_net(
             }
         }
     };
-    let lower = net_name.to_ascii_lowercase();
     Some(match class {
-        NetClass::Power => match lower.as_str() {
-            "vdd" => "power:VDD",
-            "+5v" | "5v" => "power:+5V",
-            "+12v" | "12v" => "power:+12V",
-            "+3v3" | "3v3" => "power:+3V3",
-            _ => "power:VCC",
-        },
+        NetClass::Power => positive_rail_glyph(net_name),
         NetClass::Ground => "power:GND",
         NetClass::Signal => return None,
     })
@@ -1467,6 +1514,7 @@ fn route_nets(
     driven: &std::collections::BTreeSet<String>,
     requires_driver: &std::collections::BTreeSet<String>,
     negative_rails: &std::collections::BTreeSet<String>,
+    rail_tags: &std::collections::BTreeMap<String, String>,
     passive: &std::collections::BTreeSet<String>,
     power_in: &std::collections::BTreeSet<String>,
     sheet_edge_pins: &[(f64, f64)],
@@ -1498,7 +1546,7 @@ fn route_nets(
                 uniq.push((x, y, a));
             }
         }
-        let class = classify_net_by_name(name);
+        let class = classify_net(name, rail_tags);
         let net_driven = driven.contains(name);
         let net_requires = requires_driver.contains(name);
         let pin_refs: Vec<PinRef> = uniq
@@ -1533,6 +1581,7 @@ fn route_nets(
             class,
             pins: pin_refs,
             negative_rail: negative_rails.contains(name),
+            rail_tag: rail_tags.get(name).cloned(),
             has_passive: passive.contains(name),
             has_power_in: power_in.contains(name),
         });
@@ -1610,6 +1659,7 @@ pub(crate) fn trial_route(placement: &Placement, library: &Library) -> TrialRout
     use spice_route::{NetSpec, PinRef, RouteRequest};
 
     let net_pins = collect_net_pins(placement, library, &[]);
+    let rail_tags = spice_layout::net_class::rail_tags(placement);
     let obstacles = placement_obstacles(placement, library);
 
     let mut specs: Vec<NetSpec> = Vec::with_capacity(net_pins.len());
@@ -1623,7 +1673,7 @@ pub(crate) fn trial_route(placement: &Placement, library: &Library) -> TrialRout
                 uniq.push((x, y, a));
             }
         }
-        let class = classify_net_by_name(name);
+        let class = classify_net(name, &rail_tags);
         // trial_route only measures wire-segment geometry for V5/V11
         // refinement; PWR_FLAG markers are not emitted as wires, so the
         // driver flag is irrelevant here.
@@ -1652,6 +1702,7 @@ pub(crate) fn trial_route(placement: &Placement, library: &Library) -> TrialRout
             // selection never feeds back into placement (CLAUDE.md:
             // "Decoration is a strict consumer of placement output").
             negative_rail: false,
+            rail_tag: None,
             // PWR_FLAG-only concern (no wire geometry) — irrelevant to
             // the V5/V11 refinement measurement, same as `drives`.
             has_passive: false,
@@ -1864,10 +1915,11 @@ pub(crate) fn rail_glyph_body_bboxes(
     net_pins: &std::collections::BTreeMap<String, Vec<(f64, f64, u16)>>,
     library: &Library,
     negative_rails: &std::collections::BTreeSet<String>,
+    rail_tags: &std::collections::BTreeMap<String, String>,
 ) -> Vec<spice_route::Bbox> {
     let mut out = Vec::new();
     for (name, pins) in net_pins {
-        let Some(lib_id) = power_lib_id_for_net(name, negative_rails) else {
+        let Some(lib_id) = power_lib_id_for_net(name, negative_rails, rail_tags) else {
             continue;
         };
         let Some(local) = library.lookup(lib_id).and_then(Symbol::body_bbox) else {
@@ -1940,6 +1992,35 @@ pub(crate) fn classify_net_by_name(name: &str) -> spice_layout::net_class::NetCl
         "gnd" | "vee" | "vss" | "v-" | "vminus" => NetClass::Ground,
         _ => NetClass::Signal,
     }
+}
+
+/// Classify a net by its **resolved rail identity** first, falling back
+/// to [`classify_net_by_name`] only for nets the user never declared.
+///
+/// A `*@power=` / `;@ power=` tag is authoritative (CLAUDE.md V6: "the
+/// `*@power` tag … win[s] over the name-match"). Classifying by spelling
+/// alone silently demoted any rail whose net is not *called* `vcc` /
+/// `+5v` / … to `NetClass::Signal`, so it was routed as a signal net and
+/// decorated with a plain `(global_label …)` instead of a `power:*`
+/// terminal — visible on `named_rails.cir`, whose rails are deliberately
+/// spelled `p5` / `n5` so only the tag can classify them.
+///
+/// A negative tag (`-5V`) classifies as `Ground`: negative rails share
+/// the bottom band with ground for layout, and the glyph distinction is
+/// made separately by `negative_rail_nets` (V6/V10).
+pub(crate) fn classify_net(
+    name: &str,
+    rail_tags: &std::collections::BTreeMap<String, String>,
+) -> spice_layout::net_class::NetClass {
+    use spice_layout::net_class::NetClass;
+    if let Some(tag) = rail_tags.get(name) {
+        return if tag.trim_start().starts_with('-') {
+            NetClass::Ground
+        } else {
+            NetClass::Power
+        };
+    }
+    classify_net_by_name(name)
 }
 
 /// Convert a KiCad pin angle (in `.kicad_sym` library frame) to the
@@ -2050,6 +2131,7 @@ pub(crate) fn label_specs(
     obs: &LabelObstacles<'_>,
     anchor_search: bool,
     ports: &BTreeMap<String, PortDir>,
+    rail_tags: &std::collections::BTreeMap<String, String>,
 ) -> Vec<LabelSpec> {
     let (property_bboxes, body_obstacles) = (obs.properties, obs.bodies);
     let (pin_texts, wires) = (obs.pin_texts, obs.wires);
@@ -2093,7 +2175,7 @@ pub(crate) fn label_specs(
         // connectivity carrier. Adding a global_label on top would
         // double-encode the net and trip V4 ("≤ 2 labels per net").
         if !matches!(
-            classify_net_by_name(net),
+            classify_net(net, rail_tags),
             spice_layout::net_class::NetClass::Signal
         ) {
             continue;
@@ -2316,8 +2398,9 @@ fn dangling_pin_labels(
     extra_pins: &[(String, f64, f64)],
     obs: &LabelObstacles<'_>,
     ports: &BTreeMap<String, PortDir>,
+    rail_tags: &std::collections::BTreeMap<String, String>,
 ) -> Vec<Sexpr> {
-    let specs = label_specs(nets, extra_pins, obs, true, ports);
+    let specs = label_specs(nets, extra_pins, obs, true, ports, rail_tags);
     // Reproduce the previous per-net UUID-seed scheme: globals seeded by
     // net order index; plain labels by `idx*2` (+1 for the second of a
     // name-jump pair). Net order matches `label_specs` since both walk
@@ -2444,8 +2527,9 @@ fn report_disconnected_nets(
     items: &[Sexpr],
     net_pins: &std::collections::BTreeMap<String, Vec<(f64, f64, u16)>>,
     sheet: Option<&str>,
+    rail_tags: &std::collections::BTreeMap<String, String>,
 ) {
-    for net in disconnected_nets(items, net_pins) {
+    for net in disconnected_nets(items, net_pins, rail_tags) {
         let where_ = sheet.map_or_else(String::new, |s| format!(" on sheet {s}"));
         eprintln!(
             "spice2kicad: ERROR: net {net:?}{where_} is not fully connected in the \
@@ -2483,6 +2567,7 @@ fn report_disconnected_nets(
 fn disconnected_nets(
     items: &[Sexpr],
     net_pins: &std::collections::BTreeMap<String, Vec<(f64, f64, u16)>>,
+    rail_tags: &std::collections::BTreeMap<String, String>,
 ) -> Vec<String> {
     #[allow(clippy::cast_possible_truncation)]
     let key = |x: f64, y: f64| -> (i64, i64) {
@@ -2508,7 +2593,7 @@ fn disconnected_nets(
             continue;
         }
         if matches!(
-            classify_net_by_name(net),
+            classify_net(net, rail_tags),
             spice_layout::net_class::NetClass::Power | spice_layout::net_class::NetClass::Ground
         ) {
             continue;
@@ -4394,7 +4479,7 @@ mod tests {
         let items = vec![wire(0.0, 0.0, 10.0, 0.0)];
         let mut nets = std::collections::BTreeMap::new();
         nets.insert("sig".to_string(), vec![(0.0, 0.0, 0u16), (10.0, 0.0, 0u16)]);
-        assert!(disconnected_nets(&items, &nets).is_empty());
+        assert!(disconnected_nets(&items, &nets, &std::collections::BTreeMap::new()).is_empty());
     }
 
     #[test]
@@ -4406,7 +4491,7 @@ mod tests {
             "sig".to_string(),
             vec![(0.0, 0.0, 0u16), (5.0, 0.0, 0u16), (10.0, 0.0, 0u16)],
         );
-        assert!(disconnected_nets(&items, &nets).is_empty());
+        assert!(disconnected_nets(&items, &nets, &std::collections::BTreeMap::new()).is_empty());
     }
 
     #[test]
@@ -4418,7 +4503,10 @@ mod tests {
             "sig".to_string(),
             vec![(0.0, 0.0, 0u16), (10.0, 0.0, 0u16), (50.0, 50.0, 0u16)],
         );
-        assert_eq!(disconnected_nets(&items, &nets), vec!["sig".to_string()]);
+        assert_eq!(
+            disconnected_nets(&items, &nets, &std::collections::BTreeMap::new()),
+            vec!["sig".to_string()]
+        );
     }
 
     #[test]
@@ -4427,7 +4515,10 @@ mod tests {
         let items = vec![wire(0.0, 0.0, 5.0, 0.0), wire(20.0, 0.0, 25.0, 0.0)];
         let mut nets = std::collections::BTreeMap::new();
         nets.insert("sig".to_string(), vec![(0.0, 0.0, 0u16), (25.0, 0.0, 0u16)]);
-        assert_eq!(disconnected_nets(&items, &nets), vec!["sig".to_string()]);
+        assert_eq!(
+            disconnected_nets(&items, &nets, &std::collections::BTreeMap::new()),
+            vec!["sig".to_string()]
+        );
     }
 
     #[test]
@@ -4438,6 +4529,6 @@ mod tests {
         let mut nets = std::collections::BTreeMap::new();
         nets.insert("VCC".to_string(), vec![(0.0, 0.0, 0u16), (9.0, 9.0, 0u16)]);
         nets.insert("0".to_string(), vec![(1.0, 1.0, 0u16), (8.0, 8.0, 0u16)]);
-        assert!(disconnected_nets(&items, &nets).is_empty());
+        assert!(disconnected_nets(&items, &nets, &std::collections::BTreeMap::new()).is_empty());
     }
 }

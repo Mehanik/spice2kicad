@@ -438,7 +438,8 @@ fn v13_overlap_count(placement: &Placement, library: &Library) -> usize {
     // so the refinement gate measures the SAME rotated global-label
     // geometry the final decoration will emit (V13 item 2B).
     let negative_rails = spice_layout::net_class::negative_rail_nets(placement);
-    let glyph_bodies = rail_glyph_body_bboxes(&net_pins, library, &negative_rails);
+    let rail_tags = spice_layout::net_class::rail_tags(placement);
+    let glyph_bodies = rail_glyph_body_bboxes(&net_pins, library, &negative_rails, &rail_tags);
     let label_obstacles = label_rotation_obstacles(placement, library, &glyph_bodies);
     // Consistently upstream of decoration — see the doc comment: no
     // pin-text set, no wires, no anchor search.
@@ -454,6 +455,7 @@ fn v13_overlap_count(placement: &Placement, library: &Library) -> usize {
         &obs,
         false,
         &std::collections::BTreeMap::new(),
+        &rail_tags,
     );
     // World body bboxes (as TextBboxes) for the label↔body check.
     let bodies: Vec<TextBbox> = placement

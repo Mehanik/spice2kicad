@@ -758,7 +758,6 @@ fn apply_rail_stub_columns(
     }
 }
 
-
 /// Per-element refinement metadata for the routing-aware orientation
 /// refinement phase (CLAUDE.md "Layout phase 4.5"). Recomputed from the
 /// same seed → hint → symmetry sequence [`place_with_hint`] runs, so the

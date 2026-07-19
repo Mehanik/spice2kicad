@@ -176,6 +176,35 @@ pub fn matches_negative_rail_name(lower: &str) -> bool {
     matches!(lower, "vee" | "v-" | "vminus")
 }
 
+/// Map each net a `*@power` / `;@ power=` tag declares as a supply rail
+/// to that tag's text (`+5V`, `-12V`, `VCC`, …).
+///
+/// This is the **resolved rail identity**: the thing the user actually
+/// declared, as opposed to how the net happens to be *spelled* in the
+/// netlist. Downstream glyph selection and net classification must key
+/// off this rather than name-matching, or a perfectly well-declared rail
+/// whose net is called `p5` is silently demoted to a signal net and
+/// rendered as a plain label instead of a `+5V` terminal.
+///
+/// Only the source's *positive terminal* (`nodes[0]`) is the rail — the
+/// second terminal of `VNEG n5 0 DC -5` is ground, which must stay true
+/// ground. Same rule as [`negative_rail_nets`] and `classify_nets`.
+/// Net `0` is never a declared rail.
+#[must_use]
+pub fn rail_tags(placement: &crate::Placement) -> std::collections::BTreeMap<String, String> {
+    let mut out: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    for el in &placement.elements {
+        if let Some(tag) = &el.power_rail
+            && let Some(node) = el.nodes.first()
+        {
+            out.entry(node.clone())
+                .or_insert_with(|| tag.trim().to_owned());
+        }
+    }
+    out.remove("0");
+    out
+}
+
 /// The set of net names that are *negative supply rails* (e.g. a
 /// `-12 V` rail), derived **generally** from a placed netlist — never
 /// from fixture or refdes names.

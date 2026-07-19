@@ -94,10 +94,7 @@ fn pin_xy(p: &Placement, refdes: &str, node: &str) -> (f64, f64) {
     el.world_pin_mm(sym)
         .into_iter()
         .find(|(num, _, _)| num == want)
-        .map_or_else(
-            || panic!("{refdes} pin {want} missing"),
-            |(_, x, y)| (x, y),
-        )
+        .map_or_else(|| panic!("{refdes} pin {want} missing"), |(_, x, y)| (x, y))
 }
 
 /// Screen Y grows downward, so "A is above B" is `A.y < B.y`. A full

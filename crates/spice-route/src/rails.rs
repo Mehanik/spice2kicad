@@ -107,7 +107,10 @@ pub(crate) fn lib_id_for(net: &NetSpec) -> Option<&'static str> {
         // of its NetClass. The negative-rail flag is the authoritative
         // signal here.
         _ if net.negative_rail => "power:VEE",
-        NetClass::Power => power_lib_id(&net.name),
+        // The declared tag outranks the net's spelling: an unrecognised
+        // but correctly-declared rail name must not silently collapse to
+        // the generic VCC glyph.
+        NetClass::Power => power_lib_id(net.rail_tag.as_deref().unwrap_or(&net.name)),
         NetClass::Ground => ground_lib_id(&net.name),
         NetClass::Signal => return None,
     })

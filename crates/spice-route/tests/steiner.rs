@@ -118,6 +118,7 @@ fn signal_net(name: &str, pins: &[(f64, f64)]) -> NetSpec {
             })
             .collect(),
         negative_rail: false,
+        rail_tag: None,
         has_passive: false,
         has_power_in: false,
     }
