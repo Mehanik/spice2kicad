@@ -2642,6 +2642,18 @@ fn property_offset_candidates(base_dy: f64) -> Vec<(f64, f64)> {
             }
         }
     }
+    // Last resort: the same rows mirrored to the OTHER side of the
+    // symbol. Reference above / Value below is the convention, so these
+    // come strictly after every same-side option and are reached only
+    // when the default side has no clear anchor at all — a symbol boxed
+    // in by wires on one side keeps its text legible instead of settling
+    // for the least-bad collision. Appending (never reordering) means a
+    // fixture that was already clean is byte-identical.
+    for &vy in &vertical {
+        for &hx in &horizontal {
+            out.push((hx, -vy));
+        }
+    }
     out
 }
 
@@ -2712,6 +2724,7 @@ fn host_pin_lead_bboxes(placement: &Placement, library: &Library) -> Vec<TextBbo
 }
 
 fn host_pin_text_bboxes(placement: &Placement, library: &Library) -> Vec<TextBbox> {
+    const PIN_TEXT_CLEARANCE_MM: f64 = 0.5;
     placement
         .elements
         .iter()
@@ -2724,7 +2737,33 @@ fn host_pin_text_bboxes(placement: &Placement, library: &Library) -> Vec<TextBbo
                 .map(Symbol::pin_text_local_bboxes)
                 .unwrap_or_default()
                 .into_iter()
-                .map(move |local| bbox_as_text(body_bbox_to_world(local, ox, oy, orient)))
+                .map(move |local| {
+                    let b = bbox_as_text(body_bbox_to_world(local, ox, oy, orient));
+                    // Inflate by a hairline clearance. Our pin-text box
+                    // is derived from font metrics; KiCad's renderer
+                    // puts slightly more ink on the page than the model
+                    // predicts, so a candidate the model scores as
+                    // *exactly* clear can still render as a fractional
+                    // kiss (measured on `rc_lowpass_ports`: "R1" over
+                    // pin number "2" by 0.06 mm, invisible to the
+                    // model). Only the SVG-ink test can see that gap —
+                    // see MEMORY "Verify text geometry against SVG" —
+                    // so the model has to keep its distance rather than
+                    // aim for touching.
+                    //
+                    // Sized by measurement, not taste: 0.25 mm still
+                    // rendered the kiss, 0.5 mm clears it. That is ~0.28
+                    // of a 1.778 mm text cell — enough to cover the ink
+                    // KiCad puts outside our metric-derived box, small
+                    // enough that a genuinely clear candidate stays
+                    // clear (every other fixture is unchanged).
+                    TextBbox {
+                        x0: b.x0 - PIN_TEXT_CLEARANCE_MM,
+                        y0: b.y0 - PIN_TEXT_CLEARANCE_MM,
+                        x1: b.x1 + PIN_TEXT_CLEARANCE_MM,
+                        y1: b.y1 + PIN_TEXT_CLEARANCE_MM,
+                    }
+                })
         })
         .collect()
 }

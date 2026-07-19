@@ -1355,6 +1355,67 @@ all fixtures, with a one-line rationale and user sign-off — is the
 "global-improvement escape" in CLAUDE.md; it still never licenses a
 Tier-0 regression.)
 
+### The collinear outward stub: suppressed too broadly, restored too broadly
+
+`1c75781` fixed a Tier-0 net-severing bug in `cleanup::try_merge` (a
+degenerate zero-length merge deleting a Steiner branch). With the merge
+fixed, the collinear outward stub in `route_two_pin_with_outward` — which
+that merge had been silently deleting — started surviving as a dangling
+whisker, so the commit stopped generating it. Its stated reason was that
+in the collinear case the stub is always re-covered by the continuation
+and therefore "buys no V5 compliance".
+
+**That reason is true of only one of two sub-cases**, and suppressing
+both cost 7 V5 violations across four fixtures (`common_emitter` 1→3,
+`multivibrator` 4→5, `diff_pair` 0→2, `opamp_definition_level` 3→5).
+
+- Failing direction ALONG the shared axis: the continuation must travel
+  that same line, so it does retrace the stub. Whisker. Suppress.
+- Failing direction PERPENDICULAR to it: the stub lifts the run onto a
+  parallel axis one cell over and the continuation may cross at *that*
+  axis, rejoining the shared line only at the far pin. Not re-covered,
+  and the first segment genuinely leaves the pin outward. This is the
+  ordinary jog-around route.
+
+Which sub-case applies is **not** predictable from the geometry alone —
+it flips with run orientation, because the continuation defaults to a
+horizontal-first L. So the current code builds the stub route and checks
+it: a route that revisits the pin after leaving it is rejected.
+
+**Two walls found while restoring it, both Tier 0, both worth not
+re-running into.**
+
+1. *Always emitting the 3-leg jog* (steering the continuation onto the
+   offset axis instead of rejecting the retrace) reaches the same V5
+   counts but pushes trunks off the pin row on both axes. On the
+   symmetric fixtures two nets then land on the same offset channel —
+   `common_emitter` C/E, `multivibrator` B1/B2,
+   `opamp_definition_level` OUT1/OUT2 — a cross-net collinear overlap,
+   i.e. a latent V11 short that the single-track jog reports as
+   "unresolved by single-track jog (channel router — v0.2)".
+2. *The stub makes a leg three segments where the plain route is one*,
+   and the Stage-3 jog does not always carry a 3-segment leg across
+   intact: it can move the trunk and leave the far riser behind.
+   `examples/rc_lowpass.cir` net `in` came apart exactly so. This is a
+   latent defect in the jog, not in the stub.
+
+Both are handled the same way, in `spice_route::route`: Stages 3–3d and
+cleanup now run inside a bounded retry, and a net that ends up severed
+or in an unresolvable overlapping pair has its **collinear stub only**
+suppressed and is re-routed. Suppressing the pin's outward *hints*
+entirely is the wrong granularity — it also surrenders the L-corner V5
+the net was getting for free (measured: `multivibrator` 4 → 6). The
+retry degrades monotonically toward "no stubs anywhere", which is the
+pre-restoration geometry, so it can never ship worse than that.
+
+**Also recorded: a model/render gap in property-text placement.** The
+restored routes let phase 4.5 re-pick `rc_lowpass_ports` R1 to rot 180,
+where `nudge_property_text` chose an anchor its own model scored as
+perfectly clear but which `kicad-cli` rendered kissing a pin number by
+0.06 mm. The nudge's pin-text obstacles now carry a 0.5 mm clearance
+(0.25 mm was still too small — measured, not guessed). Only the SVG-ink
+test can see this class of defect; the modelled V13 checks cannot.
+
 ---
 
 ## What we are not deciding now

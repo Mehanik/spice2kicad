@@ -553,7 +553,13 @@ pub fn place_with_hint(
 
     let glyph_prefs = net_class::vertical_prefs(&checked);
     if !opts.refine {
-        legalize_if_needed(&mut placement, &user_pinned, &checked, library, &glyph_prefs);
+        legalize_if_needed(
+            &mut placement,
+            &user_pinned,
+            &checked,
+            library,
+            &glyph_prefs,
+        );
         return Ok(placement);
     }
     let mut placement = solver::refine(placement, &pinned, &checked, library, opts, &allowed);
@@ -584,7 +590,13 @@ pub fn place_with_hint(
     // overlap, the postcondition still has an owner. Legality stops being
     // something the optimiser is merely discouraged from violating without
     // that guarantee costing correctness.
-    legalize_if_needed(&mut placement, &user_pinned, &checked, library, &glyph_prefs);
+    legalize_if_needed(
+        &mut placement,
+        &user_pinned,
+        &checked,
+        library,
+        &glyph_prefs,
+    );
     Ok(placement)
 }
 

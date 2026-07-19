@@ -1922,10 +1922,10 @@ fn v5_violation_budget(name: &str) -> usize {
         "multivibrator" => 4,
         "opamp_inverting_real" => 1,
         // Same single root cause as this fixture's V12 budget above: the
-        // RF/X body overlap in the structural seed. Recorded on explicit
-        // sign-off at the exact measured count; ratchets down to 0 with
-        // the seed fix.
-        "opamp_definition_level" => 6,
+        // RF/X body overlap in the structural seed. Ratchets down to 0
+        // with the seed fix. Lowered 6 → 3 when the collinear outward
+        // stub was restored (only X1/X2 opamp pins remain).
+        "opamp_definition_level" => 3,
         // common_emitter, diff_pair, rc_lowpass, and any other fixture:
         // zero violations.
         _ => 0,
@@ -2890,13 +2890,22 @@ const ALL_FIXTURES_FOR_CROSS_NET: &[&str] = &[
 ///   (y=41.91) crosses an opamp-triangle body — **V12** (G2 reject); the
 ///   up-track (y=39.37) has no clean landing among the input stubs.
 ///
-/// These ARE in `ALL_FIXTURES_FOR_CROSS_NET` with a budget-1 high-water
-/// mark (coverage — the true current count of one latent overlap the
-/// router escalates with a warning). A change that resolves one (the
-/// v0.2 channel/maze router, or a signed-off budget trade under the
-/// global-improvement escape) ratchets its budget **down to 0**. Never
-/// mask a *second* residual by raising the budget above 1.
-const CROSS_NET_V02_ESCALATIONS: &[&str] = &["multivibrator", "opamp_definition_level"];
+/// `multivibrator` has since been RESOLVED and is removed from this
+/// list, ratcheting its budget 1 → 0. What resolved it was not the v0.2
+/// channel router but the Tier-0 rollback in `spice_route::route`: when
+/// the deconfliction pass cannot separate a pair, the lower-priority
+/// net's V5 outward stub is dropped and the net re-routed, which vacates
+/// the contested channel outright instead of shuffling one track
+/// sideways within it. The b1/b2 wall above is real — it is why the
+/// *jog* cannot land — but the jog is no longer the only remedy.
+///
+/// `opamp_definition_level` still escalates: the rollback frees the
+/// channel only when the stub was what occupied it, and out1/out2 there
+/// overlap on their plain trees. It keeps its budget-1 high-water mark
+/// (measured: exactly one latent overlap, escalated with a warning) and
+/// ratchets to 0 when the v0.2 channel/maze router lands. Never mask a
+/// *second* residual by raising the budget above 1.
+const CROSS_NET_V02_ESCALATIONS: &[&str] = &["opamp_definition_level"];
 
 #[allow(clippy::too_many_lines)]
 #[test]

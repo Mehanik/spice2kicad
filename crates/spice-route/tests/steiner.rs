@@ -374,7 +374,22 @@ fn large_n_steiner_completes_in_time() {
 #[test]
 fn route_pipeline_emits_junction_for_three_pin_t() {
     // Pins form a clear T: the Steiner point is interior, not on any pin.
-    let nets = [signal_net("t", &[(0.0, 5.0), (10.0, 5.0), (5.0, 0.0)])];
+    //
+    // Each pin carries the outward direction a real T implies — the two
+    // trunk ends face inward along the trunk, the stem pin faces along
+    // the stem toward it. The `signal_net` helper blanket-assigns
+    // `Direction::Right` to every pin, which for the stem pin at (5, 0)
+    // points *perpendicular* to its own leg: not a clear T at all, but a
+    // pin whose wire has to leave sideways. The router now jogs one cell
+    // to honour such a pin (V5), which is correct behaviour on real
+    // geometry but makes this fixture stop describing the shape its name
+    // and comment claim. Spell the directions out so the T is a T; the
+    // perpendicular-outward case has its own coverage below.
+    let mut net = signal_net("t", &[(0.0, 5.0), (10.0, 5.0), (5.0, 0.0)]);
+    net.pins[0].outward = Direction::Right;
+    net.pins[1].outward = Direction::Left;
+    net.pins[2].outward = Direction::Down;
+    let nets = [net];
     let r = route(RouteRequest {
         nets: &nets,
         scope: "root",
@@ -633,4 +648,89 @@ fn pin_sets_stay_connected_across_random_layouts() {
             assert_all_pins_endpoint_reachable(&nets[0], &r);
         }
     }
+}
+
+// ----- Collinear legs whose pin points off-axis (V5) -----
+
+/// A pin whose outward direction is PERPENDICULAR to the only axis its
+/// leg can run along gets a one-cell jog, so the wire still leaves the
+/// pin outward (V5). The jog's middle leg travels the *offset* axis, so
+/// it never comes back through the pin — that would re-cover the stub
+/// and leave a dangling whisker instead of a route.
+///
+/// This is `diff_pair`'s tail net in miniature: an emitter pin facing
+/// down onto a horizontal trunk shared with its sibling. Without the jog
+/// the trunk runs straight through the pin row and every pin on it
+/// violates V5.
+#[test]
+fn collinear_leg_jogs_for_a_perpendicular_outward_pin() {
+    let mut net = signal_net("t", &[(0.0, 0.0), (10.0, 0.0)]);
+    net.pins[0].outward = Direction::Down;
+    net.pins[1].outward = Direction::Down;
+    let segs = collect_segments(&net);
+
+    let leaving: Vec<_> = segs
+        .iter()
+        .filter(|s| touches(**s, (0.0, 0.0)))
+        .copied()
+        .collect();
+    assert!(!leaving.is_empty(), "pin (0,0) has no wire: {segs:?}");
+    assert!(
+        leaving
+            .iter()
+            .all(|s| (s.x1 - 0.0).abs() < EPS && (s.x2 - 0.0).abs() < EPS),
+        "the wire at pin (0,0) must leave vertically (its outward \
+         direction), not run along the shared axis through it: {leaving:?}"
+    );
+    // The trunk moved off the pin row rather than through it.
+    assert!(
+        segs.iter().any(|s| s.y1.abs() > EPS && s.y2.abs() > EPS),
+        "expected a leg on the offset axis: {segs:?}"
+    );
+}
+
+/// A pin whose outward direction points back ALONG the shared axis,
+/// away from the destination, cannot be satisfied by a stub: the
+/// continuation has to travel the same line, so it retraces the stub
+/// exactly and leaves a whisker off the pin. That whisker inflates the
+/// content bbox (V15) and can spear a neighbouring body (V12) — both
+/// Tier 1, against a Tier-2 V5 gain that never materialises. Emit the
+/// plain segment instead.
+#[test]
+fn collinear_leg_emits_no_whisker_for_an_anti_parallel_outward_pin() {
+    let mut net = signal_net("t", &[(0.0, 0.0), (10.0, 0.0)]);
+    net.pins[0].outward = Direction::Left; // points away from (10, 0)
+    net.pins[1].outward = Direction::Left;
+    let segs = collect_segments(&net);
+    assert_eq!(segs.len(), 1, "expected one plain segment, got {segs:?}");
+    assert!(
+        segs[0].x1.min(segs[0].x2) >= -EPS,
+        "no wire may extend left of the pin: {segs:?}"
+    );
+}
+
+fn touches(s: spice_route::Segment, p: (f64, f64)) -> bool {
+    let within = |v: f64, a: f64, b: f64| v >= a.min(b) - EPS && v <= a.max(b) + EPS;
+    within(p.0, s.x1, s.x2) && within(p.1, s.y1, s.y2)
+}
+
+fn collect_segments(net: &NetSpec) -> Vec<spice_route::Segment> {
+    let nets = [net.clone()];
+    let mut out = spice_route::RouteResult::default();
+    spice_route::route_signal_nets(
+        &RouteRequest {
+            nets: &nets,
+            scope: "root",
+            library: None,
+            sheet_uuid: "test-uuid",
+            project_name: "test",
+            obstacles: &[],
+            bounds: None,
+            sheet_bodies: &[],
+        },
+        &mut out,
+    )
+    .into_iter()
+    .flat_map(|r| r.segments)
+    .collect()
 }

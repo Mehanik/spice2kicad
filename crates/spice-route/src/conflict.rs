@@ -1389,10 +1389,10 @@ pub fn deconflict_cross_net_overlaps<S: ::std::hash::BuildHasher>(
     own_per_routed: &[std::collections::HashSet<(i64, i64), S>],
     obstacles: &[Bbox],
     pin_outward: &PinOutwardMap,
-) -> Vec<String> {
+) -> (Vec<String>, Vec<(usize, usize)>) {
     let mut warnings = Vec::new();
     if routed.len() < 2 {
-        return warnings;
+        return (warnings, Vec::new());
     }
     let mut failed: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
     // Each successful jog removes one overlap; a failed pair is recorded
@@ -1455,7 +1455,12 @@ pub fn deconflict_cross_net_overlaps<S: ::std::hash::BuildHasher>(
              (channel router — v0.2)"
         ));
     }
-    warnings
+    // Report the pairs no single-track jog could separate so the caller
+    // can try a coarser remedy (dropping a net's V5 outward stub, which
+    // frees the whole trunk rather than one track). Deterministic order.
+    let mut unresolved: Vec<(usize, usize)> = failed.into_iter().collect();
+    unresolved.sort_unstable();
+    (warnings, unresolved)
 }
 
 /// Hash key for a segment (quantised to 1 µm) so we can compare new
@@ -1478,7 +1483,7 @@ fn seg_key(s: &Segment) -> (i64, i64, i64, i64) {
     }
 }
 
-fn segments_collinearly_overlap(a: &Segment, b: &Segment) -> bool {
+pub(crate) fn segments_collinearly_overlap(a: &Segment, b: &Segment) -> bool {
     let a_horiz = (a.y1 - a.y2).abs() < EPS;
     let a_vert = (a.x1 - a.x2).abs() < EPS;
     let b_horiz = (b.y1 - b.y2).abs() < EPS;

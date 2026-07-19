@@ -62,6 +62,17 @@ fn segment_extends_in(from: (f64, f64), to: (f64, f64), dir: Direction) -> bool 
     }
 }
 
+/// Does axis-aligned `seg` contain point `p` (endpoints included)?
+///
+/// Used to detect a stub its own continuation re-covers: if any segment
+/// after the stub passes back through the pin the stub left, the detour
+/// bought nothing. See the collinear branch of
+/// [`route_two_pin_with_outward`].
+fn segment_touches(seg: &Segment, p: (f64, f64)) -> bool {
+    let within = |v: f64, a: f64, b: f64| v >= a.min(b) - EPS && v <= a.max(b) + EPS;
+    within(p.0, seg.x1, seg.x2) && within(p.1, seg.y1, seg.y2)
+}
+
 /// Route a 2-pin net: single segment when collinear on either axis,
 /// otherwise an L-shape via `(b.x, a.y)` (horizontal-then-vertical).
 ///
@@ -93,6 +104,26 @@ pub fn route_two_pin_with_outward(
     b: (f64, f64),
     out_b: Option<Direction>,
 ) -> Vec<Segment> {
+    route_two_pin_inner(a, out_a, b, out_b, true)
+}
+
+/// [`route_two_pin_with_outward`] with an explicit switch for the
+/// collinear outward stub.
+///
+/// `collinear_stub == false` reproduces the behaviour of a net that
+/// never lifts a trunk off its pin row: the collinear branch always
+/// returns the plain segment, while outward hints still steer L-corner
+/// choice in the non-collinear branch. That is the granularity the
+/// Tier-0 rollback in `lib::route` needs — dropping outward hints
+/// *entirely* would also surrender the corner-choice V5 the net was
+/// getting for free (measured: `multivibrator` 4 -> 6).
+fn route_two_pin_inner(
+    a: (f64, f64),
+    out_a: Option<Direction>,
+    b: (f64, f64),
+    out_b: Option<Direction>,
+    collinear_stub: bool,
+) -> Vec<Segment> {
     let (x1, y1) = (a.0, a.1);
     let (x2, y2) = (b.0, b.1);
     if (x1 - x2).abs() < EPS && (y1 - y2).abs() < EPS {
@@ -109,29 +140,99 @@ pub fn route_two_pin_with_outward(
         if ok_a && ok_b {
             return vec![single];
         }
-        // Outward direction conflicts with the collinear axis. Stubbing
-        // here cannot help: `a` and `b` share an axis, so the failing
-        // outward direction is either anti-parallel to `a → b` (the
-        // continuation retraces the stub exactly) or perpendicular to it
-        // (the continuation steps straight back onto the shared axis).
-        // Either way the stub is fully re-covered by the very next leg,
-        // leaving `single` plus a dangling 1.27 mm stem off the pin — no
-        // V5 compliance bought, just a whisker that inflates the content
-        // bbox (V15) and can spear a neighbouring body (V12).
+        // The outward direction conflicts with the collinear axis. There
+        // are two geometrically distinct ways that can happen, and they
+        // need opposite answers — conflating them is what regressed V5
+        // on four fixtures (see below).
         //
-        // Returning `single` is connectivity-equivalent to the stub route
-        // and matches the output the router has always *effectively*
-        // produced: the whisker used to be emitted and then deleted by
-        // `cleanup::coalesce_collinear`, which fused the out-and-back pair
-        // into a zero-length segment. That collapse is now rejected — it
-        // was severing real branches on 3-pin nets (see the note in
-        // `cleanup::try_merge`) — so the whisker has to not be generated
-        // in the first place rather than be cleaned up after the fact.
+        // 1. The failing direction lies ALONG the shared axis (it points
+        //    back away from the destination). A stub steps 1.27 mm the
+        //    wrong way down the very line the route then has to travel,
+        //    so the continuation retraces it exactly: `single` plus a
+        //    dangling stem. No V5 compliance is bought — a pin whose
+        //    outward direction points away from the only axis available
+        //    simply cannot be satisfied here — and the whisker inflates
+        //    the content bbox (V15) and can spear a neighbouring body
+        //    (V12). Return `single`.
         //
-        // Deliberately scoped to the collinear case. In the non-collinear
-        // fallback below the stub is *not* necessarily re-covered, so
-        // `route_with_stub` still runs there.
-        return vec![single];
+        // 2. The failing direction is PERPENDICULAR to the shared axis.
+        //    The stub moves the run onto a parallel axis one cell over.
+        //    Whether that buys anything depends on which L the
+        //    continuation then picks:
+        //      * it may cross at the OFFSET axis and only rejoin the
+        //        shared line at `b` — the stub survives, the first
+        //        segment really does leave the pin outward, and V5 is
+        //        satisfied. This is the ordinary "jog around" route: on
+        //        `diff_pair`'s tail net both BJT emitters point down onto
+        //        a horizontal trunk, and this is what drops the trunk one
+        //        cell below the pin row instead of running it straight
+        //        through the pins;
+        //      * or it may turn straight back onto the shared axis
+        //        THROUGH `a` — re-covering the stub, so the result is
+        //        `single` plus a whisker again.
+        //
+        // Case 1 alone motivated suppressing the stub (it was previously
+        // emitted and then deleted by `cleanup::coalesce_collinear`,
+        // whose degenerate zero-length merge is now correctly rejected —
+        // see the note in `cleanup::try_merge`). Suppressing case 2 as
+        // well was collateral: it cost 7 V5 violations across
+        // `common_emitter`, `multivibrator`, `diff_pair` and
+        // `opamp_definition_level`.
+        //
+        // Rather than predict which sub-case applies from the geometry
+        // (the answer flips with run orientation, because the
+        // continuation defaults to a horizontal-first L), BUILD the stub
+        // route and check it: a route that revisits the pin after
+        // leaving it has re-covered its own stub and is rejected in
+        // favour of `single`. That keeps the whisker suppression the
+        // Tier-1 fix needed while restoring the genuine outward jog.
+        //
+        // Do NOT "fix" the re-covering case by steering the continuation
+        // onto the offset axis instead (i.e. always emitting the 3-leg
+        // jog). That was measured: it reaches the same V5 counts, but it
+        // pushes trunks one cell off the pin row on *both* axes, and on
+        // the symmetric fixtures two nets then land on the same offset
+        // line — `common_emitter` C/E, `multivibrator` B1/B2,
+        // `opamp_definition_level` OUT1/OUT2 all pick up a cross-net
+        // collinear overlap that `conflict::resolve_conflicts` reports as
+        // "unresolved by single-track jog (channel router — v0.2)". That
+        // is a latent V11 short (Tier 0) traded for a Tier-2 gain, which
+        // the tier rule forbids outright. The retracing case has to stay
+        // a plain segment until the v0.2 channel router exists.
+        //
+        // Duplicate legs the restored stub can produce on a 3-pin net
+        // (two pins jogging onto the same offset axis both emit the drop
+        // into the Steiner point) are folded by
+        // `cleanup::collapse_collinear_overlaps`, which takes the true
+        // interval union — not by the degenerate far-endpoint merge that
+        // used to sever them.
+        if !collinear_stub {
+            return vec![single];
+        }
+        let horizontal_run = (y1 - y2).abs() < EPS;
+        let perpendicular = |d: Direction| match d {
+            Direction::Up | Direction::Down => horizontal_run,
+            Direction::Left | Direction::Right => !horizontal_run,
+        };
+        // Stub only for a constraint that is BOTH unsatisfied and
+        // perpendicular. `route_with_stub` anchors on `out_a` when it is
+        // `Some`, so an already-satisfied (axis-parallel) `out_a` must be
+        // passed as `None` or it would stub along the axis.
+        let stub_a = out_a.filter(|&d| !segment_extends_in(a, b, d) && perpendicular(d));
+        let stub_b = out_b.filter(|&d| !segment_extends_in(b, a, d) && perpendicular(d));
+        let (anchor, stubbed) = if stub_a.is_some() {
+            (a, route_with_stub(a, stub_a, b, out_b, collinear_stub))
+        } else if stub_b.is_some() {
+            (b, route_with_stub(a, None, b, stub_b, collinear_stub))
+        } else {
+            return vec![single];
+        };
+        if stubbed[1..].iter().any(|s| segment_touches(s, anchor)) {
+            // The continuation turned straight back through the pin, so
+            // the stub is re-covered after all: a whisker, not a route.
+            return vec![single];
+        }
+        return stubbed;
     }
     // Non-collinear: two L candidates.
     let horizontal_first = [
@@ -167,7 +268,7 @@ pub fn route_two_pin_with_outward(
     // the stub endpoint to the other pin with the remaining
     // constraint. `route_with_stub` consumes whichever side it stubs
     // (preferring `out_a`) and recurses.
-    route_with_stub(a, out_a, b, out_b)
+    route_with_stub(a, out_a, b, out_b, collinear_stub)
 }
 
 /// Score an L-corner choice by how many constrained endpoints have
@@ -206,6 +307,7 @@ fn route_with_stub(
     out_a: Option<Direction>,
     b: (f64, f64),
     out_b: Option<Direction>,
+    collinear_stub: bool,
 ) -> Vec<Segment> {
     if let Some(d) = out_a {
         let mid = step(d, a.0, a.1);
@@ -218,7 +320,7 @@ fn route_with_stub(
         // Continue from `mid` to `b`. The stub already extended outward
         // at `a`, so drop `out_a`; keep `out_b` so the destination's
         // outward constraint can still steer the rest.
-        segs.extend(route_two_pin_with_outward(mid, None, b, out_b));
+        segs.extend(route_two_pin_inner(mid, None, b, out_b, collinear_stub));
         return segs;
     }
     if let Some(d) = out_b {
@@ -229,7 +331,7 @@ fn route_with_stub(
             x2: mid.0,
             y2: mid.1,
         }];
-        segs.extend(route_two_pin_with_outward(a, None, mid, None));
+        segs.extend(route_two_pin_inner(a, None, mid, None, collinear_stub));
         return segs;
     }
     // No constraints to honour: fall back to the plain L. Inline the
@@ -270,6 +372,14 @@ pub fn route_three_pin_with_outward(
     pins: [(f64, f64); 3],
     outs: [Option<Direction>; 3],
 ) -> Vec<Segment> {
+    route_three_pin_inner(pins, outs, true)
+}
+
+fn route_three_pin_inner(
+    pins: [(f64, f64); 3],
+    outs: [Option<Direction>; 3],
+    collinear_stub: bool,
+) -> Vec<Segment> {
     let xs = [pins[0].0, pins[1].0, pins[2].0];
     let ys = [pins[0].1, pins[1].1, pins[2].1];
 
@@ -288,7 +398,13 @@ pub fn route_three_pin_with_outward(
         }
         // Route pin → Steiner with the pin's outward constraint. The
         // Steiner end is unconstrained (it's an internal node).
-        segs.extend(route_two_pin_with_outward(pin, outs[i], steiner, None));
+        segs.extend(route_two_pin_inner(
+            pin,
+            outs[i],
+            steiner,
+            None,
+            collinear_stub,
+        ));
     }
 
     // Coalesce collinear horizontal segments through the Steiner X
@@ -375,6 +491,33 @@ pub(crate) fn route_signal(
     net: &crate::NetSpec,
     foreign_pins: &std::collections::HashSet<(i64, i64)>,
 ) -> (Vec<Segment>, Vec<(f64, f64)>) {
+    route_signal_inner(net, foreign_pins, true)
+}
+
+/// [`route_signal`] with the collinear outward stub suppressed.
+///
+/// The net keeps its outward hints for L-corner choice but never lifts
+/// a collinear trunk off its pin row. Used as a Tier-0 rollback: the
+/// stub can push a trunk one cell onto a channel a sibling net already
+/// occupies, and a cross-net collinear overlap is a latent V11 short.
+/// V5 is Tier 2 and V11 is Tier 0, so the stub yields.
+///
+/// This suppresses only the *stub*, not the hints. Dropping the hints
+/// outright also surrenders the corner-choice V5 the net was getting
+/// for free, which measured strictly worse (`multivibrator` V5 4 → 6).
+pub(crate) fn route_signal_without_collinear_stub(
+    net: &crate::NetSpec,
+    foreign_pins: &std::collections::HashSet<(i64, i64)>,
+) -> (Vec<Segment>, Vec<(f64, f64)>) {
+    route_signal_inner(net, foreign_pins, false)
+}
+
+fn route_signal_inner(
+    net: &crate::NetSpec,
+    foreign_pins: &std::collections::HashSet<(i64, i64)>,
+    collinear_stub: bool,
+) -> (Vec<Segment>, Vec<(f64, f64)>) {
+    let out_of = |p: &crate::PinRef| Some(p.outward);
     match net.pins.len() {
         0 | 1 => (Vec::new(), Vec::new()),
         2 => {
@@ -383,10 +526,11 @@ pub(crate) fn route_signal(
             (
                 route_two_pin_with_outward_avoiding(
                     a,
-                    Some(net.pins[0].outward),
+                    out_of(&net.pins[0]),
                     b,
-                    Some(net.pins[1].outward),
+                    out_of(&net.pins[1]),
                     foreign_pins,
+                    collinear_stub,
                 ),
                 Vec::new(),
             )
@@ -398,18 +542,18 @@ pub(crate) fn route_signal(
                 pin_xy(&net.pins[2]),
             ];
             let outs = [
-                Some(net.pins[0].outward),
-                Some(net.pins[1].outward),
-                Some(net.pins[2].outward),
+                out_of(&net.pins[0]),
+                out_of(&net.pins[1]),
+                out_of(&net.pins[2]),
             ];
-            let segs = route_three_pin_with_outward(pts, outs);
+            let segs = route_three_pin_inner(pts, outs, collinear_stub);
             let junctions = steiner_junctions(&pts, &segs);
             (segs, junctions)
         }
         _ => {
             let pins: Vec<(f64, f64)> = net.pins.iter().map(pin_xy).collect();
-            let outs: Vec<Option<Direction>> = net.pins.iter().map(|p| Some(p.outward)).collect();
-            let segs = route_n_pin_with_outward(&pins, &outs);
+            let outs: Vec<Option<Direction>> = net.pins.iter().map(out_of).collect();
+            let segs = route_n_pin_inner(&pins, &outs, collinear_stub);
             let junctions = compute_junctions(&segs, &pins);
             (segs, junctions)
         }
@@ -429,6 +573,7 @@ fn route_two_pin_with_outward_avoiding(
     b: (f64, f64),
     out_b: Option<Direction>,
     foreign_pins: &std::collections::HashSet<(i64, i64)>,
+    collinear_stub: bool,
 ) -> Vec<Segment> {
     let qk = |(x, y): (f64, f64)| -> (i64, i64) {
         ((x * 1000.0).round() as i64, (y * 1000.0).round() as i64)
@@ -453,7 +598,7 @@ fn route_two_pin_with_outward_avoiding(
     } else {
         out_b
     };
-    route_two_pin_with_outward(a, safe_out_a, b, safe_out_b)
+    route_two_pin_inner(a, safe_out_a, b, safe_out_b, collinear_stub)
 }
 
 /// Route a 4+ pin net.
@@ -486,15 +631,27 @@ pub fn route_n_pin(pins: &[(f64, f64)]) -> Vec<Segment> {
 /// leg incident on the pin extends outward.
 #[must_use]
 pub fn route_n_pin_with_outward(pins: &[(f64, f64)], outs: &[Option<Direction>]) -> Vec<Segment> {
+    route_n_pin_inner(pins, outs, true)
+}
+
+fn route_n_pin_inner(
+    pins: &[(f64, f64)],
+    outs: &[Option<Direction>],
+    collinear_stub: bool,
+) -> Vec<Segment> {
     debug_assert_eq!(pins.len(), outs.len());
     match pins.len() {
         0 | 1 => Vec::new(),
-        2 => route_two_pin_with_outward(pins[0], outs[0], pins[1], outs[1]),
-        3 => route_three_pin_with_outward([pins[0], pins[1], pins[2]], [outs[0], outs[1], outs[2]]),
+        2 => route_two_pin_inner(pins[0], outs[0], pins[1], outs[1], collinear_stub),
+        3 => route_three_pin_inner(
+            [pins[0], pins[1], pins[2]],
+            [outs[0], outs[1], outs[2]],
+            collinear_stub,
+        ),
         _ => {
             let mut tree = rectilinear_mst(pins);
             steinerize(&mut tree, pins);
-            tree_to_segments(&tree, pins.len(), outs)
+            tree_to_segments(&tree, pins.len(), outs, collinear_stub)
         }
     }
 }
@@ -721,6 +878,7 @@ fn tree_to_segments(
     tree: &(Vec<Node>, Vec<Edge>),
     pin_count: usize,
     outs: &[Option<Direction>],
+    collinear_stub: bool,
 ) -> Vec<Segment> {
     let mut segs: Vec<Segment> = Vec::new();
     let out_of = |idx: usize| -> Option<Direction> {
@@ -736,11 +894,12 @@ fn tree_to_segments(
         if (a.x - b.x).abs() < EPS && (a.y - b.y).abs() < EPS {
             continue;
         }
-        segs.extend(route_two_pin_with_outward(
+        segs.extend(route_two_pin_inner(
             (a.x, a.y),
             out_of(e.0),
             (b.x, b.y),
             out_of(e.1),
+            collinear_stub,
         ));
     }
     segs
