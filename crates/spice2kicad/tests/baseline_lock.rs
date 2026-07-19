@@ -8,6 +8,42 @@
 //!
 //! To intentionally update a single line, edit the BASELINE entry
 //! below — do **not** widen the comparison or skip elements.
+//!
+//! # Regenerating the whole table
+//!
+//! `baseline_lock` is a **movement detector, not a ratchet**: it has no
+//! notion of better or worse, so regenerating it wholesale after a
+//! deliberate layout change is legitimate (unlike a budget literal,
+//! which may only ever ratchet down — see CLAUDE.md § "Budgets are
+//! ratchets, not knobs"). What it is *not* is safe to regenerate by
+//! hand or by script: the table is 100+ rustfmt-wrapped multi-line
+//! rows, and a scripted splice has already silently left nine stale
+//! entries behind, producing a baffling "9 rows MISSING in actual"
+//! failure that cost real debugging time.
+//!
+//! So there is a dump hook. Run:
+//!
+//! ```sh
+//! S2K_BASELINE_DUMP=1 cargo test -p spice2kicad --test baseline_lock -- --nocapture
+//! ```
+//!
+//! It measures every fixture and prints the `BASELINE` table to stdout
+//! in exactly this file's source syntax (one row per line), then
+//! **skips the comparison** so the test cannot fail on the very drift
+//! you are recording. Replace the whole `const BASELINE … ];` block
+//! with the printed text and run `cargo fmt` — rustfmt re-wraps the
+//! long rows. Copy-paste, no scripted surgery. (Verified: the rows
+//! round-trip byte-identically through dump → paste → `cargo fmt`.)
+//!
+//! One thing the dump does **not** carry: the `//` regeneration-history
+//! comments *inside* the array literal. Keep them — paste the printed
+//! rows and re-add that comment block, appending your own note for why
+//! this regeneration happened.
+//!
+//! Always confirm *why* rows moved before pasting: an unexplained
+//! movement is the regression this file exists to catch. Record the
+//! reason in the `BASELINE` doc comment, as every prior regeneration
+//! has.
 
 // Pedantic lints relaxed for this S-expression-parsing test harness:
 // `car`/`cdr` and `s`/`x` are the conventional cons-cell names;
@@ -900,6 +936,24 @@ fn baseline_lock_all_fixtures() {
         for row in extract_symbols(&sch) {
             all_actual.push((fix.to_string(), row.0, row.1, row.2, row.3, row.4, row.5));
         }
+    }
+
+    // Regeneration hook — see this file's module doc. Prints the
+    // measured table in source syntax and skips the comparison, so a
+    // deliberate layout change is recorded by copy-paste rather than by
+    // hand-editing 100+ rustfmt-wrapped rows.
+    if std::env::var_os("S2K_BASELINE_DUMP").is_some() {
+        println!("const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[");
+        for (fix, refdes, lib_id, x, y, rot, mirror) in &all_actual {
+            println!("    ({fix:?}, {refdes:?}, {lib_id:?}, {x:?}, {y:?}, {rot:?}, {mirror:?}),");
+        }
+        println!("];");
+        println!(
+            "// S2K_BASELINE_DUMP: {} rows printed; comparison skipped. \
+             Paste over the BASELINE block and run `cargo fmt`.",
+            all_actual.len()
+        );
+        return;
     }
 
     let expected: Vec<_> = BASELINE
