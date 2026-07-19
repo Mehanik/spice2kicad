@@ -243,6 +243,26 @@ fn emit_schematic_target(
         .as_ref()
         .map(spice_layout::sidecar::Sidecar::to_hint)
         .unwrap_or_default();
+    // Announce a cache HIT at default verbosity. A hit pins every cached
+    // element, which makes the placer's SA refinement and the phase-4.5
+    // routing-aware orientation pass silent no-ops — so a second
+    // conversion into a directory a previous run wrote is NOT a fresh
+    // conversion, however much it looks like one. That silence has
+    // already sent one debugging session down a wrong path (every
+    // element reported `pinned=true`, attributed to a phase-4.5 defect).
+    // A behaviour-changing no-op should never be invisible; a single
+    // line on a hit is cheap and never fires on a fresh output dir.
+    if !hint.pins.is_empty() {
+        eprintln!(
+            "spice2kicad: layout cache hit ({} element(s) pinned from {}) \
+             — placement refinement is a no-op for them; \
+             use --no-layout-cache or a fresh output directory to re-place from scratch",
+            hint.pins.len(),
+            sidecar_path
+                .as_deref()
+                .map_or_else(|| "cache".into(), |p| p.display().to_string()),
+        );
+    }
     // V15 page shifts applied last run, replayed so the page frame stays
     // put when the netlist is edited. Caching positions alone is not
     // enough: the emitter's final page translation is recomputed from the
