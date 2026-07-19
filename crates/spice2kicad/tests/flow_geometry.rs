@@ -57,12 +57,37 @@
 //! not knobs": the literals record the measured count on `master` and
 //! only ever go **down**.
 //!
+//! # F5 — series-signal pose (ADR-17 Stage 1)
+//!
+//! A **series-signal element** is two-terminal, not a power source, and
+//! has NEITHER node rail-class: it passes the signal from one node to
+//! the next rather than terminating a node. Convention draws it with a
+//! **horizontal pin axis**, **upstream pin at the lower X**. F5 counts
+//! the elements that fail either half.
+//!
+//! The discriminator is ADR-15 Stage 5's — validated there — and is
+//! recomputed here from the netlist, not imported from `spice-layout`,
+//! following the F3 precedent, so the metric can falsify the crate.
+//! `series_discriminator_separates_stub_from_series_on_common_emitter`
+//! is the assertion that keeps it honest: a bypass capacitor must be
+//! classified NON-series and stay vertical, or F5 degenerates into a
+//! demand that every two-terminal part be drawn sideways.
+//!
+//! # P5 — terminal order (ADR-17 Stage 1)
+//!
+//! Every declared input terminal sits strictly left of every declared
+//! output terminal. F4 pins each terminal to the correct end of *its
+//! own* net; P5 is the sheet-wide statement F4 cannot make. On
+//! `rc_lowpass_ports` both terminals pass F4 while sitting at the same
+//! x, stacked vertically — the sheet shows no flow direction at all.
+//!
 //! # Scope
 //!
-//! ADR-15 Stage 4 is **positions only**. Element *orientation* (the
-//! "both horizontal" half of the owner's complaint) is staged
-//! separately and deliberately not asserted here — see the recorded
-//! "flow-orientation wall".
+//! ADR-15 Stage 4 was **positions only**, and the orientation half was
+//! blocked by the recorded "flow-orientation wall" (see the ADR-15
+//! Stage-5 post-mortem). F5 and P5 are ADR-17 Stage 1: they *measure*
+//! that gap so ADR-17 Stage 3 can close it. They land at today's
+//! measured, defective counts and change no placer behaviour.
 
 mod common;
 
@@ -186,6 +211,7 @@ fn placed_symbol_refdes_and_lib_id(sym: &Value) -> Option<(String, String)> {
 struct BodyPin {
     refdes: String,
     x_mm: f64,
+    y_mm: f64,
     net: String,
 }
 
@@ -196,6 +222,9 @@ struct Fixture {
     ports: Vec<(String, PortDir)>,
     /// Element refdes → its SPICE nets.
     element_nets: Vec<(String, Vec<String>)>,
+    /// Refdes of every element resolved with `ElementRole::Power` — a
+    /// voltage source lowered to rail glyphs rather than to a body.
+    power_elements: HashSet<String>,
     /// Nets carried by `power:*` glyphs rather than by signal wires:
     /// SPICE ground, the canonical rail names, and every net touched by
     /// a `*@power`-tagged source (which is how `named_rails`' `p5`/`n5`
@@ -234,6 +263,34 @@ impl Fixture {
             && nets[0] != nets[1]
             && nets.iter().filter(|n| self.is_rail_net(n)).count() == 1
     }
+
+    /// **Series-signal element** in ADR-15's role model, and the subject
+    /// of F5: a two-terminal element, not a power source, with NEITHER
+    /// node rail-class. It lies *on* the signal path — it passes the
+    /// signal from one node to the next — so convention draws it with a
+    /// horizontal pin axis, upstream pin on the left.
+    ///
+    /// This is exactly the discriminator ADR-15 Stage 5 validated
+    /// (`is_series_signal_element` in the reverted `orient.rs` patch),
+    /// re-derived here from the netlist so the metric can falsify
+    /// `spice-layout` rather than restate it — the same independence
+    /// rule `is_rail_stub` above follows.
+    ///
+    /// It is the strict complement of `is_rail_stub` among two-terminal
+    /// non-power elements: one rail pin ⇒ stub, zero rail pins ⇒ series.
+    /// (Two rail pins is neither; nothing in the fixtures has that.)
+    fn is_series_signal(&self, refdes: &str) -> bool {
+        if self.power_elements.contains(refdes) {
+            return false;
+        }
+        let Some((_, nets)) = self.element_nets.iter().find(|(r, _)| r == refdes) else {
+            return false;
+        };
+        nets.len() == 2
+            && nets[0] != nets[1]
+            && !self.is_rail_net(&nets[0])
+            && !self.is_rail_net(&nets[1])
+    }
 }
 
 fn load(name: &str) -> Fixture {
@@ -263,8 +320,12 @@ fn load(name: &str) -> Fixture {
     }
 
     let mut rail_nets: HashSet<String> = HashSet::new();
+    let mut power_elements: HashSet<String> = HashSet::new();
     for el in &resolved.elements {
         let is_power_source = matches!(el.role, spice_resolve::ElementRole::Power(_));
+        if is_power_source {
+            power_elements.insert(el.refdes.clone());
+        }
         for net in &el.nodes {
             if is_power_source || is_canonical_rail_name(net) {
                 rail_nets.insert(net.clone());
@@ -280,7 +341,7 @@ fn load(name: &str) -> Fixture {
         if refdes.starts_with("#PWR") {
             continue;
         }
-        let Some((ox, _oy, orient)) = placed_symbol_pose(sym) else {
+        let Some((ox, oy, orient)) = placed_symbol_pose(sym) else {
             continue;
         };
         let Some(lib_sym) = library.lookup(&lib_id) else {
@@ -297,6 +358,7 @@ fn load(name: &str) -> Fixture {
             pins.push(BodyPin {
                 refdes: refdes.clone(),
                 x_mm: ox + tp.x,
+                y_mm: oy - tp.y,
                 net: (*net).to_string(),
             });
         }
@@ -312,6 +374,7 @@ fn load(name: &str) -> Fixture {
         pins,
         ports,
         element_nets,
+        power_elements,
         rail_nets,
         root,
     }
@@ -352,8 +415,18 @@ fn input_nets(f: &Fixture) -> HashSet<String> {
     out
 }
 
-/// **F3** — flow inversions. See the module doc.
-fn f3_inversions(f: &Fixture) -> Vec<(String, String)> {
+/// The signal-flow graph both F3 and F5 read: rail nets and rail stubs
+/// dropped, BFS depth measured from the input nets.
+struct FlowGraph<'a> {
+    /// Signal net → the non-stub elements on it.
+    net_members: HashMap<&'a str, Vec<&'a str>>,
+    /// Non-stub element → its signal nets.
+    elem_nets: HashMap<&'a str, Vec<&'a str>>,
+    /// BFS distance from the input nets, in nets.
+    net_depth: HashMap<&'a str, u32>,
+}
+
+fn flow_graph(f: &Fixture) -> FlowGraph<'_> {
     // net → elements, signal nets only.
     let mut net_members: HashMap<&str, Vec<&str>> = HashMap::new();
     for (refdes, nets) in &f.element_nets {
@@ -408,6 +481,21 @@ fn f3_inversions(f: &Fixture) -> Vec<(String, String)> {
         }
     }
 
+    FlowGraph {
+        net_members,
+        elem_nets,
+        net_depth,
+    }
+}
+
+/// **F3** — flow inversions. See the module doc.
+fn f3_inversions(f: &Fixture) -> Vec<(String, String)> {
+    let FlowGraph {
+        net_members,
+        elem_nets,
+        net_depth,
+    } = flow_graph(f);
+
     // element depth = min over its signal nets.
     let mut depth: HashMap<&str, u32> = HashMap::new();
     for (refdes, nets) in &elem_nets {
@@ -446,6 +534,97 @@ fn f3_inversions(f: &Fixture) -> Vec<(String, String)> {
     }
     inversions.sort();
     inversions
+}
+
+/// Two pins on the same row are "horizontal" within this slop. Grid
+/// coordinates are exact multiples of 1.27 mm, so anything above f64
+/// round-trip noise is a real axis difference.
+const AXIS_TOL_MM: f64 = 0.01;
+
+/// **F5 — series-signal pin axis and direction.** See the module doc.
+///
+/// One violation per offending *element*, so the count is a count of
+/// badly-drawn parts, not of failed sub-checks.
+fn f5_violations(f: &Fixture) -> Vec<String> {
+    let g = flow_graph(f);
+    let mut out = Vec::new();
+
+    let mut refdes: Vec<&str> = f
+        .element_nets
+        .iter()
+        .map(|(r, _)| r.as_str())
+        .filter(|r| f.is_series_signal(r))
+        .collect();
+    refdes.sort_unstable();
+
+    for r in refdes {
+        // The element's two placed pins, tagged with their nets.
+        let pins: Vec<&BodyPin> = f.pins.iter().filter(|p| p.refdes == r).collect();
+        if pins.len() != 2 {
+            // Not emitted as a two-pin body (ignored, or lowered to a
+            // sheet). Nothing to measure.
+            continue;
+        }
+        let (a, b) = (pins[0], pins[1]);
+
+        if (a.y_mm - b.y_mm).abs() > AXIS_TOL_MM {
+            out.push(format!(
+                "{r}: series element is not horizontal — pins at y={:.2} and y={:.2}",
+                a.y_mm, b.y_mm
+            ));
+            continue;
+        }
+
+        // Direction: the pin on the shallower net must be the left one.
+        let (Some(&da), Some(&db)) = (
+            g.net_depth.get(a.net.as_str()),
+            g.net_depth.get(b.net.as_str()),
+        ) else {
+            continue; // unreachable from any input net — no flow order
+        };
+        if da == db {
+            continue;
+        }
+        let (up, down) = if da < db { (a, b) } else { (b, a) };
+        if up.x_mm > down.x_mm + AXIS_TOL_MM {
+            out.push(format!(
+                "{r}: upstream pin (net `{}`) at x={:.2} is right of downstream pin \
+                 (net `{}`) at x={:.2}",
+                up.net, up.x_mm, down.net, down.x_mm
+            ));
+        }
+    }
+    out.sort();
+    out
+}
+
+/// **P5 — terminal order.** Every declared input terminal must sit left
+/// of every declared output terminal on the sheet. One violation per
+/// offending (input, output) label pair.
+///
+/// F4 already pins each terminal to the correct end of *its own net*;
+/// P5 is the sheet-wide statement F4 cannot make — on `rc_lowpass_ports`
+/// both terminals satisfy F4 while sitting at the SAME x, stacked
+/// vertically, which reads as no flow direction at all.
+fn p5_violations(f: &Fixture) -> Vec<String> {
+    let labels = directional_labels(&f.root);
+    let inputs: Vec<&(String, String, f64)> =
+        labels.iter().filter(|(_, s, _)| s == "input").collect();
+    let outputs: Vec<&(String, String, f64)> =
+        labels.iter().filter(|(_, s, _)| s == "output").collect();
+    let mut out = Vec::new();
+    for (inet, _, ix) in &inputs {
+        for (onet, _, ox) in &outputs {
+            if *ix >= *ox - TERMINAL_TOL_MM {
+                out.push(format!(
+                    "input terminal `{inet}` at x={ix:.2} is not left of output terminal \
+                     `{onet}` at x={ox:.2}"
+                ));
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 /// Every `(global_label "net" (shape …) (at x y …))` on the sheet.
@@ -577,5 +756,160 @@ fn flow_monotonicity_and_terminal_lanes_within_ratchet() {
         reclaim.is_empty(),
         "flow-geometry ratchet has slack; lower these literals in the same commit:\n{}",
         reclaim.join("\n")
+    );
+}
+
+// --- ADR-17 Stage 1: F5 (P4) and P5 --------------------------------------
+
+/// Every fixture, with its zero-slack `(F5, P5)` high-water marks —
+/// the counts measured on `master` at ADR-17 Stage 1, when the placer
+/// still has both defects. CLAUDE.md § "Budgets are ratchets, not
+/// knobs": these literals only ever go **down**. ADR-17 Stage 3 drives
+/// them to zero; nothing before Stage 3 may raise one.
+/// Measured total at Stage 1: **F5 = 16, P5 = 1**. The defect is
+/// systemic, not the two isolated cases the ADR-17 design review
+/// expected — only `diff_pair` (which has no series element at all) is
+/// clean, and eight of the sixteen are plain "drawn vertical". Recorded
+/// here because it materially raises what Stage 3 must deliver.
+///
+/// `rc_lowpass` is the instructive one: R1 IS horizontal and still
+/// fails, on *direction* — its upstream `in` pin sits at x=54.61, right
+/// of the downstream `out` pin at x=46.99. That is the failure mode
+/// ADR-15's Stage-5 post-mortem called "axis is only half the
+/// constraint" (mirror state unconstrained), caught here by F5's second
+/// half.
+const FLOW_POSE_RATCHET: &[(&str, usize, usize)] = &[
+    // fixture                  F5  P5
+    // F5: R1 is horizontal but MIRRORED — `in` pin right of `out` pin.
+    ("rc_lowpass", 1, 0),
+    // F5: R1 is drawn vertical though it is the series element between
+    // `in` and `out`.
+    // P5: `in` and `out` land at the SAME x=41.91, stacked vertically,
+    // so the sheet shows no left→right flow at all.
+    ("rc_lowpass_ports", 1, 1),
+    // F5: COUT is drawn vertical though it is the series element
+    // between `c` and `out`. CIN, the other series element, is
+    // correctly horizontal — see
+    // `series_discriminator_separates_stub_from_series_on_common_emitter`.
+    ("common_emitter", 1, 0),
+    // F5: both cross-coupling caps drawn vertical.
+    ("multivibrator", 2, 0),
+    // No series-signal element: RC1/RC2/RTAIL are all rail stubs.
+    ("diff_pair", 0, 0),
+    // F5: both RIN and RF drawn vertical.
+    ("opamp_inverting", 2, 0),
+    // F5: RF drawn vertical (RIN is horizontal here).
+    ("opamp_inverting_real", 1, 0),
+    // F5: R1/R2/R3 drawn vertical (R4 is a rail stub).
+    ("port_shapes", 3, 0),
+    // F5: all four of RIN1/RF1/RIN2/RF2 drawn vertical.
+    ("opamp_definition_level", 4, 0),
+    // F5: RIN drawn vertical (RPU/RPD/CL are rail stubs).
+    ("named_rails", 1, 0),
+];
+
+#[test]
+fn series_pose_and_terminal_order_within_ratchet() {
+    let mut failures = Vec::new();
+    let mut reclaim = Vec::new();
+    for &(name, f5_budget, p5_budget) in FLOW_POSE_RATCHET {
+        let f = load(name);
+        let f5 = f5_violations(&f);
+        let p5 = p5_violations(&f);
+        if std::env::var("S2K_FLOW_DUMP").is_ok() {
+            println!("(\"{name}\", {}, {}),", f5.len(), p5.len());
+            for v in &f5 {
+                println!("    F5: {v}");
+            }
+            for v in &p5 {
+                println!("    P5: {v}");
+            }
+        }
+        if f5.len() > f5_budget {
+            failures.push(format!(
+                "{name}: F5 series-pose violations rose to {} (budget {f5_budget}): {f5:?}",
+                f5.len()
+            ));
+        } else if f5.len() < f5_budget {
+            reclaim.push(format!("{name}: F5 may be lowered to {}", f5.len()));
+        }
+        if p5.len() > p5_budget {
+            failures.push(format!(
+                "{name}: P5 terminal-order violations rose to {} (budget {p5_budget}): {p5:?}",
+                p5.len()
+            ));
+        } else if p5.len() < p5_budget {
+            reclaim.push(format!("{name}: P5 may be lowered to {}", p5.len()));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "F5/P5 ratchet regressions (do NOT raise the budget — diagnose the geometry):\n{}",
+        failures.join("\n")
+    );
+    assert!(
+        reclaim.is_empty(),
+        "F5/P5 ratchet has slack; lower these literals in the same commit:\n{}",
+        reclaim.join("\n")
+    );
+}
+
+/// The assertion that makes F5 falsifiable rather than a restatement of
+/// the placer.
+///
+/// F5 says "series elements are horizontal". If the predicate silently
+/// widened to "every two-terminal element", the metric would demand a
+/// bypass capacitor be drawn sideways — which is *wrong*, and worse,
+/// a placer changed to satisfy it would still score 0. ADR-15's
+/// "capacitors are horizontal is WRONG" correction is exactly this trap.
+///
+/// `common_emitter` carries the discriminating pair: `CIN` (`in` → `b`,
+/// both signal nets) is series and IS horizontal; `CE` (`e` → `0`, one
+/// rail pin) is a rail stub, must be classified non-series, and must
+/// stay vertical. Same element kind, opposite verdicts, decided from pin
+/// roles alone.
+#[test]
+fn series_discriminator_separates_stub_from_series_on_common_emitter() {
+    let f = load("common_emitter");
+
+    assert!(
+        f.is_rail_stub("CE") && !f.is_series_signal("CE"),
+        "CE (bypass cap, one pin on ground) must be a rail stub, never a series element"
+    );
+    assert!(
+        f.is_series_signal("CIN") && !f.is_rail_stub("CIN"),
+        "CIN (in → b, both signal nets) must be a series element"
+    );
+    assert!(
+        f.is_series_signal("COUT") && !f.is_rail_stub("COUT"),
+        "COUT (c → out, both signal nets) must be a series element"
+    );
+
+    let pin_ys = |refdes: &str| -> Vec<f64> {
+        f.pins
+            .iter()
+            .filter(|p| p.refdes == refdes)
+            .map(|p| p.y_mm)
+            .collect()
+    };
+
+    let ce = pin_ys("CE");
+    assert_eq!(ce.len(), 2, "CE should emit two pins");
+    assert!(
+        (ce[0] - ce[1]).abs() > AXIS_TOL_MM,
+        "CE must stay VERTICAL — a rail stub hangs off its node's column. \
+         Got pins at y={:.2}, y={:.2}",
+        ce[0],
+        ce[1]
+    );
+
+    let cin = pin_ys("CIN");
+    assert_eq!(cin.len(), 2, "CIN should emit two pins");
+    assert!(
+        (cin[0] - cin[1]).abs() <= AXIS_TOL_MM,
+        "CIN is a series element and is horizontal on master; if this fires the \
+         fixture regressed. Got pins at y={:.2}, y={:.2}",
+        cin[0],
+        cin[1]
     );
 }
