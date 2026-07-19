@@ -3989,18 +3989,38 @@ fn collect_translatable_bbox(node: &Sexpr, bbox: &mut ContentBbox) {
 /// `Δ = (+5.08, −1.27) mm` on `layout_cache`'s 2-element fixture gaining
 /// a third, with placer grid coordinates bit-identical.)
 ///
-/// So each property anchor votes with both its own position and its
-/// mirror about the symbol origin: the reserve is symmetric, and a label
-/// flipping sides no longer changes the bbox at all. This *widens* the
+/// So each property anchor votes with the **whole envelope of anchors
+/// the nudge could have chosen**, not merely the one it did. Mirroring
+/// the current anchor about the origin — the first version of this
+/// reserve — is not enough: `property_offset_candidates` is not
+/// symmetric about the default anchor, so the nudge can pick an offset
+/// that reaches *further* out than any mirror of the anchor it started
+/// from. (Measured: `layout_cache`'s 2-element fixture gaining a third
+/// nudged `C1`'s Value to local `dx = -7.62` while the mirror reserve
+/// only covered `±2.54`; the bbox grew 4 cells leftward and the cached
+/// page shift re-anchored 25 → 29 cells, panning every symbol by
+/// `+5.08 mm` — with placer grid coordinates bit-identical.)
+///
+/// The envelope is derived from [`property_offset_candidates`] rather
+/// than hardcoded, so the two cannot drift apart, and it is folded as a
+/// square (side = the larger of the horizontal / vertical reach) so it
+/// is invariant under the symbol's 90°-rotation / mirror orientation
+/// without this pass having to re-derive the pose. This *widens* the
 /// bbox, so V15's floor still holds by construction — it only ever moves
 /// content further inside the page, never closer to the edge, which is
 /// exactly the `min ≥ margin` (not `min == margin`) reading of V15.
 fn fold_symbol_instance(items: &[Sexpr], bbox: &mut ContentBbox) {
-    // The instance's own `(at …)` is its origin — the mirror axis.
+    // The instance's own `(at …)` is its origin — the reserve's centre.
     let origin = items.iter().find_map(|c| match c {
         Sexpr::List(sub) if sexpr_head(sub) == Some("at") => coord_pair(sub),
         _ => None,
     });
+    // Only symbols whose text `nudge_property_text` actually relocates
+    // need the reserve. Power glyphs are skipped by that pass, so their
+    // Value sits at a fixed offset and votes with its real position.
+    let nudged = symbol_lib_id(items).is_none_or(|id| !id.starts_with("power:"));
+    let reserve = property_nudge_reserve_mm();
+
     for child in items {
         let Sexpr::List(sub) = child else { continue };
         if sexpr_head(sub) == Some("property") {
@@ -4013,13 +4033,44 @@ fn fold_symbol_instance(items: &[Sexpr], bbox: &mut ContentBbox) {
             });
             if let (Some((ox, oy)), Some((px, py))) = (origin, anchor) {
                 bbox.fold(px, py);
-                // Mirror about the symbol origin.
-                bbox.fold(2.0f64.mul_add(ox, -px), 2.0f64.mul_add(oy, -py));
+                if nudged {
+                    bbox.fold(ox - reserve, oy - reserve);
+                    bbox.fold(ox + reserve, oy + reserve);
+                } else {
+                    // Mirror about the symbol origin.
+                    bbox.fold(2.0f64.mul_add(ox, -px), 2.0f64.mul_add(oy, -py));
+                }
                 continue;
             }
         }
         collect_translatable_bbox(child, bbox);
     }
+}
+
+/// Half-side of the square [`fold_symbol_instance`] reserves around a
+/// host symbol's origin for property text.
+///
+/// Derived from [`property_offset_candidates`] so the reserve and the
+/// nudge cannot drift apart: it is the furthest reach of any candidate
+/// offset on either axis. Taking the max across both axes makes the
+/// reserve a square, hence invariant under the symbol's orientation.
+fn property_nudge_reserve_mm() -> f64 {
+    // `base_dy` only sets the sign of the vertical row; the magnitudes
+    // (and therefore the reach) are the same for Reference and Value.
+    property_offset_candidates(2.54)
+        .into_iter()
+        .fold(0.0_f64, |acc, (dx, dy)| acc.max(dx.abs()).max(dy.abs()))
+}
+
+/// The `lib_id` of a `(symbol …)` instance, if it carries one.
+fn symbol_lib_id(items: &[Sexpr]) -> Option<&str> {
+    items.iter().find_map(|c| match c {
+        Sexpr::List(sub) if sexpr_head(sub) == Some("lib_id") => match sub.get(1) {
+            Some(Sexpr::Atom(s) | Sexpr::QString(s)) => Some(s.as_str()),
+            _ => None,
+        },
+        _ => None,
+    })
 }
 
 /// Recurse, adding `(dx, dy)` to every translatable coordinate node.

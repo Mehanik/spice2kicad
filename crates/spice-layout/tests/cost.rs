@@ -698,7 +698,8 @@ proptest! {
             + bd.soft_y_residual * w.soft_y_residual
             + bd.layer_order * w.layer_order
             + bd.net_bbox_crossings * w.net_bbox_crossings
-        + bd.band_inversion * w.band_inversion;
+            + bd.band_inversion * w.band_inversion
+            + bd.rail_stub_alignment * w.rail_stub_alignment;
         prop_assert!((t - manual).abs() < 1e-9);
     }
 

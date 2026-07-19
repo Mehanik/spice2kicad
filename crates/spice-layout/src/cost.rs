@@ -387,6 +387,24 @@ fn overlap(placement: &Placement, checked: &CheckedNetlist) -> f64 {
 // Constraint violation
 // ---------------------------------------------------------------------------
 
+/// Residual of every `align` / `place` directive at `placement`, in
+/// mm². Zero iff every user constraint is satisfied.
+///
+/// Exposed so seed passes that move elements can check their own work
+/// against the *same* function the objective scores, rather than
+/// re-deriving a constraint's meaning by hand. Re-deriving is what broke
+/// the rail-stub pass: `Above` / `Below` look purely vertical but their
+/// residual also demands the two pins share a **column**, so a pass that
+/// "only moves X" can still violate them (see
+/// [`crate::apply_rail_stub_columns`]).
+pub(crate) fn constraint_residual(
+    placement: &Placement,
+    checked: &CheckedNetlist,
+    library: &Library,
+) -> f64 {
+    constraint_violation(placement, checked, library)
+}
+
 fn constraint_violation(placement: &Placement, checked: &CheckedNetlist, library: &Library) -> f64 {
     let mut total = 0.0;
 

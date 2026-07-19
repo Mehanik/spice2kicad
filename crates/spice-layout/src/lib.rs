@@ -547,7 +547,7 @@ pub fn place_with_hint(
     // terminates. Runs last among the seed idioms so it can read every
     // stronger pin (hint / symmetry / divider / shared-centre) and skip
     // those columns, and BEFORE `pick_orientations` like its siblings.
-    apply_rail_stub_columns(&mut placement, &pinned, &user_pinned, &checked);
+    apply_rail_stub_columns(&mut placement, &pinned, &user_pinned, &checked, library);
     // V14: per-element allowed-orientation set (power pin up / ground
     // pin down). A *hard* candidate-space filter, threaded into both
     // the V5 seed chooser below and the SA refiner so the constraint is
@@ -693,14 +693,28 @@ fn apply_position_idioms(placement: &mut Placement, pinned: &mut [bool], checked
 /// (`diff_pair`'s `RC1`/`RC2` sitting left of the transistors they load).
 /// `place=right-of` constrains an *ordering*, which survives moving both
 /// sides. To make that safe rather than merely likely, the pass is
-/// applied to a clone and **reverted wholesale** if any `place` relation
-/// no longer holds afterwards. Y is never touched, so `align horizontal`
-/// is preserved by construction.
+/// applied to a clone and **reverted wholesale** if the user-constraint
+/// residual got worse.
+///
+/// That check goes through [`cost::constraint_residual`] — the very
+/// function the SA objective scores — rather than re-deriving what each
+/// relation means. Re-deriving is what broke it the first time: the
+/// original guard only compared X *orderings* for `RightOf` / `LeftOf`
+/// and waved `Above` / `Below` through on the reasoning "those are
+/// vertical and this pass never changes Y". But `place_residual`'s
+/// `Above` / `Below` arms also carry an `(ax - tx)²` term — "above"
+/// means *directly* above, i.e. sharing a column — so moving X alone is
+/// enough to violate them. Caught by
+/// `spice-layout/tests/cost.rs::stage1_clean_placement_has_zero_constraint_violation`
+/// on a generated `place=above` scenario. Scoring through the shared
+/// function means a future relation gaining a new residual term is
+/// honoured here for free.
 fn apply_rail_stub_columns(
     placement: &mut Placement,
     pinned: &[bool],
     user_pinned: &[bool],
     checked: &CheckedNetlist,
+    library: &Library,
 ) {
     let stubs = idioms::detect_rail_stubs(checked);
     if stubs.is_empty() {
@@ -731,47 +745,19 @@ fn apply_rail_stub_columns(
     }
 
     let before = placement.clone();
+    let residual_before = cost::constraint_residual(placement, checked, library);
     idioms::apply_rail_stub_columns(placement, &x_locked, checked, &stubs);
-    if !place_x_relations_hold(placement, checked) {
-        log::debug!("rail-stub columns: reverted (a `place` X relation would break)");
+    let residual_after = cost::constraint_residual(placement, checked, library);
+    // Strictly-worse only: an exactly-equal residual (the common case,
+    // both zero) keeps the improvement.
+    if residual_after > residual_before + 1e-9 {
+        log::debug!(
+            "rail-stub columns: reverted (user-constraint residual {residual_before} -> {residual_after})"
+        );
         *placement = before;
     }
 }
 
-/// True when every `*@place` directive's horizontal ordering still holds.
-///
-/// Only `RightOf` / `LeftOf` constrain X; `Above` / `Below` are vertical
-/// and this pass never changes Y. Compared on element origins, which is
-/// the coordinate the stub pass actually shifts.
-fn place_x_relations_hold(placement: &Placement, checked: &CheckedNetlist) -> bool {
-    let idx: HashMap<&str, usize> = placement
-        .elements
-        .iter()
-        .enumerate()
-        .map(|(i, p)| (p.refdes.as_str(), i))
-        .collect();
-    for spec in &checked.place {
-        let (Some(&t), Some(&a)) = (
-            idx.get(spec.refdes.as_str()),
-            idx.get(spec.anchor.as_str()),
-        ) else {
-            continue;
-        };
-        let (tx, ax) = (
-            placement.elements[t].origin.x,
-            placement.elements[a].origin.x,
-        );
-        let ok = match spec.relation {
-            Relation::RightOf => tx > ax,
-            Relation::LeftOf => tx < ax,
-            Relation::Above | Relation::Below => true,
-        };
-        if !ok {
-            return false;
-        }
-    }
-    true
-}
 
 /// Per-element refinement metadata for the routing-aware orientation
 /// refinement phase (CLAUDE.md "Layout phase 4.5"). Recomputed from the
