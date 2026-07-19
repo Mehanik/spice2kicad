@@ -112,6 +112,16 @@
 //! full rule, the ink-graph metric-fidelity condition, and the accepted
 //! router → placement coupling.
 //!
+//! This "final lexicographic key" shape is a reformulation of an earlier,
+//! more absolute rule ("verifier-shaped … never an in-loop objective").
+//! It was adopted **on explicit project-owner sign-off following design
+//! review**, which found the absolute wording conflated "in-loop" with
+//! "able to trade against Tier 1" — true only for a weighted sum, not
+//! under lexicographic comparison. This is authorised doctrine, not an
+//! agent relaxing a rule to legalise its own change; see `docs/
+//! invariants.md` V16 and ADR-16 in `docs/layout-adr.md` for the full
+//! provenance.
+//!
 //! Known floor: bend-minimisation and V5-outward genuinely conflict.
 //! `rc_lowpass`'s two `out` pins share a Y and sit 3.81 mm apart — a
 //! 0-bend direct wire exists, but both pins face up and V5 says wires

@@ -420,11 +420,12 @@ before the final `route_nets`/glyph/label pass begins.
    count_outward_violations`. That same function is called by the V5
    verifier (`spice2kicad/tests/electrical_safety.rs`), so the oracle and
    the grader can never drift.
-3. Accept a candidate whose measured `(V13, V12, V5)` triple strictly
-   improves **lexicographically** — V13 and V12 (Tier 1) lead the
-   ordering, V5 (Tier 2) only breaks ties among them — AND V11 residue
-   and symbol-body overlap do not increase (V12 also carries its own
-   `<=` non-regression guard, so a V13 gain can never buy a V12
+3. Accept a candidate whose measured `(V13, V12, V5, bends)` tuple
+   strictly improves **lexicographically** — V13 and V12 (Tier 1) lead
+   the ordering, V5 (Tier 2) breaks ties among them, and V16 bends
+   (Tier 2) is the FINAL key, breaking ties V5 leaves open — AND V11
+   residue and symbol-body overlap do not increase (V12 also carries
+   its own `<=` non-regression guard, so a V13 gain can never buy a V12
    regression). There is deliberately **no V5 non-regression guard**: a
    candidate that raises V5 while lowering V13 or V12 is accepted,
    because a Tier-1 fix must never be blocked to protect a Tier-2
@@ -435,13 +436,16 @@ before the final `route_nets`/glyph/label pass begins.
    gradient happened to point at it, so a router fix that flattened V5
    outright could silently strand a V12 crossing. The lexicographic
    `(V13, V12, V5)` ordering (see `refine.rs`'s `measure`/acceptance
-   code) fixed that.
+   code) fixed that. The `bends` key was appended later, strictly last —
+   see "Accepted extension: V16 bends as phase 4.5's final objective
+   key" below and ADR-16.
 4. A cheap greedy single-element descent runs first (each accepted step
    strictly lowers V5); a bounded combinatorial joint search over the
    active set (cartesian product capped) handles violations only
    removable by rotating several elements together, early-exiting on the
-   first zero-V5 combination. Deterministic throughout (no clock/RNG;
-   stable iteration order), so the layout cache stays reproducible.
+   first combination with `(V13, V12, V5, bends) == (0, 0, 0, 0)`.
+   Deterministic throughout (no clock/RNG; stable iteration order), so
+   the layout cache stays reproducible.
 
 **Why not a placer-side V5 cost or seed heuristic instead.** Tried and
 insufficient: the violation does not exist until the router's conflict

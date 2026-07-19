@@ -212,18 +212,22 @@ Layout phases (later phases never override earlier):
    `spice-route` without forming a cycle). After phases 1–4 and BEFORE
    Decoration, it trial-routes candidate orientations of at-risk,
    non-pinned, non-symmetry elements with the **real router** and
-   accepts a candidate when the router's *measured* `(V13, V12, V5)`
-   triple strictly improves **lexicographically** — V13 and V12 (Tier 1)
-   lead the ordering, V5 (Tier 2) only breaks ties among them — subject
-   to V11 and symbol-overlap never regressing (V12 also carries its own
-   non-regression guard, so it can fall but never rise sideways against
-   a V13 gain). There is deliberately **no V5 non-regression guard**: a
-   candidate that raises V5 while lowering V13 or V12 is accepted, per
-   the tier-ordering rule (never trade a Tier-1 fix away to protect a
-   Tier-2 metric). It changes element *orientation* only, never
-   position, and **never runs during or after decoration**. This is
-   placement, not decoration: it owns orientation; decoration consumes
-   it. See ADR-11.
+   accepts a candidate when the router's *measured* `(V13, V12, V5,
+   bends)` tuple strictly improves **lexicographically** — V13 and V12
+   (Tier 1) lead the ordering, V5 (Tier 2) breaks ties among them, and
+   V16 bends (Tier 2) is the FINAL key, breaking ties `V5` leaves open —
+   subject to V11 and symbol-overlap never regressing (V12 also carries
+   its own non-regression guard, so it can fall but never rise sideways
+   against a V13 gain). There is deliberately **no V5 non-regression
+   guard**: a candidate that raises V5 while lowering V13 or V12 is
+   accepted, per the tier-ordering rule (never trade a Tier-1 fix away
+   to protect a Tier-2 metric). Bends may never be a *weighted* term and
+   must never move earlier in the tuple — see `docs/invariants.md` V16
+   and ADR-16 for the proof that last-place lexicographic ordering (not
+   a weighted term) is what keeps this subordinate to V12/V13. It
+   changes element *orientation* only, never position, and **never runs
+   during or after decoration**. This is placement, not decoration: it
+   owns orientation; decoration consumes it. See ADR-11 and ADR-16.
 5. **Decoration** — routing (wires), power/ground glyphs, labels,
    junctions. Reads final symbol positions; never moves them.
 
@@ -387,25 +391,33 @@ Attempt-A failure (a tunable term that at safe weights does nothing).
 | V5 pin-facing            | soft seed + routing-aware refine*    |
 | V6 bands/layers          | soft seed + soft cost terms          |
 | V7 symmetry              | soft (mirror move, deferred)         |
+| V16 wire rectilinearity  | soft: routing-aware refine, final key only (d) |
 
 *Notes on the table.* (a) **V5 is not an SA cost term** — `cost.rs`
 has no `pin_facing`/orientation term. V5 is enforced in two non-SA
 stages: a *seed-time heuristic* in `pick_orientations` (the SA
 `rotate` move may override it), AND the **routing-aware
-orientation-refinement phase** (Layout phase 4.5, ADR-11) — a
-placement-stage pass in `kicad-emitter` that uses the *real router* as
-an oracle and accepts a candidate whose measured `(V13, V12, V5)`
-triple strictly improves lexicographically (Tier-1 V13/V12 lead, V5
-only breaks ties), subject to V11 and symbol-overlap never regressing
-(V12 also carries its own non-regression guard; **there is
-deliberately no V5 non-regression guard** — a V5 rise is accepted when
-it buys a V13 or V12 win, per the tier-ordering rule). This is correct
-precisely because a V5 violation is born in the router's
-conflict-resolution passes, invisible to any placement-side cost. (b)
-**There is no `power_pin_outward` term** in `CostWeights`. (c) V14 is
-a hard candidate filter (`orient::allowed_orientations`) at both the
-seed chooser and the SA rotate move; the refinement phase only selects
-from that same allowed set, so it cannot break V14.
+orientation-refinement phase** (Layout phase 4.5, ADR-11 and ADR-16) —
+a placement-stage pass in `kicad-emitter` that uses the *real router*
+as an oracle and accepts a candidate whose measured `(V13, V12, V5,
+bends)` tuple strictly improves lexicographically (Tier-1 V13/V12
+lead, V5 breaks ties among them, V16 bends is the final key), subject
+to V11 and symbol-overlap never regressing (V12 also carries its own
+non-regression guard; **there is deliberately no V5 non-regression
+guard** — a V5 rise is accepted when it buys a V13 or V12 win, per the
+tier-ordering rule). This is correct precisely because a V5 violation
+is born in the router's conflict-resolution passes, invisible to any
+placement-side cost. (b) **There is no `power_pin_outward` term** in
+`CostWeights`. (c) V14 is a hard candidate filter
+(`orient::allowed_orientations`) at both the seed chooser and the SA
+rotate move; the refinement phase only selects from that same allowed
+set, so it cannot break V14. (d) **V16 is never a weighted cost** —
+there is no bend weight in `cost.rs` and no bend-minimising router
+pass. It enters the same routing-aware refine phase as V5, but only as
+the FINAL key of the lexicographic tuple (strictly after `V13`, `V12`,
+`V5`) or as a non-regression guard; see `docs/invariants.md` V16 and
+ADR-16 for why last-place lexicographic ordering — not a coefficient —
+is what keeps it subordinate to Tier 1.
 
 ## Visual quality invariants
 

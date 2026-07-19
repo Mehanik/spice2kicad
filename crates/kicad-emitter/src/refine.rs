@@ -163,13 +163,14 @@ fn greedy_descent(
                 let m = measure(placement, library);
                 placement.elements[i].orientation = current;
 
-                // Accept when the (V13, V12, V5) triple strictly improves
-                // and no equal-/higher-tier guard regresses. V13 and V12
-                // are Tier 1, V5 is Tier 2, so the Tier-1 counts lead:
-                // a candidate that removes a label overlap or a wire
-                // speared through a body wins even if V5 is unchanged,
-                // and one that adds either is never taken for a V5 gain.
-                // Selection is lexicographic for the same reason.
+                // Accept when the (V13, V12, V5, bends) tuple strictly
+                // improves and no equal-/higher-tier guard regresses. V13
+                // and V12 are Tier 1, V5 and bends (V16) are Tier 2, so
+                // the Tier-1 counts lead: a candidate that removes a
+                // label overlap or a wire speared through a body wins
+                // even if V5/bends are unchanged, and one that adds
+                // either is never taken for a V5 or bend gain. Selection
+                // is lexicographic for the same reason.
                 //
                 // V12 belongs in the objective, not just the guard. It
                 // used to appear only as the `m.v12 <= baseline.v12`
