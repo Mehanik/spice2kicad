@@ -1418,6 +1418,77 @@ test can see this class of defect; the modelled V13 checks cannot.
 
 ---
 
+## ADR-16 — The baseline-diff protocol: two instruments for a coupled loop
+
+**Status:** accepted.
+
+**Context — the systemic hole.** Layout phase 4.5
+(`crates/kicad-emitter/src/refine.rs`, ADR-11) uses the **real router**
+as its orientation oracle: it trial-routes candidate orientations and
+keeps the one minimising the router's *measured* V5 violations. That is
+the right design — a V5 violation is born inside the router's
+conflict-resolution passes and is invisible to any placement-side cost —
+but it makes placement a **function of router behaviour**. Any change
+inside `crates/spice-route/` can therefore shift placement *globally*.
+This is not hypothetical: a wire-straightening pass once rotated a
+transistor two crates away from the edit, passed every gate in the
+suite, and had to be reverted on sight.
+
+`crates/spice2kicad/tests/baseline_lock.rs` already snapshots every
+element's `(refdes, lib_id, x, y, rot, mirror)`, so the *movement* is
+detectable. The hole is downstream of that: **regenerating the baseline
+is a legitimate mechanical act**, and no gate distinguishes "the
+baseline moved and the layout got better" from "the baseline moved and
+the layout got worse". A contributor who regenerates in good faith
+launders a regression through a green suite.
+
+**Decision — a two-instrument protocol.** `baseline_lock` detects
+*motion*; the quality ratchets judge *direction*. Neither alone is
+sufficient, so both are required, in this order:
+
+1. **A change confined to `crates/spice-route/` MUST produce an EMPTY
+   `baseline_lock` diff.** Router changes are supposed to alter *ink*,
+   not *placement*. If the baseline moved, the change leaked through
+   phase 4.5's oracle. That is not automatically wrong — a better router
+   can legitimately teach the refiner a better orientation — but it
+   **reclassifies the change**: it is no longer a routing change, it is a
+   layout change, and it invokes rule 2.
+
+2. **Any change that regenerates the baseline MUST show V16 (B, J)
+   non-increasing per fixture**, alongside the existing V5 / V12 / V13 /
+   crossing / detour ratchets. Report the before/after table in the
+   commit message. This is what converts "the layout moved" into "the
+   layout moved and here is the evidence it improved". V16 is the
+   instrument this protocol was missing: bends and branches are the
+   quantity a wire-straightening pass claims to improve, so a pass that
+   moves placement while *raising* B is exactly the failure mode above,
+   now visible.
+
+Standard ratchet policy governs rule 2 — the literals go down, never up,
+and the CLAUDE.md global-improvement escape (strictly-fewer TOTAL
+violations across all fixtures, one-line rationale, user sign-off) is the
+only path to a single fixture's rise.
+
+**Rejected alternative — freeze phase 4.5's oracle.** The obvious
+decoupling is to give `refine` a *private pinned copy* of the router, so
+`spice-route` edits cannot perturb placement at all. Rejected: it trades
+one failure class for a worse one. The refiner would then optimise
+orientations against **a router that no longer exists**, and every
+improvement to the real router would silently widen the gap between the
+orientation chosen and the wires actually drawn — the "wrong oracle"
+class ADR-11 was written to avoid. A stale oracle produces confidently
+wrong answers with no diff to inspect; a live oracle produces a
+`baseline_lock` diff, which is a *signal*. **The guard belongs at the
+gate, not in the oracle.** Coupling is the price of measuring reality;
+the protocol above is how we pay it.
+
+**Consequences.** Contributors touching `spice-route` should expect to
+run `baseline_lock` first and treat a non-empty diff as a scope change
+rather than a nuisance. Reviewers should refuse a baseline regeneration
+that arrives without the V16 table.
+
+---
+
 ## What we are not deciding now
 
 - ~~Sidecar file format (JSON vs TOML vs custom). Pick during

@@ -563,6 +563,40 @@ Summary (full definitions + verifiers: `docs/invariants.md`):
 
 Full definitions + verifiers: `docs/invariants.md`.
 
+## Changing the router or the placer: the baseline-diff protocol
+
+Layout phase 4.5 (`crates/kicad-emitter/src/refine.rs`) uses the **real
+router** as its orientation oracle, so **any change inside
+`crates/spice-route/` can shift placement globally**. This is real, not
+theoretical: a wire-straightening pass once rotated a transistor two
+crates away from the edit, passed every gate in the suite, and had to be
+reverted on sight.
+
+`crates/spice2kicad/tests/baseline_lock.rs` snapshots every element's
+`(refdes, lib_id, x, y, rot, mirror)`, so *motion* is detectable — but
+regenerating that snapshot is a legitimate mechanical act, and nothing
+about a regenerated baseline distinguishes "moved and got better" from
+"moved and got worse". Two instruments, both required:
+
+1. **A change confined to `crates/spice-route/` must produce an EMPTY
+   `baseline_lock` diff.** A router change is supposed to alter ink, not
+   placement. If the baseline moved, the change leaked through phase
+   4.5. That is not automatically wrong — but it **reclassifies the
+   change as a layout change**, and rule 2 applies.
+2. **Any change that regenerates the baseline must show V16 (B, J)
+   non-increasing per fixture**, alongside the existing V5 / V12 / V13 /
+   crossing / detour ratchets. Put the before/after table in the commit
+   message. V16 is the instrument this protocol was missing: bends and
+   branches are precisely what a wire-straightening pass claims to
+   improve, so a pass that moves placement while raising B is the
+   failure mode above, now visible.
+
+Freezing phase 4.5's oracle (giving `refine` a private pinned router
+copy) was **considered and rejected** — it would decouple the loop but
+re-create the "wrong oracle" failure class, optimising orientations
+against a router that no longer exists. The guard belongs at the gate,
+not in the oracle. Full rationale: `docs/layout-adr.md` ADR-16.
+
 ## When changing the annotation spec
 
 The spec is the user-facing contract. Treat changes as you would
