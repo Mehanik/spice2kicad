@@ -51,15 +51,8 @@ pub fn emit(
     out: &mut Vec<Sexpr>,
     warnings: &mut Vec<String>,
 ) {
-    let lib_id = match net.class {
-        // A negative supply rail is classed Ground for layout but must
-        // render with the distinct `power:VEE` glyph (V10), regardless
-        // of its NetClass. The negative-rail flag is the authoritative
-        // signal here.
-        _ if net.negative_rail => "power:VEE",
-        NetClass::Power => power_lib_id(&net.name),
-        NetClass::Ground => ground_lib_id(&net.name),
-        NetClass::Signal => return,
+    let Some(lib_id) = lib_id_for(net) else {
+        return;
     };
     // The glyph's canonical attachment axis (the host-pin direction that
     // needs no offset). Computed once per net; a negative rail attaches
@@ -97,6 +90,27 @@ pub fn emit(
             net.name
         ));
     }
+}
+
+/// The `power:*` library symbol that renders `net`'s rail glyph, or
+/// `None` for a Signal net (which gets wires, not glyphs).
+///
+/// Shared by Stage 1 (the per-pin rail glyphs) and the PWR_FLAG stage,
+/// which draws one more instance of the *same* glyph in the corner
+/// driver block. Both must resolve to the identical `lib_id` and Value,
+/// since KiCad ties `power:*` instances together by Value — that shared
+/// name is exactly what makes the corner flag drive the whole rail.
+pub(crate) fn lib_id_for(net: &NetSpec) -> Option<&'static str> {
+    Some(match net.class {
+        // A negative supply rail is classed Ground for layout but must
+        // render with the distinct `power:VEE` glyph (V10), regardless
+        // of its NetClass. The negative-rail flag is the authoritative
+        // signal here.
+        _ if net.negative_rail => "power:VEE",
+        NetClass::Power => power_lib_id(&net.name),
+        NetClass::Ground => ground_lib_id(&net.name),
+        NetClass::Signal => return None,
+    })
 }
 
 fn power_lib_id(net_name: &str) -> &'static str {
@@ -299,7 +313,42 @@ fn power_symbol_sexpr(
     sheet_uuid: &str,
     project_name: &str,
 ) -> Sexpr {
-    let (x, y, rot) = symbol_pose(pin, canon);
+    let (x, y, _rot) = symbol_pose(pin, canon);
+    glyph_sexpr_at(
+        lib_id,
+        net_name,
+        x,
+        y,
+        pin.outward,
+        refdes,
+        sheet_uuid,
+        project_name,
+    )
+}
+
+/// Emit one rot-0 `power:*` glyph whose anchor pin sits at `(x, y)`,
+/// with its Value (net-name) text placed one glyph-clearing offset along
+/// `outward`.
+///
+/// Split out of [`power_symbol_sexpr`] so the PWR_FLAG corner driver
+/// block can draw a rail glyph at a *synthesised* coordinate — one with
+/// no host pin to derive a pose from. Keeping both callers on this one
+/// body guarantees the corner glyph is byte-identical in `lib_id`,
+/// Value, and property layout to the in-circuit glyphs it stands for,
+/// which is what makes KiCad connect them by name.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn glyph_sexpr_at(
+    lib_id: &str,
+    net_name: &str,
+    x: f64,
+    y: f64,
+    outward: Direction,
+    refdes: &str,
+    sheet_uuid: &str,
+    project_name: &str,
+) -> Sexpr {
+    // V14 locks every rail glyph to its conventional rot-0 orientation.
+    let rot = 0_u16;
     // A KiCad power symbol's Value *is* its net name (power symbols
     // connect globally by Value), so the rendered text must preserve net
     // identity: distinct rails stay distinct. Uppercase the raw SPICE
@@ -323,7 +372,7 @@ fn power_symbol_sexpr(
     // glyph graphic itself: each glyph body extends ≈2.54 mm from the
     // anchor, so a 3.81 mm offset places the text one cell beyond the
     // tip.
-    let (vx, vy) = value_text_anchor(x, y, pin.outward);
+    let (vx, vy) = value_text_anchor(x, y, outward);
     // Use the same pattern as the existing emitter: nested `(symbol …)`
     // with `lib_id`, `at`, `unit`, properties. Reference is a unique
     // `#PWR<n>` and is *hidden* (KiCad convention for power symbols:

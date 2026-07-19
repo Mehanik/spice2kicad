@@ -1404,6 +1404,25 @@ fn v14_rail_pin_faces_rail() {
             }) else {
                 continue;
             };
+            // …but only if that pin is actually the one the glyph attaches
+            // to. V14/R-5 is a statement about a glyph and the host body it
+            // sits on: "does the rail pin face out of the body, or back
+            // into it?". A glyph attached to nothing has no such
+            // relationship to assert.
+            //
+            // An attached glyph sits either exactly on its host pin, or at
+            // most SHEET_EDGE_GLYPH_OFFSET_CELLS (2 cells = 2.54 mm) away
+            // down the pin's outward direction — the V14 forced-sideways
+            // and sheet-edge stub fallbacks. 3 cells is therefore strictly
+            // beyond every legitimate offset, so this cannot exempt a glyph
+            // that really is on a host. The detached case it *does* exempt
+            // is the PWR_FLAG corner driver block, whose glyphs stand a
+            // clear 8 cells off the circuit and connect by name, not by
+            // wire (see `spice_route::pwrflag::emit_corner_block`).
+            const MAX_HOST_ATTACH_MM: f64 = 3.0 * 1.27;
+            if (host.px - ax).hypot(host.py - ay) > MAX_HOST_ATTACH_MM {
+                continue;
+            }
             // A glyph attached to a *horizontally-drawn* host pin (e.g. an
             // opamp `+` input wired to ground) is the documented
             // detached-glyph-stub case: V14 governs supply-style

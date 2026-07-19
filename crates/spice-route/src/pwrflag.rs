@@ -36,16 +36,41 @@
 //! their passive pin is a valid driver. No fixture or refdes names are
 //! consulted.
 //!
-//! Placement is V11-safe: the flag's anchor pin sits exactly on an
-//! existing pin coordinate of the *same* net, so it joins that net by
-//! geometric coincidence and shorts nothing. The flag body extends in
-//! the host pin's outward direction (away from the symbol body), so it
-//! does not overlap the host body (V12/V13).
+//! # Where the flags go
+//!
+//! Flags are split into two placement strategies by how their net
+//! achieves connectivity:
+//!
+//! * **Global rails** (name-based Power/Ground nets) connect by *name*:
+//!   KiCad ties every `power:*` instance sharing a Value into one net,
+//!   with no wire involved. So a rail's driver need not sit anywhere
+//!   near the circuit. These flags are collected into a tidy **corner
+//!   driver block** in the bottom-right of the drawing (see
+//!   [`emit_corner_block`]): one row per rail, each row a `power:*`
+//!   glyph for that rail with its `PWR_FLAG` co-located on the same
+//!   anchor. The circuit keeps its ordinary rail glyphs and loses the
+//!   flag clutter entirely.
+//!
+//! * **Sheet-local signal nets** connect by *wire*. A driver marker for
+//!   one of these has to touch the net's own geometry, so it stays
+//!   anchored on a pin of that net (the original behaviour).
+//!
+//! Both strategies are V11-safe. The corner block's glyph and flag share
+//! one anchor coordinate, and both symbols carry their connection pin at
+//! the symbol origin, so they join by geometric coincidence — the same
+//! no-stub idiom the on-pin path uses, and the reason no wire is needed
+//! between them. The on-pin path additionally lands on an existing pin
+//! coordinate of its own net, shorting nothing.
+//!
+//! The corner block is placed outward of the circuit's own content bbox
+//! (pins ∪ symbol bodies), so it cannot overlap any circuit geometry
+//! (V12/V13). It rides the emitter's `translate_into_page` pass like all
+//! other content, so it lands inside the page's usable area (V15).
 
 use lexpr::Value as Sexpr;
 use spice_layout::net_class::NetClass;
 
-use crate::types::{NetSpec, PinRef, RouteResult};
+use crate::types::{Bbox, Direction, NetSpec, PinRef, RouteResult};
 
 /// Scope name the root sheet is routed under (see
 /// `kicad_emitter::schematic::emit_root`). Power/Ground nets are global
@@ -67,17 +92,23 @@ const PWR_FLAG_LIB_ID: &str = "power:PWR_FLAG";
 /// skipped and a warning recorded (ERC then still reports the
 /// not-driven error, surfaced by the V2 verifier — we never silently
 /// fake a driver).
+#[allow(clippy::too_many_arguments)]
 pub fn emit(
     nets: &[NetSpec],
+    obstacles: &[Bbox],
+    sheet_bodies: &[Bbox],
     library: Option<&kicad_symbols::Library>,
     scope: &str,
     sheet_uuid: &str,
     project_name: &str,
+    pwr_counter: &mut usize,
     flg_counter: &mut usize,
     out: &mut RouteResult,
 ) {
     let resolved = library.is_none_or(|lib| lib.lookup(PWR_FLAG_LIB_ID).is_some());
     let is_root = scope == ROOT_SCOPE;
+    // Global rails deferred to the bottom-right corner driver block.
+    let mut corner_rails: Vec<&NetSpec> = Vec::new();
     for net in nets {
         if net.pins.is_empty() {
             continue;
@@ -137,12 +168,7 @@ pub fn emit(
         if is_power_ground && !is_root {
             continue;
         }
-        // Net has no driver — it would trip ERC. Pick a deterministic
-        // anchor pin (lexicographically smallest world coordinate) and
-        // attach one PWR_FLAG there.
-        let Some(anchor) = pick_anchor(&net.pins) else {
-            continue;
-        };
+        // Net has no driver — it would trip ERC.
         if !resolved {
             out.warnings.push(format!(
                 "pwrflag: lib_id '{PWR_FLAG_LIB_ID}' not found in library; net '{}' left undriven (ERC will flag it)",
@@ -150,6 +176,22 @@ pub fn emit(
             ));
             continue;
         }
+        // A name-based Power/Ground rail is a *global* net: every
+        // `power:*` instance sharing its Value is the same net, wire or
+        // no wire. Its driver therefore does not have to sit on the
+        // circuit at all — defer it to the corner block, which keeps the
+        // flag glyphs out of the reader's way.
+        if is_power_ground {
+            corner_rails.push(net);
+            continue;
+        }
+        // A sheet-local signal net connects by wire, so its driver must
+        // touch the net's own geometry. Pick a deterministic anchor pin
+        // (lexicographically smallest world coordinate) and attach the
+        // PWR_FLAG there.
+        let Some(anchor) = pick_anchor(&net.pins) else {
+            continue;
+        };
         *flg_counter += 1;
         let refdes = format!("#FLG{flg_counter}");
         // The rail glyph at this anchor draws its body on one vertical
@@ -168,6 +210,159 @@ pub fn emit(
             project_name,
         ));
     }
+    emit_corner_block(
+        &corner_rails,
+        nets,
+        obstacles,
+        sheet_bodies,
+        sheet_uuid,
+        project_name,
+        pwr_counter,
+        flg_counter,
+        out,
+    );
+}
+
+/// Horizontal clearance (mm) between the circuit's content bbox and the
+/// corner driver block's anchor column. Eight grid cells: enough for the
+/// widest rail Value text (drawn centred on the anchor, so it reaches
+/// roughly half its width to the left) to clear the circuit outright.
+const BLOCK_GAP_MM: f64 = 8.0 * 1.27;
+
+/// Vertical pitch (mm) between consecutive rows of the corner block. Ten
+/// grid cells. Each row spans the glyph body (≈2.54 mm on the canonical
+/// side) plus its Value text one cell beyond that, and the PWR_FLAG
+/// chevron (≈2.54 mm on the opposite side) — about 9 mm all told, so a
+/// 12.7 mm pitch leaves a clear cell between rows (V13).
+const BLOCK_ROW_PITCH_MM: f64 = 10.0 * 1.27;
+
+/// KiCad schematic grid (mm). The block anchors are snapped to it so
+/// every emitted coordinate stays on-grid.
+const GRID_MM: f64 = 1.27;
+
+/// Draw the bottom-right **driver block**: one row per global rail, each
+/// row a `power:*` glyph for that rail with its `PWR_FLAG` co-located on
+/// the same anchor coordinate.
+///
+/// This is the whole point of the corner arrangement. KiCad connects
+/// `power:*` symbols by Value, not by wire, so the `power:VCC` glyph
+/// drawn here *is* the same net as every `power:VCC` in the circuit —
+/// and the `PWR_FLAG` sharing its anchor pin therefore drives the entire
+/// rail. ERC sees exactly one `power_out` per rail (unchanged), while
+/// the reader sees an unflagged circuit and one tidy legend of drivers
+/// off to the side.
+///
+/// The block sits `BLOCK_GAP_MM` to the right of the circuit's content
+/// bbox, with its first row level with the content's bottom edge and
+/// further rows descending — i.e. the bottom-right of the drawing. Rails
+/// are emitted in the order they appear in `nets`, which is
+/// deterministic, so the block is stable across runs.
+#[allow(clippy::too_many_arguments)]
+fn emit_corner_block(
+    rails: &[&NetSpec],
+    nets: &[NetSpec],
+    obstacles: &[Bbox],
+    sheet_bodies: &[Bbox],
+    sheet_uuid: &str,
+    project_name: &str,
+    pwr_counter: &mut usize,
+    flg_counter: &mut usize,
+    out: &mut RouteResult,
+) {
+    if rails.is_empty() {
+        return;
+    }
+    let Some(content) = content_bbox(nets, obstacles, sheet_bodies) else {
+        return;
+    };
+    let x = snap(content.x1 + BLOCK_GAP_MM);
+    let y0 = snap(content.y1);
+    for (row, net) in rails.iter().enumerate() {
+        let Some(lib_id) = crate::rails::lib_id_for(net) else {
+            continue;
+        };
+        #[allow(clippy::cast_precision_loss)]
+        let y = y0 + row as f64 * BLOCK_ROW_PITCH_MM;
+        // Which way the glyph's *body* is drawn — NOT its attachment
+        // axis. Only the `power:GND` triangle hangs below its anchor;
+        // every other rail glyph (VCC / VDD / +NV chevron, and the VEE
+        // marker) rises above it. `rails::canonical_axis` deliberately
+        // reports `Down` for a negative rail because that is the pin
+        // direction VEE *attaches* to, which is the opposite of where
+        // its graphic is drawn — using it here would point the flag
+        // straight into the VEE body (V13).
+        let body_down = matches!(net.class, NetClass::Ground) && !net.negative_rail;
+        // Value text goes on the body side, one cell past the glyph tip;
+        // the flag goes on the other side. The two graphics therefore
+        // occupy opposite halves of the row and cannot overlap.
+        let text_outward = if body_down {
+            Direction::Down
+        } else {
+            Direction::Up
+        };
+        *pwr_counter += 1;
+        let pwr_refdes = format!("#PWR{pwr_counter}");
+        out.sexprs.push(crate::rails::glyph_sexpr_at(
+            lib_id,
+            &net.name,
+            x,
+            y,
+            text_outward,
+            &pwr_refdes,
+            sheet_uuid,
+            project_name,
+        ));
+        // The flag points *opposite* the glyph body, so the two graphics
+        // share the anchor pin without their chevrons overlapping (V13).
+        let glyph_down = body_down;
+        *flg_counter += 1;
+        let flg_refdes = format!("#FLG{flg_counter}");
+        out.sexprs.push(pwr_flag_sexpr_at(
+            x,
+            y,
+            glyph_down,
+            &flg_refdes,
+            sheet_uuid,
+            project_name,
+        ));
+    }
+}
+
+/// Bounding box of everything already on the sheet: every net pin plus
+/// every symbol-body obstacle. `None` when the sheet has no geometry at
+/// all (nothing to sit beside).
+fn content_bbox(nets: &[NetSpec], obstacles: &[Bbox], sheet_bodies: &[Bbox]) -> Option<Bbox> {
+    let mut acc: Option<Bbox> = None;
+    let mut grow = |x0: f64, y0: f64, x1: f64, y1: f64| {
+        acc = Some(match acc {
+            None => Bbox { x0, y0, x1, y1 },
+            Some(b) => Bbox {
+                x0: b.x0.min(x0),
+                y0: b.y0.min(y0),
+                x1: b.x1.max(x1),
+                y1: b.y1.max(y1),
+            },
+        });
+    };
+    for net in nets {
+        for p in &net.pins {
+            grow(p.x_mm, p.y_mm, p.x_mm, p.y_mm);
+        }
+    }
+    for b in obstacles.iter().chain(sheet_bodies) {
+        grow(
+            b.x0.min(b.x1),
+            b.y0.min(b.y1),
+            b.x0.max(b.x1),
+            b.y0.max(b.y1),
+        );
+    }
+    acc
+}
+
+/// Snap a coordinate onto the KiCad schematic grid.
+fn snap(v: f64) -> f64 {
+    (v / GRID_MM).round() * GRID_MM
 }
 
 /// Deterministically choose the anchor pin: smallest (x, y) world coord.
@@ -218,6 +413,23 @@ fn pwr_flag_sexpr(
     // glyph on the same net (V11). For a non-sheet pin the offset is zero.
     let (ox, oy) = crate::rails::sheet_edge_offset(pin);
     let (x, y) = (pin.x_mm + ox, pin.y_mm + oy);
+    pwr_flag_sexpr_at(x, y, glyph_down, refdes, sheet_uuid, project_name)
+}
+
+/// Emit a `PWR_FLAG` whose anchor pin sits at `(x, y)`, oriented away
+/// from a co-located rail glyph's body per [`flag_rotation`].
+///
+/// Split out of [`pwr_flag_sexpr`] so the corner driver block can place
+/// a flag at a synthesised coordinate rather than deriving one from a
+/// host pin.
+fn pwr_flag_sexpr_at(
+    x: f64,
+    y: f64,
+    glyph_down: bool,
+    refdes: &str,
+    sheet_uuid: &str,
+    project_name: &str,
+) -> Sexpr {
     let rot = flag_rotation(glyph_down);
     // The PWR_FLAG anchor pin sits at the symbol origin, so the pin tip
     // stays at (x, y) for any rotation — the connection point is stable

@@ -110,6 +110,17 @@ pub struct RouteRequest<'a> {
     /// union of routed-net pin coordinates, padded by the per-instance
     /// margin derived in `compute_maze_bounds`.
     pub bounds: Option<Bbox>,
+    /// Drawn rectangles of any hierarchical-sheet `(sheet …)` blocks on
+    /// this sheet.
+    ///
+    /// Distinct from [`RouteRequest::obstacles`], which carries only a
+    /// small placeholder box for a sheet (a sheet has no V12-relevant
+    /// graphics for a wire to spear). The PWR_FLAG corner driver block
+    /// needs the sheet's *true* extent: its port pins all sit on one
+    /// edge, so pins and obstacles together under-state its footprint by
+    /// the full 30 mm sheet width, and a block placed from that estimate
+    /// lands inside the sheet body.
+    pub sheet_bodies: &'a [Bbox],
 }
 
 /// Axis-aligned bounding box in world millimetres. Used by the router

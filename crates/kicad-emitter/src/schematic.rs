@@ -155,8 +155,19 @@ pub fn emit_root(
     // label and overlap the sheet body, so the router offsets it
     // outward with a stub (V12/V13/V14 detached-glyph fallback).
     let mut sheet_edge_pins: Vec<(f64, f64)> = Vec::new();
+    // Drawn extent of each hierarchical-sheet block. A sheet's port pins
+    // all sit on one edge, so the pin set alone badly under-states how
+    // much canvas the sheet occupies (30.48 mm wide, and taller than the
+    // ports it carries). The PWR_FLAG corner driver block needs the real
+    // rectangle to know where the drawing actually ends.
+    let mut sheet_bodies: Vec<spice_route::Bbox> = Vec::new();
     for (idx, block) in sheets.iter().enumerate() {
         let (sheet_node, pin_labels, sheet_pin_pos) = sheet_block(block, idx);
+        // Read the extent back off the node we just built, rather than
+        // recomputing it from `block`, so the two can never drift.
+        if let Some(bbox) = sheet_node_bbox(&sheet_node) {
+            sheet_bodies.push(bbox);
+        }
         items.push(sheet_node);
         for label in pin_labels {
             items.push(label);
@@ -193,6 +204,7 @@ pub fn emit_root(
         &passive,
         &power_in,
         &sheet_edge_pins,
+        &sheet_bodies,
     )? {
         items.push(routed);
     }
@@ -336,6 +348,9 @@ pub fn emit_child_sheet(child: &ChildSheet<'_>, library: &Library) -> Result<Str
         &passive,
         &power_in,
         &[],
+        // A child sheet draws no nested `(sheet …)` blocks of its own,
+        // and global rails are driven from the root sheet regardless.
+        &[],
     )? {
         items.push(routed);
     }
@@ -387,6 +402,36 @@ pub fn emit_child_sheet(child: &ChildSheet<'_>, library: &Library) -> Result<Str
 
 /// Render a `(sheet …)` block plus the `(global_label …)` pieces that
 /// pin its port symbols to the parent net coordinates.
+/// Drawn rectangle of a `(sheet …)` block, read straight off its
+/// `(at …)` / `(size …)` children.
+///
+/// Used to tell the router where the drawing really ends — a sheet's
+/// port pins are all on one edge, so pin coordinates alone under-state
+/// the sheet's footprint by its full width.
+fn sheet_node_bbox(sheet_node: &Sexpr) -> Option<spice_route::Bbox> {
+    let Sexpr::List(items) = sheet_node else {
+        return None;
+    };
+    let mut at: Option<(f64, f64)> = None;
+    let mut size: Option<(f64, f64)> = None;
+    for item in items {
+        let Sexpr::List(kids) = item else { continue };
+        let pair = coord_pair(kids);
+        match sexpr_head(kids) {
+            Some("at") => at = pair,
+            Some("size") => size = pair,
+            _ => {}
+        }
+    }
+    let ((x, y), (w, h)) = (at?, size?);
+    Some(spice_route::Bbox {
+        x0: x,
+        y0: y,
+        x1: x + w,
+        y1: y + h,
+    })
+}
+
 fn sheet_block(block: &SheetBlock, idx: usize) -> (Sexpr, Vec<Sexpr>, Vec<(String, f64, f64)>) {
     // Origin is supplied by the structural placer
     // (`spice_layout::place_sheets`) so the sheet lands adjacent to the
@@ -1375,6 +1420,7 @@ fn route_nets(
     passive: &std::collections::BTreeSet<String>,
     power_in: &std::collections::BTreeSet<String>,
     sheet_edge_pins: &[(f64, f64)],
+    sheet_bodies: &[spice_route::Bbox],
 ) -> Result<Vec<Sexpr>, EmitError> {
     use spice_route::{NetSpec, PinRef, RouteRequest};
 
@@ -1450,6 +1496,7 @@ fn route_nets(
         sheet_uuid: &suuid,
         project_name: GENERATOR,
         obstacles,
+        sheet_bodies,
         bounds: None,
     });
     // Split V11 (correctness) residue from other warnings. A `v11:`
@@ -1571,6 +1618,7 @@ pub(crate) fn trial_route(placement: &Placement, library: &Library) -> TrialRout
         project_name: GENERATOR,
         obstacles: &obstacles,
         bounds: None,
+        sheet_bodies: &[],
     });
     let v11_count = result
         .warnings
