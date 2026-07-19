@@ -195,13 +195,16 @@ pub fn emit(
         *flg_counter += 1;
         let refdes = format!("#FLG{flg_counter}");
         // The rail glyph at this anchor draws its body on one vertical
-        // side: a `power:GND` triangle hangs *down* (world +Y); every
-        // other rail glyph (VCC / VDD / +NV chevron, VEE marker) rises
-        // *up* (world −Y). The flag is co-located on the same pin and
-        // points the *opposite* way, so its chevron clears the glyph
-        // body (V13 — issue [2]) without a separating stub wire (which
-        // would read as a non-outward first segment at the host pin, V5).
-        let glyph_down = matches!(net.class, NetClass::Ground) && !net.negative_rail;
+        // side. A `power:GND` triangle hangs *down* (world +Y); the
+        // VCC / VDD / +NV chevrons rise *up* (world −Y); and a negative
+        // rail now also hangs *down*, because `rails::glyph_rotation`
+        // emits `power:VEE` at rot 180 so its arrow points along the
+        // axis it attaches to instead of back into the host body.
+        // The flag is co-located on the same pin and points the
+        // *opposite* way, so its chevron clears the glyph body (V13 —
+        // issue [2]) without a separating stub wire (which would read as
+        // a non-outward first segment at the host pin, V5).
+        let glyph_down = matches!(net.class, NetClass::Ground) || net.negative_rail;
         out.sexprs.push(pwr_flag_sexpr(
             anchor,
             glyph_down,
@@ -283,15 +286,14 @@ fn emit_corner_block(
         };
         #[allow(clippy::cast_precision_loss)]
         let y = y0 + row as f64 * BLOCK_ROW_PITCH_MM;
-        // Which way the glyph's *body* is drawn — NOT its attachment
-        // axis. Only the `power:GND` triangle hangs below its anchor;
-        // every other rail glyph (VCC / VDD / +NV chevron, and the VEE
-        // marker) rises above it. `rails::canonical_axis` deliberately
-        // reports `Down` for a negative rail because that is the pin
-        // direction VEE *attaches* to, which is the opposite of where
-        // its graphic is drawn — using it here would point the flag
-        // straight into the VEE body (V13).
-        let body_down = matches!(net.class, NetClass::Ground) && !net.negative_rail;
+        // Which way the glyph's *body* is drawn. This used to differ
+        // from the attachment axis for a negative rail — VEE attaches
+        // downward but its arrow was drawn upward — so this predicate
+        // could not reuse `rails::canonical_axis`. `glyph_rotation` now
+        // rotates VEE 180° so body and axis agree, and the two notions
+        // coincide again: ground and negative rails hang below their
+        // anchor, positive rails rise above it.
+        let body_down = matches!(net.class, NetClass::Ground) || net.negative_rail;
         // Value text goes on the body side, one cell past the glyph tip;
         // the flag goes on the other side. The two graphics therefore
         // occupy opposite halves of the row and cannot overlap.
@@ -308,6 +310,14 @@ fn emit_corner_block(
             x,
             y,
             text_outward,
+            crate::rails::glyph_rotation(
+                lib_id,
+                if body_down {
+                    Direction::Down
+                } else {
+                    Direction::Up
+                },
+            ),
             &pwr_refdes,
             sheet_uuid,
             project_name,

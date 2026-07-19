@@ -343,14 +343,14 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "power:PWR_FLAG",
         73.66,
         73.66,
-        180.0,
+        0.0,
         "",
     ),
     ("diff_pair", "#PWR1", "power:VCC", 27.94, 29.21, 0.0, ""),
     ("diff_pair", "#PWR2", "power:VCC", 38.1, 29.21, 0.0, ""),
-    ("diff_pair", "#PWR3", "power:VEE", 50.8, 60.96, 0.0, ""),
+    ("diff_pair", "#PWR3", "power:VEE", 50.8, 60.96, 180.0, ""),
     ("diff_pair", "#PWR4", "power:VCC", 73.66, 60.96, 0.0, ""),
-    ("diff_pair", "#PWR5", "power:VEE", 73.66, 73.66, 0.0, ""),
+    ("diff_pair", "#PWR5", "power:VEE", 73.66, 73.66, 180.0, ""),
     ("diff_pair", "Q1", "Device:Q_NPN_BCE", 43.18, 46.99, 0.0, ""),
     (
         "diff_pair",
@@ -446,7 +446,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "power:PWR_FLAG",
         78.74,
         85.09,
-        180.0,
+        0.0,
         "",
     ),
     (
@@ -491,7 +491,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "power:VEE",
         30.48,
         49.53,
-        0.0,
+        180.0,
         "",
     ),
     (
@@ -500,7 +500,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "power:VEE",
         62.23,
         59.69,
-        0.0,
+        180.0,
         "",
     ),
     (
@@ -527,7 +527,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "power:VEE",
         78.74,
         85.09,
-        0.0,
+        180.0,
         "",
     ),
     (
@@ -608,7 +608,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "power:PWR_FLAG",
         90.17,
         82.55,
-        180.0,
+        0.0,
         "",
     ),
     (
@@ -635,7 +635,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "power:VEE",
         46.99,
         52.07,
-        0.0,
+        180.0,
         "",
     ),
     (
@@ -662,7 +662,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "power:VEE",
         90.17,
         82.55,
-        0.0,
+        180.0,
         "",
     ),
     (
@@ -707,7 +707,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "power:PWR_FLAG",
         62.23,
         69.85,
-        180.0,
+        0.0,
         "",
     ),
     (
@@ -734,7 +734,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "power:VEE",
         39.37,
         44.45,
-        0.0,
+        180.0,
         "",
     ),
     (
@@ -761,7 +761,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "power:VEE",
         62.23,
         69.85,
-        0.0,
+        180.0,
         "",
     ),
     (

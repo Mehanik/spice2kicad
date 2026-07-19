@@ -647,11 +647,23 @@ invariant here.
 - **V14 — Power glyph orientation: GND down, VCC up.** Every
   `power:GND` instance emits with the rotation that draws the
   triangle below the connection point (KiCad lib convention: rot 0).
-  Every `power:+...` / `power:VCC` / `power:VDD` / `power:VEE`
-  instance emits at rot 0 as well — for `VEE`, that is the KiCad lib
-  convention (its pin sits at lib-angle 90 like VCC). A negative rail
-  (`power:VEE`) is *attached* like ground (canonical axis Down, see
-  V10), so it never triggers the forced-sideways stub. The host
+  Every `power:+...` / `power:VCC` / `power:VDD` instance emits at
+  rot 0 as well (chevron drawn above the connection point).
+
+  `power:VEE` is the exception, and emits at **rot 180**. V14 is a
+  claim about the direction a glyph POINTS ON THE PAGE, which is the
+  library body direction composed with the rotation — not the rotation
+  alone. The KiCad library draws VEE's arrow toward local +Y, i.e.
+  *upward*, exactly like the VCC chevron; but VEE is a NEGATIVE supply
+  and belongs with GND. At rot 0 it therefore pointed up, into the host
+  body — visible in the `diff_pair` render as VEE's arrowhead sitting
+  inside `RTAIL`. Rot 180 is what actually delivers "negative rail
+  points down". A negative rail is also *attached* like ground
+  (canonical axis Down, see V10), so it never triggers the
+  forced-sideways stub; the rotation aligns the drawn body with that
+  same axis. See `rails::glyph_rotation`, which derives the angle by
+  comparing each glyph's library body direction against its canonical
+  attachment axis rather than hardcoding a constant. The host
   pin's outward direction does *not* alter the glyph rotation — the
   previous per-pin rotation match (commit `b4838ee`) produced GND
   glyphs at any of {0, 90, 180, 270} depending on which pin they
@@ -665,7 +677,8 @@ invariant here.
   purely "no surprising rotations".
   Verifier: `crates/spice2kicad/tests/placement_quality.rs::v14_*`
   asserts every directional rail glyph (`power:GND` / `power:VCC` /
-  `power:VEE` / variants; `power:PWR_FLAG` excepted) has `rot == 0`.
+  variants; `power:PWR_FLAG` excepted) has `rot == 0`, and that
+  `power:VEE` has `rot == 180`.
   A companion verifier
   (`electrical_safety.rs::negative_rails_render_as_vee_not_gnd`)
   asserts negative rails use `power:VEE`, true ground uses

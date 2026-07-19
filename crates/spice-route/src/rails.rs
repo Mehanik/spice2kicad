@@ -160,6 +160,35 @@ fn canonical_axis(class: NetClass, negative_rail: bool) -> Direction {
     }
 }
 
+/// Rotation that makes a rail glyph's *drawn body* point along the axis
+/// it *attaches* to.
+///
+/// Read off the KiCad library graphics: only `power:GND`'s triangle
+/// hangs DOWN from its anchor (local −Y); every other rail glyph — the
+/// VCC / VDD / +NV chevrons and the VEE arrow — rises UP. Match that
+/// against [`canonical_axis`] and rotate 180° when they disagree.
+///
+/// Today the only disagreement is the negative rail. `power:VEE`
+/// attaches to a down-facing pin like a ground glyph, but its arrow is
+/// drawn upward, so at rot 0 it points back INTO the host body — see
+/// the `diff_pair` render, where VEE's arrowhead sits inside `RTAIL`.
+/// V14 reads "GND down, VCC up", and a negative supply belongs with
+/// GND; rot 180 is what actually delivers that on the page.
+///
+/// This supersedes the "pre-existing V13 quality concern" that
+/// [`canonical_axis`]'s doc comment records as accepted: the mismatch
+/// it describes is exactly what this function removes, and it does so
+/// without touching the attachment axis, so the offset/stub geometry
+/// that comment protects is unchanged.
+pub(crate) fn glyph_rotation(lib_id: &str, canon: Direction) -> u16 {
+    let body = if lib_id == "power:GND" {
+        Direction::Down
+    } else {
+        Direction::Up
+    };
+    if body == canon { 0 } else { 180 }
+}
+
 /// True only in the V14 *forced-sideways* case the offset+stub fallback
 /// exists for: the host pin points in the exact *opposite* of the
 /// glyph's canonical body direction, so a rot-0 glyph placed at the pin
@@ -320,6 +349,7 @@ fn power_symbol_sexpr(
         x,
         y,
         pin.outward,
+        glyph_rotation(lib_id, canon),
         refdes,
         sheet_uuid,
         project_name,
@@ -343,12 +373,11 @@ pub(crate) fn glyph_sexpr_at(
     x: f64,
     y: f64,
     outward: Direction,
+    rot: u16,
     refdes: &str,
     sheet_uuid: &str,
     project_name: &str,
 ) -> Sexpr {
-    // V14 locks every rail glyph to its conventional rot-0 orientation.
-    let rot = 0_u16;
     // A KiCad power symbol's Value *is* its net name (power symbols
     // connect globally by Value), so the rendered text must preserve net
     // identity: distinct rails stay distinct. Uppercase the raw SPICE

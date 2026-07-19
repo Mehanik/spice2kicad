@@ -655,9 +655,9 @@ pub fn trim_whiskers<S: ::std::hash::BuildHasher>(
     let qk = |x: f64, y: f64| ((x * 1000.0).round() as i64, (y * 1000.0).round() as i64);
     let empty: std::collections::HashSet<(i64, i64)> = std::collections::HashSet::new();
     for (i, net) in routed.iter_mut().enumerate() {
-        let pins = pins_per_net.get(i).map_or(&empty as &dyn BarrierSet, |s| {
-            s as &dyn BarrierSet
-        });
+        let pins = pins_per_net
+            .get(i)
+            .map_or(&empty as &dyn BarrierSet, |s| s as &dyn BarrierSet);
         loop {
             let mut degree: std::collections::HashMap<(i64, i64), usize> =
                 std::collections::HashMap::new();

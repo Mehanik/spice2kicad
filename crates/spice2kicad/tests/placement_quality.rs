@@ -1491,10 +1491,21 @@ fn v14_power_glyphs_have_canonical_orientation() {
             let _ = it.next(); // x
             let _ = it.next(); // y
             let rotation = it.next().and_then(as_f64).unwrap_or(0.0);
+            // V14 is about the direction the glyph POINTS ON THE PAGE,
+            // which is the library body direction composed with the
+            // rotation — not the rotation alone. `power:VEE` is the one
+            // rail glyph the KiCad library draws pointing UP (its arrow
+            // runs to local +Y, same as the VCC chevron) while being a
+            // NEGATIVE rail that belongs with GND. Emitting it at rot 0
+            // therefore pointed it up, into the host body — visible in
+            // the `diff_pair` render as VEE's arrowhead inside `RTAIL`.
+            // Rot 180 is what makes VEE actually point down; see
+            // `rails::glyph_rotation`.
+            let want = if lib_id == "power:VEE" { 180.0 } else { 0.0 };
             assert!(
-                (rotation - 0.0).abs() < f64::EPSILON,
-                "{name}: power glyph {lib_id} rendered at rot {rotation}; V14 \
-                 requires rot 0 for GND (triangle down) / VCC (chevron up)",
+                (rotation - want).abs() < f64::EPSILON,
+                "{name}: power glyph {lib_id} rendered at rot {rotation}, want {want}; V14 \
+                 requires GND down / VCC up / VEE (negative rail) down on the page",
             );
         }
     }

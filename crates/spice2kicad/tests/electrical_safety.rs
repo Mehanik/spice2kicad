@@ -3082,6 +3082,8 @@ fn sheet_pin_positions(root: &Value) -> Vec<Pt> {
 fn no_dangling_whiskers_across_fixtures() {
     #[allow(clippy::cast_possible_truncation)]
     let qk = |p: Pt| ((p.0 * 1000.0).round() as i64, (p.1 * 1000.0).round() as i64);
+    #[allow(clippy::cast_precision_loss)]
+    let unq = |v: i64| v as f64 / 1000.0;
     let mut failures: Vec<String> = Vec::new();
     for name in SHEETS {
         let src = fixtures_dir().join(format!("{name}.cir"));
@@ -3120,8 +3122,8 @@ fn no_dangling_whiskers_across_fixtures() {
             if !on_interior {
                 failures.push(format!(
                     "{name}: wire end at ({:.2}, {:.2}) attaches to nothing",
-                    pt.0 as f64 / 1000.0,
-                    pt.1 as f64 / 1000.0,
+                    unq(pt.0),
+                    unq(pt.1),
                 ));
             }
         }
