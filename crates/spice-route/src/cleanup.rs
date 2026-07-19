@@ -103,35 +103,27 @@ fn try_merge(
     junctions: &[(f64, f64)],
     barriers: &dyn BarrierSet,
 ) -> Option<Segment> {
-    // The `(other_a - other_b).abs() > EPS` term in both arms below
-    // guards against a merge that collapses to nothing.
-    //
     // This function rewrites a matched pair as the span between their two
-    // *far* endpoints. When the two segments share an endpoint and are
-    // exact duplicates, those far endpoints coincide, so the "merge"
-    // produces a ZERO-LENGTH segment — which the following
-    // `drop_zero_length` deletes outright, taking the wire with it.
+    // *far* endpoints. That span equals the pair's union ONLY when the two
+    // segments abut end-to-end — i.e. they leave the shared point in
+    // OPPOSITE directions. In every other configuration the far-endpoint
+    // span is a set *difference*, not a union, and it silently deletes ink:
     //
-    // That is a Tier-0 defect, not a cosmetic one. It is exactly how the
-    // third leg of a 3-pin Steiner tree went missing whenever the Steiner
-    // point landed *on* one of the pins: the other two legs each emit
-    // their own identical copy of the drop to that pin, the pair
-    // collapses to nothing, and the pin is left with no wire at all — a
-    // silently split net. Regression test:
-    // `tests/steiner.rs::three_collinear_pins_with_steiner_on_a_pin_stay_connected`.
+    // * exact duplicates (both legs of a Steiner tree dropping to the same
+    //   pin, when the Steiner point lands *on* that pin) — the far
+    //   endpoints coincide, the "merge" is ZERO-LENGTH, `drop_zero_length`
+    //   deletes it, and the pin is left with no wire at all. Regression
+    //   test: `tests/steiner.rs::three_collinear_pins_with_steiner_on_a_pin_stay_connected`.
+    // * partial / nested overlap (`0→10` and `0→5` sharing x=0) — the
+    //   far-endpoint span is `5→10`, so the run `0→5` vanishes along with
+    //   the shared point itself, orphaning anything attached there.
     //
-    // Rejecting the pair is safe: `collapse_collinear_overlaps` runs next
-    // and folds genuine duplicates into their true interval union.
-    //
-    // NOTE (deliberately narrow): this rejects only the *degenerate*
-    // outcome. The far-endpoint rule is unsound for partially overlapping
-    // pairs too — it yields the set difference rather than the union,
-    // silently shortening the run — but those cases sever no net on any
-    // current fixture, and broadening the guard measurably perturbs the
-    // phase-4.5 orientation oracle (which trial-routes with this very
-    // code), shifting placements and surfacing unrelated latent router
-    // defects. Left as a follow-up; the union is the correct long-term
-    // rule.
+    // Both are Tier-0 connectivity defects. The `opposite_sides` test
+    // below rejects both by construction: a merge fires only for genuine
+    // end-to-end abutment, where far-endpoint span == union. Everything
+    // else is left to `collapse_collinear_overlaps`, which computes the
+    // true interval union split at every member endpoint and therefore
+    // preserves every attachment vertex.
     let a_horiz = (a.y1 - a.y2).abs() < EPS;
     let a_vert = (a.x1 - a.x2).abs() < EPS;
     let b_horiz = (b.y1 - b.y2).abs() < EPS;
@@ -146,7 +138,7 @@ fn try_merge(
             (a.x1, b.x2, a.x2, b.x1),
         ] {
             if (ax - bx).abs() < EPS
-                && (other_a - other_b).abs() > EPS
+                && opposite_sides(ax, other_a, other_b)
                 && !is_junction((ax, a.y1), junctions)
                 && !is_barrier((ax, a.y1), barriers)
             {
@@ -175,7 +167,7 @@ fn try_merge(
             (a.y1, b.y2, a.y2, b.y1),
         ] {
             if (ay - by).abs() < EPS
-                && (other_a - other_b).abs() > EPS
+                && opposite_sides(ay, other_a, other_b)
                 && !is_junction((a.x1, ay), junctions)
                 && !is_barrier((a.x1, ay), barriers)
             {
@@ -192,6 +184,22 @@ fn try_merge(
         }
     }
     None
+}
+
+/// True iff `far_a` and `far_b` lie strictly on OPPOSITE sides of the
+/// shared coordinate `shared`, along the merge axis.
+///
+/// This is the end-to-end abutment test that makes [`try_merge`]'s
+/// far-endpoint span equal the pair's set union. If both far endpoints
+/// sit on the same side, the segments overlap (or one nests inside the
+/// other, or they are duplicates) and the far-endpoint span would be a
+/// set *difference* — deleting the run between `shared` and the nearer
+/// far endpoint. If either far endpoint coincides with `shared`, that
+/// member is zero-length. All of those are rejected here.
+fn opposite_sides(shared: f64, far_a: f64, far_b: f64) -> bool {
+    let da = far_a - shared;
+    let db = far_b - shared;
+    da.abs() > EPS && db.abs() > EPS && (da > 0.0) != (db > 0.0)
 }
 
 fn is_junction(p: (f64, f64), junctions: &[(f64, f64)]) -> bool {
@@ -456,9 +464,49 @@ fn point_strictly_interior(s: &Segment, px: f64, py: f64) -> bool {
     }
 }
 
-/// Split every segment at any same-net segment endpoint lying in its
-/// **strict interior**, so that every attachment point is an endpoint of
-/// every segment passing through it.
+/// Every point where a vertical and a horizontal segment of the same net
+/// cross with the crossing point in the **strict interior of both** — a
+/// true same-net X-junction.
+///
+/// Such a point is invisible to the endpoint-based scan in
+/// [`split_at_interior_attachments`]: neither arm ends there, so there is
+/// no endpoint to split on, and KiCad's endpoint-only connection rule
+/// (`SCH_LINE::GetConnectionPoints`) therefore treats the two arms as
+/// *unconnected*. Crossing wires not connecting is correct behaviour for
+/// two different nets; within a single [`RoutedNet`] it is a split net.
+/// Feeding these points into the split loop makes all four arms terminate
+/// at the crossing, after which `add_connection_junctions` sees four rays
+/// and dots it.
+///
+/// Pointwise-identical ink: only the segmentation changes.
+fn perpendicular_crossings(segments: &[Segment]) -> Vec<(f64, f64)> {
+    let mut out = Vec::new();
+    for (i, a) in segments.iter().enumerate() {
+        for b in &segments[i + 1..] {
+            let a_vert = (a.x1 - a.x2).abs() < EPS && (a.y1 - a.y2).abs() > EPS;
+            let a_horiz = (a.y1 - a.y2).abs() < EPS && (a.x1 - a.x2).abs() > EPS;
+            let b_vert = (b.x1 - b.x2).abs() < EPS && (b.y1 - b.y2).abs() > EPS;
+            let b_horiz = (b.y1 - b.y2).abs() < EPS && (b.x1 - b.x2).abs() > EPS;
+            let (v, h) = if a_vert && b_horiz {
+                (a, b)
+            } else if a_horiz && b_vert {
+                (b, a)
+            } else {
+                continue;
+            };
+            let p = (v.x1, h.y1);
+            if point_strictly_interior(v, p.0, p.1) && point_strictly_interior(h, p.0, p.1) {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+/// Split every segment at any same-net segment endpoint — or same-net
+/// perpendicular crossing point — lying in its **strict interior**, so
+/// that every attachment point is an endpoint of every segment passing
+/// through it.
 ///
 /// This is a correctness normalisation, not a tidying pass. KiCad wires
 /// connect *only* at their endpoints — `SCH_LINE::GetConnectionPoints`
@@ -492,11 +540,12 @@ pub fn split_at_interior_attachments(routed: &mut [RoutedNet]) {
         // attachment on one of the halves. Bounded well above any real
         // net's segment count so a pathological input cannot spin.
         for _ in 0..64 {
-            let points: Vec<(f64, f64)> = net
+            let mut points: Vec<(f64, f64)> = net
                 .segments
                 .iter()
                 .flat_map(|s| [(s.x1, s.y1), (s.x2, s.y2)])
                 .collect();
+            points.extend(perpendicular_crossings(&net.segments));
             let mut split_any = false;
             let mut next: Vec<Segment> = Vec::with_capacity(net.segments.len());
             for seg in &net.segments {
