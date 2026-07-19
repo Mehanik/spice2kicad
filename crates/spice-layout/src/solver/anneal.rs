@@ -41,6 +41,7 @@ use crate::{
     GridPoint, PlacedElement, Placement,
     cost::{self, CostBreakdown, CostWeights},
     layers::LayerAssignment,
+    net_class::NetClass,
 };
 
 /// SA proposals between two cost-breakdown log lines.
@@ -150,6 +151,11 @@ pub(super) fn refine(
     // mirror-Y move only (see acceptance below). Tracked from the seed so
     // a flip can never make signal pins face away from their net.
     let mut current_misalignment = pin_outward_misalignment(&seed, checked);
+    // V6 / F3 signal-flow hard gate: the number of layer-order
+    // inversions must never *increase* across an accepted move. See
+    // `flow_inversions`.
+    let flow_pairs = flow_pairs(checked, layers);
+    let mut current_inversions = flow_inversions(&seed, &flow_pairs);
 
     let mut best = seed.clone();
     let mut best_cost = current_cost;
@@ -246,7 +252,17 @@ pub(super) fn refine(
             current_misalignment
         };
         let misalignment_ok = !is_mirror || trial_misalignment <= current_misalignment;
-        let accept = alive && coincidence_ok && overlap_ok && misalignment_ok;
+        // Signal-flow monotone gate. Evaluated last (it is the cheapest
+        // recount — a scan of the precomputed pair list) and only while
+        // the move is still alive, so it costs nothing on the moves the
+        // earlier filters already killed.
+        let trial_inversions = if alive && coincidence_ok && overlap_ok && misalignment_ok {
+            flow_inversions(&seed, &flow_pairs)
+        } else {
+            current_inversions
+        };
+        let flow_ok = trial_inversions <= current_inversions;
+        let accept = alive && coincidence_ok && overlap_ok && misalignment_ok && flow_ok;
 
         if accept {
             current_breakdown = trial_breakdown;
@@ -254,6 +270,7 @@ pub(super) fn refine(
             current_coincidences = trial_coincidences;
             current_overlaps = trial_overlaps;
             current_misalignment = trial_misalignment;
+            current_inversions = trial_inversions;
             if current_cost < best_cost {
                 best = seed.clone();
                 best_cost = current_cost;
@@ -643,6 +660,83 @@ fn pin_outward_misalignment(placement: &Placement, checked: &CheckedNetlist) -> 
     misaligned
 }
 
+/// The ordered element pairs the layer assignment says must run
+/// left→right: `(u, v)` sharing at least one Signal-class net with
+/// `layer(u) < layer(v)`. Pure function of the netlist and the layer
+/// assignment, so it is computed once before the anneal and the
+/// per-proposal gate is a cheap X comparison over this list.
+///
+/// **Rail stubs are excluded** (ADR-15's role model): a two-terminal
+/// element with exactly one rail pin does not pass a signal along, it
+/// *terminates* a node, and convention draws it as a vertical drop in
+/// that node's column — which is what `idioms::apply_rail_stub_columns`
+/// places it as. Its X is therefore owned by the column, not by the
+/// flow order, and holding it to a left→right ordering would fight the
+/// idiom for no readability gain (a collector load sits directly ABOVE
+/// its transistor, not to the right of it).
+fn flow_pairs(checked: &CheckedNetlist, layers: &LayerAssignment) -> Vec<(usize, usize)> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let classes = crate::net_class::classify_nets(checked);
+    if layers.layers.len() != checked.elements.len() {
+        return Vec::new();
+    }
+    let stubs: BTreeSet<usize> = crate::idioms::detect_rail_stubs(checked)
+        .into_iter()
+        .map(|s| s.element)
+        .collect();
+    let mut net_to_elements: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (i, el) in checked.elements.iter().enumerate() {
+        if stubs.contains(&i) {
+            continue;
+        }
+        for net in &el.nodes {
+            if classes
+                .get(net.as_str())
+                .copied()
+                .unwrap_or(NetClass::Signal)
+                == NetClass::Signal
+            {
+                net_to_elements.entry(net.as_str()).or_default().push(i);
+            }
+        }
+    }
+    let mut pairs: BTreeSet<(usize, usize)> = BTreeSet::new();
+    for members in net_to_elements.values() {
+        for &u in members {
+            for &v in members {
+                if u != v && layers.layers[u] < layers.layers[v] {
+                    pairs.insert((u, v));
+                }
+            }
+        }
+    }
+    pairs.into_iter().collect()
+}
+
+/// Count the flow pairs whose emitted X order is REVERSED — the placer-
+/// side measure of the F3 "signal flows left→right" property.
+///
+/// This is a **hard monotone gate** at the mover, never a cost term.
+/// `cost.rs` already carries a soft `layer_order` weight, and ADR-15
+/// found it simply outvoted: on `rc_lowpass_ports` it measured ~10² while
+/// HPWL and the crossing terms pulled the other way, so left→right flow
+/// did not survive refinement. Per CLAUDE.md's constraints-vs-costs rule
+/// a categorical yes/no property belongs at the candidate boundary, so a
+/// move that raises this count is force-rejected exactly like the V11
+/// coincidence and V6 overlap gates — the soft term stays as the
+/// tie-breaking gradient that pulls the count *down*.
+fn flow_inversions(placement: &Placement, pairs: &[(usize, usize)]) -> usize {
+    pairs
+        .iter()
+        .filter(|&&(u, v)| {
+            let (xu, _) = placement.elements[u].origin.to_mm();
+            let (xv, _) = placement.elements[v].origin.to_mm();
+            xu > xv
+        })
+        .count()
+}
+
 /// The orientation `el` *would* take under a reorienting proposal,
 /// without mutating anything. Non-reorienting proposals return the
 /// current orientation unchanged (the caller only consults this for
@@ -863,6 +957,71 @@ mod tests {
             is_power_source: false,
             power_rail: None,
         }
+    }
+
+    /// `flow_inversions` counts exactly the ordered pairs whose X order
+    /// is reversed — the quantity the SA gate holds monotone.
+    #[test]
+    fn flow_inversions_counts_reversed_pairs_only() {
+        let placement = Placement {
+            elements: vec![placed("R1", 0, 0), placed("R2", 10, 0), placed("R3", 5, 0)],
+        };
+        // R1 → R2 is in order; R2 → R3 is reversed; R1 → R3 is in order.
+        assert_eq!(flow_inversions(&placement, &[(0, 1)]), 0);
+        assert_eq!(flow_inversions(&placement, &[(1, 2)]), 1);
+        assert_eq!(flow_inversions(&placement, &[(0, 1), (1, 2), (0, 2)]), 1);
+    }
+
+    /// A rail stub terminates a node in that node's column, so it must
+    /// not appear in the flow-ordering pair set (ADR-15's role model);
+    /// a series element on the signal path must.
+    #[test]
+    fn flow_pairs_exclude_rail_stubs() {
+        use crate::layers::assign_x_layers;
+        use crate::net_class::classify_nets;
+        use kicad_symbols::Library;
+        use spice_diagnostics::FileId;
+        use spice_policy::check;
+
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let fixture_dir = manifest
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("workspace root")
+            .join("crates/kicad-symbols/tests/fixtures");
+        let library = Library::from_file(fixture_dir.join("Device.kicad_sym"))
+            .expect("load Device fixture library")
+            .merge(
+                Library::from_file(fixture_dir.join("Simulation_SPICE.kicad_sym"))
+                    .expect("load Simulation_SPICE fixture library"),
+            );
+        // R1 is a series element (`in` → `mid`, both Signal); C1 is a
+        // rail stub (`mid` → ground); R2 is a second series element.
+        let src = "test\nV1 in 0 AC 1\nR1 in mid 1k\nR2 mid out 1k\nC1 mid 0 1u\n.end\n";
+        let parsed = spice_parser::parse(src, FileId(0))
+            .expect("parse failed")
+            .netlist;
+        let resolved = spice_resolve::resolve(&parsed, &library).expect("resolve failed");
+        let (checked, _warns) = check(resolved).expect("policy check failed");
+        let classes = classify_nets(&checked);
+        let layers = assign_x_layers(&checked, &classes);
+        let idx = |refdes: &str| {
+            checked
+                .elements
+                .iter()
+                .position(|e| e.refdes == refdes)
+                .expect("element present")
+        };
+        let pairs = flow_pairs(&checked, &layers);
+        let c1 = idx("C1");
+        assert!(
+            pairs.iter().all(|&(u, v)| u != c1 && v != c1),
+            "rail stub C1 must not constrain the flow order: {pairs:?}"
+        );
+        assert!(
+            pairs.contains(&(idx("R1"), idx("R2"))),
+            "series pair R1 → R2 must constrain the flow order: {pairs:?}"
+        );
     }
 
     /// Two same-layer elements should be eligible for a Y-rank swap;

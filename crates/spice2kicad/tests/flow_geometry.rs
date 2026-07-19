@@ -26,6 +26,17 @@
 //! left of v's. An **inversion** is such a pair whose mean pin X is
 //! reversed (`x(u) > x(v)`). F3 is the inversion count.
 //!
+//! **Rail stubs take no part in it.** In ADR-15's role model a
+//! two-terminal element with exactly one rail pin does not pass a
+//! signal along — it *terminates* a node, and convention draws it as a
+//! vertical drop in that node's column, which is exactly where
+//! `idioms.rs` idiom 4 places it. Its X is owned by the column, not by
+//! the flow order: a collector load belongs directly ABOVE its
+//! transistor, and counting `Q1 → RC` as a left→right pair would score
+//! the conventional drawing as a defect. The discriminator is
+//! structural (pin count + rail-class pin count), never a refdes or an
+//! element kind.
+//!
 //! Deliberately NOT defined via `spice_layout::assign_x_layers`: the
 //! layer assignment is an *input* to placement and has its own defects
 //! (a `*@port …=output` used to push every element on the output net —
@@ -185,21 +196,44 @@ struct Fixture {
     ports: Vec<(String, PortDir)>,
     /// Element refdes → its SPICE nets.
     element_nets: Vec<(String, Vec<String>)>,
+    /// Nets carried by `power:*` glyphs rather than by signal wires:
+    /// SPICE ground, the canonical rail names, and every net touched by
+    /// a `*@power`-tagged source (which is how `named_rails`' `p5`/`n5`
+    /// become rails without matching any canonical name).
+    rail_nets: HashSet<String>,
     /// Root sheet s-expr.
     root: Value,
 }
 
-/// True for a net carried by `power:*` glyphs rather than by signal
-/// wires: SPICE ground plus the canonical rail names. Mirrors
-/// `spice_layout::net_class` closely enough for a flow verifier — a
-/// rail net is not part of the left→right signal path.
-fn is_rail_net(net: &str) -> bool {
+fn is_canonical_rail_name(net: &str) -> bool {
     let lo = net.to_ascii_lowercase();
     net == "0"
         || matches!(
             lo.as_str(),
             "gnd" | "vss" | "vee" | "v-" | "vminus" | "vcc" | "vdd" | "v+" | "vplus"
         )
+}
+
+impl Fixture {
+    fn is_rail_net(&self, net: &str) -> bool {
+        self.rail_nets.contains(net)
+    }
+
+    /// **Rail stub** in ADR-15's role model: a two-terminal element with
+    /// exactly one rail pin. It does not pass a signal along, it
+    /// *terminates* a node, and convention draws it as a vertical drop
+    /// in that node's column (`idioms.rs` idiom 4 places it there). Its
+    /// X therefore belongs to the column, not to the flow order — a
+    /// collector load sits directly ABOVE its transistor, not right of
+    /// it — so it takes no part in the F3 ordering.
+    fn is_rail_stub(&self, refdes: &str) -> bool {
+        let Some((_, nets)) = self.element_nets.iter().find(|(r, _)| r == refdes) else {
+            return false;
+        };
+        nets.len() == 2
+            && nets[0] != nets[1]
+            && nets.iter().filter(|n| self.is_rail_net(n)).count() == 1
+    }
 }
 
 fn load(name: &str) -> Fixture {
@@ -226,6 +260,16 @@ fn load(name: &str) -> Fixture {
         }
         by_refdes.insert(el.refdes.clone(), pairs);
         element_nets.push((el.refdes.clone(), el.nodes.clone()));
+    }
+
+    let mut rail_nets: HashSet<String> = HashSet::new();
+    for el in &resolved.elements {
+        let is_power_source = matches!(el.role, spice_resolve::ElementRole::Power(_));
+        for net in &el.nodes {
+            if is_power_source || is_canonical_rail_name(net) {
+                rail_nets.insert(net.clone());
+            }
+        }
     }
 
     let mut pins = Vec::new();
@@ -268,6 +312,7 @@ fn load(name: &str) -> Fixture {
         pins,
         ports,
         element_nets,
+        rail_nets,
         root,
     }
 }
@@ -312,8 +357,11 @@ fn f3_inversions(f: &Fixture) -> Vec<(String, String)> {
     // net → elements, signal nets only.
     let mut net_members: HashMap<&str, Vec<&str>> = HashMap::new();
     for (refdes, nets) in &f.element_nets {
+        if f.is_rail_stub(refdes) {
+            continue;
+        }
         for net in nets {
-            if is_rail_net(net) {
+            if f.is_rail_net(net) {
                 continue;
             }
             net_members
@@ -326,11 +374,12 @@ fn f3_inversions(f: &Fixture) -> Vec<(String, String)> {
     let elem_nets: HashMap<&str, Vec<&str>> = f
         .element_nets
         .iter()
+        .filter(|(r, _)| !f.is_rail_stub(r))
         .map(|(r, nets)| {
             (
                 r.as_str(),
                 nets.iter()
-                    .filter(|n| !is_rail_net(n))
+                    .filter(|n| !f.is_rail_net(n))
                     .map(String::as_str)
                     .collect(),
             )
@@ -473,16 +522,16 @@ fn f4_violations(f: &Fixture) -> Vec<String> {
 /// ever go **down**.
 const FLOW_RATCHET: &[(&str, usize, usize)] = &[
     // fixture                  F3  F4
-    ("rc_lowpass", 1, 0),
-    ("rc_lowpass_ports", 1, 1),
+    ("rc_lowpass", 0, 0),
+    ("rc_lowpass_ports", 0, 0),
     ("common_emitter", 0, 0),
     ("multivibrator", 0, 0),
     ("diff_pair", 0, 0),
     ("opamp_inverting", 0, 0),
     ("opamp_inverting_real", 0, 0),
-    ("port_shapes", 0, 1),
+    ("port_shapes", 0, 0),
     ("opamp_definition_level", 0, 0),
-    ("named_rails", 1, 0),
+    ("named_rails", 0, 0),
 ];
 
 #[test]

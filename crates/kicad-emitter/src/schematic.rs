@@ -2262,8 +2262,18 @@ pub(crate) fn label_specs(
         // A declared `*@port <net>=<dir>` renders exactly one directional
         // `(global_label … (shape …))` on the net, REPLACING whatever
         // plain / interface label the 1-pin/≥2-pin heuristic below would
-        // have chosen (V4: ≤ 1 label per net). Anchored at the leftmost
-        // body pin, body-clearing rotation like the interface case.
+        // have chosen (V4: ≤ 1 label per net).
+        //
+        // The anchor pin is chosen by DIRECTION, not by a fixed "first
+        // pin" rule: the terminal marks where the signal enters or
+        // leaves the sheet, so an `input` terminal belongs at the net's
+        // LEFTMOST pin and an `output` terminal at its RIGHTMOST
+        // (`uniq` is sorted by X, then Y). Anchoring an output terminal
+        // at the leftmost pin drew it *back inside* the circuit — the
+        // `rc_lowpass_ports` `out` marker landing left of the very
+        // resistor feeding it. `bidirectional` keeps the leftmost pin.
+        // Any pin on the net is an equally V11-correct anchor (foreign
+        // coords were filtered out above), so this is a free choice.
         if let Some(dir) = ports.get(net) {
             let obstacles: Vec<TextBbox> = property_bboxes
                 .iter()
@@ -2272,10 +2282,15 @@ pub(crate) fn label_specs(
                 .copied()
                 .collect();
             let shape = port_shape_token(*dir);
+            let (px, py, pang) = if matches!(dir, PortDir::Output) {
+                *uniq.last().expect("uniq is non-empty")
+            } else {
+                uniq[0]
+            };
             let rot = global_label_rotation_avoiding(
                 net,
-                (fx, fy),
-                label_rot(fang),
+                (px, py),
+                label_rot(pang),
                 shape,
                 &obstacles,
                 pin_texts,
@@ -2283,8 +2298,8 @@ pub(crate) fn label_specs(
             );
             out.push(LabelSpec {
                 net: net.clone(),
-                x: fx,
-                y: fy,
+                x: px,
+                y: py,
                 rot,
                 is_global: true,
                 shape,
