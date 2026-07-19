@@ -1,14 +1,4 @@
-//! **P10 / P11 — placement stability** (ADR-17 Stage 1).
-//!
-//! ADR-17's diagnosis is that the placer's defects are not individually
-//! wrong rules but one architectural property: *a constraint cannot be
-//! added without global, unattributable consequences.* Metropolis
-//! acceptance over a shared RNG stream means a change anywhere re-bases
-//! the whole layout, so a per-fixture ratchet — which assumes local,
-//! attributable effects — turns into a change-prevention machine.
-//!
-//! You cannot fix what you cannot measure, and neither half of that
-//! property had a verifier. These are the two.
+//! **P10 / P11 — placement stability.**
 //!
 //! # P10 — determinism
 //!
@@ -16,30 +6,48 @@
 //! output. This is the weaker half and it **already passes on master**:
 //! the SA is seeded deterministically, so the run-to-run variance ADR-17
 //! worried about does not exist. The ADR-17 design review expected this
-//! test to need `#[ignore]` until the SA retires at Stage 2; measurement
-//! says otherwise, so it lands live and guards the property from here on.
+//! test to need `#[ignore]` until the SA retired; measurement said
+//! otherwise, so it landed live and guards the property from here on.
 //!
 //! Note what it does NOT say. Determinism is reproducibility of *one*
-//! input, which is orthogonal to the sensitivity P11 measures: a
-//! chaotic map is perfectly deterministic and still re-bases globally
-//! on the smallest input change.
+//! input, which is orthogonal to sensitivity: a chaotic map is perfectly
+//! deterministic and still re-bases globally on the smallest input
+//! change.
 //!
-//! # P11 — basin locality
+//! # P11 — cache-path stability
 //!
-//! Adding ONE element to a netlist must move only the poses near it,
-//! not re-place the sheet. This is the property ADR-15 Stage 5 needed
-//! and did not have: shrinking one element's allowed orientation set
-//! perturbed the SA trajectory into a different basin, moving *every*
-//! element on `common_emitter` (R2 55.88 → 35.56, Q1 63.5 → 49.53, all
-//! seven power glyphs) and taking B from 4 to 11. That regression was
-//! only discovered by reading a `baseline_lock` diff after the fact.
-//! With P11 in the suite it would have been a named, failing assertion
-//! at the moment the change was made.
+//! P11 originally asserted **basin locality**: adding ONE element to a
+//! netlist must move only the poses near it. It was `#[ignore]`d with
+//! budgets of 0 against a measured blast radius of 5/5 and 17/17, on
+//! the theory (ADR-17) that the SA caused it and determinism would cure
+//! it.
 //!
-//! **`#[ignore]`d until ADR-17 Stage 3.** It cannot pass while the SA
-//! owns placement — that is precisely the finding it exists to record —
-//! and the budgets below are today's measured blast radius, not a
-//! target. Stage 3 un-ignores it and ratchets them down.
+//! **That theory is falsified, twice over, and the old P11 is deleted.**
+//! ADR-17 Stage 2 measured a deterministic order-preserving compaction
+//! at 5/5 and 16/17 — no better. The control that settles it is the bare
+//! deterministic seed (`--no-refine`: no SA, no compaction at all),
+//! which moves **17/17** on `common_emitter`+1C and **5/5** on
+//! `rc_lowpass`+1R — the same as the SA. Global re-basing is intrinsic
+//! to any *spacing-derived* placement: classify→bands→layers re-derives
+//! strides from global structure, so one insertion re-spaces its column
+//! and every coordinate derived after it. **Determinism is not
+//! locality**, and no budget-0 locality target is reachable by this
+//! architecture. Leaving such a target `#[ignore]`d in the suite was
+//! worse than deleting it. See ADR-17's RETIRED record.
+//!
+//! What replaces it is the property that is both *achievable* and the
+//! one users actually experience: **cache-path stability**. Convert a
+//! netlist; edit it (add an element); re-convert into the *same* output
+//! directory so the ADR-4 layout-cache sidecar is read. Every
+//! pre-existing user symbol must keep its exact pose, and the result
+//! must still pass the CLI's post-emit connectivity check. That makes an
+//! edit's schematic diff attributable to the edit — which was ADR-17's
+//! stated primary product, already delivered by the cache for the
+//! workflow that needs it.
+//!
+//! (Developers changing *placer code* can never get per-fixture locality
+//! from any spacing-derived algorithm; that workflow is governed by
+//! ADR-16's two-instrument protocol, not by this test.)
 
 mod common;
 
@@ -47,6 +55,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use common::text_model::{Bbox, Pt, TextKind, text_bbox};
+use kicad_symbols::{Orientation, Rotation};
 use lexpr::Value;
 
 fn fixtures_dir() -> PathBuf {
@@ -72,19 +82,32 @@ fn tempdir(name: &str) -> PathBuf {
 fn convert_no_cache(src: &Path, out_dir: &Path) -> PathBuf {
     let stem = src.file_stem().unwrap().to_string_lossy();
     let out = out_dir.join(format!("{stem}.kicad_sch"));
+    convert(src, &out, true);
+    out
+}
+
+/// Run the CLI. `no_cache` selects the `--no-layout-cache` opt-out; with
+/// it *off* the converter reads/writes `<basename>.layout.json` next to
+/// `out`, which is the ADR-4 path P11 exercises.
+///
+/// The process exit status is load-bearing: the CLI runs a post-emit
+/// connectivity check through `kicad-cli` by default and returns a
+/// non-zero status when the emitted schematic does not wire up the
+/// source netlist. Asserting success therefore *is* the connectivity
+/// assertion (vacuous only if `kicad-cli` is not installed).
+fn convert(src: &Path, out: &Path, no_cache: bool) {
     let bin = env!("CARGO_BIN_EXE_spice2kicad");
     let lib_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
         .expect("workspace root")
         .join("crates/kicad-symbols/tests/fixtures");
-    let status = Command::new(bin)
-        .arg(src)
+    let mut cmd = Command::new(bin);
+    cmd.arg(src)
         .arg("-t")
         .arg("schematic")
-        .arg("--no-layout-cache")
         .arg("-o")
-        .arg(&out)
+        .arg(out)
         .arg("-l")
         .arg(lib_dir.join("Device.kicad_sym"))
         .arg("-l")
@@ -92,11 +115,17 @@ fn convert_no_cache(src: &Path, out_dir: &Path) -> PathBuf {
         .arg("-l")
         .arg(lib_dir.join("Amplifier_Operational.kicad_sym"))
         .arg("-l")
-        .arg(lib_dir.join("power.kicad_sym"))
-        .status()
-        .expect("invoke spice2kicad");
-    assert!(status.success(), "spice2kicad exited with {status}");
-    out
+        .arg(lib_dir.join("power.kicad_sym"));
+    if no_cache {
+        cmd.arg("--no-layout-cache");
+    }
+    let status = cmd.status().expect("invoke spice2kicad");
+    assert!(
+        status.success(),
+        "spice2kicad exited with {status} converting {} \
+         (a non-zero status here is usually the post-emit connectivity check)",
+        src.display()
+    );
 }
 
 // --- P10 ------------------------------------------------------------------
@@ -141,42 +170,58 @@ fn conversion_is_byte_deterministic_across_fixtures() {
     );
 }
 
-// --- P11 ------------------------------------------------------------------
+// --- shared s-expression helpers -----------------------------------------
 
-/// `(refdes, x, y, rot, mirror)` for every placed symbol, keyed by
-/// refdes. Power glyphs are included on purpose: ADR-15's Stage-5
-/// basin shift moved all seven of `common_emitter`'s, and a locality
-/// metric that cannot see them would have scored that change clean.
-fn poses(sch: &Path) -> BTreeMap<String, (f64, f64, f64, bool)> {
-    fn list_iter(v: &Value) -> Box<dyn Iterator<Item = &Value> + '_> {
-        v.list_iter().map_or_else(
-            || Box::new(std::iter::empty()) as Box<dyn Iterator<Item = &Value>>,
-            |it| Box::new(it),
-        )
-    }
-    fn as_str(v: &Value) -> Option<&str> {
-        v.as_symbol()
-            .or_else(|| v.as_str())
-            .or_else(|| v.as_keyword())
-    }
-    fn as_f64(v: &Value) -> Option<f64> {
-        #[allow(clippy::cast_precision_loss)]
-        v.as_f64().or_else(|| v.as_i64().map(|i| i as f64))
-    }
-    fn head(v: &Value) -> Option<&str> {
-        list_iter(v).next().and_then(as_str)
-    }
-    fn children<'a>(v: &'a Value, name: &str) -> Vec<&'a Value> {
-        list_iter(v)
-            .filter(|c| c.is_list() && head(c) == Some(name))
-            .collect()
-    }
+fn list_iter(v: &Value) -> Box<dyn Iterator<Item = &Value> + '_> {
+    v.list_iter().map_or_else(
+        || Box::new(std::iter::empty()) as Box<dyn Iterator<Item = &Value>>,
+        |it| Box::new(it),
+    )
+}
 
-    let src = std::fs::read_to_string(sch).expect("read sch");
-    let root: Value = lexpr::from_str(&src).expect("parse sch");
+fn as_str(v: &Value) -> Option<&str> {
+    v.as_symbol()
+        .or_else(|| v.as_str())
+        .or_else(|| v.as_keyword())
+}
+
+fn as_f64(v: &Value) -> Option<f64> {
+    #[allow(clippy::cast_precision_loss)]
+    v.as_f64().or_else(|| v.as_i64().map(|i| i as f64))
+}
+
+fn head(v: &Value) -> Option<&str> {
+    list_iter(v).next().and_then(as_str)
+}
+
+fn children<'a>(v: &'a Value, name: &str) -> Vec<&'a Value> {
+    list_iter(v)
+        .filter(|c| c.is_list() && head(c) == Some(name))
+        .collect()
+}
+
+fn find_child<'a>(v: &'a Value, name: &str) -> Option<&'a Value> {
+    children(v, name).first().copied()
+}
+
+fn parse_sch(path: &Path) -> Value {
+    let src = std::fs::read_to_string(path).expect("read sch");
+    lexpr::from_str(&src).expect("parse sch")
+}
+
+/// A placed symbol's full pose *and* its library id.
+///
+/// The `lib_id` is part of the key on purpose: power glyphs are compared
+/// by geometry rather than by refdes (see [`glyph_poses`]), and a bare
+/// coordinate cannot tell a `power:GND` from a `power:PWR_FLAG` sitting
+/// on the same anchor.
+type Pose = (f64, f64, f64, bool, String);
+
+/// `refdes -> pose` for every placed symbol.
+fn poses(root: &Value) -> BTreeMap<String, Pose> {
     let mut out = BTreeMap::new();
-    for sym in children(&root, "symbol") {
-        let Some(at) = children(sym, "at").first().copied() else {
+    for sym in children(root, "symbol") {
+        let Some(at) = find_child(sym, "at") else {
             continue;
         };
         let mut it = list_iter(at);
@@ -185,10 +230,13 @@ fn poses(sch: &Path) -> BTreeMap<String, (f64, f64, f64, bool)> {
             continue;
         };
         let rotation = it.next().and_then(as_f64).unwrap_or(0.0);
-        let mirror = children(sym, "mirror")
-            .first()
+        let mirror = find_child(sym, "mirror")
             .and_then(|m| list_iter(m).nth(1).and_then(as_str))
             .is_some_and(|s| s == "y");
+        let lib_id = find_child(sym, "lib_id")
+            .and_then(|l| list_iter(l).nth(1).and_then(as_str))
+            .unwrap_or_default()
+            .to_owned();
         let mut refdes = None;
         for prop in children(sym, "property") {
             let mut pit = list_iter(prop);
@@ -199,109 +247,373 @@ fn poses(sch: &Path) -> BTreeMap<String, (f64, f64, f64, bool)> {
             }
         }
         if let Some(r) = refdes {
-            out.insert(r, (x, y, rotation, mirror));
+            out.insert(r, (x, y, rotation, mirror, lib_id));
         }
     }
     out
 }
 
-/// One P11 case: a base netlist, the same netlist with ONE element
-/// added, the refdes that are expected to move (the added element's own
-/// column/row neighbourhood), and the measured blast radius today.
-struct LocalityCase {
+/// True for the auto-generated power/flag glyph refdes (`#PWR…`,
+/// `#FLG…`). Everything else is a symbol the *user* wrote in the deck.
+fn is_glyph(refdes: &str) -> bool {
+    refdes.starts_with('#')
+}
+
+/// Poses of the power/ground glyphs, as a multiset keyed by geometry.
+///
+/// Load-bearing: glyph refdes are assigned by emission order, so
+/// inserting one new glyph renumbers every later one. Matching glyphs by
+/// refdes therefore reports "moved" for glyphs that did not budge —
+/// e.g. adding `CB` to `common_emitter` renumbers four of nine glyphs
+/// while all nine geometries are byte-identical. Compare geometry.
+///
+/// (The renumbering itself is a real, small, separately-fixable defect —
+/// a stable glyph-naming scheme keyed on host pin rather than emission
+/// order would remove it. This test pins the behaviour so that fix can
+/// be made deliberately.)
+fn glyph_poses(root: &Value) -> Vec<Pose> {
+    let mut v: Vec<Pose> = poses(root)
+        .into_iter()
+        .filter(|(r, _)| is_glyph(r))
+        .map(|(_, p)| p)
+        .collect();
+    v.sort_by(|a, b| a.partial_cmp(b).expect("no NaN in emitted coordinates"));
+    v
+}
+
+// --- geometry counters ----------------------------------------------------
+
+/// Fallback half-extent for a symbol whose library body cannot be
+/// measured — mirrors `electrical_safety.rs`.
+const SYM_HALF_MM: f64 = 2.54;
+
+fn load_test_library() -> kicad_symbols::Library {
+    use kicad_symbols::Library;
+    let libs_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root")
+        .join("crates/kicad-symbols/tests/fixtures");
+    let device =
+        Library::from_file(libs_dir.join("Device.kicad_sym")).expect("parse Device.kicad_sym");
+    let sim = Library::from_file(libs_dir.join("Simulation_SPICE.kicad_sym"))
+        .expect("parse Simulation_SPICE.kicad_sym");
+    let amp = Library::from_file(libs_dir.join("Amplifier_Operational.kicad_sym"))
+        .expect("parse Amplifier_Operational.kicad_sym");
+    let power =
+        Library::from_file(libs_dir.join("power.kicad_sym")).expect("parse power.kicad_sym");
+    device.merge(sim).merge(amp).merge(power)
+}
+
+/// Transform a symbol-local `LocalBbox` into the world frame — same
+/// convention as `electrical_safety.rs::body_bbox_to_world`.
+fn body_bbox_to_world(
+    local: kicad_symbols::LocalBbox,
+    origin_x: f64,
+    origin_y: f64,
+    rot_degrees: f64,
+    mirror_y: bool,
+) -> Bbox {
+    let rot_norm = rot_degrees.rem_euclid(360.0).round();
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let rot = rot_norm as u16;
+    let rotation = match rot {
+        90 => Rotation::R90,
+        180 => Rotation::R180,
+        270 => Rotation::R270,
+        _ => Rotation::R0,
+    };
+    let orient = Orientation { rotation, mirror_y };
+    let mut x0 = f64::INFINITY;
+    let mut y0 = f64::INFINITY;
+    let mut x1 = f64::NEG_INFINITY;
+    let mut y1 = f64::NEG_INFINITY;
+    for (lx, ly) in [
+        (local.x0, local.y0),
+        (local.x0, local.y1),
+        (local.x1, local.y0),
+        (local.x1, local.y1),
+    ] {
+        let (rx, ry) = orient.apply_point(lx, ly);
+        let (wx, wy) = (origin_x + rx, origin_y - ry);
+        x0 = x0.min(wx);
+        x1 = x1.max(wx);
+        y0 = y0.min(wy);
+        y1 = y1.max(wy);
+    }
+    Bbox { x0, y0, x1, y1 }
+}
+
+/// World-frame body boxes of the non-glyph symbols. Power glyphs sit ON
+/// a host pin by design (V10) and are not obstacles.
+fn placed_symbol_bboxes(root: &Value, library: &kicad_symbols::Library) -> Vec<(String, Bbox)> {
+    let mut out = Vec::new();
+    for (refdes, (x, y, rot, mirror, lib_id)) in poses(root) {
+        if is_glyph(&refdes) || lib_id.starts_with("power:") {
+            continue;
+        }
+        let bbox = library
+            .lookup(&lib_id)
+            .and_then(kicad_symbols::Symbol::body_bbox)
+            .map_or(
+                Bbox {
+                    x0: x - SYM_HALF_MM,
+                    y0: y - SYM_HALF_MM,
+                    x1: x + SYM_HALF_MM,
+                    y1: y + SYM_HALF_MM,
+                },
+                |local| body_bbox_to_world(local, x, y, rot, mirror),
+            );
+        out.push((refdes, bbox));
+    }
+    out
+}
+
+fn wire_segments(root: &Value) -> Vec<(Pt, Pt)> {
+    let mut out = Vec::new();
+    for w in children(root, "wire") {
+        let Some(pts) = find_child(w, "pts") else {
+            continue;
+        };
+        let xys: Vec<&Value> = list_iter(pts).filter(|c| head(c) == Some("xy")).collect();
+        if xys.len() < 2 {
+            continue;
+        }
+        let point = |v: &Value| -> Option<Pt> {
+            let mut it = list_iter(v);
+            it.next();
+            Some((it.next().and_then(as_f64)?, it.next().and_then(as_f64)?))
+        };
+        if let (Some(a), Some(b)) = (point(xys[0]), point(xys[1])) {
+            out.push((a, b));
+        }
+    }
+    out
+}
+
+/// Labels as `(text, anchor, rotation, kind)` — the input `text_bbox`
+/// needs. Mirrors `electrical_safety.rs::labels_with_kind`.
+fn labels_with_kind(root: &Value) -> Vec<(String, Pt, u16, TextKind)> {
+    let mut out = Vec::new();
+    for tag in ["label", "global_label"] {
+        for node in children(root, tag) {
+            let Some(name) = list_iter(node).nth(1).and_then(as_str) else {
+                continue;
+            };
+            let Some(at) = find_child(node, "at") else {
+                continue;
+            };
+            let mut it = list_iter(at);
+            it.next();
+            let (Some(x), Some(y)) = (it.next().and_then(as_f64), it.next().and_then(as_f64))
+            else {
+                continue;
+            };
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let rotation = it.next().and_then(as_f64).unwrap_or(0.0).rem_euclid(360.0) as u16;
+            let kind = if tag == "label" {
+                TextKind::PlainLabel
+            } else {
+                let shape =
+                    find_child(node, "shape").and_then(|s| list_iter(s).nth(1).and_then(as_str));
+                TextKind::global_label(shape)
+            };
+            out.push((name.to_owned(), (x, y), rotation, kind));
+        }
+    }
+    out
+}
+
+/// The three geometric quality counts P11 requires not to grow when a
+/// sheet is extended through the cache path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Metrics {
+    /// V12 — wire segments crossing a foreign symbol body.
+    v12_wire_body: usize,
+    /// V13 (part 1) — label text boxes overlapping a symbol body.
+    v13_label_body: usize,
+    /// Symbol bodies overlapping each other.
+    body_overlap: usize,
+}
+
+fn metrics(sch: &Path) -> Metrics {
+    let root = parse_sch(sch);
+    let library = load_test_library();
+    let bodies = placed_symbol_bboxes(&root, &library);
+    let wires = wire_segments(&root);
+
+    let v12_wire_body = bodies
+        .iter()
+        .map(|(_, b)| {
+            wires
+                .iter()
+                .filter(|(p, q)| b.intersects_segment(*p, *q))
+                .count()
+        })
+        .sum();
+
+    let v13_label_body = labels_with_kind(&root)
+        .iter()
+        .map(|(text, anchor, rot, kind)| {
+            let lb = text_bbox(text, *anchor, 1.27, *rot, *kind);
+            bodies.iter().filter(|(_, b)| lb.intersects(b)).count()
+        })
+        .sum();
+
+    let mut body_overlap = 0;
+    for i in 0..bodies.len() {
+        for j in (i + 1)..bodies.len() {
+            if bodies[i].1.intersects(&bodies[j].1) {
+                body_overlap += 1;
+            }
+        }
+    }
+
+    Metrics {
+        v12_wire_body,
+        v13_label_body,
+        body_overlap,
+    }
+}
+
+// --- P11 ------------------------------------------------------------------
+
+/// One P11 case: a fixture, and ONE element spliced into it.
+struct CacheCase {
     name: &'static str,
     base: &'static str,
     added: &'static str,
-    /// Refdes permitted to move: the added element plus its immediate
-    /// electrical neighbours. Anything else that moves is a basin shift.
-    local: &'static [&'static str],
-    /// Zero-slack ratchet: how many NON-`local` pre-existing symbols
-    /// move today. ADR-17 Stage 3 drives this to 0.
-    non_local_budget: usize,
+    /// Zero-slack ratchet: how many pre-existing *glyph* geometries fail
+    /// to survive the edit.
+    ///
+    /// `common_emitter` is 0 — every one of its nine glyphs keeps its
+    /// exact pose (four merely renumber). `rc_lowpass` is 2: adding
+    /// `C2`'s ground moves the `PWR_FLAG` to the new last ground pin and
+    /// re-offsets `C1`'s GND glyph. Both are *decoration* re-anchoring
+    /// around new neighbours, downstream of placement — the user symbols
+    /// do not move in either case. Recorded to pin it, and it ratchets
+    /// down only.
+    glyph_pose_budget: usize,
 }
 
-/// `rc_lowpass` + one series resistor, and `common_emitter` + one
-/// bypass capacitor — the two shapes ADR-17 Stage 3 must keep local.
-///
-/// **Measured blast radius on master** (run with `--ignored` to see it):
-/// `rc_lowpass_plus_r` moves 5 of the 5 pre-existing symbols;
-/// `common_emitter_plus_c` moves **17 of 17** — adding one capacitor
-/// re-places the entire sheet, power glyphs included. Nothing survives
-/// untouched in either case, so the "basin" is the whole page. That
-/// number is ADR-17's diagnosis stated as a measurement.
-///
-/// The budgets are 0 rather than 5/17 on purpose: this is a *target*
-/// for a test that does not run yet, not a ratchet on live behaviour.
-/// Recording 5/17 as a passing budget would enshrine the defect.
-const LOCALITY_CASES: &[LocalityCase] = &[
-    LocalityCase {
+const CACHE_CASES: &[CacheCase] = &[
+    CacheCase {
         name: "rc_lowpass_plus_r",
         base: "rc_lowpass",
         // A second series resistor splitting `out` into `out`/`mid`.
         added: "R2 out mid 1k\nC2 mid 0 100n\n",
-        local: &["R2", "C2"],
-        non_local_budget: 0,
+        glyph_pose_budget: 2,
     },
-    LocalityCase {
+    CacheCase {
         name: "common_emitter_plus_c",
         base: "common_emitter",
         // One more bypass capacitor on the existing `b` node.
         added: "CB b 0 10n\n",
-        local: &["CB"],
-        non_local_budget: 0,
+        glyph_pose_budget: 0,
     },
 ];
 
-/// **P11 — basin locality.** See the module doc.
+/// **P11 — cache-path stability.** See the module doc.
 ///
-/// `#[ignore]`d: it cannot pass while the SA owns placement. ADR-17
-/// Stage 3 replaces the SA with deterministic construction and
-/// un-ignores this test; the budgets below are the measured blast
-/// radius on master, recorded so Stage 3 has a floor to beat rather
-/// than a target to argue about.
+/// Editing a netlist and re-converting into the same output directory
+/// (so the ADR-4 layout-cache sidecar is read) must leave every
+/// pre-existing user symbol at its exact pose, must still pass the CLI's
+/// post-emit connectivity check, and must not make any measured
+/// geometric defect count worse than the base sheet's.
+///
+/// **Measured: 0 of 2 user symbols move on `rc_lowpass`+R2/C2, and 0 of
+/// 8 on `common_emitter`+CB** — with both conversions passing the
+/// connectivity check. This is the attributability property ADR-17 set
+/// out to deliver; the cache already delivers it.
 #[test]
-#[ignore = "ADR-17 Stage 1: records the SA's blast radius; un-ignore at Stage 3"]
-fn adding_one_element_moves_only_its_neighbourhood() {
+fn cache_path_keeps_pre_existing_symbols_in_place() {
     let mut failures = Vec::new();
-    for case in LOCALITY_CASES {
+    for case in CACHE_CASES {
         let base_src = fixtures_dir().join(format!("{}.cir", case.base));
         let text = std::fs::read_to_string(&base_src).expect("read base fixture");
-        // Splice the new element in ahead of the trailing directives, so
-        // the added line is a plain element in the same deck.
         let grown = text.replace(".end", &format!("{}\n.end", case.added));
         assert_ne!(grown, text, "{}: failed to splice element", case.name);
 
+        // ONE directory for both conversions: the sidecar written by the
+        // first run is what the second run reads. A fresh directory per
+        // run would silently measure the cache-less path instead.
         let dir = tempdir(case.name);
-        let grown_src = dir.join(format!("{}.cir", case.name));
-        std::fs::write(&grown_src, &grown).expect("write grown fixture");
+        let src = dir.join(format!("{}.cir", case.base));
+        let out = dir.join(format!("{}.kicad_sch", case.base));
 
-        let before = poses(&convert_no_cache(&base_src, &tempdir(case.name)));
-        let after = poses(&convert_no_cache(&grown_src, &tempdir(case.name)));
+        std::fs::copy(&base_src, &src).expect("copy base fixture");
+        convert(&src, &out, false);
+        let before = poses(&parse_sch(&out));
+        let before_glyphs = glyph_poses(&parse_sch(&out));
+        let before_metrics = metrics(&out);
 
+        // Edit the deck in place, then re-convert over the same output.
+        std::fs::write(&src, &grown).expect("write grown fixture");
+        convert(&src, &out, false);
+        let after = poses(&parse_sch(&out));
+        let after_glyphs = glyph_poses(&parse_sch(&out));
+        let after_metrics = metrics(&out);
+
+        // (1) No pre-existing USER symbol changes pose.
         let moved: Vec<&String> = before
             .iter()
+            .filter(|(r, _)| !is_glyph(r))
             .filter(|(r, p)| after.get(*r).is_none_or(|q| q != *p))
             .map(|(r, _)| r)
             .collect();
-        let non_local: Vec<&&String> = moved
-            .iter()
-            .filter(|r| !case.local.contains(&r.as_str()))
-            .collect();
-
-        if non_local.len() > case.non_local_budget {
+        if !moved.is_empty() {
             failures.push(format!(
-                "{}: adding `{}` moved {} pre-existing symbol(s) outside its neighbourhood \
-                 (budget {}): {non_local:?}",
+                "{}: adding `{}` moved {} pre-existing user symbol(s) through the layout \
+                 cache: {moved:?}",
                 case.name,
                 case.added.trim().replace('\n', "; "),
-                non_local.len(),
-                case.non_local_budget,
+                moved.len(),
             ));
+        }
+
+        // (2) Pre-existing glyph GEOMETRY survives, matched by pose and
+        //     lib_id rather than by refdes.
+        let lost = before_glyphs
+            .iter()
+            .filter(|p| !after_glyphs.contains(p))
+            .count();
+        if lost > case.glyph_pose_budget {
+            failures.push(format!(
+                "{}: {lost} pre-existing power-glyph pose(s) did not survive the edit \
+                 (budget {}); before={before_glyphs:?} after={after_glyphs:?}",
+                case.name, case.glyph_pose_budget,
+            ));
+        }
+
+        // (3) No geometric defect count grows on the extended sheet.
+        for (label, b, a) in [
+            (
+                "V12 wire↔body",
+                before_metrics.v12_wire_body,
+                after_metrics.v12_wire_body,
+            ),
+            (
+                "V13 label↔body",
+                before_metrics.v13_label_body,
+                after_metrics.v13_label_body,
+            ),
+            (
+                "symbol body overlap",
+                before_metrics.body_overlap,
+                after_metrics.body_overlap,
+            ),
+        ] {
+            if a > b {
+                failures.push(format!(
+                    "{}: {label} rose {b} → {a} on the grown sheet",
+                    case.name,
+                ));
+            }
         }
     }
     assert!(
         failures.is_empty(),
-        "P11: placement is not basin-local:\n{}",
+        "P11: the layout-cache path is not stable:\n{}",
         failures.join("\n")
     );
 }
