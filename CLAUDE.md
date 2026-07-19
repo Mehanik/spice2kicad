@@ -282,6 +282,24 @@ For full grammar, examples, and diagnostics, see
   before touching `cost.rs` weights, `idioms.rs`, or the flow gate in
   `solver/anneal.rs`; it records which of its stages are built, and
   which conventions were measured and rejected.
+
+  **ADR-17 supersedes ADR-15's end-state and is the current plan.**
+  It diagnoses the long-blocked flow-orientation and V14-glyph defects
+  as ONE property — *a constraint cannot be added to the SA without
+  global, unattributable consequences* — and replaces the SA with
+  deterministic constructive placement plus bounded router-verified
+  local repair. Status: proposed / owner-approved, staged, with
+  per-stage kill criteria; Stages 0 and 1 (this ADR + its verifiers) are
+  landed, Stage 2 onward are not. **Read ADR-17 before proposing any
+  placer change**, and in particular before adding a hard constraint or
+  a cost term — it records why the last three attempts to do so could
+  not be contained. It also carries the measured SA ablation (the SA
+  moves nothing on 4 of 10 fixtures, fixes zero crossings on all ten,
+  and on `rc_lowpass` ends worse than its own seed) and the corrected
+  V14 residual. ADR-15's role model, its verifiers-before-intervention
+  rule, and its "pinning is the only trivially-consistent hard
+  mechanism" observation all survive unchanged; its "SA as polisher"
+  prescription does not.
 - **Diagnostics.** Use `ariadne` for source-spanned error rendering.
   Every error/warning code in spec §7 should round-trip through
   `ariadne` with the offending line highlighted.

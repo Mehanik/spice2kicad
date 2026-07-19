@@ -1956,10 +1956,26 @@ fn glyph_body_bbox(library: &Library, sym: &Value) -> Option<(String, Bbox)> {
 /// See ADR-14 "Known scope limits".
 ///
 /// `opamp_inverting_real` remains **1**: its residual is a distinct
-/// defect class — a `power:PWR_FLAG` driver marker (`#FLG3` at
-/// (30.48,44.45), the VEE rail flag) clipping
-/// `RIN`, anchored on the opamp triangle `X1` (a sheet-port-flavoured
-/// overlap, ADR-14 "Risks": "may have a different cause … scope it out").
+/// defect class — a power glyph on a rail pin of the oversized opamp
+/// triangle `X1`, clipping a neighbouring resistor body (a
+/// sheet-port-flavoured overlap, ADR-14 "Risks": "may have a different
+/// cause … scope it out").
+///
+/// **Re-measured at ADR-17 Stage 1 — the previously recorded pair was
+/// stale.** This comment used to name `#FLG3` (a `power:PWR_FLAG` at
+/// (30.48, 44.45), the VEE rail flag) clipping `RIN`. That overlap no
+/// longer exists in emitted output: `#FLG3` now sits at (59.69, 77.47)
+/// and overlaps nothing. The live residual is:
+///
+/// > `#PWR1` (`power:GND`, at (46.99, 41.91) rot 0, bbox
+/// > 45.72..48.26 × 41.91..44.45) overlapping the body of **`RF`**
+/// > (47.244..49.276 × 41.910..46.990), host `X1`.
+///
+/// i.e. a GND glyph on the opamp's grounded `+` input pin clipping the
+/// FEEDBACK resistor — same fixture, same count, same class, different
+/// glyph kind and different victim. See ADR-17 § "Correction — the
+/// recorded V14 residual is stale".
+///
 /// The opamp's rail pins sit on the oversized `X1` body itself; reserving
 /// those crowded zones in the SA gate reshuffled the part into a
 /// `RIN`/glyph value-text V13 overlap — a within-Tier-1 sideways trade
@@ -1967,13 +1983,15 @@ fn glyph_body_bbox(library: &Library, sym: &Value) -> Option<(String, Bbox)> {
 /// *non-oversized* rail consumers, which fixes `common_emitter` while
 /// leaving the opamp layout (and its deferred residual) exactly as
 /// master. Driving this last residual to 0 needs the PWR_FLAG /
-/// host-on-oversized-body case, deferred to v0.2 (see ADR-14).
+/// host-on-oversized-body case. ADR-17 Stage 4 (complete decoration
+/// reservation) is where it is now expected to fall; ADR-17's Stage-4
+/// kill criterion covers the case where it does not.
 fn power_glyph_foreign_body_overlap_budget(fixture: &str) -> usize {
     match fixture {
-        // [3] deferred: a PWR_FLAG marker (#FLG3 at (30.48,44.45), the VEE
-        // rail flag) clipping RIN, anchored on the
-        // oversized opamp X1. Distinct from the (now-fixed) rail-consumer
-        // case; see ADR-14. Driven to 0 by a future v0.2 placement pass.
+        // [3] deferred: #PWR1 (power:GND at (46.99, 41.91)) clipping RF,
+        // hosted on the oversized opamp X1's grounded + input pin.
+        // Distinct from the (now-fixed) rail-consumer case; see ADR-14
+        // and ADR-17 Stage 4.
         "opamp_inverting_real" => 1,
         _ => 0,
     }

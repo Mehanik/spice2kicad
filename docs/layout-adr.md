@@ -1826,6 +1826,463 @@ counts unmoved on every fixture.
 
 ---
 
+## ADR-17 — Deterministic constructive placement with router-verified local repair
+
+**Status: proposed / owner-approved, staged.** Building ADR-17 is
+APPROVED by the project owner. It is staged with per-stage kill criteria
+(below), and each stage's escape-list is brought for sign-off **in
+advance of that stage**, not retroactively.
+
+**Supersedes** ADR-15's "SA as polisher" *end-state*.
+
+It also **reverses ADR-15's decision to leave the pose-assignment
+mechanism with the annealer.** ADR-15 named the right mechanism —
+"constructive assignment + the `pinned` mask, not cost terms" — and then
+did not build it: its Stage 3 is recorded NOT LANDED, and its own
+corrections section records that idiom 4 "does not pin, and does not set
+the stub's side … the mask half of the decision is unbuilt". Every pose
+decision therefore still resolves inside the SA. ADR-17 moves that
+decision out of the optimizer and into a deterministic construction.
+(Note for the record: this is a reversal of ADR-15's *as-built
+disposition*, which its corrections section states plainly; ADR-15 never
+used the phrase "discrete assignment solver" and no such component was
+ever specified or deferred by name.)
+
+---
+
+### Diagnosis — the two blocked defect classes are one defect
+
+Two things have been stuck for several sessions:
+
+1. **Flow orientation.** `common_emitter`'s `COUT` is drawn vertical
+   where it should be horizontal; `rc_lowpass_ports` emits its `in` and
+   `out` global labels at **identical x = 41.91**, input below and
+   output above, so the sheet shows no left→right flow at all. (Both
+   verified against a fresh cache-less conversion at `6c28b72`.)
+2. **The V14 glyph residual** on `opamp_inverting_real` — see the
+   correction below for what it actually is.
+
+They are not two problems. They are one architectural property:
+
+> **A constraint cannot be added to the SA without global,
+> unattributable consequences.**
+
+The codebase already documents itself fighting this, in five places
+that were each written as a local workaround:
+
+- `anneal.rs`'s **RNG-stream-preservation machinery** (`:196`, `:847`,
+  both commented "the RNG stream stays byte-identical to the pre-…")
+  — deliberate care to keep the random stream identical so unrelated
+  fixtures don't move.
+- `anneal.rs`'s **`gates_active` switch** (`:101`), which switches the
+  V11 gate off entirely when `mirror_eligible` is empty, so the gate
+  does not perturb all-passive fixtures it has nothing to say about.
+- **`mirror_eligible` scoping** (`anneal.rs:88`), narrowing which
+  elements the mirror move may touch.
+- **ADR-14's glyph reservation, shipped deliberately incomplete** — the
+  reservation is hard only for oversized-involving pairs in the SA gate
+  and X-only at the seed stride, because widening it "risks reshuffling
+  layouts".
+- **Legalization moved from before the SA to after it** (`lib.rs`, the
+  long comment above `legalize_if_needed`), for exactly this reason and
+  stated in exactly these terms: legalizing the *seed* "perturb[ed] the
+  SA's starting point, sending it down a different trajectory", which on
+  `common_emitter` cost a **Tier-0 V11 short** plus three Tier-1
+  invariants "in exchange for one Tier-2 crossing". The fix was not to
+  make legalization better — it was to move it somewhere the SA could
+  not amplify it. That is the clearest statement in the tree of the
+  problem this ADR names, and it was written as a local workaround.
+
+Every hard constraint that has landed needed a bespoke blast-radius
+hack. The two that could not be contained are exactly the two that are
+stuck. That is not a coincidence; it is the pattern.
+
+**The measurement.** P11 (`placement_stability.rs`, ADR-17 Stage 1)
+states the property as a number: adding **one** bypass capacitor to
+`common_emitter` moves **17 of 17** pre-existing symbols, power glyphs
+included. Adding one series resistor to `rc_lowpass` moves 5 of 5. The
+"basin" is the whole page.
+
+### Governance consequence
+
+Zero-slack per-fixture ratchets (CLAUDE.md § "Budgets are ratchets, not
+knobs") assume changes have **local, attributable effects**. Metropolis
+acceptance over a shared RNG stream **guarantees they do not**. The
+ratchet regime and a chaotic optimizer are, jointly, a
+change-prevention machine — which is precisely the "local-optimum
+freeze" CLAUDE.md already documents under the global-improvement
+escape.
+
+Neither half is wrong on its own. The ratchets are correct policy; the
+SA is a reasonable optimizer. The combination is what blocks work.
+
+**The redesign's primary product is therefore not a prettier layout. It
+is that a change's diff becomes attributable to the change.** Every
+other benefit is downstream of that.
+
+### Correction — the recorded V14 residual is stale
+
+The record (CLAUDE.md, ADR-14, and the budget comment at
+`crates/spice2kicad/tests/placement_quality.rs`
+`power_glyph_foreign_body_overlap_budget`) says the `opamp_inverting_real`
+residual is *"a `power:PWR_FLAG` driver marker (`#FLG3` at
+(30.48, 44.45), the VEE rail flag) clipping `RIN`"*.
+
+**That no longer exists in emitted output.** Measured at `6c28b72` on a
+fresh cache-less conversion: `#FLG3` is at **(59.69, 77.47)** and
+overlaps nothing. The live residual is:
+
+> `#PWR1` (`power:GND`, at `(46.99, 41.91)` rot 0, bbox
+> `45.72 .. 48.26 × 41.91 .. 44.45`) overlapping the body of **`RF`**
+> (`47.244 .. 49.276 × 41.910 .. 46.990`), with host `X1`.
+
+A **GND glyph on the oversized opamp's grounded `+` input pin, clipping
+the feedback resistor.** Still one overlap, still on the same fixture,
+still Tier 1 — but a different pair, a different glyph *kind*
+(`power:GND`, not `PWR_FLAG`), and a different victim. The stale comment
+has been refreshed in the same commit as this ADR's Stage 1.
+
+The class description in ADR-14 ("anchored on the oversized opamp
+triangle, sheet-port-flavoured") survives the correction; the specific
+coordinates and refdes did not.
+
+### The SA ablation
+
+All ten fixtures converted twice, once normally and once with the
+stage-3 force-directed + simulated-annealing refinement disabled, and
+diffed. The flag is **`--no-refine`** (`crates/spice2kicad/src/main.rs`,
+`refine: !cli.no_refine`) — note it disables the FR seed + SA, *not*
+phase 4.5, which lives in `kicad-emitter` and still runs in both arms.
+
+Reproduce with:
+
+```sh
+L="--lib crates/kicad-symbols/tests/fixtures/Device.kicad_sym \
+   --lib crates/kicad-symbols/tests/fixtures/Simulation_SPICE.kicad_sym \
+   --lib crates/kicad-symbols/tests/fixtures/Amplifier_Operational.kicad_sym \
+   --lib crates/kicad-symbols/tests/fixtures/power.kicad_sym"
+for f in crates/spice2kicad/tests/fixtures/*.cir; do
+  n=$(basename "$f" .cir)
+  bash -c "ulimit -v 4194304 && cargo run -q -p spice2kicad -- $f            -o /tmp/sa_on/$n.kicad_sch  $L"
+  bash -c "ulimit -v 4194304 && cargo run -q -p spice2kicad -- $f --no-refine -o /tmp/sa_off/$n.kicad_sch $L"
+done
+```
+
+(Fresh output directories are load-bearing: re-converting into a used
+directory pins every element via the layout cache.)
+
+Poses moved = non-power symbols whose `(x, y, rot, mirror)` differs
+between the two arms. `B` is the V16 ink-graph bend count
+(`wire_geometry.rs`); `X` is the inter-net crossing count; `WL` is total
+wire length in mm over maximal runs.
+
+| Fixture | poses moved | B on/off | X on/off | WL mm on/off |
+| ------- | ----------- | -------- | -------- | ------------ |
+| `common_emitter` | 8/8 | 4 / 11 | 0 / 0 | 95.3 / 121.9 |
+| `diff_pair` | 0/5 | 2 / 2 | 0 / 0 | 24.1 / 24.1 |
+| `multivibrator` | 0/8 | 10 / 10 | 4 / 4 | 184.2 / 184.2 |
+| `named_rails` | 4/4 | 2 / 4 | 0 / 0 | 22.9 / 35.6 |
+| `opamp_definition_level` | 0/6 | 12 / 12 | 6 / 6 | 152.4 / 152.4 |
+| `opamp_inverting` | 2/2 | 3 / 5 | 0 / 0 | 33.0 / 86.4 |
+| `opamp_inverting_real` | 3/3 | 8 / 6 | 0 / 0 | 54.6 / 88.9 |
+| `port_shapes` | 0/4 | 4 / 4 | 0 / 0 | 64.8 / 64.8 |
+| `rc_lowpass` | 2/2 | 3 / 2 | 0 / 0 | 17.8 / 11.4 |
+| `rc_lowpass_ports` | 2/2 | 2 / 2 | 0 / 0 | 8.9 / 11.4 |
+
+(The SA-on `B` column reproduces `BEND_BRANCH_BUDGETS` in
+`wire_geometry.rs` exactly on all nine ratcheted fixtures, which
+validates the measurement.)
+
+The table covers root sheets only. `opamp_inverting`'s hierarchical
+child sheet `OPAMP.kicad_sch` behaves the same way and is worth
+recording separately: 1/1 pose moved, B 5/5, WL 104.1 / 146.0 — and
+X **2 with the SA on versus 1 with it off**. On that sheet the SA
+*introduces* a crossing while shortening wire, a second instance of
+conclusion (c) below.
+
+**Three conclusions:**
+
+**(a) On FOUR of ten fixtures the SA moves nothing at all** —
+`diff_pair`, `multivibrator`, `opamp_definition_level`, `port_shapes`.
+Every ink metric is bit-identical with it switched off.
+
+**(b) Where it does act, its entire measurable value is COMPACTION.**
+It fixes **zero** crossings on all ten fixtures — `X` is identical in
+both arms everywhere, including the two fixtures that have crossings to
+fix. What it does is shorten wire: 121.9 → 95.3 mm, 86.4 → 33.0,
+88.9 → 54.6. That is worth having, and it is *deterministic work being
+done by a stochastic process*.
+
+**(c) On `rc_lowpass` the SA's output is WORSE than the raw seed** —
+B 3 vs 2 and WL 17.8 vs 11.4 mm — and on the `OPAMP` child sheet it
+adds a crossing (X 1 → 2). The polish can anti-polish. A
+~200-iteration Metropolis walk with no acceptance gate on the output
+metrics has no obligation to end better than it started, and on one
+fixture in ten it doesn't.
+
+An optimizer that is inert on 40% of inputs, fixes none of the defect
+class it is credited with, actively regresses 10%, and costs global
+attributability on 100% is not earning its coupling.
+
+### The design
+
+The pipeline becomes:
+
+1. **classify** — net classes, as today.
+2. **flow graph** — BFS depth from the input-terminal nets. The feedback
+   edges that `break_cycles` (`layers.rs:258`) identifies are carried
+   through **marked exempt**, rather than silently *reversed* as they are
+   today: a feedback resistor must be excused from the flow ordering, not
+   asserted to run backwards. When a netlist declares no input net, fall
+   back to the existing layering (`layers.rs::no_source_fallback`).
+3. **role assignment** — ADR-15's **anchor / series / rail-stub /
+   terminal** roles. ADR-15 Stage 5 **VALIDATED** this: the structural
+   discriminator worked perfectly, putting `COUT` horizontal and the
+   bypass `CE` vertical **from pin roles alone**, with no element-kind
+   or refdes test. The role model is not in question; only what consumes
+   it is.
+4. **columns, with COMPLETE decoration reservation** — every column
+   reserves the space its decoration will occupy: power-glyph body *and*
+   value text, labels, stubs. ADR-14 reserved a subset; this reserves
+   the rest.
+5. **net lines** — the row/column tracks nets will run on.
+6. **joint pose assignment** — **position, orientation AND mirror
+   emitted together from ONE datum: the element's flow position.**
+7. **user `align` / `place` + V7 symmetry + sidecar** — applied over the
+   construction, as today.
+8. **deterministic order-preserving compaction** — the SA's one real
+   job, done deterministically and without reordering.
+9. **legalize** — as today.
+10. **generalized router-verified repair** — phase 4.5, promoted (see
+    below).
+11. **decoration** — unchanged, still a strict consumer.
+
+**The key rationale, and the reason this is not just another optimizer.**
+Orientation and position are coupled — that is what ADR-15 Stage 5
+proved when filtering one element's orientation set moved every element
+on the sheet. But they are coupled *through the optimizer*. The naive
+reading of Stage 5's finding is "we need a joint optimizer over position
+and orientation", which is a **bigger SA** and makes every problem above
+worse. The correct reading is the opposite:
+
+> Emit position, orientation and mirror from **one deterministic
+> construction** over the same structural facts, so **there is no
+> optimizer for the coupling to flow through.**
+
+Separability was never the question. The question is whether the
+coupling is resolved by *search* (where it propagates globally and
+unattributably) or by *construction* (where it is resolved once, locally,
+by a rule you can read).
+
+**Why sequential phases are still safe here.** The obvious objection is
+that steps 7–10 are exactly the "later phase undoes earlier phase"
+failure ADR-15 Stage 5 hit. They are not, because every phase after step
+6 is **LOCAL and MONOTONE**: compaction preserves order and only removes
+slack; legalization only separates overlapping pairs; repair touches
+only measured offenders and only within a bounded neighbourhood. None of
+them re-bases. That is the property being bought, and Stage 3's kill
+criterion is what tests whether it was actually bought.
+
+**Phase 4.5 survives and is PROMOTED.** ADR-11's core insight is
+untouched and confirmed by everything above: a V5 violation is born in
+the router's conflict-resolution passes and is invisible to any
+placement-side cost, so the real router must remain the oracle. What
+changes is scope. Its current contract — *"orientation only, never
+position"* — relaxes to:
+
+> **bounded local pose repair, offenders only, before decoration.**
+
+Concretely: orientation candidates as today, plus slot shifts of at most
+±2 cells, applied only to elements the router reports as offenders,
+still gated by no V11 / V12 / V13 / overlap / V16 regression, still
+strictly before decoration begins. Decoration's contract (a strict
+consumer that never feeds position back) is unchanged.
+
+**CLAUDE.md's layout-phase list will need amending when Stage 5 lands**
+— phase 4.5's "changes element *orientation* only, never position"
+sentence becomes the bounded-local-pose-repair wording above. That
+amendment is **not made now**; it is made by the Stage 5 commit, if
+Stage 5 lands.
+
+### Honesty check
+
+This must be recorded, because the redesign is large and the honest
+case for it is narrower than its size suggests.
+
+**Both Item-1 defects could be fixed TODAY, at zero risk, with hand
+`*@place` / `*@align` annotations.** That is the annotation spec's
+designed escape hatch (CLAUDE.md principle 9: "The escape hatch when
+heuristics fail is `*@place` / `*@align` — already in v0.1"). A user who
+hits either defect has a working, supported answer right now.
+
+The redesign is therefore justified by exactly two things, and nothing
+else:
+
+- the **zero-annotation quality bar**. Note this is an aspiration, not
+  a stated contract: CLAUDE.md principle 2 sets the floor at "a valid
+  (if ugly) schematic", which today's output already clears. The case
+  for ADR-17 is that "ugly but valid" is the right floor for v0.1 and
+  the wrong ceiling for the project — an unannotated netlist should
+  read as a circuit diagram. Anyone weighing this ADR's cost should
+  weigh it against *that*, not against a rule it violates; and
+- **unblocking all future Tier-2 readability work**, which is currently
+  gated behind the attributability problem rather than behind any
+  individual rule.
+
+**Item 2 (the glyph residual) does NOT justify the redesign.** It rides
+along because Stage 4's complete decoration reservation is likely to
+clear it for free. It has a narrow decoration-side plan B, and under the
+Stage-4 kill criterion it is never allowed to hold Item 1 hostage.
+
+### What ADR-15 got wrong
+
+Recorded by ADR-15's own author, re-reading it against the measurements
+above. Three of its judgements were wrong:
+
+1. **"Demote the SA to a polisher" was wrong AS AN END-STATE.** A
+   polisher that re-basins globally under any constraint change is not a
+   polisher, it is a **coupling amplifier** — it converts every local
+   edit into a global diff. And the ablation shows what the polishing
+   actually is: compaction. Deterministic work misassigned to a
+   stochastic process. (ADR-15's *diagnosis* of the cost function was
+   correct and stands; only the prescription was wrong.)
+
+2. **Stage 5 was MIS-DESIGNED, not unlucky.** ADR-15's Stage-5
+   post-mortem reads the failure as "the flow proxy and measured routing
+   quality genuinely disagree". That is true but secondary. The design
+   error is upstream: **filtering the orientation candidate set treats
+   orientation as separable from position.** Finding 2 of that same
+   post-mortem — the global SA basin shift, where every element moved —
+   **disproves the separability the mechanism assumed.** The post-mortem
+   recorded the disproof and did not draw the conclusion.
+
+3. **The headline consequence was only HALF-DELIVERED.** ADR-15 states
+   the mechanism as "constructive assignment + the `pinned` mask, not
+   cost terms". As built, `idioms.rs::apply_rail_stub_columns` takes
+   `pinned` **immutably**, mutates **X only**, and leaves the stub's
+   **side** to the soft `cost::rail_direction` term — because pinning
+   the side would have perturbed the SA elsewhere. The `pinned` half,
+   the half that carries the hardness guarantee, was never built. Note
+   the reason: *it was blocked by the blast-radius problem this ADR
+   exists to fix.*
+
+**What ADR-15 got RIGHT, and ADR-17 keeps unchanged:**
+
+- **the role model** (anchor / series / rail-stub / terminal, derived
+  from pin counts, pin angles and net classes only) — validated by
+  Stage 5's discriminator and carried forward intact;
+- **verifiers before intervention** — measure first, then change; this
+  ADR's Stage 1 is that rule applied to itself;
+- **pinning as the only trivially-consistent hard mechanism** — the
+  observation that a hard constraint must be hard at *every* stage that
+  can move an element, and that a mask is the only cheap way to achieve
+  that.
+
+### Staging
+
+| Stage | Content | Status |
+| ----- | ------- | ------ |
+| 0 | This ADR; owner sign-off | **LANDED** |
+| 1 | Verifiers (F5/P4, P5, P10, P11); no behaviour change | **LANDED** |
+| 2 | Deterministic order-preserving compaction; SA retirement | not started |
+| 3 | Joint flow-pose construction (position + orientation + mirror) | not started |
+| 4 | Complete decoration reservation | not started |
+| 5 | Generalized router-verified local repair (phase 4.5 promoted) | not started |
+| 6 | Consolidation; delete the superseded machinery | not started |
+
+### Kill criteria
+
+Stated as **measurements, not judgement calls**. Each is evaluated at
+the end of its stage, against the fixture suite.
+
+- **Stage 2 kill.** If deterministic compaction cannot reach `≤` the
+  current `(WL, B)` **per fixture** using **at most TWO** escape
+  requests, or if **any** Tier-0 or Tier-1 count rises — the SA stays,
+  and the redesign **halts**. Record the outcome as: *"the wall's true
+  name is the SA, and we chose to keep it."*
+
+- **Stage 3 kill.** If `Σ(V12 + V13)` summed across all fixtures is
+  `> 0` after repair, the **positional hypothesis is FALSIFIED** —
+  revert Stage 3, keep the Stage-1 verifiers at their newly measured
+  floors, and **close the flow question permanently**. Do **not** iterate
+  past **two** falsifying rounds; a third round is tuning, not
+  hypothesis-testing.
+
+- **Stage 4 kill.** If completing the decoration reservation cannot
+  clear the glyph overlap, fall back to the decoration-side plan B for
+  **Item 2 only**. Item 2 must not hold Item 1 hostage, and Stage 4
+  failing does not stop Stages 5–6.
+
+- **Stage 5 kill.** If the generalized repair exceeds `MAX_COMBINATIONS`
+  or oscillates (a pose repaired and re-repaired across rounds), keep
+  **orientation-only** repair and ship Stage 5 reduced to today's
+  phase 4.5 scope.
+
+### Owner decisions
+
+- **Building ADR-17 is APPROVED.**
+- **The Stage-3 doctrine amendment — a within-Tier-2 precedence order of
+  F5 flow > V5 pin-facing > V16 bends — is DEFERRED to Stage 3 by the
+  owner. It is NOT approved.** It is recorded here as an **open decision
+  that Stage 3 must obtain sign-off for before relying on it.** Stage 3
+  may not assume it; if Stage 3 needs it, Stage 3 asks.
+- **Escape lists for Stages 2, 3 and 5 are brought for sign-off in
+  advance, per stage.** A stage may not discover its escapes while
+  landing.
+
+### Stage 1 — what landed, and what it measured
+
+Four verifiers, all at today's measured (defective) counts with zero
+slack, no placer behaviour changed:
+
+- **F5 / P4** (`flow_geometry.rs`) — series-signal elements horizontal,
+  upstream pin at lower X. Series = 2-terminal, non-`Power` role,
+  NEITHER node rail-class; recomputed in the test from the netlist, per
+  the F3 precedent, so it can falsify the crate rather than restate it.
+  Guarded by
+  `series_discriminator_separates_stub_from_series_on_common_emitter`,
+  which asserts the bypass cap `CE` is classified **non**-series and
+  stays **vertical** — without it, F5 degenerates into a demand that
+  every two-terminal part be drawn sideways (ADR-15's "capacitors are
+  horizontal is WRONG" trap).
+
+  **Measured total: 16, not the 2 the design review expected.** The
+  defect is systemic: `rc_lowpass` 1, `rc_lowpass_ports` 1,
+  `common_emitter` 1, `multivibrator` 2, `diff_pair` 0,
+  `opamp_inverting` 2, `opamp_inverting_real` 1, `port_shapes` 3,
+  `opamp_definition_level` 4, `named_rails` 1. Only `diff_pair` — which
+  contains no series element at all — is clean by construction.
+  `rc_lowpass` is the instructive case: R1 *is* horizontal and still
+  fails, on **direction** (upstream `in` pin at x = 54.61, right of the
+  downstream `out` pin at x = 46.99) — the "axis is only half the
+  constraint" mode ADR-15 Stage 5 identified but never measured.
+
+- **P5** (`flow_geometry.rs`) — every declared input terminal strictly
+  left of every declared output terminal. Measured 1, on
+  `rc_lowpass_ports` (both at x = 41.91). F4 pins each terminal to the
+  correct end of *its own* net; P5 is the sheet-wide statement F4 cannot
+  make.
+
+- **P10** (`placement_stability.rs`) — two cache-less conversions
+  byte-identical. **Landed LIVE, not `#[ignore]`d.** The ADR-17 design
+  review expected this to be un-ignorable only after the SA retires at
+  Stage 2; measurement says the
+  SA is seeded deterministically and all ten fixtures already round-trip
+  byte-identically today. Determinism is orthogonal to the sensitivity
+  P11 measures — a chaotic map is perfectly deterministic and still
+  re-bases globally on the smallest input change.
+
+- **P11** (`placement_stability.rs`) — adding ONE element to a netlist
+  moves poses only in the affected neighbourhood. `#[ignore]`d until
+  Stage 3, budgets at 0 (a target for a test that does not run, not a
+  ratchet on live behaviour — recording 5/17 as passing would enshrine
+  the defect). **This is the test ADR-15 Stage 5 needed and did not
+  have:** Stage 5's fatal basin shift was found by reading a
+  `baseline_lock` diff after the fact; with P11 in the suite it would
+  have been a named, failing assertion at the moment of the change.
+
+---
+
 ## What we are not deciding now
 
 - ~~Sidecar file format (JSON vs TOML vs custom). Pick during
