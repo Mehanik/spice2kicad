@@ -944,6 +944,77 @@ is wide enough to exceed the 3.81 mm floor, so this half is expected to
 move layouts and trip ratchets — it should come back as an escape
 request with numbers, never assumed free.
 
+**Attempt (2026-07-20) — label text IS computable pre-routing; NOT
+LANDED, per-consumer measurement below.** Built and measured on branch
+`wip/label-reservation` (`spice-layout/src/label_geom.rs`). Do not
+re-derive this; read the table.
+
+*The architectural question is answered: yes, and no new crate is
+needed.* Every input to a label's identity is netlist data, not routed
+geometry — which nets get one (V4: signal nets only, from
+`net_class`), what kind (declared `*@port` → directional
+`global_label`; single body terminal → interface `global_label`;
+otherwise plain `label`), the text (the net name), and the width
+(`kicad_symbols::text_metrics` real Newstroke advances through
+`text_geom`, the ink-calibrated model both crates already share). The
+policy therefore belongs *placement-side*, as `spice-layout::label_geom`
+— the exact shape of `glyph_geom`, with `kicad-emitter` reading it, so
+the dependency keeps pointing the safe way. A shared types crate and
+caller-supplied estimator injection were both rejected: the dependency
+already points the right way, and injection would make the placer's
+behaviour a function of caller wiring, which is what ADR-14's
+single-source rule exists to forbid. The ONE input that is not known
+pre-routing is *which pin* of a multi-terminal net carries the label
+(the emitter takes the geometrically leftmost — a function of the very
+positions being decided); it is bounded by reserving every candidate
+pin.
+
+*Per-consumer measurement.* Four consumers take the reservation. They
+are not equally able to hold it:
+
+| consumer | fixtures moved | result |
+| --- | --- | --- |
+| seed layer-stride (`place_seed`) | 1 (`opamp_definition_level`) | **GREEN, every ratchet unchanged** |
+| align stride (`apply_user_constraints`) | 1 (`diff_pair`) | F6 rail-stub lateral run 4 → 6 cells; align value-text gap 2.54 → 1.777 mm |
+| `legalize` | 1 (`opamp_definition_level`) | V5 0 → 5; V16 B 12 → 13 |
+| SA gate (`footprint_half_extents`) | 6 | F6 + V16 B/J regressions |
+| all four together | 9 | union of the above |
+
+*Two mechanisms, each diagnosed — neither is a tuning problem.*
+
+1. **The align stride cannot know the orientation.** It runs inside
+   `place_seed` → `apply_user_constraints`, *before* `pick_orientations`,
+   so it computes every member's extent in `Orientation::IDENTITY`. A
+   power-glyph reach is near-vertical and survived that; a label box is
+   strongly one-sided along the pin axis, so identity puts it on the
+   wrong side of a mirrored member. On `diff_pair` this widens the
+   Q1↔Q2 stride for `in2`'s label, which in the emitted schematic
+   points the *other* way (Q2 is mirrored). The over-reservation is a
+   modelling artefact, not a faithful footprint.
+2. **The SA gate's footprint model is symmetric.** `footprint_half_extents`
+   returns half-extents about the origin, so a one-sided reach `(dx, dy)`
+   blocks `|dx|` on BOTH sides — already flagged as "a strict-but-
+   conservative halo" for glyphs. A ~6 mm one-sided global label becomes
+   a ~12 mm halo. Narrowing the scope to global-label nets only does
+   **not** help (5 fixtures moved, 4 ratchets regressed), because the
+   halo, not the count, is the defect. **The SA gate needs a signed /
+   asymmetric footprint before it can hold any label reservation.** That
+   is the concrete prerequisite for finishing this.
+
+*Why nothing landed.* The green sub-variant (seed layer-stride only)
+buys **no measured quality** — the same result the property-text and
+horizontal-glyph-text completions produced, and for the same stated
+reason: a reservation buys nothing until something removes the slack.
+Landing it alone would also break this ADR's single-source rule, since
+the SA would stay blind to a reach the seed enforces. Weighed together,
+a partial reservation is a layout move with no upside and a rule
+deviation, so it stays on the branch pending owner sign-off.
+
+*It does not unblock `fix/multichannel-layout`.* Cherry-picked on top,
+`opamp_definition_level` V13(6a) goes 3 → 2 — identical to the naive
+rebase — and V5 / V16 / F5 fail as before. The blocker is not label
+reservation.
+
 ### Problem
 
 Exactly one class of converted-schematic defect remains: a power
