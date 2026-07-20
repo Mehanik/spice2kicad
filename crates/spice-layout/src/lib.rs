@@ -24,6 +24,7 @@
 #![forbid(unsafe_code)]
 
 pub mod bands;
+pub mod channels;
 pub mod cost;
 pub mod glyph_geom;
 mod idioms;
