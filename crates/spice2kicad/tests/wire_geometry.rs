@@ -512,7 +512,13 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     // trunk bending sideways to reach them: the same shape as the
     // owner-approved `diff_pair` J 0 -> 1 above. Escape request pending;
     // do not raise this literal without sign-off.
-    ("multivibrator", 8, 2),
+    // J 2 -> 4 under the global-improvement escape (owner sign-off,
+    // 2026-07-20): the rail-stub column idiom now fires on symmetric
+    // circuits, straightening both collector trunks. C1/C2 tap those
+    // trunks as proper Steiner Ts instead of the trunk bending
+    // sideways to reach them. Net on this fixture: V5 5 -> 3, B 10 ->
+    // 8, J 2 -> 4. Same shape as the diff_pair J 0 -> 1 escape.
+    ("multivibrator", 8, 4),
     // J 0 → 1: `apply_shared_centers` now reserves one grid cell of
     // vertical stub under the tail trunk, so the three-way `tail` node is
     // drawn as a proper Steiner T instead of the trunk stopping sideways
