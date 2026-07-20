@@ -893,7 +893,12 @@ fn rail_stub_alignment(
         else {
             continue;
         };
-        let d = x - target.x;
+        // Resolve through the same helper the seed pass uses, so a
+        // sideways anchor's outward stride is scored where the seed puts
+        // it rather than pulled back onto the pin's column (ADR-14
+        // single-source rule).
+        let target_x = crate::idioms::anchored_column_x(placement, checked, target, &[s.element]);
+        let d = x - target_x;
         total += d * d;
     }
     total

@@ -653,14 +653,24 @@ pub(crate) fn detect_rail_stubs(checked: &CheckedNetlist) -> Vec<RailStub> {
 /// column carries.
 ///
 /// `strong` means the column came from a **multi-terminal (active)
-/// device's** own vertically-facing pin — the collector/emitter case
-/// this idiom exists for. When it is false the column is the weaker
-/// `any`-pin fallback (some two-terminal neighbour on the same net),
-/// which can sit anywhere on the sheet.
+/// device's** own pin — the collector/emitter/base case this idiom
+/// exists for. When it is false the column is the weaker `any`-pin
+/// fallback (some two-terminal neighbour on the same net), which can sit
+/// anywhere on the sheet.
+///
+/// `outward` is `0` when `x` is a column to occupy directly (the anchor
+/// pin faces up or down, so the stub drops straight through it). It is
+/// `+1` / `-1` when the anchor pin faces **sideways**: the stub cannot
+/// share that pin's column without robbing it of an outward-extending
+/// first segment (V5), so it takes a column one stride along the pin's
+/// outward direction and reaches the pin with a short horizontal run.
+/// The caller owns the stride because it depends on the *stub's* own
+/// resolved extent, which this function does not see.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct RailStubAnchor {
     pub x: f64,
     pub strong: bool,
+    pub outward: i32,
 }
 
 pub(crate) fn rail_stub_anchor_x(
@@ -671,6 +681,9 @@ pub(crate) fn rail_stub_anchor_x(
 ) -> Option<RailStubAnchor> {
     let mut multi: Vec<f64> = Vec::new();
     let mut any: Vec<f64> = Vec::new();
+    // Sideways-facing pins on multi-terminal (active) devices, as
+    // `(pin x, outward sign)`. See `RailStubAnchor::outward`.
+    let mut multi_sideways: Vec<(f64, i32)> = Vec::new();
     for (i, e) in checked.elements.iter().enumerate() {
         // A stub is never an anchor for the net it stubs off.
         if stubs.iter().any(|s| s.element == i && s.signal_net == net) {
@@ -692,25 +705,133 @@ pub(crate) fn rail_stub_anchor_x(
         else {
             continue;
         };
-        if pin.angle % 180 == 0 {
-            continue; // faces left/right — a stub cannot hang off it
-        }
         let Some(x) = world_pin_x_of(pe, &e.symbol, net) else {
             continue;
         };
+        if pin.angle % 180 == 0 {
+            // Faces left/right — the stub cannot share this pin's column
+            // (that robs the pin of its outward first segment, V5), but
+            // an *active* device's sideways pin still says where the
+            // node lives. Record it with the pin's outward direction so
+            // the caller can seat the stub one stride to that side.
+            // `pins_in` yields WORLD-OUTWARD angles, so 0 => +x.
+            if e.nodes.len() >= 3 {
+                let sign = if pin.angle % 360 == 0 { 1 } else { -1 };
+                multi_sideways.push((x, sign));
+            }
+            continue;
+        }
         if e.nodes.len() >= 3 {
             multi.push(x);
         }
         any.push(x);
     }
-    let strong = !multi.is_empty();
-    let xs = if strong { multi } else { any };
-    if xs.is_empty() {
+    // Priority: an active device's own vertical pin (share its column) >
+    // an active device's sideways pin (one stride outward of it) > the
+    // weak `any`-pin fallback (an arbitrary two-terminal neighbour, which
+    // can sit anywhere on the sheet).
+    if !multi.is_empty() {
+        #[allow(clippy::cast_precision_loss)] // pin counts are tiny.
+        let mean = multi.iter().sum::<f64>() / multi.len() as f64;
+        return Some(RailStubAnchor {
+            x: mean,
+            strong: true,
+            outward: 0,
+        });
+    }
+    // A node carrying stubs on BOTH sides is a divider THROUGH the node:
+    // the two groups already share one column (each takes the anchor
+    // outright — see `apply_rail_stub_columns`) and the node is tapped
+    // off that column. There is nothing to reach from one stride away,
+    // so a sideways pin has no opinion to offer about such a node, and
+    // offering one only perturbs the divider. Declining here restores
+    // exactly the behaviour this shape had before sideways anchors
+    // existed; snapping the divider onto the sideways pin's own column
+    // is the variant already measured and rejected above.
+    let node_has_both_sides = {
+        let mut up = false;
+        let mut down = false;
+        for s in stubs.iter().filter(|s| s.signal_net == net) {
+            match s.side {
+                VertPref::Up => up = true,
+                VertPref::Down => down = true,
+            }
+        }
+        up && down
+    };
+    if !node_has_both_sides && !multi_sideways.is_empty() {
+        #[allow(clippy::cast_precision_loss)] // pin counts are tiny.
+        let mean =
+            multi_sideways.iter().map(|(x, _)| *x).sum::<f64>() / multi_sideways.len() as f64;
+        // Pins facing opposite ways cancel; only a consistent direction
+        // tells us which side is "outward" for the whole group.
+        let sum: i32 = multi_sideways.iter().map(|(_, s)| *s).sum();
+        if sum != 0 {
+            return Some(RailStubAnchor {
+                x: mean,
+                strong: true,
+                outward: sum.signum(),
+            });
+        }
+    }
+    if any.is_empty() {
         return None;
     }
     #[allow(clippy::cast_precision_loss)] // pin counts are tiny.
-    let mean = xs.iter().sum::<f64>() / xs.len() as f64;
-    Some(RailStubAnchor { x: mean, strong })
+    let mean = any.iter().sum::<f64>() / any.len() as f64;
+    Some(RailStubAnchor {
+        x: mean,
+        strong: false,
+        outward: 0,
+    })
+}
+
+/// Resolve a [`RailStubAnchor`] into the actual X column the given stub
+/// group should occupy.
+///
+/// For a column anchor (`outward == 0`) that is just the anchor X. For a
+/// **sideways** anchor it is one stride along the anchor pin's outward
+/// direction: the stub cannot stand in that pin's column without robbing
+/// it of an outward-extending first segment (V5), so it seats itself
+/// beside the pin and reaches it with a short horizontal run — the
+/// conventional drawing of a bias resistor feeding a transistor base.
+///
+/// The stride is geometry-derived, never a tuned constant: the widest
+/// group member's own resolved half-extent facing the pin, plus
+/// [`crate::MIN_CLEARANCE_MM`], snapped up to the grid. That is the
+/// smallest offset at which the stub's body clears the pin's connection
+/// point, so the run in is as short as the symbols allow.
+///
+/// **Both** the seed pass ([`apply_rail_stub_columns`]) and the SA
+/// objective (`cost::rail_stub_alignment`) resolve the anchor through
+/// this one function. A seed-time target and a refine-time target that
+/// disagree let the refiner silently undo the seed — the ADR-14
+/// single-source lesson.
+pub(crate) fn anchored_column_x(
+    placement: &Placement,
+    checked: &CheckedNetlist,
+    anchor: RailStubAnchor,
+    members: &[usize],
+) -> f64 {
+    if anchor.outward == 0 {
+        return anchor.x;
+    }
+    let mut reach_mm = 0.0_f64;
+    for &el in members {
+        let ext = world_extent(
+            &checked.elements[el].symbol,
+            placement.elements[el].orientation,
+            None,
+        );
+        let toward_pin = if anchor.outward > 0 {
+            -ext.min_x
+        } else {
+            ext.max_x
+        };
+        reach_mm = reach_mm.max(toward_pin);
+    }
+    let cells = crate::mm_up_to_cells(reach_mm + crate::MIN_CLEARANCE_MM);
+    anchor.x + f64::from(anchor.outward * cells) * GridPoint::STEP_MM
 }
 
 /// Move every unpinned rail stub into the column of the node it
@@ -782,7 +903,8 @@ pub(crate) fn apply_rail_stub_columns(
         // everywhere it was live before, so no non-symmetric fixture
         // changes (`common_emitter`'s `R1`/`R2` bias divider still snaps
         // to `CIN`'s column).
-        let anchor_x = anchor.x;
+        let member_idx: Vec<usize> = members.iter().map(|s| s.element).collect();
+        let anchor_x = anchored_column_x(placement, checked, anchor, &member_idx);
         if !anchor.strong && members.iter().any(|s| sym_released[s.element]) {
             continue;
         }

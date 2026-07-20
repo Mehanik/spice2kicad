@@ -998,11 +998,12 @@ const STUB_RUN_RATCHET: &[(&str, u32)] = &[
     // same node, which is deliberate — `apply_rail_stub_columns` spreads
     // a group symmetrically about the anchor so they do not stack.
     ("common_emitter", 4),
-    // RB1/RB2 are the reported defect: bias resistors feeding a BASE, a
-    // horizontally-facing pin, so the column idiom declines and they
-    // keep the seeder's extreme columns 11.43 mm out from their
-    // transistors. RC1/RC2 (collector loads, vertical pin) score 2.
-    ("multivibrator", 9),
+    // RB1/RB2 bias a BASE — a horizontally-facing pin. The column idiom
+    // now seats them one geometry-derived stride to the base pin's
+    // OUTWARD side and reaches the pin with a short run in, so they
+    // score the same 2 as RC1/RC2 (collector loads, vertical pin, whose
+    // 2 is the two-stub group spread about the anchor). Was 9.
+    ("multivibrator", 2),
     // RTAIL terminates `tail`, shared by BOTH transistors' emitters; the
     // shared-centre idiom seats it at their midpoint, so a non-zero
     // offset from either one is correct, not a defect.

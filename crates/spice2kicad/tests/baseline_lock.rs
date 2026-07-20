@@ -301,6 +301,19 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
     // at most one Signal net); an element on two or more Signal nets is
     // an interior node and takes its layer from the BFS. 12 of 107 rows
     // moved, all on `opamp_inverting_real`; no other fixture changed.
+    //
+    // Regenerated again for the rail-stub OUTWARD anchor. The column
+    // idiom declined outright when a stub's node presented only
+    // sideways-facing pins (a bias resistor feeding a transistor BASE),
+    // leaving the stub at whatever column the layer seeder gave it. It
+    // now takes the column one geometry-derived stride along such a
+    // pin's OUTWARD direction and reaches the pin with a short run in —
+    // the conventional drawing, and a different proposal from the
+    // measured-and-rejected "anchor AT the pin, offset zero". A node
+    // carrying stubs on BOTH sides is a divider through the node and is
+    // deliberately excluded (it already shares one column). 16 of 107
+    // rows moved, all on `multivibrator` (RB1/RB2 in, everything else
+    // following the V15 page re-anchor); no other fixture changed.
     (
         "common_emitter",
         "#FLG1",
@@ -456,7 +469,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "multivibrator",
         "#FLG1",
         "power:PWR_FLAG",
-        95.25,
+        77.47,
         76.2,
         0.0,
         "",
@@ -465,26 +478,26 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "multivibrator",
         "#FLG2",
         "power:PWR_FLAG",
-        95.25,
+        77.47,
         88.9,
         180.0,
         "",
     ),
-    ("multivibrator", "#PWR1", "power:GND", 54.61, 73.66, 0.0, ""),
-    ("multivibrator", "#PWR2", "power:GND", 64.77, 73.66, 0.0, ""),
-    ("multivibrator", "#PWR3", "power:+5V", 54.61, 31.75, 0.0, ""),
-    ("multivibrator", "#PWR4", "power:+5V", 64.77, 31.75, 0.0, ""),
+    ("multivibrator", "#PWR1", "power:GND", 45.72, 73.66, 0.0, ""),
+    ("multivibrator", "#PWR2", "power:GND", 55.88, 73.66, 0.0, ""),
+    ("multivibrator", "#PWR3", "power:+5V", 45.72, 31.75, 0.0, ""),
+    ("multivibrator", "#PWR4", "power:+5V", 55.88, 31.75, 0.0, ""),
     ("multivibrator", "#PWR5", "power:+5V", 35.56, 44.45, 0.0, ""),
-    ("multivibrator", "#PWR6", "power:+5V", 83.82, 44.45, 0.0, ""),
-    ("multivibrator", "#PWR7", "power:GND", 95.25, 76.2, 0.0, ""),
-    ("multivibrator", "#PWR8", "power:+5V", 95.25, 88.9, 0.0, ""),
-    ("multivibrator", "C1", "Device:C", 52.07, 52.07, 0.0, ""),
-    ("multivibrator", "C2", "Device:C", 67.31, 52.07, 0.0, "y"),
+    ("multivibrator", "#PWR6", "power:+5V", 66.04, 44.45, 0.0, ""),
+    ("multivibrator", "#PWR7", "power:GND", 77.47, 76.2, 0.0, ""),
+    ("multivibrator", "#PWR8", "power:+5V", 77.47, 88.9, 0.0, ""),
+    ("multivibrator", "C1", "Device:C", 43.18, 52.07, 0.0, ""),
+    ("multivibrator", "C2", "Device:C", 58.42, 52.07, 0.0, "y"),
     (
         "multivibrator",
         "Q1",
         "Device:Q_NPN_BCE",
-        52.07,
+        43.18,
         68.58,
         0.0,
         "",
@@ -493,7 +506,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "multivibrator",
         "Q2",
         "Device:Q_NPN_BCE",
-        67.31,
+        58.42,
         68.58,
         0.0,
         "y",
@@ -503,17 +516,17 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "multivibrator",
         "RB2",
         "Device:R_US",
-        83.82,
+        66.04,
         48.26,
         0.0,
         "y",
     ),
-    ("multivibrator", "RC1", "Device:R_US", 54.61, 35.56, 0.0, ""),
+    ("multivibrator", "RC1", "Device:R_US", 45.72, 35.56, 0.0, ""),
     (
         "multivibrator",
         "RC2",
         "Device:R_US",
-        64.77,
+        55.88,
         35.56,
         0.0,
         "y",

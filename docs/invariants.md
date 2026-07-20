@@ -972,15 +972,28 @@ invariant here.
   lateral run is ZERO. `spice-layout/src/idioms.rs`'s rail-stub column
   idiom exists to produce that.
 
-  The idiom anchors only on **vertically-facing** pins, which is
-  load-bearing (see `idioms::rail_stub_anchor_x`: anchoring on any pin
-  dragged bias dividers onto horizontal base pins and cost V5 on three
-  fixtures at once). That leaves a measured blind spot: a stub whose
-  anchor node presents only HORIZONTAL pins — a bias resistor feeding a
-  transistor BASE, or an RC junction — gets no column opinion and keeps
-  whatever column the layer seeder gave it. On `multivibrator` that is
-  `RB1`/`RB2` sitting 9 grid cells (11.43 mm) out from the transistors
-  they bias, reached by a long horizontal run.
+  The idiom never puts a stub in a **horizontally-facing** pin's own
+  column, which is load-bearing (see `idioms::rail_stub_anchor_x`:
+  anchoring AT any pin dragged bias dividers onto horizontal base pins
+  and cost V5 on three fixtures at once). What it does instead, for a
+  stub whose node presents only sideways pins — a bias resistor feeding
+  a transistor BASE — is take the column one geometry-derived stride
+  along that pin's **outward** direction and reach the pin with a short
+  horizontal run in. That is the conventional drawing, and a different
+  proposal from the measured-and-rejected "anchor at the pin, offset
+  zero". Measured on `multivibrator`: `RB1`/`RB2` fell from 9 grid cells
+  (11.43 mm) out from the transistors they bias to 2, with no other
+  fixture moving at all and no Tier-0/Tier-1 count changing.
+
+  The sideways anchor is deliberately **declined** when the node carries
+  stubs on BOTH sides. Those two groups are a divider *through* the
+  node: they already share one column and the node is tapped off it, so
+  there is nothing to reach from a stride away. Offering an opinion
+  there only perturbs the divider — measured on `common_emitter`, whose
+  `R1`/`R2` sit on `b` alongside `Q1`'s base: V16 B rose 4 → 7 and F5
+  rose 1 → 2 (`CIN` flipped vertical) purely from the SA re-basining,
+  with F6 unimproved. The exclusion restores exactly the behaviour that
+  shape had before sideways anchors existed.
 
   F6 bounds that. For every rail stub, take its non-rail pin and the
   NEAREST other pin on the same net, and measure the horizontal offset
@@ -996,12 +1009,13 @@ invariant here.
   `crates/spice2kicad/tests/flow_geometry.rs::stub_lateral_run_within_ratchet`,
   per-fixture zero-slack maximum, ratcheting down only.
 
-  **Open (not fixed here).** The structural direction for the
-  horizontal-anchor case: the conventional drawing of a stub feeding a
-  horizontally-facing pin is NOT a drop in that pin's column — it is a
-  drop one stride to the *outward* side of the pin, with a short
-  horizontal run into it. `rail_stub_anchor_x` returning `None` today
-  could instead return an anchor offset one stride along the pin's
-  outward direction. That is a different proposal from the one measured
-  and rejected (which anchored AT the pin, offset zero), but it has not
-  been measured; F6 is the instrument that would judge it.
+  **Remaining non-zero scores, and which are defects.** `rc_lowpass` 9
+  and `rc_lowpass_ports` 5 are genuine blind spots: `C1` terminates
+  `out` whose only other pin is `R1`'s, facing horizontally on a
+  TWO-terminal element — the sideways anchor requires a multi-terminal
+  (active) device, so the idiom still declines. `named_rails` 6 is the
+  same shape. `diff_pair` 4 and `common_emitter` 4 are NOT defects
+  (a shared-centre midpoint and a two-stub group spread about its
+  anchor, both deliberate). Extending the sideways anchor to
+  two-terminal neighbours is untested and would re-open the weak-anchor
+  failure mode `rail_stub_anchor_x` documents.
