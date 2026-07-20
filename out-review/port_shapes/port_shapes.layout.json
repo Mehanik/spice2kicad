@@ -1,0 +1,36 @@
+{
+  "version": 3,
+  "circuit": "/home/eugene/Projects/spice2eeschema/crates/spice2kicad/tests/fixtures/port_shapes.cir",
+  "positions": {
+    "R1": {
+      "x": 0,
+      "y": 20,
+      "rotation": 0,
+      "mirror": false
+    },
+    "R2": {
+      "x": 0,
+      "y": 27,
+      "rotation": 0,
+      "mirror": false
+    },
+    "R3": {
+      "x": 37,
+      "y": 25,
+      "rotation": 0,
+      "mirror": false
+    },
+    "R4": {
+      "x": 37,
+      "y": 32,
+      "rotation": 0,
+      "mirror": false
+    }
+  },
+  "page_shifts": {
+    "<root>": {
+      "cells_x": 28,
+      "cells_y": 8
+    }
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "version": 3,
+  "circuit": "/home/eugene/Projects/spice2eeschema/crates/spice2kicad/tests/fixtures/opamp_inverting_real.cir",
+  "positions": {
+    "RF": {
+      "x": 7,
+      "y": 30,
+      "rotation": 180,
+      "mirror": false
+    },
+    "RIN": {
+      "x": -3,
+      "y": 23,
+      "rotation": 90,
+      "mirror": false
+    },
+    "VCC": {
+      "x": -10,
+      "y": 30,
+      "rotation": 180,
+      "mirror": false
+    },
+    "VEE": {
+      "x": 4,
+      "y": 37,
+      "rotation": 90,
+      "mirror": false
+    },
+    "X1": {
+      "x": 0,
+      "y": 30,
+      "rotation": 0,
+      "mirror": true
+    }
+  },
+  "page_shifts": {
+    "<root>": {
+      "cells_x": 31,
+      "cells_y": 5
+    }
+  }
+}

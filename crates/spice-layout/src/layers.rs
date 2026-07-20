@@ -159,17 +159,53 @@ fn no_source_fallback(
         }
     }
 
-    let roots: HashSet<usize> = (0..n)
-        .filter(|&i| {
-            if leaf_input_elements.contains(&i) {
-                return true;
-            }
-            checked.elements[i]
-                .nodes
-                .iter()
-                .any(|net| matches!(classes.get(net.as_str()).copied(), Some(NetClass::Power)))
-        })
+    // A power-touching element is a natural left-edge element only when the
+    // rail IS its connection — a bias resistor, a collector resistor, a
+    // decoupling cap. Such an element touches at most ONE Signal net: it is a
+    // *rail stub*, a boundary of the signal graph.
+    //
+    // An element touching TWO OR MORE Signal nets is an interior node of the
+    // signal path that merely happens to be supplied from a rail — an opamp,
+    // a buffer, any powered active block. Rooting it at layer 0 places it
+    // level with the circuit's true input, so the signal runs backwards into
+    // it. Its layer must come from the BFS like any other interior element.
+    let signal_degree = |i: usize| -> usize {
+        checked.elements[i]
+            .nodes
+            .iter()
+            .filter(|net| {
+                classes
+                    .get(net.as_str())
+                    .copied()
+                    .unwrap_or(NetClass::Signal)
+                    == NetClass::Signal
+            })
+            .collect::<HashSet<_>>()
+            .len()
+    };
+    let touches_power = |i: usize| -> bool {
+        checked.elements[i]
+            .nodes
+            .iter()
+            .any(|net| matches!(classes.get(net.as_str()).copied(), Some(NetClass::Power)))
+    };
+    let coarse_roots: HashSet<usize> = (0..n)
+        .filter(|&i| leaf_input_elements.contains(&i) || touches_power(i))
         .collect();
+    let refined_roots: HashSet<usize> = coarse_roots
+        .iter()
+        .copied()
+        .filter(|&i| leaf_input_elements.contains(&i) || signal_degree(i) <= 1)
+        .collect();
+    // Well-formedness guard: a root set that touches NO Signal net cannot
+    // layer the signal graph at all — the BFS would reach nothing and every
+    // element would collapse onto layer 0. In that degenerate case keep the
+    // coarse power-touching roots, which at least span the signal path.
+    let roots = if refined_roots.iter().any(|&i| signal_degree(i) >= 1) {
+        refined_roots
+    } else {
+        coarse_roots
+    };
     if roots.is_empty() {
         return LayerAssignment {
             layers: vec![0; n],

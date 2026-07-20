@@ -1935,66 +1935,25 @@ fn glyph_body_bbox(library: &Library, sym: &Value) -> Option<(String, Bbox)> {
     Some((refdes, Bbox { x0, y0, x1, y1 }))
 }
 
-/// Per-fixture budget for `no_power_glyph_foreign_body_overlap_across_fixtures`:
-/// the recorded high-water mark (count of power-glyph bodies overlapping a
-/// foreign real-symbol body) on current master. ZERO-SLACK ratchet — each
-/// literal equals the measured count and may only ever decrease.
+/// Per-fixture budget for the V14 power-glyph / foreign-body overlap:
+/// **0 everywhere**, no exceptions.
 ///
-/// `common_emitter` is now **0**: ADR-14 Option A reserves each rail pin's
-/// power-glyph footprint (body + value text) as effective placement
-/// geometry, so the placer repels the foreign body (Q1) out of R2's
-/// ground-glyph zone during optimization. No glyph moves; only the
-/// foreign element is repelled. Scope, precisely: the reservation is
-/// hard only where an OVERSIZED body is involved — the SA overlap gate
-/// (`footprint_half_extents`) activates per pair only when one body is
-/// oversized, and reserves glyph zones only on non-oversized consumers
-/// (which covers `common_emitter`'s R2×Q1: Q1's BJT body is oversized)
-/// — and the phase-2 seed floor (`world_extent_with_glyphs` in the
-/// layer stride) is X-only outside the align path. Small×small pairs
-/// and the seed's Y axis are guarded only by THIS zero-slack output
-/// ratchet, which measures emitted geometry and trips on any drift.
-/// See ADR-14 "Known scope limits".
+/// This function used to carry a single exception,
+/// `"opamp_inverting_real" => 1`, for the long-deferred V14 "[3]"
+/// residual — a `power:GND` glyph on the opamp's grounded `+` input pin
+/// clipping the FEEDBACK resistor `RF`. (Before that it named `#FLG3`,
+/// a `PWR_FLAG` clipping `RIN`, which had already gone stale; see ADR-17
+/// § "Correction — the recorded V14 residual is stale".)
 ///
-/// `opamp_inverting_real` remains **1**: its residual is a distinct
-/// defect class — a power glyph on a rail pin of the oversized opamp
-/// triangle `X1`, clipping a neighbouring resistor body (a
-/// sheet-port-flavoured overlap, ADR-14 "Risks": "may have a different
-/// cause … scope it out").
-///
-/// **Re-measured at ADR-17 Stage 1 — the previously recorded pair was
-/// stale.** This comment used to name `#FLG3` (a `power:PWR_FLAG` at
-/// (30.48, 44.45), the VEE rail flag) clipping `RIN`. That overlap no
-/// longer exists in emitted output: `#FLG3` now sits at (59.69, 77.47)
-/// and overlaps nothing. The live residual is:
-///
-/// > `#PWR1` (`power:GND`, at (46.99, 41.91) rot 0, bbox
-/// > 45.72..48.26 × 41.91..44.45) overlapping the body of **`RF`**
-/// > (47.244..49.276 × 41.910..46.990), host `X1`.
-///
-/// i.e. a GND glyph on the opamp's grounded `+` input pin clipping the
-/// FEEDBACK resistor — same fixture, same count, same class, different
-/// glyph kind and different victim. See ADR-17 § "Correction — the
-/// recorded V14 residual is stale".
-///
-/// The opamp's rail pins sit on the oversized `X1` body itself; reserving
-/// those crowded zones in the SA gate reshuffled the part into a
-/// `RIN`/glyph value-text V13 overlap — a within-Tier-1 sideways trade
-/// the ratchet rule forbids. So the SA-gate reservation is scoped to
-/// *non-oversized* rail consumers, which fixes `common_emitter` while
-/// leaving the opamp layout (and its deferred residual) exactly as
-/// master. Driving this last residual to 0 needs the PWR_FLAG /
-/// host-on-oversized-body case. ADR-17 Stage 4 (complete decoration
-/// reservation) is where it is now expected to fall; ADR-17's Stage-4
-/// kill criterion covers the case where it does not.
-fn power_glyph_foreign_body_overlap_budget(fixture: &str) -> usize {
-    match fixture {
-        // [3] deferred: #PWR1 (power:GND at (46.99, 41.91)) clipping RF,
-        // hosted on the oversized opamp X1's grounded + input pin.
-        // Distinct from the (now-fixed) rail-consumer case; see ADR-14
-        // and ADR-17 Stage 4.
-        "opamp_inverting_real" => 1,
-        _ => 0,
-    }
+/// It is gone. ADR-14 predicted it was a **placement** defect, not a
+/// glyph-orientation one, and that is what it turned out to be: `X1` was
+/// seeded at layer 0 level with `RIN` (`layers.rs` rooted any
+/// power-touching element there), which put its grounded `+` pin on top
+/// of `RF`. With the layer-root refinement the glyph clears `RF` by
+/// construction. No glyph rotation, no V3 exception, no decoration
+/// change was needed — exactly ADR-14's call.
+fn power_glyph_foreign_body_overlap_budget(_fixture: &str) -> usize {
+    0
 }
 
 /// Tier-1 readability containment: a `power:*` glyph body (including the

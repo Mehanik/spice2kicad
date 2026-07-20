@@ -1,0 +1,48 @@
+{
+  "version": 3,
+  "circuit": "/home/eugene/Projects/spice2eeschema/crates/spice2kicad/tests/fixtures/named_rails.cir",
+  "positions": {
+    "CL": {
+      "x": 2,
+      "y": 29,
+      "rotation": 0,
+      "mirror": false
+    },
+    "RIN": {
+      "x": -2,
+      "y": 27,
+      "rotation": 180,
+      "mirror": false
+    },
+    "RPD": {
+      "x": -8,
+      "y": 29,
+      "rotation": 0,
+      "mirror": false
+    },
+    "RPU": {
+      "x": 6,
+      "y": 23,
+      "rotation": 0,
+      "mirror": true
+    },
+    "VNEG": {
+      "x": 12,
+      "y": 31,
+      "rotation": 90,
+      "mirror": false
+    },
+    "VPOS": {
+      "x": -5,
+      "y": 27,
+      "rotation": 180,
+      "mirror": false
+    }
+  },
+  "page_shifts": {
+    "<root>": {
+      "cells_x": 36,
+      "cells_y": 5
+    }
+  }
+}
