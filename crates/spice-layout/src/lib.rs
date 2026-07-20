@@ -775,13 +775,71 @@ fn apply_rail_stub_columns(
 
     let before = placement.clone();
     let residual_before = cost::constraint_residual(placement, checked, library);
+    let overlaps_before =
+        legalize::immovable_overlap_count(placement, checked, library, user_pinned);
     idioms::apply_rail_stub_columns(placement, &x_locked, checked, &stubs);
     let residual_after = cost::constraint_residual(placement, checked, library);
+    let overlaps_after =
+        legalize::immovable_overlap_count(placement, checked, library, user_pinned);
     // Strictly-worse only: an exactly-equal residual (the common case,
     // both zero) keeps the improvement.
     if residual_after > residual_before + 1e-9 {
         log::debug!(
             "rail-stub columns: reverted (user-constraint residual {residual_before} -> {residual_after})"
+        );
+        *placement = before;
+        return;
+    }
+    // ...and reverted just as hard if the snap CREATED a body overlap
+    // between two elements NOTHING DOWNSTREAM CAN SEPARATE.
+    //
+    // Load-bearing, Tier 0. `constraint_residual` alone cannot see this
+    // failure: `place_residual`'s X term for `RightOf` / `LeftOf` is a
+    // one-sided hinge (`(ax - tx).max(0)`, ε = 0), so collapsing the
+    // target onto the anchor's *own* column scores an unchanged
+    // residual of zero — "not strictly worse" — and the revert above
+    // waves it through. A `place`d element is `user_pinned`, so the
+    // post-refinement legalizer will not move it either, and the two
+    // symbols reach the emitter stacked at one origin. Their pins then
+    // coincide, KiCad shorts the two nets together, and the CLI's
+    // connectivity verifier fails the conversion *after* writing the
+    // file ("emitted schematic does not match the source netlist").
+    //
+    // Reproduced on `rc_lowpass_ports.cir` + `;@ place=right-of R1` on
+    // `C1`: C1 is a ground-side rail stub on `out`, whose anchor column
+    // is R1's own, so this idiom undid the 7.62 mm the `place` phase had
+    // correctly opened up. Note the defect is NOT in `solve_place` — it
+    // separates the pair correctly — nor is it specific to `place`: any
+    // stub whose anchor column is already occupied by a symbol the
+    // legalizer may not move hits it. Guarding on measured overlap
+    // therefore fixes the whole class, and — unlike a pre-flight hard
+    // error — leaves the user with the working schematic they asked
+    // for. See `spice2kicad/tests/place_no_coincidence.rs`.
+    //
+    // **Why `user_pinned` and not the total overlap count.** This runs
+    // at SEED time, where transient overlaps are normal and the SA plus
+    // the post-refinement legalizer clear them. Gating on the total
+    // count therefore reverts the idiom over overlaps that were never
+    // going to survive — measured: it moved `rc_lowpass` (R1 rot
+    // 270→90, C1 x 35.56→46.99, three glyphs with them) for no
+    // corresponding gain. Only a pair where BOTH members are
+    // `user_pinned` is genuinely unrepairable, and that is exactly the
+    // defect case: a `place` target and its anchor are both pinned, as
+    // are two `align` members.
+    //
+    // **Why `user_pinned` and not the total overlap count.** This runs
+    // at SEED time, where transient overlaps are normal and the SA plus
+    // the post-refinement legalizer clear them. Gating on the total
+    // count therefore reverts the idiom over overlaps that were never
+    // going to survive — measured: it moved `rc_lowpass` (R1 rot
+    // 270→90, C1 x 35.56→46.99, three glyphs with them) for no
+    // corresponding gain. Only a pair where BOTH members are
+    // `user_pinned` is genuinely unrepairable, and that is exactly the
+    // defect case: a `place` target and its anchor are both pinned, as
+    // are two `align` members.
+    if overlaps_after > overlaps_before {
+        log::debug!(
+            "rail-stub columns: reverted (body overlaps {overlaps_before} -> {overlaps_after})"
         );
         *placement = before;
     }

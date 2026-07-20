@@ -148,6 +148,41 @@ pub fn overlap_count(placement: &Placement, checked: &CheckedNetlist, library: &
     n
 }
 
+/// Number of overlapping footprint pairs in which **both** members are
+/// marked in `immovable`.
+///
+/// Such a pair is unrepairable: neither the SA refiner nor the
+/// post-refinement legalizer will move a `user_pinned` element, so an
+/// overlap between two of them survives all the way to the emitter,
+/// where coincident pins silently short their nets (Tier 0, V11).
+///
+/// This is deliberately narrower than [`overlap_count`]. A seed-stage
+/// pass must not revert itself over an overlap that involves at least
+/// one *movable* element — refinement resolves those routinely, and
+/// treating them as failures loses real placement quality (measured:
+/// gating on the total count moved `rc_lowpass` for no benefit).
+#[must_use]
+pub fn immovable_overlap_count(
+    placement: &Placement,
+    checked: &CheckedNetlist,
+    library: &Library,
+    immovable: &[bool],
+) -> usize {
+    let prints = footprints(placement, checked, library);
+    let mut n = 0;
+    for (i, pi) in prints.iter().enumerate() {
+        if !immovable.get(i).copied().unwrap_or(false) {
+            continue;
+        }
+        for (j, pj) in prints.iter().enumerate().skip(i + 1) {
+            if immovable.get(j).copied().unwrap_or(false) && pi.overlaps(*pj) {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
 fn footprints(
     placement: &Placement,
     checked: &CheckedNetlist,

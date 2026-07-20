@@ -493,6 +493,14 @@ fn constraint_violation(placement: &Placement, checked: &CheckedNetlist, library
 ///
 /// `ε = 0` in stage 2 (no minimum-gap enforcement; gap is the SA's
 /// job).
+///
+/// **This residual is a one-sided hinge and is therefore NOT a
+/// collision check.** Zero separation — the two elements stacked at one
+/// origin — scores exactly as well as a healthy gap. Any pass using
+/// `constraint_residual` as a "did I make things worse?" guard needs a
+/// separate, categorical no-overlap condition alongside it; see
+/// `apply_rail_stub_columns` and `docs/layout-adr.md` post-mortem
+/// "A hinged residual is not a collision check".
 fn place_residual(
     rel: Relation,
     anchor_pins: &[(String, f64, f64)],
