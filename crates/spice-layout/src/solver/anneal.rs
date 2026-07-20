@@ -121,7 +121,9 @@ pub(super) fn refine(
     // reservation in `symbol_overlap_count`. A pure function of the
     // netlist — invariant across the anneal — so it is computed once
     // here and threaded down, not recomputed per proposal.
-    let glyph_prefs = crate::net_class::vertical_prefs(checked);
+    let glyph_rails = crate::net_class::vertical_prefs(checked);
+    let glyph_labels = crate::label_geom::plans_for(checked, "sa");
+    let glyph_prefs = crate::DecorationPrefs::of(&glyph_rails, &glyph_labels);
 
     let weights = CostWeights::DEFAULT;
     let mut current_breakdown = cost::breakdown(&seed, checked, library);
@@ -451,14 +453,14 @@ fn body_half_extents(el: &spice_resolve::ResolvedElement, orient: Orientation) -
 fn footprint_extent(
     el: &spice_resolve::ResolvedElement,
     orient: Orientation,
-    prefs: Option<&std::collections::HashMap<String, crate::net_class::VertPref>>,
+    prefs: Option<&crate::DecorationPrefs<'_>>,
 ) -> crate::WorldExtent {
-    // No `value` text: the gate reserves body ∪ pins ∪ glyph reach only,
-    // exactly the set the old symmetric model covered.
-    match prefs {
-        Some(prefs) => crate::world_extent_with_glyphs(el, orient, None, prefs),
-        None => crate::world_extent_with_glyphs(el, orient, None, &Default::default()),
-    }
+    // No `value` text: the gate reserves body ∪ pins ∪ decoration reach,
+    // single-sourced with the seed/align stride.
+    let empty_rails = std::collections::HashMap::new();
+    let empty_labels = std::collections::HashMap::new();
+    let none = crate::DecorationPrefs::of(&empty_rails, &empty_labels);
+    crate::world_extent_with_glyphs(el, orient, None, prefs.unwrap_or(&none))
 }
 
 /// Count unordered element pairs whose real body bounding boxes
@@ -513,7 +515,7 @@ fn symbol_overlap_count(
     // footprint measure unions in (ADR-14 phase 3, mirroring the seed).
     // Computed once in `refine` (invariant across the anneal) and
     // threaded in, so the SA hot loop never re-runs `classify_nets`.
-    prefs: &std::collections::HashMap<String, crate::net_class::VertPref>,
+    prefs: &crate::DecorationPrefs<'_>,
 ) -> usize {
     // The cell half-extents the `overlap` cost already enforces. A body
     // within these contributes nothing here (the cost covers it).

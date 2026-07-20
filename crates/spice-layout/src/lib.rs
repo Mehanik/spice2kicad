@@ -27,6 +27,7 @@ pub mod bands;
 pub mod cost;
 pub mod glyph_geom;
 mod idioms;
+pub mod label_geom;
 pub mod layers;
 pub mod legalize;
 pub mod net_class;
@@ -449,16 +450,46 @@ pub(crate) fn world_extent_with_glyphs(
     element: &spice_resolve::ResolvedElement,
     orientation: Orientation,
     value: Option<&str>,
-    prefs: &HashMap<String, crate::net_class::VertPref>,
+    prefs: &DecorationPrefs<'_>,
 ) -> WorldExtent {
     let mut ext = world_extent(&element.symbol, orientation, value);
-    for (dx, dy) in crate::glyph_geom::glyph_reach(element, orientation, prefs) {
+    let reach = crate::glyph_geom::glyph_reach(element, orientation, prefs.rails)
+        .into_iter()
+        .chain(crate::label_geom::label_reach(
+            element,
+            orientation,
+            prefs.labels,
+        ));
+    for (dx, dy) in reach {
         ext.min_x = ext.min_x.min(dx);
         ext.max_x = ext.max_x.max(dx);
         ext.min_y = ext.min_y.min(dy);
         ext.max_y = ext.max_y.max(dy);
     }
     ext
+}
+
+/// The decoration a placement pass must reserve space for, bundled so
+/// the seed/align stride and the SA gate consume the *same* set — the
+/// single-source rule ADR-14 turns on. Both maps are pure functions of
+/// the checked netlist, computed once and threaded in.
+#[derive(Clone, Copy, Debug)]
+pub struct DecorationPrefs<'a> {
+    /// Rail-pin screen-vertical preferences → power-glyph reach.
+    pub rails: &'a HashMap<String, crate::net_class::VertPref>,
+    /// Per-net label plans → net-label text reach.
+    pub labels: &'a HashMap<String, crate::label_geom::LabelPlan>,
+}
+
+impl<'a> DecorationPrefs<'a> {
+    /// Both reservations, derived from the checked netlist.
+    #[must_use]
+    pub fn of(
+        rails: &'a HashMap<String, crate::net_class::VertPref>,
+        labels: &'a HashMap<String, crate::label_geom::LabelPlan>,
+    ) -> Self {
+        Self { rails, labels }
+    }
 }
 
 /// World-frame left reach (mm, as a non-negative magnitude) of a
@@ -608,7 +639,9 @@ pub fn place_with_hint(
     let allowed = orient::allowed_orientations(&checked);
     pick_orientations(&mut placement, &pinned, &checked, &allowed);
 
-    let glyph_prefs = net_class::vertical_prefs(&checked);
+    let glyph_rails = net_class::vertical_prefs(&checked);
+    let glyph_labels = label_geom::plans_for(&checked, "legalize");
+    let glyph_prefs = DecorationPrefs::of(&glyph_rails, &glyph_labels);
     if !opts.refine {
         legalize_if_needed(
             &mut placement,
@@ -670,7 +703,7 @@ fn legalize_if_needed(
     user_pinned: &[bool],
     checked: &spice_policy::CheckedNetlist,
     library: &Library,
-    glyph_prefs: &HashMap<String, crate::net_class::VertPref>,
+    glyph_prefs: &DecorationPrefs<'_>,
 ) {
     let overlaps = legalize::overlap_count(placement, checked, library);
     if overlaps == 0 {
@@ -1174,7 +1207,9 @@ fn place_seed(checked: &CheckedNetlist) -> Result<(Placement, Vec<bool>), Vec<Di
     // Per-net screen-vertical preference (Power → up, Ground/negative →
     // down). Used to identify rail pins whose power-glyph footprint the
     // layer stride must reserve (ADR-14 Option A).
-    let prefs = crate::net_class::vertical_prefs(checked);
+    let rails = crate::net_class::vertical_prefs(checked);
+    let labels = crate::label_geom::plans_for(checked, "seed");
+    let prefs = DecorationPrefs::of(&rails, &labels);
 
     // Per-layer X positions, geometry-derived (HARD, at the spacing
     // boundary). Each element's resolved world extent (identity
@@ -1335,7 +1370,9 @@ fn apply_user_constraints(
 ) -> Result<(), Vec<Diagnostic>> {
     // Rail-pin screen-vertical preferences, for the align stride's
     // power-glyph reach reservation (ADR-14 Option A).
-    let prefs = crate::net_class::vertical_prefs(checked);
+    let rails = crate::net_class::vertical_prefs(checked);
+    let labels = crate::label_geom::plans_for(checked, "align");
+    let prefs = DecorationPrefs::of(&rails, &labels);
     let CheckedNetlist {
         elements,
         align,

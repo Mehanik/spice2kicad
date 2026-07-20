@@ -293,7 +293,7 @@ pub fn legalize(
     pinned: &[bool],
     checked: &CheckedNetlist,
     _library: &Library,
-    prefs: &std::collections::HashMap<String, crate::net_class::VertPref>,
+    prefs: &crate::DecorationPrefs<'_>,
 ) -> usize {
     let extents: Vec<WorldExtent> = placement
         .elements
