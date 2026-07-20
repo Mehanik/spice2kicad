@@ -26,11 +26,15 @@
 //! zero and passed as "not strictly worse".
 //!
 //! The fix adds a second, categorical revert condition: the idiom is
-//! rolled back wholesale if it *creates* a symbol-body overlap. That
-//! covers the whole class (any stub snapping onto an occupied column),
-//! not just the annotated case, and leaves the user with the working
-//! schematic they asked for rather than a hard diagnostic — the layout
-//! is legitimately expressible.
+//! rolled back wholesale if it *creates* a symbol-body overlap whose
+//! two members are BOTH `user_pinned` — i.e. one nothing downstream can
+//! separate. (Gating on the total overlap count instead would revert
+//! over transient seed-stage overlaps the SA clears anyway; measured, it
+//! moved `rc_lowpass` for no gain.) That covers the whole class — any
+//! stub snapping onto a column held by an immovable symbol — not just
+//! the annotated case, and leaves the user with the working schematic
+//! they asked for rather than a hard diagnostic: the layout is
+//! legitimately expressible.
 
 mod common;
 
@@ -95,11 +99,10 @@ fn symbol_origins(path: &Path) -> Vec<(String, f64, f64)> {
                 Some("property") => {
                     let vals: Vec<&Value> = f.collect();
                     if vals.first().and_then(|v| v.as_str()) == Some("Reference") {
-                        reference = vals
-                            .get(1)
+                        vals.get(1)
                             .and_then(|v| v.as_str())
                             .unwrap_or_default()
-                            .to_owned();
+                            .clone_into(&mut reference);
                     }
                 }
                 _ => {}
@@ -199,10 +202,9 @@ fn align_vertical_between_two_net_sharing_two_pin_parts() {
 /// annotated element at a SMALLER screen y than its anchor.
 #[test]
 fn above_and_below_match_the_spec_direction_end_to_end() {
-    for (name, rel, expect_target_above) in [
-        ("dir_above", "above", true),
-        ("dir_below", "below", false),
-    ] {
+    for (name, rel, expect_target_above) in
+        [("dir_above", "above", true), ("dir_below", "below", false)]
+    {
         let dir = tempdir(name);
         let cir = dir.join(format!("{name}.cir"));
         std::fs::write(

@@ -26,9 +26,21 @@ use spice_layout::place;
 use spice_policy::check;
 use spice_resolve::{Axis, Relation};
 
-/// Place `R2` relative to `R1` and return `(r1_y, r2_y)` (or x's).
-fn solve(rel: Relation) -> (f64, f64, f64, f64) {
-    let resolved = mk_resolved(&["R1", "R2"], &[] as &[(Axis, &[&str])], &[("R2", rel, "R1")]);
+/// Placed coordinates of the anchor (`R1`) and the target (`R2`).
+struct Pair {
+    anchor_x: f64,
+    anchor_y: f64,
+    target_x: f64,
+    target_y: f64,
+}
+
+/// Place `R2` (the target) relative to `R1` (the anchor).
+fn solve(rel: Relation) -> Pair {
+    let resolved = mk_resolved(
+        &["R1", "R2"],
+        &[] as &[(Axis, &[&str])],
+        &[("R2", rel, "R1")],
+    );
     let (checked, _warns) = check(resolved).expect("policy check");
     let p = place(checked, fixture_library()).expect("placement");
     let r1 = p
@@ -41,68 +53,95 @@ fn solve(rel: Relation) -> (f64, f64, f64, f64) {
         .iter()
         .find(|e| e.refdes == "R2")
         .expect("R2 placed");
-    let (r1x, r1y) = r1.origin.to_mm();
-    let (r2x, r2y) = r2.origin.to_mm();
-    (r1x, r1y, r2x, r2y)
+    let (anchor_x, anchor_y) = r1.origin.to_mm();
+    let (target_x, target_y) = r2.origin.to_mm();
+    Pair {
+        anchor_x,
+        anchor_y,
+        target_x,
+        target_y,
+    }
 }
 
 #[test]
 fn above_puts_the_element_above_the_anchor() {
-    let (r1x, r1y, r2x, r2y) = solve(Relation::Above);
+    let p = solve(Relation::Above);
     assert!(
-        r2y < r1y,
+        p.target_y < p.anchor_y,
         "spec §4.3: `R2 place=above R1` must put R2 ABOVE R1 \
-         (smaller screen y); got R2 y={r2y}, R1 y={r1y}"
+         (smaller screen y); got R2 y={}, R1 y={}",
+        p.target_y,
+        p.anchor_y
     );
     assert!(
-        (r2x - r1x).abs() < 1e-9,
-        "`above` shares a column: R2 x={r2x}, R1 x={r1x}"
+        (p.target_x - p.anchor_x).abs() < 1e-9,
+        "`above` shares a column: R2 x={}, R1 x={}",
+        p.target_x,
+        p.anchor_x
     );
 }
 
 #[test]
 fn below_puts_the_element_below_the_anchor() {
-    let (r1x, r1y, r2x, r2y) = solve(Relation::Below);
+    let p = solve(Relation::Below);
     assert!(
-        r2y > r1y,
+        p.target_y > p.anchor_y,
         "spec §4.3: `R2 place=below R1` must put R2 BELOW R1 \
-         (larger screen y); got R2 y={r2y}, R1 y={r1y}"
+         (larger screen y); got R2 y={}, R1 y={}",
+        p.target_y,
+        p.anchor_y
     );
     assert!(
-        (r2x - r1x).abs() < 1e-9,
-        "`below` shares a column: R2 x={r2x}, R1 x={r1x}"
+        (p.target_x - p.anchor_x).abs() < 1e-9,
+        "`below` shares a column: R2 x={}, R1 x={}",
+        p.target_x,
+        p.anchor_x
     );
 }
 
 #[test]
 fn above_and_below_are_mirror_images() {
-    let (_, a_r1y, _, a_r2y) = solve(Relation::Above);
-    let (_, b_r1y, _, b_r2y) = solve(Relation::Below);
+    let up = solve(Relation::Above);
+    let down = solve(Relation::Below);
+    let up_delta = up.target_y - up.anchor_y;
+    let down_delta = down.target_y - down.anchor_y;
     assert!(
-        ((a_r2y - a_r1y) + (b_r2y - b_r1y)).abs() < 1e-9,
+        (up_delta + down_delta).abs() < 1e-9,
         "spec §4.3 calls `below` the mirror of `above`: \
-         above Δy={}, below Δy={}",
-        a_r2y - a_r1y,
-        b_r2y - b_r1y
+         above Δy={up_delta}, below Δy={down_delta}"
     );
 }
 
 #[test]
 fn right_of_puts_the_element_right_of_the_anchor() {
-    let (r1x, r1y, r2x, r2y) = solve(Relation::RightOf);
-    assert!(r2x > r1x, "R2 x={r2x} must be right of R1 x={r1x}");
+    let p = solve(Relation::RightOf);
     assert!(
-        (r2y - r1y).abs() < 1e-9,
-        "`right-of` shares a row: R2 y={r2y}, R1 y={r1y}"
+        p.target_x > p.anchor_x,
+        "R2 x={} must be right of R1 x={}",
+        p.target_x,
+        p.anchor_x
+    );
+    assert!(
+        (p.target_y - p.anchor_y).abs() < 1e-9,
+        "`right-of` shares a row: R2 y={}, R1 y={}",
+        p.target_y,
+        p.anchor_y
     );
 }
 
 #[test]
 fn left_of_puts_the_element_left_of_the_anchor() {
-    let (r1x, r1y, r2x, r2y) = solve(Relation::LeftOf);
-    assert!(r2x < r1x, "R2 x={r2x} must be left of R1 x={r1x}");
+    let p = solve(Relation::LeftOf);
     assert!(
-        (r2y - r1y).abs() < 1e-9,
-        "`left-of` shares a row: R2 y={r2y}, R1 y={r1y}"
+        p.target_x < p.anchor_x,
+        "R2 x={} must be left of R1 x={}",
+        p.target_x,
+        p.anchor_x
+    );
+    assert!(
+        (p.target_y - p.anchor_y).abs() < 1e-9,
+        "`left-of` shares a row: R2 y={}, R1 y={}",
+        p.target_y,
+        p.anchor_y
     );
 }
