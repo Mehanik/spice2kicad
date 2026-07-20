@@ -123,9 +123,9 @@ fn no_source_fallback(
     // element should sit on the left/right edge of the layout
     // depending on the net name.
     //
-    // Convention:
-    //   * `in` / `input` / `vin*` → leftmost (layer 0 root)
-    //   * `out` / `output` / `vout*` → rightmost (terminal sink)
+    // Convention (see `boundary_net_role`):
+    //   * `in` / `input` / `vin` → leftmost (layer 0 root)
+    //   * `out` / `output` / `vout` → rightmost (terminal sink)
     //   * any other leaf net → no special handling
     let mut leaf_input_elements: HashSet<usize> = HashSet::new();
     let mut leaf_output_elements: HashSet<usize> = HashSet::new();
@@ -133,12 +133,15 @@ fn no_source_fallback(
         if members.len() != 1 {
             continue;
         }
-        let lo = net.to_ascii_lowercase();
         let owner = members[0];
-        if lo == "in" || lo == "input" || lo.starts_with("vin") {
-            leaf_input_elements.insert(owner);
-        } else if lo == "out" || lo == "output" || lo.starts_with("vout") {
-            leaf_output_elements.insert(owner);
+        match boundary_net_role(net) {
+            Some(PortDir::Input) => {
+                leaf_input_elements.insert(owner);
+            }
+            Some(PortDir::Output) => {
+                leaf_output_elements.insert(owner);
+            }
+            _ => {}
         }
     }
 
@@ -189,22 +192,69 @@ fn no_source_fallback(
             .iter()
             .any(|net| matches!(classes.get(net.as_str()).copied(), Some(NetClass::Power)))
     };
+    // The same "boundary, not interior" test applies to an element that owns
+    // an input net. The input net anchors the LEFT EDGE of the signal path;
+    // the element that owns it is a left-edge element only if the signal
+    // merely *passes through* it — a series input resistor, an AC-coupling
+    // cap, anything with at most two Signal nets. An element with THREE or
+    // more Signal nets is a junction or an active block that the input net
+    // feeds *into*: a diff-pair transistor whose base is `in1` also carries
+    // its collector and tail nodes, and rooting it at layer 0 collapses it
+    // onto the same layer as its own collector load.
+    //
+    // Note the two thresholds differ, and deliberately: a *rail*-touching
+    // element must be a true stub (degree ≤ 1, it terminates a node), while
+    // an *input*-owning element may be a two-port pass-through (degree ≤ 2).
+    // A rail stub does not pass a signal along; a series input element does.
+    let input_root =
+        |i: usize| -> bool { leaf_input_elements.contains(&i) && signal_degree(i) <= 2 };
     let coarse_roots: HashSet<usize> = (0..n)
-        .filter(|&i| leaf_input_elements.contains(&i) || touches_power(i))
+        .filter(|&i| input_root(i) || touches_power(i))
         .collect();
     let refined_roots: HashSet<usize> = coarse_roots
         .iter()
         .copied()
-        .filter(|&i| leaf_input_elements.contains(&i) || signal_degree(i) <= 1)
+        .filter(|&i| input_root(i) || signal_degree(i) <= 1)
         .collect();
     // Well-formedness guard: a root set that touches NO Signal net cannot
     // layer the signal graph at all — the BFS would reach nothing and every
-    // element would collapse onto layer 0. In that degenerate case keep the
-    // coarse power-touching roots, which at least span the signal path.
+    // element would collapse onto layer 0.
+    //
+    // The guard must NOT revert to `coarse_roots`. `coarse_roots` is the
+    // *unrefined* set, and the whole point of the `signal_degree <= 1`
+    // refinement is that a rail-supplied interior node (an opamp, a
+    // buffer — anything with two or more Signal nets) is not a left-edge
+    // element: rooting it at layer 0 puts it level with the circuit's
+    // true input and the signal runs backwards into it. Reverting hands
+    // back exactly the root set the refinement was written to reject,
+    // through a side door — reached whenever no input anchor exists and
+    // every power-toucher is an interior node.
+    //
+    // Instead, relax the degree threshold by the *smallest* amount that
+    // makes the set span the signal graph: take the power-touching
+    // elements of minimum signal degree. That is monotone (it never
+    // admits a higher-degree element while a lower-degree one is
+    // available), it always spans when `coarse_roots` did, and on a
+    // netlist where every power-toucher really is degree-3 it degrades
+    // to the coarse behaviour rather than to a collapse.
     let roots = if refined_roots.iter().any(|&i| signal_degree(i) >= 1) {
         refined_roots
     } else {
-        coarse_roots
+        let min_degree = coarse_roots
+            .iter()
+            .map(|&i| signal_degree(i))
+            .filter(|&d| d >= 1)
+            .min();
+        match min_degree {
+            Some(d) => coarse_roots
+                .iter()
+                .copied()
+                .filter(|&i| signal_degree(i) == d)
+                .collect(),
+            // No power-touching element reaches the signal graph at all;
+            // there is nothing to relax toward. Keep the refined set.
+            None => refined_roots,
+        }
     };
     if roots.is_empty() {
         return LayerAssignment {
@@ -275,6 +325,45 @@ fn no_source_fallback(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Classify a *leaf* net name as a circuit input / output boundary.
+///
+/// This is a **name heuristic and a backstop only** — the explicit,
+/// preferred mechanism is a `*@port <net>=<dir>` directive (spec §4.7),
+/// which is applied additively by the caller and always wins by being a
+/// superset. The heuristic exists so a zero-annotation file still gets a
+/// left-to-right signal flow (design principle 2).
+///
+/// **Channel numbering is stripped before matching.** A multi-channel
+/// circuit — a dual opamp, a quad comparator, a stereo stage — *must*
+/// number its ports (`in1`, `in2`, `out1`, `out2`), so a matcher that
+/// only accepts the bare word silently excludes the entire class of
+/// circuits with more than one channel and draws every one of them
+/// backwards. Trailing ASCII digits and one optional `_`/`-`/`.`
+/// separator are therefore removed first.
+///
+/// Matching is then **exact against a closed set** in both directions.
+/// The previous implementation compared `in`/`out` by equality but
+/// `vin`/`vout` by prefix, an accidental asymmetry. Prefix matching is
+/// the wrong generalisation regardless: `in_amp`, `input_stage` and
+/// `inverting` are ordinary interior nets, not circuit boundaries, and a
+/// prefix rule claims all three.
+fn boundary_net_role(net: &str) -> Option<PortDir> {
+    let lo = net.to_ascii_lowercase();
+    let stem = lo.trim_end_matches(|c: char| c.is_ascii_digit());
+    // Only strip the separator when digits actually preceded it, so a
+    // plain `in_` (no channel number) is not silently accepted.
+    let stem = if stem.len() < lo.len() {
+        stem.trim_end_matches(['_', '-', '.'])
+    } else {
+        stem
+    };
+    match stem {
+        "in" | "input" | "vin" => Some(PortDir::Input),
+        "out" | "output" | "vout" => Some(PortDir::Output),
+        _ => None,
+    }
+}
 
 fn is_signal_source(checked: &CheckedNetlist, idx: usize) -> bool {
     let el = &checked.elements[idx];
@@ -545,6 +634,85 @@ mod tests {
             "R1 (layer {}) should be ≤ C1 (layer {})",
             m["R1"],
             m["C1"]
+        );
+    }
+
+    /// `boundary_net_role` must treat numbered channel ports exactly like
+    /// their unnumbered singular form. A multi-channel circuit MUST number
+    /// its ports, so a matcher that only accepts the bare word silently
+    /// excludes every dual / quad / stereo design — the defect this
+    /// function was extracted to fix.
+    #[test]
+    fn channel_numbered_ports_are_boundary_nets() {
+        for n in ["in", "in1", "in2", "IN3", "input", "input2", "vin", "vin1"] {
+            assert_eq!(
+                boundary_net_role(n),
+                Some(PortDir::Input),
+                "{n} should read as a circuit input"
+            );
+        }
+        for n in ["out", "out1", "out2", "OUT12", "output", "vout", "vout2"] {
+            assert_eq!(
+                boundary_net_role(n),
+                Some(PortDir::Output),
+                "{n} should read as a circuit output"
+            );
+        }
+    }
+
+    /// The matcher is exact against a closed set once channel digits are
+    /// stripped — never a prefix. `in_amp` / `input_stage` / `inverting`
+    /// are ordinary interior nets, and a prefix rule claims all three.
+    #[test]
+    fn interior_nets_are_not_boundary_nets() {
+        for n in [
+            "in_amp",
+            "input_stage",
+            "inverting",
+            "inv1",
+            "inn",
+            "inp",
+            "outer",
+            "vintage",
+            "in_",
+        ] {
+            assert_eq!(
+                boundary_net_role(n),
+                None,
+                "{n} is an interior net, not a circuit boundary"
+            );
+        }
+    }
+
+    /// Two uncoupled channels with numbered ports must each layer
+    /// left-to-right: the input resistor strictly left of the block it
+    /// feeds. Before the numbered-port fix neither channel had an input
+    /// anchor, the root set collapsed to the rails, and the well-formedness
+    /// guard reverted to the coarse roots — re-rooting both active blocks
+    /// at layer 0 and drawing the whole sheet backwards.
+    #[test]
+    fn multi_channel_numbered_ports_layer_left_to_right() {
+        let src = "dual channel\n\
+                   VCC vcc 0 DC 15 ;@ power=+15V\n\
+                   R1 in1 mid1 1k\n\
+                   R2 in2 mid2 1k\n\
+                   Q1 c1 mid1 0 QGENERIC\n\
+                   Q2 c2 mid2 0 QGENERIC\n\
+                   RC1 vcc c1 4k7\n\
+                   RC2 vcc c2 4k7\n\
+                   .model QGENERIC NPN (BF=200 IS=1e-15)\n.end\n";
+        let m = layer_str(src);
+        assert!(
+            m["R1"] < m["Q1"],
+            "channel 1 runs backwards: R1 layer {} vs Q1 layer {}",
+            m["R1"],
+            m["Q1"]
+        );
+        assert!(
+            m["R2"] < m["Q2"],
+            "channel 2 runs backwards: R2 layer {} vs Q2 layer {}",
+            m["R2"],
+            m["Q2"]
         );
     }
 

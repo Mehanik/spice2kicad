@@ -1131,14 +1131,11 @@ fn pick_orientations(
     }
 }
 
-/// Stage-1 placer body: returns the seed placement plus a per-element
-/// `pinned` mask (`true` for elements whose position is fixed by an
-/// `align` or `place` directive).
-///
-/// Pipeline: classify nets → assign Y bands → assign X layers → emit
-/// initial grid coordinates from `(band, layer, rank_in_layer)`. User
-/// `align`/`place`/`power` directives then override the heuristic seed
-/// via [`apply_user_constraints`], which pins the affected elements.
+/// Baseline vertical step (grid cells) per rank within a (layer, slot)
+/// bucket. A floor: [`bucket_y_strides`] may widen it for a bucket that
+/// stacks two oversized bodies, never narrow it.
+const Y_RANK_STRIDE: i32 = 5;
+
 /// Y-band sub-slot used for band-aware seed stacking.
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 enum Slot {
@@ -1149,6 +1146,102 @@ enum Slot {
     Bot,
 }
 
+/// Per-(layer, slot) vertical rank stride in grid cells, geometry-derived
+/// (HARD, at the spacing boundary) — the Y counterpart of `place_seed`'s
+/// per-layer X derivation, and the same shape as the align path's
+/// [`vertical_stride_cells`].
+///
+/// [`Y_RANK_STRIDE`] alone is a fixed 5 cells (6.35 mm) no matter what is
+/// stacked. That is ample for resistors and capacitors and far too tight
+/// for an oversized body: two `Amplifier_Operational:OPAMP` triangles in
+/// one bucket — a dual-opamp deck, i.e. every multi-channel circuit —
+/// landed 6.35 mm apart with a 10.16 mm body and a 15.24 mm pin span, so
+/// the SEED was already infeasible. Neither downstream owner can recover
+/// from that: the SA overlap gate is a never-INCREASE filter, and
+/// `legalize` shoves greedily in index order, which on two mutually
+/// overlapping triangles merely relocates the clash. A hard constraint
+/// cannot repair an infeasible start, so the start must not be
+/// infeasible.
+///
+/// **Derivation.** Within a bucket the stride must cover the lower
+/// element's upward reach plus the upper element's downward reach plus
+/// [`MIN_CLEARANCE_MM`]. Taking the bucket-wide maxima of each gives one
+/// uniform, order-independent stride that bounds every adjacent pair.
+/// Floored at [`Y_RANK_STRIDE`], so it only ever *widens*.
+///
+/// **Reach = drawn body ∪ own rail-glyph reach.** Pins are excluded,
+/// exactly as the align stride's `body_left_reach` excludes them: a pin
+/// is a connection point a wire lands on, not ink that must clear a
+/// neighbour. (Including pin reach makes a plain resistor demand 7 cells
+/// and widens every bucket on every fixture — a whole-suite reshuffle for
+/// no defect; measured.) The glyph reach *is* included, because two
+/// stacked opamps must clear each other's VCC / VEE glyph body and
+/// net-name text, not merely the two triangles: without that term the
+/// channel between them is too tight and X2's VEE glyph collides three
+/// ways — its net name lands on RF2's body, the `INV2` trunk crosses its
+/// body, and RIN2 loses its outward first segment.
+///
+/// **Scope: a bucket holding TWO OR MORE oversized bodies.** That is the
+/// categorically infeasible case and the only one measured to need
+/// fixing. A bucket with one large body among small neighbours is left
+/// alone deliberately: widening it too was implemented and measured, and
+/// it regresses a second fixture (`opamp_inverting_real` V5 0→1, V16 B
+/// 5→7) for no gain — the within-tier sideways trade the ratchet rule
+/// forbids. "Oversized" is the same key the SA overlap gate uses: a body
+/// half-extent past the cost's uniform cell. Every all-small-symbol
+/// fixture therefore keeps its previous, well-tuned 5-cell spacing
+/// exactly, and no such fixture moves.
+fn bucket_y_strides(
+    checked: &CheckedNetlist,
+    layers: &[u32],
+    element_slot: &[Slot],
+    prefs: &HashMap<String, crate::net_class::VertPref>,
+) -> HashMap<(u32, Slot), i32> {
+    let cell_hh = f64::from(CELL_H) * GridPoint::STEP_MM / 2.0;
+    let mut bucket_big: HashMap<(u32, Slot), Vec<(f64, f64)>> = HashMap::new();
+    for (i, e) in checked.elements.iter().enumerate() {
+        let mut down = 0.0_f64;
+        let mut up = 0.0_f64;
+        if let Some(b) = e.symbol.body_bbox() {
+            for (lx, ly) in [(b.x0, b.y0), (b.x0, b.y1), (b.x1, b.y0), (b.x1, b.y1)] {
+                let (_rx, ry) = Orientation::IDENTITY.apply_point(lx, ly);
+                down = down.max(-ry);
+                up = up.max(ry);
+            }
+        }
+        if down.max(up) > cell_hh + 1e-6 {
+            for (_dx, dy) in crate::glyph_geom::glyph_reach(e, Orientation::IDENTITY, prefs) {
+                down = down.max(dy);
+                up = up.max(-dy);
+            }
+            bucket_big
+                .entry((layers[i], element_slot[i]))
+                .or_default()
+                .push((down, up));
+        }
+    }
+    bucket_big
+        .into_iter()
+        .filter(|(_, big)| big.len() >= 2)
+        .map(|(k, big)| {
+            let down = big.iter().map(|r| r.0).fold(0.0_f64, f64::max);
+            let up = big.iter().map(|r| r.1).fold(0.0_f64, f64::max);
+            (
+                k,
+                mm_up_to_cells(down + up + MIN_CLEARANCE_MM).max(Y_RANK_STRIDE),
+            )
+        })
+        .collect()
+}
+
+/// Stage-1 placer body: returns the seed placement plus a per-element
+/// `pinned` mask (`true` for elements whose position is fixed by an
+/// `align` or `place` directive).
+///
+/// Pipeline: classify nets → assign Y bands → assign X layers → emit
+/// initial grid coordinates from `(band, layer, rank_in_layer)`. User
+/// `align`/`place`/`power` directives then override the heuristic seed
+/// via [`apply_user_constraints`], which pins the affected elements.
 fn place_seed(checked: &CheckedNetlist) -> Result<(Placement, Vec<bool>), Vec<Diagnostic>> {
     use crate::bands::{Band, assign_y_bands};
     use crate::layers::assign_x_layers;
@@ -1156,7 +1249,6 @@ fn place_seed(checked: &CheckedNetlist) -> Result<(Placement, Vec<bool>), Vec<Di
 
     // Geometry constants in grid cells (1.27 mm each).
     const Y_BAND_GAP: i32 = 6; // gap from rail edge into Mid band
-    const Y_RANK_STRIDE: i32 = 5; // vertical step per rank within layer
     // Bound on the per-bucket left/right jitter (cells). Adjacent
     // layers' X positions must clear each other even after both layers
     // jitter toward one another, so the layer-spacing derivation adds
@@ -1255,6 +1347,14 @@ fn place_seed(checked: &CheckedNetlist) -> Result<(Placement, Vec<bool>), Vec<Di
         element_slot.push(s);
     }
 
+    let bucket_stride = bucket_y_strides(checked, &layer_asg.layers, &element_slot, &prefs);
+
+    // Reserve three sub-rows in Mid: upper / centre / lower.
+    let mid_span = (y_mid_bot - y_mid_top).max(1);
+    let mid_up_y = y_mid_top + mid_span / 4;
+    let mid_ctr_y = y_mid_top + mid_span / 2;
+    let mid_lo_y = y_mid_top + (3 * mid_span) / 4;
+
     // Per-(layer, slot) running rank.
     let mut bucket_rank: HashMap<(u32, Slot), i32> = HashMap::new();
     let mut placed: Vec<PlacedElement> = Vec::with_capacity(n);
@@ -1279,17 +1379,14 @@ fn place_seed(checked: &CheckedNetlist) -> Result<(Placement, Vec<bool>), Vec<Di
         let x_jitter = raw_jitter.clamp(-MAX_JITTER, MAX_JITTER);
         let x = layer_x[layer] + x_jitter;
 
-        // Reserve three sub-rows in Mid: upper / centre / lower.
-        let mid_span = (y_mid_bot - y_mid_top).max(1);
-        let mid_up_y = y_mid_top + mid_span / 4;
-        let mid_ctr_y = y_mid_top + mid_span / 2;
-        let mid_lo_y = y_mid_top + (3 * mid_span) / 4;
+        let y_stride = bucket_stride.get(&(layer_asg.layers[i], slot)).copied();
+        let y_stride = y_stride.unwrap_or(Y_RANK_STRIDE);
         let y = match slot {
-            Slot::Top => y_top + rank * Y_RANK_STRIDE,
-            Slot::MidUp => mid_up_y + rank * Y_RANK_STRIDE,
-            Slot::MidCtr => mid_ctr_y + rank * Y_RANK_STRIDE,
-            Slot::MidLo => mid_lo_y + rank * Y_RANK_STRIDE,
-            Slot::Bot => y_bot - rank * Y_RANK_STRIDE,
+            Slot::Top => y_top + rank * y_stride,
+            Slot::MidUp => mid_up_y + rank * y_stride,
+            Slot::MidCtr => mid_ctr_y + rank * y_stride,
+            Slot::MidLo => mid_lo_y + rank * y_stride,
+            Slot::Bot => y_bot - rank * y_stride,
         };
         placed.push(PlacedElement {
             refdes: e.refdes.clone(),

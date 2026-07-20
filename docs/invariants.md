@@ -578,8 +578,10 @@ invariant here.
   Verifier: `crates/spice2kicad/tests/electrical_safety.rs::v12_*`.
   Calibration: `crates/spice2kicad/tests/electrical_safety.rs::v12_crossing_budget`
   returns `0` for every fixture, so the budget is `0` across all
-  five (rc_lowpass / common_emitter / multivibrator / diff_pair /
-  opamp_inverting_real) — no wire may cross a foreign body. The
+  **ten** — no wire may cross a foreign body. `opamp_definition_level`
+  briefly carried a non-zero "OWED, NOT ACCEPTED" budget of 4, whose
+  stated precondition for retirement (fix the seed defect that put
+  `RF1`/`RF2` inside a foreign opamp body) has been met; it is back to 0. The
   budget is the **high-water mark we drive down**, not a license to
   introduce new crossings — a regression trips the test.
 
@@ -904,21 +906,24 @@ invariant here.
 
   **Verifier.**
   `crates/spice2kicad/tests/wire_geometry.rs::bend_and_branch_counts_within_ratchet_across_fixtures`
-  builds the ink graph from the emitted root sheet of all nine fixtures
+  builds the ink graph from the emitted root sheet of all ten fixtures
   and asserts B and J against a zero-slack `&[(&str, u32, u32)]` table.
-  Measured high-water marks on `master` at the time of landing:
+  Current measured high-water marks (this table is synced to
+  `BEND_BRANCH_BUDGETS`; it had drifted for `multivibrator` and
+  `opamp_inverting_real`, whose literals moved without it):
 
   | fixture                  |  B |  J |
   | ------------------------ | -- | -- |
   | `rc_lowpass`             |  3 |  0 |
   | `common_emitter`         |  4 |  3 |
-  | `multivibrator`          | 10 |  2 |
+  | `multivibrator`          |  8 |  4 |
   | `diff_pair`              |  2 |  1 |
-  | `opamp_inverting_real`   |  8 |  0 |
+  | `opamp_inverting_real`   |  5 |  1 |
   | `opamp_inverting`        |  3 |  0 |
   | `port_shapes`            |  4 |  0 |
   | `rc_lowpass_ports`       |  2 |  0 |
-  | `opamp_definition_level` | 12 |  0 |
+  | `opamp_definition_level` | 15 |  0 |
+  | `named_rails`            |  2 |  2 |
 
   Standard ratchet policy applies (CLAUDE.md § "Budgets are ratchets,
   not knobs"): these literals only ever go **down**, and the test prints
@@ -950,8 +955,23 @@ invariant here.
     unchanged at 1; no Tier-0/Tier-1 count moved. Ratchet DOWN.
   - `rc_lowpass_ports` B 4 → 2 — as above; escape withdrawn.
 
-  Net effect of the bend key: `opamp_definition_level`'s B = 12 is the
-  only rise anywhere still standing on the global-improvement escape.
+  Net effect of the bend key: `opamp_definition_level`'s B is the
+  only rise anywhere still standing on an escape.
+
+  It has since risen again, **12 → 15**, on EXPLICIT OWNER SIGN-OFF (not
+  the automatic global-improvement escape, which nets to zero here: F5
+  −3 against B +3). The multi-channel placement fix restored
+  left-to-right signal flow on this fixture, which was previously drawn
+  backwards and X-interleaved because `layers.rs::no_source_fallback`
+  matched `in`/`out` by equality but `vin`/`vout` by prefix — so
+  `in1`/`in2`/`out1`/`out2`, the mandatory spelling for any
+  multi-channel circuit, matched nothing. Bought alongside it, and
+  strictly higher-tier than the bends: the fixture's last cross-net
+  collinear wire overlap (Tier 0, a latent V11 short) 1 → 0, its V12
+  wires-through-foreign-bodies 4 → 0 (the "OWED, NOT ACCEPTED" budget,
+  paid off), and its wire-crossing count 6 → 0. The tier ordering is
+  respected in the permitted direction: Tier 2 pays for Tier 0 and
+  Tier 1, never the reverse.
 
   **Cross-check against the crossing ratchet.** The verifier's
   `inter_net_crossings` (4-ray vertices with no dot — excluded from both

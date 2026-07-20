@@ -560,7 +560,34 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     // Three literals rise in this commit and no others: this B, the
     // `rc_lowpass_ports` B above (same escape), and the `diff_pair` J
     // above (separately approved). Every other literal held or fell.
-    ("opamp_definition_level", 12, 0),
+    // B 12 -> 15. A RATCHET RISE, landed on EXPLICIT OWNER SIGN-OFF —
+    // not the automatic global-improvement escape, which does not reach
+    // this far on its own (F5 -3 against B +3 is net zero).
+    //
+    // What is bought: this fixture was drawn BACKWARDS and with its two
+    // channels X-interleaved, because `layers.rs::no_source_fallback`
+    // matched `in`/`out` by equality but `vin`/`vout` by prefix, so
+    // `in1`/`in2`/`out1`/`out2` — the mandatory spelling for ANY
+    // multi-channel circuit — matched nothing at all. Left-to-right
+    // signal flow is a stated core convention (docs/invariants.md V6);
+    // three bends is the price of restoring it.
+    //
+    // Measured alongside it, and strictly HIGHER-tier than the bends:
+    //   * cross-net collinear wire overlap 1 -> 0 (Tier 0, latent V11
+    //     short) — the last `CROSS_NET_V02_ESCALATIONS` entry, retired.
+    //   * V12 wires-through-foreign-bodies 4 -> 0 (Tier 1) — the "OWED,
+    //     NOT ACCEPTED" budget in `electrical_safety::v12_crossing_budget`,
+    //     paid off exactly as its comment required.
+    //   * wire crossings 6 -> 0 (Tier 2).
+    //   * F5 flow-pose violations 4 -> 1 (Tier 2).
+    // So the tier ordering is respected in the permitted direction: a
+    // Tier-2 bend count rises to buy Tier-0 and Tier-1 correctness. It
+    // is NOT the forbidden trade (higher tier regressed for a lower-tier
+    // gain). J stays 0.
+    //
+    // This literal is a high-water mark like every other: it ratchets
+    // DOWN from 15 and is never raised again without fresh sign-off.
+    ("opamp_definition_level", 15, 0),
 ];
 
 #[test]

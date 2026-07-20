@@ -65,6 +65,7 @@ pub(crate) fn detect_pairs(checked: &CheckedNetlist) -> Option<SymmetryPlan> {
     let elems = &checked.elements;
     let candidates = collect_candidate_pairs(checked)?;
     let fixed = fixed_nets(elems);
+    let candidates = retain_coupled_pairs(elems, &fixed, candidates)?;
     let sigma = build_sigma(elems, &candidates, &fixed)?;
     if !sigma_is_involution(&sigma) {
         return None;
@@ -81,6 +82,83 @@ pub(crate) fn detect_pairs(checked: &CheckedNetlist) -> Option<SymmetryPlan> {
         return None;
     }
     Some(SymmetryPlan { pairs: candidates })
+}
+
+/// Drop candidate pairs whose two halves are not **signal-coupled**.
+///
+/// A σ-involution proves the two halves are structurally interchangeable.
+/// It does NOT prove they belong on opposite sides of a shared axis, and
+/// that distinction is what separates the two circuit families the
+/// signature groups together:
+///
+/// * A **coupled** pair — `diff_pair`'s `Q1`/`Q2` about their tail node,
+///   `multivibrator`'s cross-coupled halves — genuinely nests about a
+///   common axis. The shared node sits ON the axis, and mirroring puts
+///   each half's pins facing inward toward it. This is V7's whole point.
+///
+/// * **Uncoupled repeated channels** — a dual opamp, a quad comparator,
+///   a stereo stage — share nothing but the supply rails. There is no
+///   node on the axis to nest about. Mirroring channel 2 onto
+///   `axis_sum - L.x` maps it onto the SAME x-span channel 1 occupies
+///   instead of placing it beside channel 1, and flips its orientation
+///   so its inputs face away from its own resistors. Such channels
+///   belong side by side, which is what the ordinary
+///   classify → bands → layers seed produces once V7 declines.
+///
+/// The predicate: build a graph on elements using only **non-rail** nets
+/// (excluding ground, `*@power` rails and conventional supply names —
+/// the same `fixed` set σ requires to self-map, which is exactly the set
+/// that carries no signal), and require both halves of a pair to land in
+/// the same connected component. Direct sharing is the common case;
+/// connectivity through intermediate elements covers a tail node reached
+/// via a shared resistor.
+///
+/// Rejected pairs are dropped individually rather than failing the whole
+/// plan, so a circuit mixing a coupled pair with an uncoupled repeat
+/// keeps the symmetry it really has. Returns `None` if nothing survives.
+fn retain_coupled_pairs(
+    elems: &[ResolvedElement],
+    fixed: &HashSet<String>,
+    candidates: Vec<(usize, usize)>,
+) -> Option<Vec<(usize, usize)>> {
+    fn find(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+
+    // Union-find over elements, joined by shared non-rail nets.
+    let mut parent: Vec<usize> = (0..elems.len()).collect();
+    let mut by_net: HashMap<&str, usize> = HashMap::new();
+    for (i, e) in elems.iter().enumerate() {
+        for node in &e.nodes {
+            if fixed.contains(node) {
+                continue;
+            }
+            match by_net.get(node.as_str()) {
+                Some(&first) => {
+                    let (a, b) = (find(&mut parent, first), find(&mut parent, i));
+                    if a != b {
+                        parent[a] = b;
+                    }
+                }
+                None => {
+                    by_net.insert(node.as_str(), i);
+                }
+            }
+        }
+    }
+
+    let coupled: Vec<(usize, usize)> = candidates
+        .into_iter()
+        .filter(|&(l, r)| find(&mut parent, l) == find(&mut parent, r))
+        .collect();
+    if coupled.is_empty() {
+        return None;
+    }
+    Some(coupled)
 }
 
 /// A purely structural fingerprint of an element's local neighbourhood.
@@ -590,6 +668,66 @@ C1 out 0 100n
             detect_pairs(&checked).is_none(),
             "asymmetric RC low-pass should not be detected as symmetric"
         );
+    }
+
+    /// Two electrically independent channels sharing only the supply
+    /// rails are structurally interchangeable but NOT coupled: there is
+    /// no node on the axis to nest about. Mirroring maps channel 2 onto
+    /// channel 1's own x-span and flips its orientation so its inputs
+    /// face away from its own resistors. V7 must decline and let the
+    /// ordinary layered seed place them side by side.
+    #[test]
+    fn uncoupled_repeated_channels_are_not_mirrored() {
+        let src = "\
+dual independent inverting amplifier
+*@symbol Device:R_US for=R*
+
+VCC vcc 0 DC 15 ;@ power=+15V
+VEE vee 0 DC -15 ;@ power=-15V
+
+RIN1 in1  inv1 1k
+RF1  inv1 out1 10k
+RIN2 in2  inv2 1k
+RF2  inv2 out2 10k
+.end
+";
+        let checked = checked_of(src);
+        assert!(
+            detect_pairs(&checked).is_none(),
+            "uncoupled channels sharing only rails must not be mirror-paired"
+        );
+    }
+
+    /// The coupling predicate must not weaken genuine symmetry. A
+    /// cross-coupled multivibrator's halves reach each other through the
+    /// signal nets `c1`/`b2`, so every pair survives.
+    #[test]
+    fn coupled_halves_still_pair() {
+        let src = "\
+multivibrator
+*@symbol Device:R_US      for=R*
+*@symbol Device:C         for=C*
+*@symbol Device:Q_NPN_BCE for=Q*
+
+VCC vcc 0 DC 5 ;@ power=+5V
+
+RCA vcc c1 10k
+RCB vcc c2 10k
+RBA vcc b1 100k
+RBB vcc b2 100k
+
+CA c1 b2 10n
+CB c2 b1 10n
+
+Q1 c1 b1 0 QGENERIC
+Q3 c2 b2 0 QGENERIC
+
+.model QGENERIC NPN (BF=200 IS=1e-15)
+.end
+";
+        let checked = checked_of(src);
+        let plan = detect_pairs(&checked).expect("cross-coupled symmetry must survive coupling");
+        assert_eq!(refdes_pairs(&checked, &plan).len(), 4);
     }
 
     /// Three structurally-identical elements on the same nets must not be

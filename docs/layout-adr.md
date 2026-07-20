@@ -3058,3 +3058,115 @@ Two consequences recorded so this is not re-litigated from the name:
    explicitly, build it as a term that measures cohesion (net-pin
    dispersion) rather than length, and retire this one against that —
    with this same ablation table as the acceptance bar.
+
+---
+
+## ADR-18 — Multi-channel layout: numbered ports, uncoupled repeats, and a geometry-derived seed stride
+
+**Status:** ACCEPTED, landed. The V16 bend rise it carries is on
+explicit project-owner sign-off (see below), not on the automatic
+global-improvement escape.
+
+### The symptom
+
+`opamp_definition_level` — two independent inverting-opamp channels —
+was drawn **backwards and X-interleaved**: `RIN1` at x=60.96 fed `X1` at
+x=36.83 (the opamp to the LEFT of its own input resistor), and the two
+channels' elements were shuffled into each other's x-span. It also
+carried the fixture's two worst outstanding debts: an "OWED, NOT
+ACCEPTED" V12 budget of 4 (wires through foreign bodies) and the last
+surviving `CROSS_NET_V02_ESCALATIONS` entry (a latent V11 short).
+
+### Four root causes, none of them the router
+
+1. **`layers.rs::no_source_fallback` matched port names asymmetrically.**
+   `in`/`input`/`out`/`output` were matched by **equality**, but
+   `vin`/`vout` by **prefix**. A multi-channel circuit *must* number its
+   ports (`in1`, `in2`, `out1`, `out2`), so under equality matching they
+   matched nothing at all: **every** multi-channel circuit had no input
+   anchor and was layered backwards. Fixed by stripping trailing channel
+   digits and matching exactly against a closed set in both directions
+   (`boundary_net_role`). Prefix matching was not the right
+   generalisation either — `in_amp`, `input_stage`, `inverting` are
+   ordinary interior nets.
+   The fix additionally requires an input-owning element to be a
+   **pass-through** (≤ 2 Signal nets); without that, `diff_pair`'s
+   transistors (whose bases are `in1`/`in2` but which also carry
+   collector and tail nodes) get rooted at layer 0 and collapse onto
+   their own collector loads.
+
+2. **The `refined_roots` → `coarse_roots` well-formedness fallback was a
+   side door.** The `signal_degree <= 1` refinement exists precisely to
+   stop a rail-supplied interior element (an opamp) being a layer-0
+   root; the fallback handed back the unrefined set, re-admitting exactly
+   what the refinement rejected, whenever no input anchor existed. It now
+   relaxes the degree threshold *minimally* (the power-touching elements
+   of minimum signal degree), which spans whenever `coarse_roots` did.
+
+3. **`symmetry::detect_pairs` had no coupling predicate.** A σ-involution
+   proves two halves are structurally interchangeable; it does **not**
+   prove they belong on opposite sides of a shared axis. `diff_pair` and
+   `multivibrator` are *coupled* (a shared node sits on the axis).
+   N repeated but *uncoupled* channels share only the supply rails, and
+   mirroring channel 2 onto `axis_sum - L.x` maps it onto the SAME
+   x-span channel 1 occupies. Now gated by union-find over **non-rail**
+   nets, dropping uncoupled pairs individually. `diff_pair` and
+   `multivibrator` stay byte-identical (`coupled_halves_still_pair`).
+
+4. **The seed was infeasible, and no downstream owner could repair it.**
+   `place_seed`'s within-bucket Y rank stride was a hardcoded 5 cells
+   (6.35 mm) *regardless of geometry*, so two `OPAMP` triangles — a
+   10.16 mm body with a 15.24 mm pin span — were seeded 6.35 mm apart.
+   This is the general lesson worth keeping: **a hard constraint cannot
+   repair an infeasible start.** The SA overlap gate is a
+   never-*increase* filter, so it locks the overlap in rather than
+   fixing it; `legalize` shoves greedily in index order, which on two
+   mutually overlapping triangles merely relocates the clash (measured:
+   it shoved X1 into X2). The stride is now geometry-derived
+   (`bucket_y_strides`: body ∪ own rail-glyph reach, floored at the old
+   value), scoped to a bucket stacking **two or more** oversized bodies.
+   Widening single-oversized buckets too was implemented and measured,
+   and regressed `opamp_inverting_real` (V5 0→1, V16 B 5→7) for no
+   gain — the sideways trade the ratchet rule forbids.
+
+### Measured, and the owner-approved escape
+
+`opamp_definition_level` now reads left-to-right per channel: RIN1
+35.56 → X1 53.34 → RF1 59.69; RIN2 52.07 → X2 62.23. Per ADR-16's
+baseline-diff protocol, **18 of 120 baseline rows move, all on this
+fixture**; the other nine fixtures are byte-identical, so the
+anti-overfit bar is met by construction.
+
+| metric (fixture: `opamp_definition_level`) | before | after | tier |
+| ------------------------------------------ | ------ | ----- | ---- |
+| cross-net collinear overlap (latent V11)    | 1      | **0** | 0    |
+| V12 wires through foreign bodies            | 4      | **0** | 1    |
+| wire crossings                              | 6      | **0** | 2    |
+| F5 flow-pose violations                     | 4      | **1** | 2    |
+| V16 B (bends)                               | 12     | **15**| 2    |
+| V16 J (branches)                            | 0      | 0     | 2    |
+
+The B rise 12 → 15 is a **ratchet rise on explicit owner sign-off**. The
+automatic global-improvement escape does *not* reach it on the owner's
+original framing (F5 −3 against B +3 is net zero across fixtures). What
+the measurement above adds is that the rise is paid for by strictly
+**higher-tier** gains — a Tier-0 latent short and a Tier-1 V12 debt both
+go to zero. That is the *permitted* direction under the tier ordering
+(Tier 2 pays for Tier 0/1), never the forbidden one.
+
+Two long-standing debts were retired by this and their comments'
+stated preconditions honoured rather than deleted:
+`v12_crossing_budget`'s "MUST ratchet down to 0 when the seed defect is
+fixed", and the last `CROSS_NET_V02_ESCALATIONS` entry.
+
+### Coverage note (why this was landable at all)
+
+This work landed *after* the fixture lists were unified so that
+`placement_quality`'s `no_symbol_symbol_overlap_across_fixtures` and
+`no_power_glyph_foreign_body_overlap_across_fixtures` — both
+unconditional-0 Tier-1 invariants — actually graded
+`opamp_definition_level`. They previously did not, and two earlier
+intermediate states of this same work (a VCC glyph inside `RF1`'s body;
+two massively overlapping opamp triangles) had passed the entire suite.
+Do not measure a placement change against a suite that cannot see the
+fixture it moves.

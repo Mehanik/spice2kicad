@@ -266,28 +266,18 @@ const SHEETS: &[&str] = &[
 /// junction-move step + maze fallback, every router-fixable case is
 /// gone across all five v0.1 fixtures. A non-zero budget here would
 /// be a regression: every fixture should route clean.
-fn v12_crossing_budget(name: &str) -> usize {
-    match name {
-        // OWED, NOT ACCEPTED. These 4 crossings are a *consequence* of a
-        // placement fault, not a routing one: RF1 overlaps X2's body and
-        // RF2 overlaps X1's, which puts a resistor pin strictly inside a
-        // foreign body, at which point the router logs `skipping V12
-        // enforcement` and stops trying. See the ADR-11 post-mortem
-        // "Symbol-body overlap on `opamp_definition_level` is a *seed*
-        // defect" — the annealer cannot reach it (`2 movable / 8
-        // elements`), so the fix belongs in bands/layers sizing slots from
-        // real body extents.
-        //
-        // Recorded as a non-zero ratchet on explicit sign-off, under the
-        // budget policy's new-geometry exception: this fixture had no
-        // grading at all until now, so a regression here was previously
-        // silent. The literal is the exact measured count — zero slack —
-        // and MUST ratchet down to 0 when the seed defect is fixed. It is
-        // never a licence to route this fixture worse.
-        "opamp_definition_level" => 4,
-        // Every other fixture routes clean, and must stay that way.
-        _ => 0,
-    }
+fn v12_crossing_budget(_name: &str) -> usize {
+    // `opamp_definition_level` PAID ITS DEBT. It carried an "OWED,
+    // NOT ACCEPTED" budget of 4, whose comment named the exact
+    // precondition for retiring it: "MUST ratchet down to 0 when the
+    // seed defect is fixed". That seed defect — `place_seed`'s
+    // within-bucket Y stride being a hardcoded 5 cells regardless of
+    // body geometry, so two 10.16 mm opamp triangles seeded 6.35 mm
+    // apart and RF1/RF2 ended up inside a foreign body — is fixed,
+    // and the router no longer logs `skipping V12 enforcement` here.
+    //
+    // Every fixture routes clean, and must stay that way.
+    0
 }
 
 #[test]
@@ -2860,15 +2850,10 @@ fn segments_collinearly_overlap(s1: &(Pt, Pt), s2: &(Pt, Pt)) -> bool {
 /// or nudge merges them, but a single added junction (or any router
 /// tweak that snaps an endpoint onto the shared run) would merge the two
 /// nets into one. ERC does not catch it because the segments carry no
-/// junction. The budget is **zero** wherever the router's single-track
-/// jog resolves the overlap; it is **1** for the two recorded v0.2
-/// channel-router escalations ([`CROSS_NET_V02_ESCALATIONS`]) where the
-/// minimal jog provably cannot land — that literal is a coverage
-/// high-water mark that records the true current count (one latent
-/// overlap the router escalates with a warning), and it ratchets
-/// **down to 0** when the v0.2 channel/maze router resolves it. A
-/// non-zero count anywhere else — or a *second* overlap on an escalated
-/// fixture — is a defect to fix in the router, never a budget to raise.
+/// junction. The budget is now **zero on every fixture**:
+/// [`CROSS_NET_V02_ESCALATIONS`] is empty, the last entry having been
+/// retired. Any non-zero count is a defect to fix in the router or the
+/// placer, never a budget to raise.
 fn cross_net_overlap_budget(name: &str) -> usize {
     usize::from(CROSS_NET_V02_ESCALATIONS.contains(&name))
 }
@@ -2881,29 +2866,12 @@ fn cross_net_overlap_budget(name: &str) -> usize {
 /// for, so broadening `SHEETS` to reach the opamp cases would cascade
 /// failures. This verifier therefore carries its own list.
 ///
-/// Each fixture's overlap count is checked against
-/// `cross_net_overlap_budget`: a hard **0** where the router's
-/// single-track jog resolves the channel share, or **1** for the two
-/// recorded v0.2 channel-router escalations (`multivibrator`,
-/// `opamp_definition_level`) where the minimal jog provably cannot land.
-///
-/// `diff_pair` used to be an escalation: its c1/c2 priority keys tie, so
-/// the index tie-break arbitrarily fixed c1 as winner / c2 as victim,
-/// and both of c2's tracks were blocked. The router now falls back to
-/// jogging the *winner* (c1 down to y=39.37) when the victim cannot
-/// move, which clears all five guards — so `diff_pair` is a hard 0 here
-/// and no longer escalated.
-///
-/// The two remaining escalations (`CROSS_NET_V02_ESCALATIONS`) are still
-/// listed here — with budget 1 — so they carry regression coverage: the
-/// router's deconfliction pass detects each overlap and tries to jog
-/// both the victim and (fallback) the winner one grid cell onto an
-/// adjacent track, but on these two *neither* net can land in *either*
-/// direction without a higher-tier regression, so the pass rolls back
-/// and emits an observability warning. The budget-1 literal records that
-/// single latent overlap and ratchets to 0 when the v0.2 channel/maze
-/// router resolves it. See the escalation const for the per-fixture wall
-/// each hits.
+/// Every fixture's overlap count is checked against
+/// `cross_net_overlap_budget`, which is now a hard **0** everywhere —
+/// three fixtures were escalations at various points (`diff_pair`,
+/// `multivibrator`, `opamp_definition_level`) and all three have been
+/// resolved. See [`CROSS_NET_V02_ESCALATIONS`] for what each wall was
+/// and what removed it.
 const ALL_FIXTURES_FOR_CROSS_NET: &[&str] = &[
     "rc_lowpass",
     "common_emitter",
@@ -2943,13 +2911,16 @@ const ALL_FIXTURES_FOR_CROSS_NET: &[&str] = &[
 /// sideways within it. The b1/b2 wall above is real — it is why the
 /// *jog* cannot land — but the jog is no longer the only remedy.
 ///
-/// `opamp_definition_level` still escalates: the rollback frees the
-/// channel only when the stub was what occupied it, and out1/out2 there
-/// overlap on their plain trees. It keeps its budget-1 high-water mark
-/// (measured: exactly one latent overlap, escalated with a warning) and
-/// ratchets to 0 when the v0.2 channel/maze router lands. Never mask a
-/// *second* residual by raising the budget above 1.
-const CROSS_NET_V02_ESCALATIONS: &[&str] = &["opamp_definition_level"];
+/// `opamp_definition_level` has since been RESOLVED too, and the list is
+/// now EMPTY. Its wall was never really a router one: out1/out2 shared a
+/// channel because the two channels were X-interleaved and drawn
+/// backwards, which in turn came from `place_seed`'s hardcoded 5-cell
+/// within-bucket Y stride seeding two oversized opamp bodies on top of
+/// one another. With the channels laid out left-to-right and side by
+/// side, out1 and out2 no longer contend for one track and the plain
+/// trees do not overlap. Keep this list empty; a new entry needs the
+/// same evidence these three carried.
+const CROSS_NET_V02_ESCALATIONS: &[&str] = &[];
 
 #[allow(clippy::too_many_lines)]
 #[test]

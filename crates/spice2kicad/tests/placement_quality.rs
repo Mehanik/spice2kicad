@@ -1306,18 +1306,10 @@ fn crossing_count_within_budget_across_fixtures() {
         ("rc_lowpass_ports", 0),
         ("opamp_inverting", 0),
         ("port_shapes", 0),
-        // PRE-EXISTING DEFECT the old five-fixture list could not see,
-        // recorded at its measured value rather than fixed here. These
-        // crossings are a *placement* fault, not a routing one, and have
-        // the same root cause already documented for this fixture in
-        // `electrical_safety.rs::v12_crossing_budget` ("OWED, NOT
-        // ACCEPTED"): `RF1` overlaps `X2`'s body and `RF2` overlaps
-        // `X1`'s, which puts a resistor pin strictly inside a foreign
-        // body, at which point the router stops enforcing V12 and the
-        // trunks cross. Non-zero on a Tier-2 metric, so it is a budget;
-        // it is expected to fall when the seed-stride / layer-root
-        // placement fault is fixed.
-        ("opamp_definition_level", 6),
+        // 6 -> 0. Recorded at 6 when this fixture was first graded, with
+        // the note that it would fall once the seed-stride placement
+        // fault was fixed. It was, and it did. Ratchet DOWN.
+        ("opamp_definition_level", 0),
         ("named_rails", 0),
     ];
     for (name, path) in fixtures() {
