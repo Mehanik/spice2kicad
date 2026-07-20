@@ -286,17 +286,18 @@ fn check_relation(
             }
             shared_axis(a_pins, b_pins, a_min_x, b_max_x, true)
         }
+        // Y grows downward: `above` means SMALLER y (spec §4.3).
         Relation::Above => {
-            if b_min_y <= a_max_y + TOL_MM {
-                return Err(format!("b_min_y {b_min_y} not > a_max_y {a_max_y}"));
-            }
-            shared_axis(a_pins, b_pins, a_max_y, b_min_y, false)
-        }
-        Relation::Below => {
             if b_max_y >= a_min_y - TOL_MM {
                 return Err(format!("b_max_y {b_max_y} not < a_min_y {a_min_y}"));
             }
             shared_axis(a_pins, b_pins, a_min_y, b_max_y, false)
+        }
+        Relation::Below => {
+            if b_min_y <= a_max_y + TOL_MM {
+                return Err(format!("b_min_y {b_min_y} not > a_max_y {a_max_y}"));
+            }
+            shared_axis(a_pins, b_pins, a_max_y, b_min_y, false)
         }
     }
 }

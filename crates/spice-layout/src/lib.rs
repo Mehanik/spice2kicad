@@ -1473,19 +1473,28 @@ fn solve_place(
             let (bx, by) = pick(&b_pins, |p| (-p.0, p.1));
             GridPoint::new(a_origin.x + ax - CELL_W - bx, a_origin.y + ay - by)
         }
+        // NOTE: Y grows DOWNWARD (KiCad screen coords), so `a`'s
+        // *topmost* pin is its MINIMUM y and its *bottommost* pin is
+        // its MAXIMUM y. These two arms once had the sign backwards
+        // (picking max-y for "top"), which made `above`/`below` emit
+        // the opposite of what spec §4.3 defines — the same
+        // screen-Y-sign class of bug as the `cost::rail_direction`
+        // inversion. See `tests/place_direction.rs`.
         Relation::Above => {
-            // `b` sits above `a`: b's bottom pin connects to a's top.
-            //   b.origin.y + b_bottom.y = a.origin.y + a_top.y + CELL_H
+            // `b` sits ABOVE `a` (spec §4.3: anchor's top edge → the
+            // element's bottom edge), i.e. at SMALLER y.
+            //   b.origin.y + b_bottom.y = a.origin.y + a_top.y - CELL_H
             //   shared X.
-            let (ax, ay) = pick(&a_pins, |p| (-p.1, p.0));
-            let (bx, by) = pick(&b_pins, |p| (p.1, p.0));
-            GridPoint::new(a_origin.x + ax - bx, a_origin.y + ay + CELL_H - by)
-        }
-        Relation::Below => {
-            //   b.origin.y + b_top.y = a.origin.y + a_bottom.y - CELL_H
             let (ax, ay) = pick(&a_pins, |p| (p.1, p.0));
             let (bx, by) = pick(&b_pins, |p| (-p.1, p.0));
             GridPoint::new(a_origin.x + ax - bx, a_origin.y + ay - CELL_H - by)
+        }
+        Relation::Below => {
+            // `b` sits BELOW `a`, i.e. at LARGER y.
+            //   b.origin.y + b_top.y = a.origin.y + a_bottom.y + CELL_H
+            let (ax, ay) = pick(&a_pins, |p| (-p.1, p.0));
+            let (bx, by) = pick(&b_pins, |p| (p.1, p.0));
+            GridPoint::new(a_origin.x + ax - bx, a_origin.y + ay + CELL_H - by)
         }
     }
 }

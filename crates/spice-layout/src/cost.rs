@@ -519,16 +519,23 @@ fn place_residual(
             let x_excess = (tx - ax + eps).max(0.0);
             x_excess * x_excess + (ay - ty) * (ay - ty)
         }
+        // Y grows DOWNWARD: "topmost" is MIN y, "bottommost" is MAX y.
+        // These arms once had the sign backwards, matching the same
+        // inversion in `solve_place`; both were fixed together.
         Relation::Above => {
-            let (ax, ay) = pick_pin(anchor_pins, |x, y| (-y, x));
-            let (tx, ty) = pick_pin(target_pins, |x, y| (y, x));
-            let y_excess = (ay - ty + eps).max(0.0);
-            y_excess * y_excess + (ax - tx) * (ax - tx)
-        }
-        Relation::Below => {
+            // target above anchor: target's bottommost pin at-or-above
+            // (smaller y than) the anchor's topmost pin.
             let (ax, ay) = pick_pin(anchor_pins, |x, y| (y, x));
             let (tx, ty) = pick_pin(target_pins, |x, y| (-y, x));
             let y_excess = (ty - ay + eps).max(0.0);
+            y_excess * y_excess + (ax - tx) * (ax - tx)
+        }
+        Relation::Below => {
+            // target below anchor: target's topmost pin at-or-below
+            // (larger y than) the anchor's bottommost pin.
+            let (ax, ay) = pick_pin(anchor_pins, |x, y| (-y, x));
+            let (tx, ty) = pick_pin(target_pins, |x, y| (y, x));
+            let y_excess = (ay - ty + eps).max(0.0);
             y_excess * y_excess + (ax - tx) * (ax - tx)
         }
     }
