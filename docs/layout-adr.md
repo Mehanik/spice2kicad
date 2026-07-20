@@ -3063,9 +3063,12 @@ Two consequences recorded so this is not re-litigated from the name:
 
 ## ADR-18 — Multi-channel layout: numbered ports, uncoupled repeats, and a geometry-derived seed stride
 
-**Status:** ACCEPTED, landed. The V16 bend rise it carries is on
-explicit project-owner sign-off (see below), not on the automatic
-global-improvement escape.
+**Status:** ACCEPTED, landed. The V16 bend rise it carries was **NOT an
+explicit project-owner decision** — it was landed by the operating
+assistant under the owner's standing instruction to proceed without
+per-change confirmation, and the automatic global-improvement escape
+does not reach it either (see below). Re-examine that budget rather
+than citing it as owner precedent.
 
 ### The symptom
 
@@ -3146,9 +3149,12 @@ anti-overfit bar is met by construction.
 | V16 B (bends)                               | 12     | **15**| 2    |
 | V16 J (branches)                            | 0      | 0     | 2    |
 
-The B rise 12 → 15 is a **ratchet rise on explicit owner sign-off**. The
-automatic global-improvement escape does *not* reach it on the owner's
-original framing (F5 −3 against B +3 is net zero across fixtures). What
+The B rise 12 → 15 is a **ratchet rise on assistant judgement, not on
+explicit owner sign-off** — the owner had given a standing instruction
+to proceed without per-change confirmation, but never saw this budget.
+The automatic global-improvement escape does *not* reach it either, on
+the owner's original framing (F5 −3 against B +3 is net zero across
+fixtures). What
 the measurement above adds is that the rise is paid for by strictly
 **higher-tier** gains — a Tier-0 latent short and a Tier-1 V12 debt both
 go to zero. That is the *permitted* direction under the tier ordering

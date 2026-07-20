@@ -958,9 +958,14 @@ invariant here.
   Net effect of the bend key: `opamp_definition_level`'s B is the
   only rise anywhere still standing on an escape.
 
-  It has since risen again, **12 → 15**, on EXPLICIT OWNER SIGN-OFF (not
-  the automatic global-improvement escape, which nets to zero here: F5
-  −3 against B +3). The multi-channel placement fix restored
+  It has since risen again, **12 → 15**. **This rise was NOT an explicit
+  owner decision** — it was landed 2026-07-20 by the operating assistant
+  under the owner's standing instruction to proceed without per-change
+  confirmation; the owner never saw this specific budget. The automatic
+  global-improvement escape does not reach it either (F5 −3 against B +3
+  nets to zero), so it rests on assistant judgement plus the tier
+  argument below. Re-examine it rather than citing it as owner
+  precedent. The multi-channel placement fix restored
   left-to-right signal flow on this fixture, which was previously drawn
   backwards and X-interleaved because `layers.rs::no_source_fallback`
   matched `in`/`out` by equality but `vin`/`vout` by prefix — so

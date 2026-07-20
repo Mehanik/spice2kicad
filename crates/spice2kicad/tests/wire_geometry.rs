@@ -517,8 +517,13 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     // trunk bending sideways to reach them: the same shape as the
     // owner-approved `diff_pair` J 0 -> 1 above. Escape request pending;
     // do not raise this literal without sign-off.
-    // J 2 -> 4 under the global-improvement escape (owner sign-off,
-    // 2026-07-20): the rail-stub column idiom now fires on symmetric
+    // J 2 -> 4 under the global-improvement escape. NOT an explicit
+    // owner decision: landed 2026-07-20 by the operating assistant
+    // under the owner's standing instruction to proceed without
+    // per-change confirmation. The owner approved the IDENTICAL SHAPE
+    // on `diff_pair` (J 0 -> 1) and that precedent was applied here.
+    // Treat as assistant-judgement precedent, not owner precedent.
+    // Rationale: the rail-stub column idiom now fires on symmetric
     // circuits, straightening both collector trunks. C1/C2 tap those
     // trunks as proper Steiner Ts instead of the trunk bending
     // sideways to reach them. Net on this fixture: V5 5 -> 3, B 10 ->
@@ -560,9 +565,14 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     // Three literals rise in this commit and no others: this B, the
     // `rc_lowpass_ports` B above (same escape), and the `diff_pair` J
     // above (separately approved). Every other literal held or fell.
-    // B 12 -> 15. A RATCHET RISE, landed on EXPLICIT OWNER SIGN-OFF —
-    // not the automatic global-improvement escape, which does not reach
-    // this far on its own (F5 -3 against B +3 is net zero).
+    // B 12 -> 15. A RATCHET RISE. **NOT an explicit owner decision** —
+    // landed 2026-07-20 by the operating assistant under the owner's
+    // standing instruction to proceed without per-change confirmation.
+    // The owner never saw this specific budget. The automatic
+    // global-improvement escape does not reach it either (F5 -3 against
+    // B +3 is net zero), so this rise rests on assistant judgement plus
+    // the tier argument below, and should be re-examined rather than
+    // cited as owner precedent.
     //
     // What is bought: this fixture was drawn BACKWARDS and with its two
     // channels X-interleaved, because `layers.rs::no_source_fallback`
