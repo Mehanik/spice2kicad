@@ -259,6 +259,7 @@ const SHEETS: &[&str] = &[
     "port_shapes",
     "rc_lowpass_ports",
     "opamp_definition_level",
+    "named_rails",
 ];
 
 /// Per-fixture crossing budget. After the V11/V12 cascade + Steiner-
@@ -1945,6 +1946,17 @@ fn v5_violation_budget(name: &str) -> usize {
         // collector trunks leave the pin outward. Ratchet DOWN.
         "multivibrator" => 3,
         "common_emitter" | "opamp_inverting" => 1,
+        // PRE-EXISTING, newly VISIBLE: `named_rails` was absent from
+        // `SHEETS` until the fixture lists were unified, so nothing ever
+        // graded it. Nothing moved — the fixture is simply now measured.
+        // Both residuals are the documented v0.2 placer work item, not a
+        // routing bug: `RIN.2` and `RPU.2` are the two rail-stub pins on
+        // the `out` node, which the router reaches with a run *along* the
+        // shared column rather than an outward stub. V5 is Tier 2, and
+        // MEMORY "flow-orientation wall" records that a seed/SA
+        // orientation tie-break is the wrong lever here. Ratchets down
+        // when the v0.2 placer redesign lands.
+        "named_rails" => 2,
         // diff_pair, rc_lowpass, rc_lowpass_ports, port_shapes,
         // opamp_inverting_real, opamp_definition_level: zero violations.
         _ => 0,
@@ -2333,12 +2345,22 @@ fn no_pwr_flag_on_signal_net_with_passive_pin() {
 /// Fixtures whose emitted schematic Phase 1 touches (flat root-sheet
 /// fixtures — no hierarchical-ground ERC artifact). ERC must stay at
 /// zero errors after the net-`b`-class flag is removed.
+/// Every FLAT fixture. `opamp_inverting` is deliberately absent: it is
+/// the one fixture that emits a hierarchical sheet, and it carries the
+/// documented `power_pin_not_driven` artifact on its parent-side ground
+/// glyph (see docs/invariants.md V2) — a genuine KiCad hierarchical
+/// limitation, not a defect this guard should mask. Every other fixture
+/// must be at zero ERC errors with no allowance at all.
 const PHASE1_ERC_FIXTURES: &[&str] = &[
     "rc_lowpass",
+    "rc_lowpass_ports",
     "common_emitter",
     "diff_pair",
     "multivibrator",
     "opamp_inverting_real",
+    "port_shapes",
+    "opamp_definition_level",
+    "named_rails",
 ];
 
 #[test]
@@ -2890,6 +2912,9 @@ const ALL_FIXTURES_FOR_CROSS_NET: &[&str] = &[
     "diff_pair",
     "multivibrator",
     "opamp_definition_level",
+    "port_shapes",
+    "rc_lowpass_ports",
+    "named_rails",
 ];
 
 /// Symmetric fixtures whose two mirror-image sub-circuits force two

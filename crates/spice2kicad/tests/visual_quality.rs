@@ -32,12 +32,21 @@ use std::process::Command;
 use common::{require_kicad_cli, spice_to_kicad};
 use lexpr::Value;
 
+/// All ten fixtures. This was the classic five; the port,
+/// definition-level and named-rail sheets were emitted by the CLI but
+/// graded by nothing here, so V1 (visible glyphs), V2 (ERC) and V9
+/// (value formatting) were blind on exactly the newest code paths.
 const FIXTURES: &[&str] = &[
     "rc_lowpass",
+    "rc_lowpass_ports",
     "common_emitter",
     "multivibrator",
     "diff_pair",
     "opamp_inverting",
+    "opamp_inverting_real",
+    "port_shapes",
+    "opamp_definition_level",
+    "named_rails",
 ];
 
 // --- driver bits ---------------------------------------------------------

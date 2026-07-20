@@ -54,6 +54,7 @@ const FIXTURES: &[&str] = &[
     "port_shapes",
     "rc_lowpass_ports",
     "opamp_definition_level",
+    "named_rails",
 ];
 
 // --- environment ---------------------------------------------------------

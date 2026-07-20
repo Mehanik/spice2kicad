@@ -58,6 +58,7 @@ const FIXTURES: &[&str] = &[
     "opamp_definition_level",
     "port_shapes",
     "rc_lowpass_ports",
+    "named_rails",
 ];
 
 fn fixtures_dir() -> PathBuf {

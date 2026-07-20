@@ -531,12 +531,29 @@ fn smoke_label_positions_filters_by_net_name() {
 //   5. crossing-count budget (true wire-segment crossings ≤ K)
 //   6. common-emitter signal-flow regression guard
 
+/// **All ten fixtures.** This list was the classic five for a long
+/// time, which left the port / hierarchical-sheet / definition-level
+/// paths ungraded by the geometry verifiers that live in this file —
+/// notably `no_symbol_symbol_overlap_across_fixtures` and
+/// `no_power_glyph_foreign_body_overlap_across_fixtures`, both
+/// unconditional-0 Tier-1 invariants. Two separate intermediate states
+/// that shipped a VCC glyph inside a resistor body and two massively
+/// overlapping opamp triangles on `opamp_definition_level` passed the
+/// whole suite, because this list could not see that fixture.
+/// `electrical_safety::SHEETS`, `labels::SHEETS`, `wire_geometry::FIXTURES`
+/// and `rendered_text::FIXTURES` had already been extended; this one had
+/// not. There is no fixture that belongs out of it.
 const FIXTURES_FOR_QUALITY: &[(&str, &str)] = &[
     ("rc_lowpass", "rc_lowpass.cir"),
+    ("rc_lowpass_ports", "rc_lowpass_ports.cir"),
     ("common_emitter", "common_emitter.cir"),
     ("multivibrator", "multivibrator.cir"),
     ("diff_pair", "diff_pair.cir"),
+    ("opamp_inverting", "opamp_inverting.cir"),
     ("opamp_inverting_real", "opamp_inverting_real.cir"),
+    ("port_shapes", "port_shapes.cir"),
+    ("opamp_definition_level", "opamp_definition_level.cir"),
+    ("named_rails", "named_rails.cir"),
 ];
 
 fn fixtures() -> Vec<(&'static str, PathBuf)> {
@@ -1184,6 +1201,24 @@ fn wire_length_within_budget_across_fixtures() {
         ("multivibrator", 2.5),
         ("diff_pair", 1.5),
         ("opamp_inverting_real", 1.5),
+        // Newly graded (the fixture list was extended to all ten).
+        //
+        // CAVEAT, and it is a large one: this metric's baseline is
+        // `pin_pair_manhattan_sum`, which is derived from *labelled*
+        // nets. Nine of the ten fixtures emit no multi-pin labelled net
+        // at all, so they hit the `baseline < 1e-6` early-`continue`
+        // above and are never actually graded here — the five original
+        // budgets are vacuous today too. `opamp_inverting` is the only
+        // fixture that reaches the assertion (its hierarchical-sheet
+        // ports carry the labels). Measured ratio 1.13; recorded tight.
+        // Making this verifier bite on the other nine means replacing
+        // the label-derived baseline with a pin-derived one, which is a
+        // separate change — see the report note.
+        ("rc_lowpass_ports", 1.5),
+        ("opamp_inverting", 1.14),
+        ("port_shapes", 1.5),
+        ("opamp_definition_level", 1.5),
+        ("named_rails", 1.5),
     ];
     for (name, path) in fixtures() {
         let tmp = tempdir(name);
@@ -1196,6 +1231,10 @@ fn wire_length_within_budget_across_fixtures() {
             continue;
         }
         let ratio = total / baseline;
+        if std::env::var_os("S2K_QUALITY_DUMP").is_some() {
+            println!("wire_length (\"{name}\", {ratio}),");
+            continue;
+        }
         let &(_, budget) = budgets
             .iter()
             .find(|(n, _)| *n == name)
@@ -1255,16 +1294,41 @@ fn crossing_count_within_budget_across_fixtures() {
     // then lowered common_emitter 3→2. Never raise.
     let budgets: &[(&str, u32)] = &[
         ("rc_lowpass", 0),
-        ("common_emitter", 2),
+        // 2 -> 0. Reclaimed slack: the fixture measures 0 crossings on
+        // master today. Ratchet DOWN, per CLAUDE.md § "Budgets are
+        // ratchets, not knobs" ("when you fix something, read the new
+        // count and lower the literal; don't leave slack").
+        ("common_emitter", 0),
         ("multivibrator", 4),
         ("diff_pair", 0),
         ("opamp_inverting_real", 0),
+        // Newly graded (the fixture list was extended to all ten).
+        ("rc_lowpass_ports", 0),
+        ("opamp_inverting", 0),
+        ("port_shapes", 0),
+        // PRE-EXISTING DEFECT the old five-fixture list could not see,
+        // recorded at its measured value rather than fixed here. These
+        // crossings are a *placement* fault, not a routing one, and have
+        // the same root cause already documented for this fixture in
+        // `electrical_safety.rs::v12_crossing_budget` ("OWED, NOT
+        // ACCEPTED"): `RF1` overlaps `X2`'s body and `RF2` overlaps
+        // `X1`'s, which puts a resistor pin strictly inside a foreign
+        // body, at which point the router stops enforcing V12 and the
+        // trunks cross. Non-zero on a Tier-2 metric, so it is a budget;
+        // it is expected to fall when the seed-stride / layer-root
+        // placement fault is fixed.
+        ("opamp_definition_level", 6),
+        ("named_rails", 0),
     ];
     for (name, path) in fixtures() {
         let tmp = tempdir(name);
         let sch = common::spice_to_kicad(&path, &tmp).expect("spice2kicad");
         let root = parse_sch(&sch);
         let crossings = count_wire_crossings(&root);
+        if std::env::var_os("S2K_QUALITY_DUMP").is_some() {
+            println!("crossings (\"{name}\", {crossings}),");
+            continue;
+        }
         let &(_, budget) = budgets
             .iter()
             .find(|(n, _)| *n == name)

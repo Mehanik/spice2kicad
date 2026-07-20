@@ -139,6 +139,10 @@ const FIXTURES: &[&str] = &[
     "opamp_inverting",
     "opamp_inverting_real",
     "rc_lowpass",
+    "port_shapes",
+    "rc_lowpass_ports",
+    "opamp_definition_level",
+    "named_rails",
 ];
 
 #[test]
