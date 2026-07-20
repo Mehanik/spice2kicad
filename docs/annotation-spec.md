@@ -818,6 +818,55 @@ Two caveats:
   geometry — exactly the failure mode core principle 3 ("no
   geometry numbers in user input") guards against. Promote when a
   real file demonstrates a layout the auto-orienter cannot reach.
+
+  **The demonstrating case now exists** (recorded so whoever picks
+  this up does not have to re-derive it). Two current fixtures show a
+  layout no annotation in v0.1 can reach:
+
+  - `common_emitter`'s `COUT` is emitted vertical while `CIN` is
+    horizontal — the same role on the same signal path, drawn two
+    different ways.
+  - `rc_lowpass_ports`'s `R1` and `C1` are both vertical, so the `in`
+    and `out` labels land at the same x.
+
+  An investigation established **three independent walls**, all of
+  which a future design must clear:
+
+  1. **No orientation vocabulary exists.** None of the seven v0.1
+     directives can express "draw this part sideways" — `place` and
+     `align` describe *position* only.
+  2. **`place` / `align` force identity orientation.** An element
+     pinned by either keeps `Orientation::IDENTITY`, because its
+     position was solved against identity and re-rotating it would
+     invalidate the pin-anchored math in `solve_place`
+     (`spice-layout/src/lib.rs`; enforced again by the `pinned`
+     short-circuit in the SA rotate move and in
+     `kicad-emitter/src/refine.rs`). For `Device:C` and
+     `Device:R_US` identity **is** the unwanted vertical, so reaching
+     for `place`/`align` to fix a layout locks in the very
+     orientation the user was trying to change.
+  3. **Horizontal relations between two-pin parts have no pin
+     extent to work with.** In identity orientation both
+     `Device:C` and `Device:R_US` put both pins at x = 0, so a
+     pin-anchored `right-of` has zero horizontal pin extent to
+     separate against and leans entirely on the engine's fixed
+     cell gap. (This is *not* the cause of the coincident-symbol
+     defect fixed in `spice2kicad/tests/place_no_coincidence.rs`
+     — that one was the rail-stub-column idiom — but it does mean
+     the relation carries no geometric information of its own.)
+
+  **Design caveat — the deferred item as written violates core
+  principle 3.** Promoting `;@ orientation=0|90|180|270` literally
+  would put geometry numbers in user input, which CLAUDE.md
+  principle 3 forbids outright. The deferred design therefore needs
+  **rework before it can land**, not just a decision to build it. An
+  intent-level alternative — a hint meaning something like "this part
+  is drawn along the signal axis" / "across it" — would stay inside
+  principle 3 and is the direction to explore. Whatever lands must
+  also address wall (2): an orientation directive attached to a
+  `place`d element hits the same identity-orientation pinning
+  short-circuit and would be silently ignored. (No design work has
+  been done here; this entry records the constraints only.)
 - **`align` under mixed orientation** — the spec does not
   currently say which pin's coordinate is shared when aligned
   parts are rotated differently. Likely resolutions: (a) require

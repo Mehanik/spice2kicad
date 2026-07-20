@@ -1480,6 +1480,76 @@ perfectly clear but which `kicad-cli` rendered kissing a pin number by
 (0.25 mm was still too small — measured, not guessed). Only the SVG-ink
 test can see this class of defect; the modelled V13 checks cannot.
 
+### A hinged residual is not a collision check — the rail-stub column collapse
+
+`*@align horizontal R1 C1` or `C1 … ;@ place=right-of R1` on
+`rc_lowpass_ports` emitted **both symbols at one origin** (`35.56 35.56
+rot 0`), shorting the two nets; the CLI's connectivity verifier failed
+the conversion *after* writing the file. Tier 0.
+
+**The obvious diagnosis was wrong, and cost the first pass of this
+investigation.** It looked like a pin-extent problem: `place` is
+pin-anchored, and in identity orientation both `Device:R_US` and
+`Device:C` put *both* pins at x = 0, so `right-of` appears to have zero
+horizontal extent to separate against. Measured, `solve_place` is
+**correct** — it opens the full `CELL_W` (7.62 mm) on exactly this pair.
+Confirmed by stubbing out one call: with `apply_rail_stub_columns`
+disabled the same input emits R1 at 35.56 and C1 at 43.18.
+
+**Actual cause.** `C1` is a ground-side rail stub on net `out`, so
+`idioms::apply_rail_stub_columns` snapped its X to that net's anchor
+column — which is `R1`'s own column. The idiom's revert guard scored
+only `cost::constraint_residual`, and `place_residual`'s `RightOf` X
+term is a **one-sided hinge** (`(ax - tx).max(0)`, ε = 0): collapsing the
+target onto the anchor scores an unchanged zero, i.e. "not strictly
+worse", so the guard waved it through. A `place`d element is
+`user_pinned`, so the post-refinement legalizer would not repair it
+either.
+
+**The rule.** *A hinged/one-sided residual can never serve as a
+collision guard.* It is satisfied at zero separation by construction —
+that is what makes it a good SA objective and a useless safety check.
+Any pass that relocates an element onto a column derived from *other*
+elements needs a categorical, measured no-overlap condition alongside
+the residual. `apply_rail_stub_columns` now also reverts wholesale when
+`legalize::overlap_count` *rises*, which covers the whole class (any
+stub snapping onto an already-occupied column), not merely the
+annotated case.
+
+**Why a fix and not a diagnostic.** A pre-flight hard error in
+`spice-policy` was considered and rejected: the layout the user asked
+for is legitimately expressible and now renders correctly, so blocking
+it would trade silent corruption for a spurious refusal. Per CLAUDE.md
+principle "hard errors on typos, soft warnings on conflicts" — this is
+neither; it was a converter defect wearing a user-input costume. No new
+diagnostic code was added. Verifier:
+`spice2kicad/tests/place_no_coincidence.rs`.
+
+### `place=above` / `below` were inverted — the second screen-Y-sign bug
+
+Spec §4.3 defines `above` as "anchor's top edge → element's bottom
+edge": the annotated element sits **above** the anchor, i.e. at the
+*smaller* y, because KiCad screen Y grows downward. Both `solve_place`
+(`spice-layout/src/lib.rs`) and `cost::place_residual` picked the
+anchor's **max-y** pin as its "top", so `;@ place=above R1` emitted the
+element *below* R1 and vice versa — consistently, on both the seed and
+the SA-objective side, which is why nothing caught it.
+
+Nothing caught it for two further reasons worth recording: no fixture
+uses `above`/`below` (the only `place` uses in the tree are
+`right-of`), and `spice-layout/tests/properties.rs::check_relation`
+was itself written against the buggy direction, so the property test
+*confirmed* the inversion instead of falsifying it. A verifier derived
+from the implementation rather than from the spec is not a verifier.
+
+This is the same class as the `cost::rail_direction` inversion
+(`pin_extents_y` returns `(y_min, y_max)`; screen Y grows downward) —
+third occurrence of the sign confusion in this file's history. Fixed on
+the code side (the spec is the contract). Direction is now pinned
+against the spec's own wording by
+`spice-layout/tests/place_direction.rs` and, end-to-end, by
+`spice2kicad/tests/place_no_coincidence.rs::above_and_below_match_the_spec_direction_end_to_end`.
+
 ---
 
 ## ADR-15 — Readability-first placement: constructive role/anchor placement, demoting the SA to a polisher
