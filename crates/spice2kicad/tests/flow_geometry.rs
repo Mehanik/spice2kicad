@@ -694,6 +694,72 @@ fn f4_violations(f: &Fixture) -> Vec<String> {
     out
 }
 
+/// **F6 — rail-stub lateral run.** A rail stub does not pass a signal
+/// along; it *terminates* a node, and the conventional drawing hangs it
+/// straight off that node — a vertical drop in the node's column, with a
+/// lateral run of ZERO. `idioms.rs`'s rail-stub column idiom exists to
+/// produce exactly that.
+///
+/// The idiom deliberately anchors only on **vertically-facing** pins,
+/// which is load-bearing and must not be widened (see the doc comment on
+/// `idioms::rail_stub_anchor_x`: anchoring on any pin dragged bias
+/// dividers onto horizontal base pins and cost V5 on three fixtures).
+/// The consequence is a blind spot with no measurement: a stub whose
+/// anchor node presents only HORIZONTAL pins — a bias resistor feeding a
+/// transistor BASE — gets no column opinion at all and keeps whatever
+/// column the layer seeder gave it. On `multivibrator` that leaves
+/// `RB1`/`RB2` at the extreme columns while the transistors they bias
+/// sit ~16 mm inboard, so each base is reached by a long horizontal run.
+///
+/// F6 makes that visible and bounded. For every rail stub, take its
+/// non-rail (signal) pin and the NEAREST other pin on the same net —
+/// the node it terminates — and measure the horizontal offset between
+/// them, in whole grid cells (1.27 mm). A stub hanging correctly in its
+/// node's column scores 0. The per-fixture ratchet records the MAXIMUM
+/// over the fixture's stubs.
+///
+/// Deliberately a *distance*, not a violation count: there is no
+/// threshold at which a lateral run becomes categorically wrong, and a
+/// count would hide a stub drifting from 2 cells to 12. It is Tier 2
+/// (an aesthetic gradient, like V5/V6), measured on emitted geometry,
+/// and derived from the netlist's pin roles — no fixture or refdes is
+/// named.
+fn f6_stub_lateral_runs(f: &Fixture) -> Vec<(String, u32)> {
+    let mut out = Vec::new();
+    let refdeses: Vec<String> = f.element_nets.iter().map(|(r, _)| r.clone()).collect();
+    for refdes in refdeses {
+        if !f.is_rail_stub(&refdes) {
+            continue;
+        }
+        // The stub's own pin on its signal (non-rail) net.
+        let Some(own) = f
+            .pins
+            .iter()
+            .find(|p| p.refdes == refdes && !f.is_rail_net(&p.net))
+        else {
+            continue;
+        };
+        // The node it terminates: the nearest foreign pin on that net.
+        let Some(anchor) = f
+            .pins
+            .iter()
+            .filter(|p| p.refdes != refdes && p.net == own.net)
+            .min_by(|a, b| {
+                let da = (a.x_mm - own.x_mm).abs() + (a.y_mm - own.y_mm).abs();
+                let db = (b.x_mm - own.x_mm).abs() + (b.y_mm - own.y_mm).abs();
+                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            })
+        else {
+            continue;
+        };
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let cells = ((anchor.x_mm - own.x_mm).abs() / 1.27).round() as u32;
+        out.push((refdes, cells));
+    }
+    out.sort();
+    out
+}
+
 // --- ratchets ------------------------------------------------------------
 
 /// Every fixture, with its zero-slack `(F3, F4)` high-water marks.
@@ -911,5 +977,80 @@ fn series_discriminator_separates_stub_from_series_on_common_emitter() {
          fixture regressed. Got pins at y={:.2}, y={:.2}",
         cin[0],
         cin[1]
+    );
+}
+
+/// Per-fixture zero-slack high-water mark for F6 (see
+/// `f6_stub_lateral_runs`): the MAXIMUM rail-stub lateral run on the
+/// fixture, in grid cells. Ratchets DOWN only.
+const STUB_RUN_RATCHET: &[(&str, u32)] = &[
+    // fixture                  max lateral run, grid cells
+    // C1 terminates `out` alongside R1, which the seeder puts 9 cells
+    // away; `out`'s only other pin is R1's, facing horizontally, so the
+    // column idiom has no vertical anchor and declines.
+    ("rc_lowpass", 9),
+    ("rc_lowpass_ports", 5),
+    // CE/RE share `e` with Q1's emitter (vertical pin, so the idiom does
+    // fire); the 4 is the side-by-side spread of the two stubs on the
+    // same node, which is deliberate — `apply_rail_stub_columns` spreads
+    // a group symmetrically about the anchor so they do not stack.
+    ("common_emitter", 4),
+    // RB1/RB2 are the reported defect: bias resistors feeding a BASE, a
+    // horizontally-facing pin, so the column idiom declines and they
+    // keep the seeder's extreme columns 11.43 mm out from their
+    // transistors. RC1/RC2 (collector loads, vertical pin) score 2.
+    ("multivibrator", 9),
+    // RTAIL terminates `tail`, shared by BOTH transistors' emitters; the
+    // shared-centre idiom seats it at their midpoint, so a non-zero
+    // offset from either one is correct, not a defect.
+    ("diff_pair", 4),
+    ("opamp_inverting", 0),
+    ("opamp_inverting_real", 0),
+    ("port_shapes", 0),
+    ("opamp_definition_level", 0),
+    ("named_rails", 6),
+];
+
+/// F6 ratchet. A rail stub should hang straight off the node it
+/// terminates; this bounds how far sideways it is allowed to drift.
+#[test]
+fn stub_lateral_run_within_ratchet() {
+    let mut failures = Vec::new();
+    let mut reclaim = Vec::new();
+    for &(name, budget) in STUB_RUN_RATCHET {
+        let f = load(name);
+        let runs = f6_stub_lateral_runs(&f);
+        let worst = runs.iter().map(|(_, c)| *c).max().unwrap_or(0);
+        if std::env::var("S2K_FLOW_DUMP").is_ok() {
+            println!("(\"{name}\", {worst}),  // {runs:?}");
+        }
+        if worst > budget {
+            let detail: Vec<String> = runs
+                .iter()
+                .filter(|(_, c)| *c > budget)
+                .map(|(r, c)| {
+                    format!(
+                        "{r}: {c} cells ({:.2} mm) sideways of its node",
+                        f64::from(*c) * 1.27
+                    )
+                })
+                .collect();
+            failures.push(format!(
+                "{name}: worst rail-stub lateral run rose to {worst} cells (budget {budget}): {}",
+                detail.join("; ")
+            ));
+        } else if worst < budget {
+            reclaim.push(format!("{name}: F6 may be lowered to {worst}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "F6 ratchet regressions (do NOT raise the budget — diagnose the geometry):\n{}",
+        failures.join("\n")
+    );
+    assert!(
+        reclaim.is_empty(),
+        "F6 ratchet has slack; lower these literals in the same commit:\n{}",
+        reclaim.join("\n")
     );
 }
