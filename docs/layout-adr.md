@@ -875,6 +875,64 @@ attempt rather than a successor to one: it buys no observable quality
 until something removes the slack, and it must be measured together with
 whatever does.
 
+**Completion (2026-07-20, part 2) — glyph value text reserved on
+horizontally-facing rail pins.** The first live blocker this reservation
+gap produced: a denser (correct) multi-channel layout put X2's
+left-facing GND glyph text on X1's body (V13(6a) = 3 on
+`opamp_definition_level`).
+
+*Mechanism, confirmed against ink.* A rail glyph's Value property is
+emitted with no `justify`, so KiCad **centres** it on its anchor
+(`TextKind::CenteredProperty` — the same model the V13 verifier grades
+against). `kicad-cli sch export svg` confirms it: a `GND` label anchored
+at x = 25.40 renders ink x ∈ [23.71, 27.09] — dead centred, 3.39 mm
+wide. `glyph_reach` reserved only out to the anchor, so on a
+horizontally-facing pin ~1.7 mm of label lay outside the reserved zone.
+
+*What landed.* `glyph_reach` now reserves the value text's **full
+rendered box** — both axes — on horizontally-facing rail pins, in BOTH
+consumers (`world_extent_with_glyphs` and `footprint_half_extents`), so
+ADR-14's single-source rule holds. The box comes from
+`kicad_symbols::text_geom` (the ONE text model, held to real SVG ink by
+`rendered_text.rs`) and the rendered string from a new shared
+`glyph_geom::rail_value_text`, which `rails::glyph_sexpr_at` now also
+calls — the placer cannot reserve a box sized for a different string
+than the emitter draws.
+
+*Blast radius:* one fixture. `opamp_inverting_real` shifts its
+right-hand cluster +2.54 mm in X (one grid cell — the reserved
+half-width, snapped); 11 of 109 `baseline_lock` rows. The other eight
+fixtures are byte-identical. Pure spacing — no rotation, no mirror, no
+reordering. **Every ratchet is unchanged, including V16 (B, J) on every
+fixture**; nothing improved, so no literal was lowered.
+
+*What was measured and REJECTED — vertically-facing pins.* Reserving
+the text box on vertical pins too (the canonical GND-down / VCC-up case,
+where the string's width is *perpendicular* to the pin axis) was
+implemented and measured in four ablations. It regresses Tier 1 on
+`opamp_definition_level`: label `out2` lands on RF2's body (V13(1)
+0→1) and a foreign `INV1` wire crosses the VEE glyph (V13(6b) 0→1),
+and V16 J rises 0→2. Applying it in the SA gate is worse still —
+`common_emitter` B 4→7 and F6's rail-stub lateral run 4→5 cells —
+because that gate's halo is symmetric, so a perpendicular reach blocks
+space on *both* sides. The ablation table:
+
+| seed | SA gate | result |
+| --- | --- | --- |
+| anchor | anchor | master (green) |
+| text box | anchor | V13(1) 0→1, V13(6b) 0→1, V16 J 0→2; 21 baseline rows |
+| anchor | text box | `common_emitter` B 4→7, F6 4→5 cells; 17 rows |
+| text box | text box | union of both; 38 rows |
+| **horizontal-only box** | **horizontal-only box** | **GREEN; 11 rows (landed)** |
+
+The reason is the general one: **space reclaimed by one reservation is
+space the still-unreserved decoration classes move into.** Label text
+and wires remain unreserved, so a faithful vertical reservation does not
+remove the collision, it relocates it. That is the same result ADR-17
+Stage 2 hit, and it is further evidence for "a complete decoration
+reservation is a precondition, not a successor". The vertical half stays
+out until label text is reserved too, and should return *with* it.
+
 **Label text remains unreserved** — the larger half. Not attempted: the
 information lives in `kicad-emitter`'s `label_specs`, which depends on
 routed geometry, so `spice-layout` cannot call it without inverting the

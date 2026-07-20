@@ -314,6 +314,24 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
     // deliberately excluded (it already shares one column). 16 of 107
     // rows moved, all on `multivibrator` (RB1/RB2 in, everything else
     // following the V15 page re-anchor); no other fixture changed.
+    //
+    // Regenerated again for the ADR-14 completion: a rail glyph's
+    // net-name Value text is CENTRED on its anchor (confirmed against
+    // `kicad-cli sch export svg` ink — a "GND" label anchored at x=25.40
+    // renders x[23.71, 27.09]), so on a HORIZONTALLY-facing rail pin
+    // roughly half the string used to lie outside the reserved zone.
+    // `glyph_reach` now reserves that text's full rendered box on
+    // horizontal pins, in BOTH consumers (seed/align stride and the SA
+    // overlap gate), so the two cannot disagree.
+    //
+    // Blast radius is one fixture: `opamp_inverting_real` shifts its
+    // right-hand cluster +2.54 mm in X (one grid cell — the reserved
+    // half-width, grid-snapped). 11 of 109 rows; the other eight
+    // fixtures are byte-identical. Pure spacing: no rotation, no mirror,
+    // no reordering. V16 (B, J) unchanged on every fixture, and every
+    // other ratchet is unchanged — consistent with ADR-14's finding that
+    // a faithful reservation buys no observable quality until something
+    // removes the slack.
     (
         "common_emitter",
         "#FLG1",
@@ -796,7 +814,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "opamp_inverting_real",
         "#FLG1",
         "power:PWR_FLAG",
-        77.47,
+        80.01,
         46.99,
         0.0,
         "",
@@ -805,7 +823,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "opamp_inverting_real",
         "#FLG2",
         "power:PWR_FLAG",
-        77.47,
+        80.01,
         59.69,
         180.0,
         "",
@@ -814,7 +832,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "opamp_inverting_real",
         "#FLG3",
         "power:PWR_FLAG",
-        77.47,
+        80.01,
         72.39,
         0.0,
         "",
@@ -823,7 +841,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "opamp_inverting_real",
         "#PWR1",
         "power:GND",
-        52.07,
+        54.61,
         36.83,
         0.0,
         "",
@@ -832,7 +850,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "opamp_inverting_real",
         "#PWR2",
         "power:VCC",
-        57.15,
+        59.69,
         31.75,
         0.0,
         "",
@@ -841,7 +859,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "opamp_inverting_real",
         "#PWR3",
         "power:VEE",
-        57.15,
+        59.69,
         46.99,
         180.0,
         "",
@@ -850,7 +868,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "opamp_inverting_real",
         "#PWR4",
         "power:GND",
-        77.47,
+        80.01,
         46.99,
         0.0,
         "",
@@ -859,7 +877,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "opamp_inverting_real",
         "#PWR5",
         "power:VCC",
-        77.47,
+        80.01,
         59.69,
         0.0,
         "",
@@ -868,7 +886,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "opamp_inverting_real",
         "#PWR6",
         "power:VEE",
-        77.47,
+        80.01,
         72.39,
         180.0,
         "",
@@ -877,7 +895,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "opamp_inverting_real",
         "RF",
         "Device:R_US",
-        45.72,
+        48.26,
         35.56,
         180.0,
         "",
@@ -895,7 +913,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "opamp_inverting_real",
         "X1",
         "Amplifier_Operational:OPAMP",
-        59.69,
+        62.23,
         39.37,
         0.0,
         "",

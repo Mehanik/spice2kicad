@@ -57,6 +57,30 @@ pub const VALUE_TEXT_OFFSET_MM: f64 = GLYPH_BODY_REACH_MM + GRID_MM;
 /// the inner glyph edge one full cell clear of the sheet edge.
 pub const SHEET_EDGE_GLYPH_OFFSET_CELLS: f64 = 2.0;
 
+/// The rendered net-name string a rail glyph's **Value** property
+/// carries, as a pure function of the SPICE net name.
+///
+/// A KiCad power symbol's Value *is* its net name (power symbols connect
+/// globally by Value), so this must preserve net identity: distinct
+/// rails stay distinct. The raw SPICE token is uppercased to the
+/// canonical rail label (`vcc`→`VCC`, `vee`→`VEE`, `v+`→`V+`), and the
+/// SPICE ground net `"0"` is renamed to the conventional `GND` (ground
+/// is a single net, so this rename cannot merge two distinct nets).
+///
+/// Single-sourced here, placement-side, for the same reason the reach
+/// constants are: `spice-route::rails::glyph_sexpr_at` *draws* this
+/// string and [`glyph_reach`] *reserves* the box it occupies. If the two
+/// disagreed, the placer would reserve a differently-sized box than the
+/// emitter draws — exactly the drift ADR-14 exists to prevent.
+#[must_use]
+pub fn rail_value_text(net_name: &str) -> String {
+    if net_name == "0" {
+        "GND".to_string()
+    } else {
+        net_name.to_ascii_uppercase()
+    }
+}
+
 /// Screen-vertical axis a rail glyph's body extends along, away from its
 /// host pin. Positive supply rails point the chevron **up**; ground and
 /// negative supply rails point the triangle **down**.
@@ -167,10 +191,61 @@ pub fn glyph_reach(
             0 => (1.0, 0.0),    // screen right
             _ => continue,      // non-cardinal: no glyph reservation
         };
-        out.push((
+        // Anchor of the glyph's net-name Value text — the point
+        // `rails::value_text_anchor` places it at.
+        let (ax, ay) = (
             tip_x + ux * VALUE_TEXT_OFFSET_MM,
             tip_y + uy * VALUE_TEXT_OFFSET_MM,
-        ));
+        );
+        // The text is CENTRED on that anchor (the emitted property
+        // carries no `justify`, so KiCad centres it horizontally — the
+        // same `TextKind::CenteredProperty` the V13 verifier grades
+        // against). Reserving only the anchor therefore leaves half the
+        // string's width unreserved on a horizontally-facing pin, which
+        // is precisely how a foreign body ends up under a rail label.
+        let tb = value_text_box(&rail_value_text(node), (ax, ay));
+        // Reserve the text's FULL rendered box on a horizontally-facing
+        // pin, where the centring puts half the string along the pin's
+        // own outward axis — the case a bare-anchor reservation misses
+        // entirely, and the one that lets a foreign body sit under a
+        // rail label.
+        //
+        // A *vertically*-facing pin (the canonical GND-down / VCC-up
+        // case) still reserves the anchor only. Reserving its text box
+        // too was implemented and MEASURED, and it regresses Tier 1: on
+        // `opamp_definition_level` it puts label "out2" on RF2's body
+        // (V13(1) 0→1) and a foreign INV1 wire across the VEE glyph
+        // (V13(6b) 0→1), and raises V16 J 0→2 — because the space it
+        // reclaims is space still-unreserved decoration (label text,
+        // wires) then moves into. That is the same "partial reservation
+        // just relocates the collision" result ADR-17 Stage 2 hit, and
+        // it stays out until label text is reserved too. See ADR-14
+        // "Known scope limits".
+        if uy == 0.0 {
+            out.push((tb.x0, tb.y0));
+            out.push((tb.x1, tb.y1));
+        } else {
+            out.push((ax, ay));
+        }
     }
     out
+}
+
+/// Renderer-faithful world-frame box of a rail glyph's net-name Value
+/// text, centred on `anchor`.
+///
+/// Delegates to `kicad_symbols::text_geom` — the ONE text-bbox
+/// definition, calibrated against real `kicad-cli sch export svg` ink by
+/// `spice2kicad/tests/rendered_text.rs` — so the reserved box is the box
+/// KiCad draws, not an estimate. `TextKind::CenteredProperty` and
+/// rotation 0 mirror exactly what `rails::glyph_sexpr_at` emits:
+/// `(property "Value" … (at vx vy 0))` with no `justify` token.
+fn value_text_box(value: &str, anchor: (f64, f64)) -> kicad_symbols::text_geom::TextBox {
+    kicad_symbols::text_geom::text_bbox(
+        value,
+        anchor,
+        kicad_symbols::text_geom::DEFAULT_TEXT_SIZE_MM,
+        0,
+        kicad_symbols::text_geom::TextKind::CenteredProperty,
+    )
 }

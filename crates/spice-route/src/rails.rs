@@ -381,18 +381,9 @@ pub(crate) fn glyph_sexpr_at(
     sheet_uuid: &str,
     project_name: &str,
 ) -> Sexpr {
-    // A KiCad power symbol's Value *is* its net name (power symbols
-    // connect globally by Value), so the rendered text must preserve net
-    // identity: distinct rails stay distinct. Uppercase the raw SPICE
-    // token to the canonical rail label (`vcc`→`VCC`, `vee`→`VEE`,
-    // `v+`→`V+`), and rename the SPICE ground net `"0"` to the
-    // conventional `GND` (ground is a single net, so this rename cannot
-    // merge two distinct nets).
-    let value = if net_name == "0" {
-        "GND".to_string()
-    } else {
-        net_name.to_ascii_uppercase()
-    };
+    // Single-sourced with the placer: `glyph_reach` reserves the box
+    // this exact string occupies, so the two must not drift.
+    let value = glyph_geom::rail_value_text(net_name);
     // Anchor the Value (net-name) text on the *outward* side of the
     // glyph — the side the glyph graphic points, away from the host
     // body the glyph attaches to. A GND triangle hangs *below* its
