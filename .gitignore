@@ -20,3 +20,4 @@ Cargo.lock.bak
 # for ad-hoc `kicad-cli` runs from the repo root.
 *-erc.rpt
 erc.rpt
+/out-review/
