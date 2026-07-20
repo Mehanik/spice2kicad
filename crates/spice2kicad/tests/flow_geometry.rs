@@ -864,8 +864,11 @@ const FLOW_POSE_RATCHET: &[(&str, usize, usize)] = &[
     ("diff_pair", 0, 0),
     // F5: both RIN and RF drawn vertical.
     ("opamp_inverting", 2, 0),
-    // F5: RF drawn vertical (RIN is horizontal here).
-    ("opamp_inverting_real", 1, 0),
+    // F5: RF AND RIN drawn vertical — same state as the sibling
+    // `opamp_inverting`, whose topology is identical. Rose 1 -> 2 when
+    // the `layers.rs` root refinement moved X1 downstream of RIN;
+    // ESCAPE REQUEST, pending owner sign-off (see the commit message).
+    ("opamp_inverting_real", 2, 0),
     // F5: R1/R2/R3 drawn vertical (R4 is a rail stub).
     ("port_shapes", 3, 0),
     // F5: all four of RIN1/RF1/RIN2/RF2 drawn vertical.

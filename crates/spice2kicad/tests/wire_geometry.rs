@@ -524,7 +524,11 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     // drawn as a proper Steiner T instead of the trunk stopping sideways
     // on RTAIL's pin. Buys V5 1 → 0 on this fixture. Owner-approved.
     ("diff_pair", 2, 1),
-    ("opamp_inverting_real", 8, 0),
+    // B 8 -> 5, J 0 -> 1 with the `layers.rs` root refinement. `inv` is a
+    // 3-pin net, so J >= k-2 = 1 is its topological floor; the previous
+    // J = 0 came from a degenerate collinear layout. ESCAPE REQUEST for
+    // the J rise, pending owner sign-off (see the commit message).
+    ("opamp_inverting_real", 5, 1),
     ("opamp_inverting", 3, 0),
     ("port_shapes", 4, 0),
     // B 4 → 2, and the global-improvement escape that once raised this
