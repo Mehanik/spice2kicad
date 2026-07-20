@@ -1015,6 +1015,115 @@ deviation, so it stays on the branch pending owner sign-off.
 rebase — and V5 / V16 / F5 fail as before. The blocker is not label
 reservation.
 
+**POST-MORTEM (2026-07-20) — the symmetric halo is LOAD-BEARING. Do not
+"fix" it. The decoration-reservation program is CLOSED.**
+
+The prerequisite the previous amendment named — "the SA gate needs a
+signed / asymmetric footprint before it can hold any label reservation"
+— was built and measured. **It is not a prerequisite; it is the thing
+that breaks.** This is the fourth failed attempt at completing the
+reservation, and the first one that explains the other three. Read this
+before touching `footprint_half_extents`, `world_extent_with_glyphs`, or
+`label_geom`: on its face "make the footprint model honest" looks
+obviously correct, and it is obviously wrong.
+
+*The finding.* `anneal.rs::footprint_half_extents` collapses every reach
+with `.abs()` (`hw = hw.max(p.x.abs())`, likewise for glyph reaches), so
+a **one-sided** reach becomes a **two-sided halo**: a `power:GND` glyph
+extends *down* only, a label box is strongly one-sided along the pin
+axis, and both get mirrored onto the opposite side for free. Every prior
+amendment called that halo "strict but conservative" — an accident to be
+cleaned up. It is not an accident to be cleaned up. It is the spacing
+the layouts are calibrated to.
+
+*The decisive argument — it is a proof, not a measurement.* The
+directional AABB is **provably a subset** of the symmetric box.
+Symmetric `hw = max|coord|`, so `[-hw, hw] ⊇ [min_x, max_x]` for any
+reach set, on both axes, always. Making the footprint directional
+therefore **strictly relaxes** the gate — it can only ever remove
+reserved space, never add it. It does not remove *phantom* space that
+was doing nothing; it removes space the SA immediately spends on
+tighter, worse layouts. Every V13 / V16 / F6 / rendered-text budget on
+`master` is calibrated against the halo, so "honesty" is a
+across-the-board loosening dressed as a bug fix.
+
+*Measured — directional alone* (branch `wip/directional-footprint`,
+`d176b9e`), vs `master`:
+
+| fixture | metric | master | directional |
+| --- | --- | --- | --- |
+| `rc_lowpass` | V13 label↔body (budget 0) | 0 | **1** |
+| `rc_lowpass` | V13 item (3) interface-label↔foreign-body | 0 | **1** |
+| `common_emitter` | rendered-text overlap (real `kicad-cli sch export svg` INK) | 0 | **1** |
+| `common_emitter` | V16 B | 4 | **7** |
+| `common_emitter` | F6 rail-stub lateral run | 4 cells | **5 cells** |
+| `rc_lowpass_plus_r` | P11 glyph poses | 2 | **3** |
+
+16 `baseline_lock` diffs across 3 fixtures. **Nothing improved anywhere
+— not one metric on one fixture.**
+
+*Measured — directional PLUS the complete label reservation*
+(`wip/label-reservation` cherry-picked on top, `8b060cf`): an
+**identical failure set**. The reservation recovers nothing the
+directional model gave away. With `legalize` in scope it is strictly
+worse (`opamp_definition_level` V5 0→5, V16 B 12→13).
+
+*The corollary, which is the general result.* **An exact directional
+model plus a complete label reservation together reserve strictly LESS
+space than the accident does.** The reservation program was premised on
+the reverse — that faithfulness would reserve *more* and the extra would
+buy quality. It reserves less, and the deficit is exactly what the four
+attempts kept re-discovering as "space reclaimed by one reservation is
+space the still-unreserved decoration classes move into". There is no
+remaining unreserved class large enough to close the gap, because the
+gap is not an unreserved class: it is the mirrored copy of a reach that
+does not exist.
+
+*Two corrections to the prior record.* Both were stated as fact in
+earlier amendments and are wrong:
+
+1. **`world_extent_with_glyphs` was never symmetrized.** `WorldExtent`
+   is `{min_x, max_x, min_y, max_y}` — signed since it was written — and
+   `glyph_reach` already returns signed offsets, folded in with
+   `min`/`max`. **Only the SA gate collapsed them.** The gate also built
+   its extents in the *opposite Y frame* from the seed (`world_extent`
+   applies the eeschema y-flip `(rx, -ry)`; `footprint_half_extents`
+   reads `pins_in(orient)` unflipped) — a frame mismatch that `.abs()`
+   was hiding. Symmetrizing was never the seed's behaviour, so "make the
+   two consumers agree" is not a route back in.
+2. **The align stride's `Orientation::IDENTITY` extent is a real latent
+   defect — but on MIRROR, not rotation.** The stride
+   (`lib.rs::apply_user_constraints`) computes signed extents at
+   `Orientation::IDENTITY`, justified by the comment "align-pinned
+   members keep identity orientation (`pick_orientations` skips pinned
+   elements)". That holds for *rotation* and not for *mirror*:
+   `diff_pair`'s `Q2` and `multivibrator`'s `C2` are emitted `mirror y`
+   (baseline rows), so a one-sided box is reserved on the wrong side of
+   every mirrored align member **today**. It is latent only because the
+   halo covers for it. *A claim that `rc_lowpass`'s R1 (rot 270)
+   demonstrates this does NOT check out* — `rc_lowpass` has no `*@align`
+   directive at all, so R1 never reaches the stride; the only align
+   groups in the suite are `diff_pair` Q1/Q2 + RC1/RC2 and
+   `multivibrator` Q1/Q2. Worth its own fix if the stride ever carries a
+   directional box; harmless while it carries a halo.
+
+*The one suggested future direction — UNTRIED, NOT ENDORSED, needs
+owner sign-off.* Keep the reserved **area** roughly constant while
+moving it to the correct side: directional extents **plus an explicit
+compensating outward margin** sized to preserve today's total reach —
+rather than shrinking to honesty and hoping the missing reservations
+refill it. This inverts the failed premise (it treats the halo's
+magnitude as the calibrated quantity and its *placement* as the bug)
+and it is the only variant not yet measured. It is also a
+re-parameterisation of every layout in the suite, so it must arrive as
+an escape request with the full ratchet table, never as a cleanup.
+
+*Recoverable work.* Branches `wip/directional-footprint` (`d176b9e`,
+directional gate alone) and `wip/label-reservation` (`8b060cf`,
+directional + complete label reservation) hold the experiments. Do not
+re-derive; re-measure only against a variant this post-mortem does not
+already cover.
+
 ### Problem
 
 Exactly one class of converted-schematic defect remains: a power
