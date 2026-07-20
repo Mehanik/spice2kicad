@@ -2764,3 +2764,59 @@ slack, no placer behaviour changed:
   against `examples/`.
 - Whether `kicad-symbols` is its own crate or a module inside
   `kicad-emitter`. Decide when extracting.
+
+---
+
+## HPWL ablation — measured, kept, renamed in spirit
+
+**Status: measured; term KEPT at weight 1.0. Do not delete without
+re-running this ablation.**
+
+**The challenge.** `cost.rs`'s `hpwl: 1.0` is absolute half-perimeter
+wire length. For schematics we maximise READABILITY and area is not an
+objective; "too short nets are bad for readability". HPWL is also the
+ONLY term in the SA objective that rewards *crowding* — the way to lower
+it is to move elements closer together. Its stated job ("wires shouldn't
+sprawl") is covered by two later, better measures: **V16 bends**
+(`wire_geometry.rs`, corners not distance) and the **wire-length RATIO**
+ratchet (`placement_quality.rs`, normalised by pin-pair Manhattan, so it
+measures router *detour* rather than element spacing).
+
+**The experiment.** `hpwl` set to 0.0, nothing else changed, all ten
+fixtures re-converted and the whole `spice2kicad` suite re-run
+(`--no-fail-fast`). Every other fixture/metric not listed below was
+byte-identical or unchanged.
+
+| Metric | Fixture | 1.0 → 0.0 | Verdict |
+| ------ | ------- | --------- | ------- |
+| V16 B | `common_emitter` | 4 → **2** | better |
+| V16 J | `common_emitter` | 3 → **4** | worse |
+| V16 B | `opamp_inverting` | 3 → **4** | worse |
+| V16 B | `opamp_inverting_real` | 8 → **6** | better |
+| V16 B | `rc_lowpass_ports` | 2 → **3** | worse |
+| V5 outward | `opamp_inverting` | 1 → **2** (`RF.1`, `RF.2`) | worse |
+| F5 series pose | `opamp_inverting` | 2 → **1** | better |
+| F5 series pose | `opamp_inverting_real` | 1 → **0** | better |
+| CIN-horizontal guard | `common_emitter` | pass → **FAIL** (CIN goes vertical) | worse |
+| P11 cache growth | `rc_lowpass_plus_r` | V13 label↔body 0 → **1** | worse, **Tier 1** |
+
+**Conclusion — outcome 2 of the three anticipated: the term is
+load-bearing under a misleading name.** It is not a wire-length
+objective and should not be read as one. What it empirically supplies is
+a weak **cohesion prior**: it keeps a net's pins inside one region of the
+sheet, which is what stops `common_emitter`'s `CIN` flipping vertical and
+what keeps the P11 grown-sheet layout from re-anchoring a label onto a
+body. Deleting it trades three fixtures' V16/V5 and one Tier-1 V13
+(P11) for two fixtures' F5 series pose — a mixed result, and the Tier-1
+loss alone disqualifies it under the tier ordering.
+
+Two consequences recorded so this is not re-litigated from the name:
+
+1. The doc comment on `CostBreakdown::hpwl` now says what the term
+   actually does and points here. It is not evidence that "shorter is
+   better" is a project goal.
+2. Because it is a crowding term, it is the wrong instrument for any
+   FUTURE readability work. If a spacing/cohesion property is wanted
+   explicitly, build it as a term that measures cohesion (net-pin
+   dispersion) rather than length, and retire this one against that —
+   with this same ablation table as the acceptance bar.

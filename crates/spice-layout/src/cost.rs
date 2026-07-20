@@ -66,6 +66,25 @@ use crate::{CELL_H, CELL_W, GridPoint, Placement};
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CostBreakdown {
     /// Half-perimeter wirelength, summed over all non-ground nets, in mm.
+    ///
+    /// **What this term actually buys (measured, not assumed).** Its
+    /// name suggests "wires shouldn't sprawl", a job now done far better
+    /// by V16 bends (corners, not distance) and by the wire-length
+    /// *ratio* ratchet (router detour, normalised by pin-pair Manhattan).
+    /// It is also the only term in the objective that rewards CROWDING —
+    /// the way to lower it is to move elements closer — which cuts
+    /// against the project's readability-over-area principle.
+    ///
+    /// It was therefore ablated (`hpwl: 0.0`, all ten fixtures
+    /// re-measured). The result is MIXED, not removable: see
+    /// `docs/layout-adr.md` § "HPWL ablation". In short it holds up
+    /// `common_emitter`'s `CIN` pose and V16 J, `opamp_inverting`'s V5
+    /// and B, and `rc_lowpass_ports`' B, and its removal costs a Tier-1
+    /// V13 regression on the P11 cache-growth path — while improving
+    /// F5 series pose on both opamp fixtures. Read it as a weak
+    /// *cohesion* prior that keeps a net's pins in one region, not as a
+    /// wire-length objective. Do not delete it without re-running that
+    /// ablation.
     pub hpwl: f64,
     /// Cell-bbox overlap area summed over all element pairs, in mm².
     pub overlap: f64,
