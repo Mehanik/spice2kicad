@@ -429,30 +429,36 @@ fn body_half_extents(el: &spice_resolve::ResolvedElement, orient: Orientation) -
 /// gaps are guarded downstream by the zero-slack output ratchet
 /// (`no_power_glyph_foreign_body_overlap_across_fixtures`), which
 /// measures emitted geometry and trips on any drift — see ADR-14
-/// "Known scope limits". The gate's half-extent model is symmetric
-/// about the origin, so a glyph reach point `(dx, dy)` extends the
-/// half-extent by `|dx|`/`|dy|` on BOTH sides: a reserved zone below
-/// the part also blocks space above it — a strict-but-conservative
-/// halo (ADR-14's Risks flagged this shape; acceptable now, revisit if
-/// a glyph-dense fixture hits V15). This is extra outward spacing
-/// only; it changes no orientation (V5) and no glyph pose (V14).
-fn footprint_half_extents(
+/// "Known scope limits".
+///
+/// **The extent is DIRECTIONAL, and single-sourced with the seed.** It
+/// is literally [`crate::world_extent_with_glyphs`] — the same function
+/// the seed/align stride reserves with — so the two cannot disagree
+/// about where an element ends (ADR-14's single-source rule).
+///
+/// This replaces an earlier symmetric `(half_w, half_h)` model that
+/// took `|dx|`/`|dy|` of every pin and glyph-reach point, mirroring a
+/// one-sided reach onto BOTH sides: a `power:GND` glyph reaches only
+/// *downward* from its pin, yet the old model also reserved the same
+/// span *above* the part. Every element therefore reserved phantom
+/// space on the side its decoration does not occupy — and, being built
+/// from `+p.y` while the seed used the eeschema-flipped `-p.y`, the two
+/// consumers were also in different frames (harmless only because
+/// `.abs()` erased the sign). Directional extents fix both.
+///
+/// This is spacing geometry only; it changes no orientation (V5) and no
+/// glyph pose (V14).
+fn footprint_extent(
     el: &spice_resolve::ResolvedElement,
     orient: Orientation,
     prefs: Option<&std::collections::HashMap<String, crate::net_class::VertPref>>,
-) -> (f64, f64) {
-    let (mut hw, mut hh) = body_half_extents(el, orient);
-    for p in el.symbol.pins_in(orient) {
-        hw = hw.max(p.x.abs());
-        hh = hh.max(p.y.abs());
+) -> crate::WorldExtent {
+    // No `value` text: the gate reserves body ∪ pins ∪ glyph reach only,
+    // exactly the set the old symmetric model covered.
+    match prefs {
+        Some(prefs) => crate::world_extent_with_glyphs(el, orient, None, prefs),
+        None => crate::world_extent_with_glyphs(el, orient, None, &Default::default()),
     }
-    if let Some(prefs) = prefs {
-        for (dx, dy) in crate::glyph_geom::glyph_reach(el, orient, prefs) {
-            hw = hw.max(dx.abs());
-            hh = hh.max(dy.abs());
-        }
-    }
-    (hw, hh)
 }
 
 /// Count unordered element pairs whose real body bounding boxes
@@ -514,7 +520,7 @@ fn symbol_overlap_count(
     let cell_hw = f64::from(crate::CELL_W) * GridPoint::STEP_MM / 2.0;
     let cell_hh = f64::from(crate::CELL_H) * GridPoint::STEP_MM / 2.0;
 
-    let extents: Vec<(f64, f64, f64, f64, bool)> = checked
+    let extents: Vec<(f64, f64, crate::WorldExtent)> = checked
         .elements
         .iter()
         .zip(&placement.elements)
@@ -542,18 +548,22 @@ fn symbol_overlap_count(
             // remaining opamp `#FLG4`/PWR_FLAG residual is a distinct
             // sheet-port-flavoured defect, scoped out per ADR-14.)
             let prefs_for = if oversized { None } else { Some(prefs) };
-            let (fhw, fhh) = footprint_half_extents(el, placed.orientation, prefs_for);
+            let ext = footprint_extent(el, placed.orientation, prefs_for);
             let (ox, oy) = placed.origin.to_mm();
-            (ox, oy, fhw, fhh, oversized)
+            (ox, oy, ext)
         })
         .collect();
     let eps = 1e-3;
     let mut count = 0;
     for a in 0..extents.len() {
         for b in (a + 1)..extents.len() {
-            let (ax, ay, ahw, ahh, _a_big) = extents[a];
-            let (bx, by, bhw, bhh, _b_big) = extents[b];
-            if (ax - bx).abs() + eps < ahw + bhw && (ay - by).abs() + eps < ahh + bhh {
+            let (ax, ay, ae) = extents[a];
+            let (bx, by, be) = extents[b];
+            // Directional AABB intersection: each element spans
+            // [origin + min, origin + max] independently per side.
+            let x_hit = ax + ae.min_x + eps < bx + be.max_x && bx + be.min_x + eps < ax + ae.max_x;
+            let y_hit = ay + ae.min_y + eps < by + be.max_y && by + be.min_y + eps < ay + ae.max_y;
+            if x_hit && y_hit {
                 count += 1;
             }
         }

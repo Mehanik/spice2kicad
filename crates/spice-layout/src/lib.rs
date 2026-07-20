@@ -372,10 +372,10 @@ const ALIGN_TEXT_GAP_MM: f64 = 2.0 * GridPoint::STEP_MM;
 /// width so neighbours clear it.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct WorldExtent {
-    min_x: f64,
-    max_x: f64,
-    min_y: f64,
-    max_y: f64,
+    pub(crate) min_x: f64,
+    pub(crate) max_x: f64,
+    pub(crate) min_y: f64,
+    pub(crate) max_y: f64,
 }
 
 /// Compute the resolved world extent of `symbol` placed at the origin
