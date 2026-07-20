@@ -1249,32 +1249,6 @@ fn world_pins_by_net(
     (out, glyph_anchors)
 }
 
-/// Per-fixture wire **detour**: emitted wire length over the ideal
-/// rectilinear lower bound, measured on real pin geometry.
-///
-/// For each net the ideal is the half-perimeter of its pins' bounding
-/// box — the exact lower bound on any rectilinear Steiner tree spanning
-/// them, so a perfect router scores 1.0 and the ratio reads directly as
-/// "how far the ink wanders past the shortest possible route".
-///
-/// Numerator and denominator are both restricted to nets that actually
-/// carry **routed** wire. Two exclusions keep the measure honest, and
-/// both are needed in the same direction — without them the ratio is
-/// deflated toward zero and re-hides exactly the defects this metric
-/// exists to catch:
-///
-///  * nets with no emitted wire at all contribute neither term;
-///  * **glyph-carried (power / ground) nets** are dropped whole. Per V10
-///    these are drawn as `power:*` glyphs, not routed: their only ink is
-///    the short detached-glyph stub, while their "pin" set includes the
-///    PWR_FLAG driver anchor parked far off to one side. On
-///    `opamp_inverting` that pairs a 2.54 mm stub with a 66 mm bbox —
-///    a meaningless 0.04 ratio that drags the fixture total to 0.22,
-///    below the theoretical floor of 1.0.
-///
-/// Segments are attributed to nets by union-find over shared endpoints
-/// and pin coincidences — the same connectivity model KiCad itself uses
-/// (V11) — rather than by proximity.
 fn uf_find(uf: &mut [usize], mut x: usize) -> usize {
     while uf[x] != x {
         uf[x] = uf[uf[x]];
@@ -1297,6 +1271,35 @@ fn hpwl(pts: &[Pt]) -> f64 {
     (x1 - x0) + (y1 - y0)
 }
 
+/// Per-fixture wire **detour**: emitted wire length over the ideal
+/// rectilinear lower bound, measured on real pin geometry.
+///
+/// The unit of measurement is a connected COMPONENT of emitted ink (see
+/// the accumulation loop for why, not the net). For each component the
+/// ideal is the half-perimeter of the bounding box of the pins attached
+/// to it — the exact lower bound on any rectilinear Steiner tree
+/// spanning them — so a perfect router scores 1.0 and the ratio reads
+/// directly as "how far the ink wanders past the shortest possible
+/// route".
+///
+/// Numerator and denominator are both restricted to nets that actually
+/// carry **routed** wire. Two exclusions keep the measure honest, and
+/// both are needed in the same direction — without them the ratio is
+/// deflated toward zero and re-hides exactly the defects this metric
+/// exists to catch:
+///
+///  * nets with no emitted wire at all contribute neither term;
+///  * **glyph-carried (power / ground) nets** are dropped whole. Per V10
+///    these are drawn as `power:*` glyphs, not routed: their only ink is
+///    the short detached-glyph stub, while their "pin" set includes the
+///    PWR_FLAG driver anchor parked far off to one side. On
+///    `opamp_inverting` that pairs a 2.54 mm stub with a 66 mm bbox —
+///    a meaningless 0.04 ratio that drags the fixture total to 0.22,
+///    below the theoretical floor of 1.0.
+///
+/// Segments are attributed to nets by union-find over shared endpoints
+/// and pin coincidences — the same connectivity model KiCad itself uses
+/// (V11) — rather than by proximity.
 fn wire_detour(spice_path: &std::path::Path, root: &Value) -> (f64, f64) {
     use std::collections::HashMap;
 
