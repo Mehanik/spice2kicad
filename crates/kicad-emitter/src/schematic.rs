@@ -2311,21 +2311,11 @@ pub(crate) fn label_specs(
                 .then(a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
         });
         // Label rotation: orient the label so its text extends in the
-        // pin's *outward* direction (away from the symbol body), so
-        // the label's text bbox doesn't overlap the body it anchors
-        // on (V13 — label↔body overlap). KiCad's `.kicad_sym` pin
-        // `(at x y angle)` stores the angle the pin line extends
-        // *toward the body* (tip at (x,y), body in direction `angle`).
-        // The outward direction is therefore `angle + 180 (mod 360)`.
-        //
-        // Additionally, eeschema applies a world-Y flip when loading
-        // pins (see the matching comment in `collect_net_pins`), which
-        // is purely a frame conversion for pin tip coordinates and
-        // does *not* affect the label's `(at … rot)` interpretation —
-        // labels live in the same flipped world frame as the pins, so
-        // we can pass the outward-angle straight through as the
-        // label's rotation token.
-        let label_rot = |pin_angle: u16| -> u16 { (pin_angle + 180) % 360 };
+        // pin's *outward* direction (away from the symbol body), so the
+        // label's text bbox doesn't overlap the body it anchors on
+        // (V13 — label↔body overlap). See [`outward_label_rot`] for why
+        // this is `360 - angle` and not `angle + 180`.
+        let label_rot = outward_label_rot;
         // Classify the net's label kind:
         //
         //   - 1 body pin only → `(global_label …)`. The single pin
@@ -3659,6 +3649,30 @@ fn plain_label_bbox(text: &str, anchor: (f64, f64), rot_deg: u16) -> TextBbox {
     )
 }
 
+/// The label `(at … rot)` token whose text reads **outward** from a pin
+/// whose world-outward angle is `pin_angle`.
+///
+/// `Symbol::pins_in` reports the pin's **world-outward** angle (the
+/// `world_outward = (180 - inward) mod 360` fix in `kicad-symbols`), and
+/// a label's rotation token advances its text along `+x` rotated
+/// `rot` CCW *on screen* — while the schematic world frame is Y-down.
+/// So the rotation that advances along a world-outward angle `a` is
+/// `(360 - a) mod 360`, not `a + 180`.
+///
+/// `a + 180` was the pre-`pins_in`-fix rule, written when the angle was
+/// still the raw (body-ward) `.kicad_sym` value. Like every other
+/// consumer of that stale convention it is accidentally right for the
+/// vertical pins (`90`/`270` are fixed points of both maps) and exactly
+/// **inverted** for the horizontal ones — so a label anchored on a
+/// transistor base or an opamp input *preferred* reading back into its
+/// own body. It was invisible because the rotation-avoidance search
+/// enumerates all four rotations and repairs the preference whenever the
+/// wrong one collides; the cost was paid only in the cases where the
+/// inward direction happened to be clear, and in preference order.
+fn outward_label_rot(pin_angle: u16) -> u16 {
+    (360 - pin_angle % 360) % 360
+}
+
 /// Pick the `(anchor, rotation)` for a plain label that best clears the
 /// obstacle sets, searching the net's pins in order.
 ///
@@ -3677,7 +3691,7 @@ fn best_plain_label_anchor(
     wires: &[WireSeg],
     anchor_search: bool,
 ) -> (f64, f64, u16) {
-    let label_rot = |pin_angle: u16| -> u16 { (pin_angle + 180) % 360 };
+    let label_rot = outward_label_rot;
     let pins: &[(f64, f64, u16)] = if anchor_search { pins } else { &pins[..1] };
     let score_of = |px: f64, py: f64, rot: u16| -> (f64, f64, f64) {
         let b = plain_label_bbox(net, (px, py), rot);
