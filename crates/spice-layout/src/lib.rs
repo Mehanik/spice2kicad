@@ -560,9 +560,24 @@ pub fn place_with_hint(
     // layout when one exists, and before V5 orientation so the pinned
     // pair geometry guides the orientation chooser for the rest of
     // the circuit.
-    if let Some(plan) = symmetry::detect_pairs(&checked) {
-        symmetry::apply(&mut placement, &mut pinned, &plan);
-    }
+    let sym_plan = symmetry::detect_pairs(&checked);
+    // Elements pinned *by V7 and only by V7* — the difference the
+    // symmetry pass makes to the mask. `apply_rail_stub_columns` unlocks
+    // exactly these: V7 owns a pair's mirror RELATION, not either
+    // member's absolute column. A cache hint (ADR-4) or a user directive
+    // on the same element is NOT in this set and still locks.
+    let mut sym_pinned = vec![false; pinned.len()];
+    let sym_axis = if let Some(plan) = &sym_plan {
+        let axis = symmetry::axis_sum(&placement, &pinned, plan);
+        let before = pinned.clone();
+        symmetry::apply(&mut placement, &mut pinned, plan);
+        for (i, s) in sym_pinned.iter_mut().enumerate() {
+            *s = pinned[i] && !before[i];
+        }
+        Some(axis)
+    } else {
+        None
+    };
     // Idiom detection (roadmap §6, v0.2 Item 4): infer placement
     // constraints from recurring analog sub-topologies and emit them
     // through the same `align`/pin channel the user `align` path uses.
@@ -576,7 +591,15 @@ pub fn place_with_hint(
     // terminates. Runs last among the seed idioms so it can read every
     // stronger pin (hint / symmetry / divider / shared-centre) and skip
     // those columns, and BEFORE `pick_orientations` like its siblings.
-    apply_rail_stub_columns(&mut placement, &pinned, &user_pinned, &checked, library);
+    apply_rail_stub_columns(
+        &mut placement,
+        &pinned,
+        &user_pinned,
+        &sym_pinned,
+        &checked,
+        library,
+        sym_plan.as_ref().zip(sym_axis),
+    );
     // V14: per-element allowed-orientation set (power pin up / ground
     // pin down). A *hard* candidate-space filter, threaded into both
     // the V5 seed chooser below and the SA refiner so the constraint is
@@ -742,18 +765,31 @@ fn apply_rail_stub_columns(
     placement: &mut Placement,
     pinned: &[bool],
     user_pinned: &[bool],
+    sym_pinned: &[bool],
     checked: &CheckedNetlist,
     library: &Library,
+    symmetry: Option<(&symmetry::SymmetryPlan, i32)>,
 ) {
     let stubs = idioms::detect_rail_stubs(checked);
     if stubs.is_empty() {
         return;
     }
 
-    let mut x_locked: Vec<bool> = pinned
-        .iter()
-        .zip(user_pinned)
-        .map(|(p, u)| *p && !*u)
+    // A V7 symmetry pin owns the mirror RELATION between a pair, not
+    // either member's absolute column — so a stub pinned by V7 *alone*
+    // is free to move here, provided the relation is restored afterwards
+    // (`symmetry::remirror`, below). Without that unlock the idiom is a
+    // total no-op on any circuit whose symmetry V7 detects but whose
+    // members the user did not also pin: measured on `multivibrator`,
+    // V7 pins all eight elements, so every rail-stub group contained a
+    // pinned member and was skipped wholesale, leaving `RC1` 17.8 mm off
+    // `Q1`'s collector column — the exact defect this idiom exists to
+    // fix on `common_emitter`, silently excluded on the symmetric
+    // fixtures. `sym_pinned` is the V7-ONLY difference, so a cache hint
+    // (ADR-4 position stability) or an earlier idiom on the same element
+    // still locks it.
+    let mut x_locked: Vec<bool> = (0..pinned.len())
+        .map(|i| pinned[i] && !user_pinned[i] && !sym_pinned[i])
         .collect();
 
     let refdes_to_index: HashMap<&str, usize> = placement
@@ -777,7 +813,19 @@ fn apply_rail_stub_columns(
     let residual_before = cost::constraint_residual(placement, checked, library);
     let overlaps_before =
         legalize::immovable_overlap_count(placement, checked, library, user_pinned);
-    idioms::apply_rail_stub_columns(placement, &x_locked, checked, &stubs);
+    // Elements this pass released from their V7 pin (see `x_locked`).
+    let sym_released: Vec<bool> = (0..pinned.len())
+        .map(|i| sym_pinned[i] && !user_pinned[i])
+        .collect();
+    idioms::apply_rail_stub_columns(placement, &x_locked, &sym_released, checked, &stubs);
+    // Restore the V7 mirror relation the unlock above allowed the idiom
+    // to perturb. The anchors are themselves symmetric when the netlist
+    // is (each pair's anchor device is the other's mirror image), so
+    // this is usually a no-op; it is here so that V7 is guaranteed by
+    // construction rather than by that coincidence.
+    if let Some((plan, axis)) = symmetry {
+        symmetry::remirror(placement, plan, user_pinned, axis);
+    }
     let residual_after = cost::constraint_residual(placement, checked, library);
     let overlaps_after =
         legalize::immovable_overlap_count(placement, checked, library, user_pinned);

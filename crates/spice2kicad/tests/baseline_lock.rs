@@ -279,6 +279,18 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
     // V5 is unchanged or lower on every fixture; no Tier-0/Tier-1 count
     // moved anywhere. Only `opamp_definition_level` B rose (10 → 12), on
     // the owner-approved global-improvement escape.
+    //
+    // Regenerated again for the rail-stub column idiom's symmetry unlock.
+    // Idiom 4 was a total no-op on any circuit V7 symmetry pinned, because
+    // a group containing a pinned member is skipped wholesale — so the
+    // collector-load column fix that landed for `common_emitter` was
+    // silently excluded from every symmetric fixture. It now releases a
+    // V7-ONLY pin (V7 owns a pair's mirror RELATION, not either member's
+    // absolute column) and re-mirrors afterwards, and a released group
+    // moves only on a STRONG anchor — an active device's own vertical pin.
+    // `multivibrator`'s `RC1`/`RC2` drop onto their transistors' collector
+    // columns, removing 17.78 mm of dog-leg each; their VCC glyphs follow.
+    // 4 of 107 rows moved and no other fixture changed at all.
     (
         "common_emitter",
         "#FLG1",
@@ -450,8 +462,8 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
     ),
     ("multivibrator", "#PWR1", "power:GND", 54.61, 73.66, 0.0, ""),
     ("multivibrator", "#PWR2", "power:GND", 64.77, 73.66, 0.0, ""),
-    ("multivibrator", "#PWR3", "power:+5V", 36.83, 31.75, 0.0, ""),
-    ("multivibrator", "#PWR4", "power:+5V", 82.55, 31.75, 0.0, ""),
+    ("multivibrator", "#PWR3", "power:+5V", 54.61, 31.75, 0.0, ""),
+    ("multivibrator", "#PWR4", "power:+5V", 64.77, 31.75, 0.0, ""),
     ("multivibrator", "#PWR5", "power:+5V", 35.56, 44.45, 0.0, ""),
     ("multivibrator", "#PWR6", "power:+5V", 83.82, 44.45, 0.0, ""),
     ("multivibrator", "#PWR7", "power:GND", 95.25, 76.2, 0.0, ""),
@@ -486,12 +498,12 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         0.0,
         "y",
     ),
-    ("multivibrator", "RC1", "Device:R_US", 36.83, 35.56, 0.0, ""),
+    ("multivibrator", "RC1", "Device:R_US", 54.61, 35.56, 0.0, ""),
     (
         "multivibrator",
         "RC2",
         "Device:R_US",
-        82.55,
+        64.77,
         35.56,
         0.0,
         "y",

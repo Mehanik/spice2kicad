@@ -502,7 +502,17 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     // COUT lands at rot 0 instead of rot 180 and Q1 unmirrors. V5 is
     // unchanged at 1 and no Tier-0/Tier-1 count moved. Ratchet DOWN.
     ("common_emitter", 4, 3),
-    ("multivibrator", 10, 2),
+    // B 10 -> 8: `RC1`/`RC2` now sit on their transistors' collector
+    // columns, so each collector trunk is one straight drop instead of a
+    // dog-leg.
+    //
+    // J 2 -> 4 is a RISE and is NOT YET APPROVED — the test fails on it
+    // deliberately. The two new branch vertices are `C1`/`C2` tapping the
+    // now-straight collector trunks as proper Steiner Ts instead of the
+    // trunk bending sideways to reach them: the same shape as the
+    // owner-approved `diff_pair` J 0 -> 1 above. Escape request pending;
+    // do not raise this literal without sign-off.
+    ("multivibrator", 8, 2),
     // J 0 → 1: `apply_shared_centers` now reserves one grid cell of
     // vertical stub under the tail trunk, so the three-way `tail` node is
     // drawn as a proper Steiner T instead of the trunk stopping sideways

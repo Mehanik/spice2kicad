@@ -874,7 +874,7 @@ fn rail_stub_alignment(
         else {
             continue;
         };
-        let d = x - target;
+        let d = x - target.x;
         total += d * d;
     }
     total

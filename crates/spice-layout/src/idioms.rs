@@ -649,12 +649,26 @@ pub(crate) fn detect_rail_stubs(checked: &CheckedNetlist) -> Vec<RailStub> {
 /// Returns `None` when `net` has no usable anchor pin — every member is
 /// itself a stub on that net, or every candidate pin faces sideways. A
 /// `None` anchor means "no opinion": the stub keeps its seed column.
+/// The column a rail stub should occupy, plus how much authority that
+/// column carries.
+///
+/// `strong` means the column came from a **multi-terminal (active)
+/// device's** own vertically-facing pin — the collector/emitter case
+/// this idiom exists for. When it is false the column is the weaker
+/// `any`-pin fallback (some two-terminal neighbour on the same net),
+/// which can sit anywhere on the sheet.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct RailStubAnchor {
+    pub x: f64,
+    pub strong: bool,
+}
+
 pub(crate) fn rail_stub_anchor_x(
     placement: &Placement,
     checked: &CheckedNetlist,
     stubs: &[RailStub],
     net: &str,
-) -> Option<f64> {
+) -> Option<RailStubAnchor> {
     let mut multi: Vec<f64> = Vec::new();
     let mut any: Vec<f64> = Vec::new();
     for (i, e) in checked.elements.iter().enumerate() {
@@ -689,13 +703,14 @@ pub(crate) fn rail_stub_anchor_x(
         }
         any.push(x);
     }
-    let xs = if multi.is_empty() { any } else { multi };
+    let strong = !multi.is_empty();
+    let xs = if strong { multi } else { any };
     if xs.is_empty() {
         return None;
     }
     #[allow(clippy::cast_precision_loss)] // pin counts are tiny.
     let mean = xs.iter().sum::<f64>() / xs.len() as f64;
-    Some(mean)
+    Some(RailStubAnchor { x: mean, strong })
 }
 
 /// Move every unpinned rail stub into the column of the node it
@@ -729,6 +744,7 @@ pub(crate) fn rail_stub_anchor_x(
 pub(crate) fn apply_rail_stub_columns(
     placement: &mut Placement,
     pinned: &[bool],
+    sym_released: &[bool],
     checked: &CheckedNetlist,
     stubs: &[RailStub],
 ) {
@@ -745,9 +761,31 @@ pub(crate) fn apply_rail_stub_columns(
 
     for key in keys {
         let members = &groups[&key];
-        let Some(anchor_x) = rail_stub_anchor_x(placement, checked, stubs, key.0) else {
+        let Some(anchor) = rail_stub_anchor_x(placement, checked, stubs, key.0) else {
             continue;
         };
+        // A group whose V7 symmetry pin was released for this pass moves
+        // ONLY on a strong (active-device) anchor.
+        //
+        // V7 owns the mirror relation, and the caller released the pin
+        // because a collector-load column is a better opinion than the
+        // seeded one. The weak `any`-pin fallback is not a better
+        // opinion: measured on `multivibrator`, `RB1`'s only vertical
+        // anchor on net `b1` is the cross-coupling capacitor `C2`, which
+        // lives above the OTHER transistor — the fallback dragged `RB1`
+        // 15 mm across the sheet into `Q2`'s column and stretched `b1`
+        // into a full-width diagonal. So a released group keeps the
+        // symmetric column V7 gave it unless the active device it
+        // terminates actually presents a vertical pin.
+        //
+        // Scoped to released groups on purpose: the fallback stays live
+        // everywhere it was live before, so no non-symmetric fixture
+        // changes (`common_emitter`'s `R1`/`R2` bias divider still snaps
+        // to `CIN`'s column).
+        let anchor_x = anchor.x;
+        if !anchor.strong && members.iter().any(|s| sym_released[s.element]) {
+            continue;
+        }
         // A group containing ANY pinned member is left entirely alone.
         //
         // The pin means something stronger than this heuristic already

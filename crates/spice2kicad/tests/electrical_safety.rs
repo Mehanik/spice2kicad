@@ -1940,7 +1940,10 @@ fn v5_violation_budget(name: &str) -> usize {
         // `multivibrator`'s Q1.1/Q2.1 are BJT bases, `opamp_inverting`'s
         // RF.1 sits on the feedback trunk. They are the same v0.2
         // placer / channel-router work items as the rest.
-        "multivibrator" => 5,
+        // V5 5 -> 3: the rail-stub column idiom now fires on symmetric
+        // fixtures, putting RC1/RC2 on their collector columns so both
+        // collector trunks leave the pin outward. Ratchet DOWN.
+        "multivibrator" => 3,
         "common_emitter" | "opamp_inverting" => 1,
         // diff_pair, rc_lowpass, rc_lowpass_ports, port_shapes,
         // opamp_inverting_real, opamp_definition_level: zero violations.

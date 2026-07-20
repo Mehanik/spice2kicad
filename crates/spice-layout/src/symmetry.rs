@@ -327,25 +327,7 @@ pub(crate) fn apply(placement: &mut Placement, pinned: &mut [bool], plan: &Symme
         return;
     }
 
-    // Determine the mirror reference. We avoid integer-dividing the
-    // axis (which loses 0.5-cell precision on odd sums) and instead
-    // store `axis_sum = L.x + R.x` for some chosen reference pair —
-    // the mirror operation `R.x = axis_sum - L.x` preserves grid
-    // alignment exactly. If a pair is already pinned by the user
-    // (`align`/`place` bound both halves), it defines the reference;
-    // otherwise we fall back to the placement bbox midpoint.
-    let axis_sum = plan
-        .pairs
-        .iter()
-        .find(|&&(l, r)| pinned[l] && pinned[r])
-        .map_or_else(
-            || {
-                let min_x = placement.elements.iter().map(|e| e.origin.x).min().unwrap();
-                let max_x = placement.elements.iter().map(|e| e.origin.x).max().unwrap();
-                min_x + max_x
-            },
-            |&(l, r)| placement.elements[l].origin.x + placement.elements[r].origin.x,
-        );
+    let axis_sum = axis_sum(placement, pinned, plan);
 
     // For each pair, mirror R's origin and align R's y to L's. If
     // both halves were user-pinned we trust the user and only adjust
@@ -362,6 +344,62 @@ pub(crate) fn apply(placement: &mut Placement, pinned: &mut [bool], plan: &Symme
         placement.elements[r].orientation = Orientation::IDENTITY.flip();
         pinned[l] = true;
         pinned[r] = true;
+    }
+}
+
+/// The mirror reference for `plan`, as `L.x + R.x`.
+///
+/// We avoid integer-dividing the axis (which loses 0.5-cell precision on
+/// odd sums) and instead store the *sum* — the mirror operation
+/// `R.x = axis_sum - L.x` then preserves grid alignment exactly. If a
+/// pair is already pinned by the user (`align`/`place` bound both
+/// halves), it defines the reference; otherwise we fall back to the
+/// placement bbox midpoint.
+pub(crate) fn axis_sum(placement: &Placement, pinned: &[bool], plan: &SymmetryPlan) -> i32 {
+    plan.pairs
+        .iter()
+        .find(|&&(l, r)| pinned[l] && pinned[r])
+        .map_or_else(
+            || {
+                let min_x = placement
+                    .elements
+                    .iter()
+                    .map(|e| e.origin.x)
+                    .min()
+                    .unwrap_or(0);
+                let max_x = placement
+                    .elements
+                    .iter()
+                    .map(|e| e.origin.x)
+                    .max()
+                    .unwrap_or(0);
+                min_x + max_x
+            },
+            |&(l, r)| placement.elements[l].origin.x + placement.elements[r].origin.x,
+        )
+}
+
+/// Re-establish the mirror relation for every pair in `plan` about
+/// `axis_sum`, taking the LEFT member's column as authoritative.
+///
+/// V7 owns the *relation* between a mirror pair, not either member's
+/// absolute column — so a later seed idiom (rail-stub columns) is
+/// allowed to move a symmetry-pinned element, provided the relation is
+/// restored afterwards. Pairs whose halves the user pinned outright are
+/// left alone: an explicit `align` / `place` outranks V7.
+pub(crate) fn remirror(
+    placement: &mut Placement,
+    plan: &SymmetryPlan,
+    user_pinned: &[bool],
+    axis_sum: i32,
+) {
+    for &(l, r) in &plan.pairs {
+        if user_pinned[l] && user_pinned[r] {
+            continue;
+        }
+        let l_origin = placement.elements[l].origin;
+        placement.elements[r].origin.x = axis_sum - l_origin.x;
+        placement.elements[r].origin.y = l_origin.y;
     }
 }
 
