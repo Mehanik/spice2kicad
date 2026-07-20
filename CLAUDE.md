@@ -590,9 +590,9 @@ expressed three ways today; all three are subject to this rule:
   `tests/electrical_safety.rs::body_overlap_budget`;
 - `&[(&str, _)]` const tables, e.g. the crossing budgets in
   `tests/placement_quality.rs::crossing_count_within_budget_across_fixtures`
-  (`("multivibrator", 4)`) and the wire-length-ratio budgets in
-  `tests/placement_quality.rs::wire_length_within_budget_across_fixtures`
-  (`("common_emitter", 2.5)`);
+  (`("multivibrator", 4)`) and the wire-detour budgets in
+  `tests/placement_quality.rs::wire_detour_within_budget_across_fixtures`
+  (`("common_emitter", 1.0136)`);
 - bare `const` literals, e.g. `V5_RC_LOWPASS_OUT_MAX_MM` in
   `tests/placement_quality.rs`.
 

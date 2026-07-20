@@ -18,7 +18,7 @@
 //!   common-emitter archetype tests; those have been replaced (T8)
 //!   with six general checks that iterate every fixture: no
 //!   symbol-symbol overlap, no symbol-label overlap, rails ordered
-//!   (Power above Ground), wire-length budget, crossing-count budget,
+//!   (Power above Ground), wire-detour budget, crossing-count budget,
 //!   and a focused common-emitter signal-flow regression guard.
 //!
 //! Tests that fail against the current placer are `#[ignore]`d with a
@@ -527,7 +527,7 @@ fn smoke_label_positions_filters_by_net_name() {
 //   1. no symbol-symbol overlap (per-symbol bbox + 1 cell padding)
 //   2. no symbol-label overlap (label bbox vs symbol bbox)
 //   3. rails ordered (max Y of Power-only elements < min Y of Ground-only)
-//   4. wire-length budget per net (total / pin-pair-Manhattan ≤ K)
+//   4. wire-detour budget (emitted wire / rectilinear ideal ≤ K)
 //   5. crossing-count budget (true wire-segment crossings ≤ K)
 //   6. common-emitter signal-flow regression guard
 
@@ -1131,108 +1131,357 @@ fn rails_correctly_ordered_across_fixtures() {
     }
 }
 
-/// Sum of Manhattan distances of all wire segments under `root`,
-/// regardless of net.
-fn total_all_wire_length(root: &Value) -> f64 {
-    wire_segments(root)
-        .iter()
-        .map(|&(a, b)| manhattan(a, b))
-        .sum()
+/// Quantise a millimetre coordinate to an integer key. One grid step is
+/// 1.27 mm, so a 1 µm quantum can never bridge two distinct grid points.
+#[allow(clippy::cast_possible_truncation)]
+fn key(p: Pt) -> (i64, i64) {
+    ((p.0 * 1000.0).round() as i64, (p.1 * 1000.0).round() as i64)
 }
 
-/// Sum of pin-pair Manhattan distances per net (lower bound on
-/// wire-routing cost). For a net with k pins we sum Manhattan
-/// distances for the (k-1) edges of an MST-equivalent chain ordered
-/// by index — close enough for budget calculations.
-fn pin_pair_manhattan_sum(root: &Value) -> f64 {
-    // Group labels by net name as a stand-in for pin positions: every
-    // multi-pin net (V4 invariant) gets at most 2 labels but is wired
-    // to all its pins. We approximate "pin positions" as label
-    // positions — these always sit at terminal points.
-    use std::collections::HashMap;
-    let mut by_net: HashMap<String, Vec<Pt>> = HashMap::new();
-    for (n, p) in all_labels(root) {
-        by_net.entry(n).or_default().push(p);
+/// World pin positions grouped by net name.
+type PinsByNet = std::collections::HashMap<String, Vec<Pt>>;
+
+/// World pin positions grouped by net, recovered by re-resolving the
+/// SPICE source and transforming each library pin through its placed
+/// pose. This is the same join `electrical_safety.rs::world_pins_for_sheet`
+/// performs; it is duplicated here (rather than shared) because the two
+/// test binaries need different per-pin payloads.
+///
+/// Returns `(pins_by_net, glyph_anchors)`. `glyph_anchors` holds the
+/// quantised coordinate of every `power:*` glyph / `PWR_FLAG` instance:
+/// a net reaching one of those is drawn with glyphs rather than routed
+/// wire (V10) and is excluded from the detour measure — see
+/// [`wire_detour`].
+fn world_pins_by_net(
+    spice_path: &std::path::Path,
+    root: &Value,
+) -> (PinsByNet, std::collections::HashSet<(i64, i64)>) {
+    use spice_diagnostics::FileId;
+    use std::collections::{HashMap, HashSet};
+
+    let library = load_test_library();
+    let source = std::fs::read_to_string(spice_path).expect("read spice fixture");
+    let parsed = spice_parser::parse(&source, FileId(0)).expect("parse spice fixture");
+    let resolved =
+        spice_resolve::resolve(&parsed.netlist, &library).expect("resolve spice fixture");
+
+    let mut by_refdes: HashMap<String, HashMap<String, String>> = HashMap::new();
+    for el in &resolved.elements {
+        let mut pairs = HashMap::new();
+        for (i, kicad_pin) in el.pin_mapping.iter().enumerate() {
+            if let Some(net) = el.nodes.get(i) {
+                pairs.insert(kicad_pin.clone(), net.clone());
+            }
+        }
+        by_refdes.insert(el.refdes.clone(), pairs);
     }
-    let mut sum = 0.0;
-    for pts in by_net.values() {
+
+    let mut out: HashMap<String, Vec<Pt>> = HashMap::new();
+    let mut glyph_anchors: HashSet<(i64, i64)> = HashSet::new();
+    for sym in children(root, "symbol") {
+        let Some((refdes, lib_id)) = placed_symbol_refdes_and_lib_id(sym) else {
+            continue;
+        };
+        let Some((ox, oy, orient)) = placed_symbol_pose(sym) else {
+            continue;
+        };
+        let Some(lib_sym) = library.lookup(&lib_id) else {
+            continue;
+        };
+        let Some(pin_to_net) = by_refdes.get(&refdes) else {
+            continue;
+        };
+        for tp in lib_sym.pins_in(orient) {
+            if let Some(net) = pin_to_net.get(&tp.number) {
+                out.entry(net.clone())
+                    .or_default()
+                    .push((ox + tp.x, oy - tp.y));
+            }
+        }
+    }
+
+    // Hierarchical-sheet port pins: the parent-side terminal of a child
+    // sheet is a real routing endpoint even though it is not a symbol.
+    // The emitted `(pin …)` name is the CHILD-side port name, which need
+    // not equal the parent net (`X1 0 inv out … OPAMP` binds child `inp`
+    // to parent `0`), so the parent net is recovered positionally: the
+    // sheet's pins are emitted in `SubcktPorts.ports` order and
+    // `SheetInstance.nodes` is in that same order.
+    let sheet_nets: HashMap<&str, &Vec<String>> = resolved
+        .sheet_instances
+        .iter()
+        .map(|si| (si.refdes.as_str(), &si.nodes))
+        .collect();
+    for sheet in children(root, "sheet") {
+        let mut sheet_name: Option<String> = None;
+        for prop in children(sheet, "property") {
+            let mut it = list_iter(prop);
+            it.next();
+            if it.next().and_then(as_str) == Some("Sheetname") {
+                sheet_name = it.next().and_then(as_str).map(str::to_owned);
+                break;
+            }
+        }
+        let Some(nodes) = sheet_name.as_deref().and_then(|n| sheet_nets.get(n)) else {
+            continue;
+        };
+        for (i, (_, x, y)) in sheet_port_pins(sheet).into_iter().enumerate() {
+            if let Some(net) = nodes.get(i) {
+                out.entry(net.clone()).or_default().push((x, y));
+            }
+        }
+    }
+
+    // Every `power:*` glyph / PWR_FLAG anchor, as a coordinate. A wire
+    // component touching one of these is a glyph stub, not routing —
+    // `wire_detour` uses this to drop the whole net.
+    for sym in children(root, "symbol") {
+        if let Some((refdes, lib_id)) = placed_symbol_refdes_and_lib_id(sym)
+            && (refdes.starts_with("#PWR")
+                || refdes.starts_with("#FLG")
+                || lib_id.starts_with("power:"))
+            && let Some((ox, oy, _)) = placed_symbol_pose(sym)
+        {
+            glyph_anchors.insert(key((ox, oy)));
+        }
+    }
+
+    (out, glyph_anchors)
+}
+
+/// Per-fixture wire **detour**: emitted wire length over the ideal
+/// rectilinear lower bound, measured on real pin geometry.
+///
+/// For each net the ideal is the half-perimeter of its pins' bounding
+/// box — the exact lower bound on any rectilinear Steiner tree spanning
+/// them, so a perfect router scores 1.0 and the ratio reads directly as
+/// "how far the ink wanders past the shortest possible route".
+///
+/// Numerator and denominator are both restricted to nets that actually
+/// carry **routed** wire. Two exclusions keep the measure honest, and
+/// both are needed in the same direction — without them the ratio is
+/// deflated toward zero and re-hides exactly the defects this metric
+/// exists to catch:
+///
+///  * nets with no emitted wire at all contribute neither term;
+///  * **glyph-carried (power / ground) nets** are dropped whole. Per V10
+///    these are drawn as `power:*` glyphs, not routed: their only ink is
+///    the short detached-glyph stub, while their "pin" set includes the
+///    PWR_FLAG driver anchor parked far off to one side. On
+///    `opamp_inverting` that pairs a 2.54 mm stub with a 66 mm bbox —
+///    a meaningless 0.04 ratio that drags the fixture total to 0.22,
+///    below the theoretical floor of 1.0.
+///
+/// Segments are attributed to nets by union-find over shared endpoints
+/// and pin coincidences — the same connectivity model KiCad itself uses
+/// (V11) — rather than by proximity.
+fn uf_find(uf: &mut [usize], mut x: usize) -> usize {
+    while uf[x] != x {
+        uf[x] = uf[uf[x]];
+        x = uf[x];
+    }
+    x
+}
+
+/// Half-perimeter of the bounding box of `pts` — the exact lower bound
+/// on any rectilinear tree spanning them.
+fn hpwl(pts: &[Pt]) -> f64 {
+    let (mut x0, mut x1) = (f64::INFINITY, f64::NEG_INFINITY);
+    let (mut y0, mut y1) = (f64::INFINITY, f64::NEG_INFINITY);
+    for &(x, y) in pts {
+        x0 = x0.min(x);
+        x1 = x1.max(x);
+        y0 = y0.min(y);
+        y1 = y1.max(y);
+    }
+    (x1 - x0) + (y1 - y0)
+}
+
+fn wire_detour(spice_path: &std::path::Path, root: &Value) -> (f64, f64) {
+    use std::collections::HashMap;
+
+    let segs = wire_segments(root);
+    let (pins_by_net, glyph_anchors) = world_pins_by_net(spice_path, root);
+    if segs.is_empty() {
+        return (0.0, 0.0);
+    }
+
+    // Union-find over quantised coordinates: wire endpoints, plus any pin
+    // lying on a segment (endpoint or interior — V11 clause 2).
+    let mut ids: HashMap<(i64, i64), usize> = HashMap::new();
+    let id_of = |k: (i64, i64), ids: &mut HashMap<(i64, i64), usize>| -> usize {
+        let n = ids.len();
+        *ids.entry(k).or_insert(n)
+    };
+    let mut edges: Vec<(usize, usize)> = Vec::new();
+    for &(a, b) in &segs {
+        let ia = id_of(key(a), &mut ids);
+        let ib = id_of(key(b), &mut ids);
+        edges.push((ia, ib));
+    }
+    let on_segment = |p: Pt, a: Pt, b: Pt| -> bool {
+        let eps = 1e-6;
+        let within = |v: f64, lo: f64, hi: f64| v >= lo.min(hi) - eps && v <= lo.max(hi) + eps;
+        ((a.0 - b.0).abs() < eps && (p.0 - a.0).abs() < eps && within(p.1, a.1, b.1))
+            || ((a.1 - b.1).abs() < eps && (p.1 - a.1).abs() < eps && within(p.0, a.0, b.0))
+    };
+    let mut pin_ids: Vec<(usize, &str)> = Vec::new();
+    for (net, pts) in &pins_by_net {
+        for &p in pts {
+            let mut touched = None;
+            for &(a, b) in &segs {
+                if on_segment(p, a, b) {
+                    touched = Some(key(a));
+                    break;
+                }
+            }
+            if let Some(anchor) = touched {
+                let ip = id_of(key(p), &mut ids);
+                let ia = id_of(anchor, &mut ids);
+                edges.push((ip, ia));
+                pin_ids.push((ip, net.as_str()));
+            }
+        }
+    }
+
+    let mut uf = vec![0usize; ids.len()];
+    for (i, slot) in uf.iter_mut().enumerate() {
+        *slot = i;
+    }
+    for (a, b) in edges {
+        let (ra, rb) = (uf_find(&mut uf, a), uf_find(&mut uf, b));
+        if ra != rb {
+            uf[ra] = rb;
+        }
+    }
+
+    // component -> net. V11 guarantees a component carries pins of only
+    // one net (a foreign-pin coincidence would be a short), so the fold
+    // below is well defined — but `pins_by_net` is a HashMap, so sort
+    // first and keep the choice deterministic even if V11 ever regresses.
+    // A nondeterministic ratchet is worse than a wrong one.
+    pin_ids.sort_unstable();
+    let mut comp_net: HashMap<usize, String> = HashMap::new();
+    for (ip, net) in pin_ids {
+        let r = uf_find(&mut uf, ip);
+        comp_net.entry(r).or_insert_with(|| net.to_string());
+    }
+
+    // Nets whose ink reaches a power glyph / PWR_FLAG anchor: V10
+    // glyph-carried, dropped whole (see the doc comment).
+    let mut glyph_nets: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for &k in &glyph_anchors {
+        if let Some(&i) = ids.get(&k)
+            && let Some(net) = comp_net.get(&uf_find(&mut uf, i))
+        {
+            glyph_nets.insert(net.clone());
+        }
+    }
+
+    // Accumulate per CONNECTED COMPONENT of ink, not per net. A net may
+    // legitimately be drawn as two disjoint wire trees bridged by a V4
+    // plain-label name-jump pair (`opamp_inverting`'s `inv`: RIN's pin
+    // carries a label, and only RF→sheet is wired). Charging that net the
+    // bounding box of ALL its pins would bill the router for a span it
+    // was never asked to cross — measured 0.26 for a route that is in
+    // fact optimal. The component is the unit of routing, so it is the
+    // unit of measurement.
+    let mut wire_by_comp: HashMap<usize, f64> = HashMap::new();
+    let mut pins_by_comp: HashMap<usize, Vec<Pt>> = HashMap::new();
+    for &(a, b) in &segs {
+        let r = uf_find(&mut uf, ids[&key(a)]);
+        if comp_net.get(&r).is_some_and(|n| !glyph_nets.contains(n)) {
+            *wire_by_comp.entry(r).or_default() += manhattan(a, b);
+        }
+    }
+    for (net, pts) in &pins_by_net {
+        if glyph_nets.contains(net) {
+            continue;
+        }
+        for &p in pts {
+            if let Some(&i) = ids.get(&key(p)) {
+                let r = uf_find(&mut uf, i);
+                pins_by_comp.entry(r).or_default().push(p);
+            }
+        }
+    }
+
+    let (mut wire, mut ideal) = (0.0, 0.0);
+    for (comp, len) in &wire_by_comp {
+        let Some(pts) = pins_by_comp.get(comp) else {
+            continue;
+        };
         if pts.len() < 2 {
             continue;
         }
-        // Consecutive Manhattan distance after sorting by x then y.
-        let mut sorted = pts.clone();
-        sorted.sort_by(|a, b| {
-            a.0.partial_cmp(&b.0)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-        });
-        for w in sorted.windows(2) {
-            sum += manhattan(w[0], w[1]);
-        }
+        wire += len;
+        ideal += hpwl(pts);
     }
-    sum
+    (wire, ideal)
 }
 
 #[test]
-fn wire_length_within_budget_across_fixtures() {
-    // Per-fixture ratio of total wire length to pin-pair-Manhattan
-    // baseline. The baseline is "what the labels themselves span";
-    // a perfect router would emit roughly that much wire. The
-    // fast-path 2-pin router emits ~Manhattan distance directly
-    // (ratio ≈ 1.0); the channel router adds a lead-in + trunk so
-    // we allow a slack factor.
-    // Per-fixture wire-length budgets, expressed as the ratio of
-    // total emitted wire mm to the label-pair Manhattan baseline
-    // (a label-only proxy for "what an ideal router would produce").
-    // The channel router's mandatory lead-in (5.08 mm per pin) plus
-    // trunk inflation pushes ratios well above 1.0 even on small
-    // fixtures; rc_lowpass is exempt from channel-routing because
-    // its `out` net is fast-pathed (2 pins, < 10 mm Manhattan).
-    // R7 budgets, calibrated against the spice-route Steiner-tree
-    // router. Measured ratios on master at R7:
-    // rc_lowpass=1.00, common_emitter=1.15, multivibrator=1.52,
-    // diff_pair=1.00, opamp_inverting_real=1.05. Plan target was
-    // 2.5 across the board; we keep that as the upper bound and
-    // tighten the simpler fixtures further so a regression is
-    // visible immediately.
+fn wire_detour_within_budget_across_fixtures() {
+    // Per-fixture wire DETOUR: emitted wire length over the rectilinear
+    // ideal for the same ink (see `wire_detour`). 1.0 is a route that
+    // could not be shorter; 1.4 means 40% of the ink is wander.
+    //
+    // This is deliberately a RATIO, not a length. Absolute wire length is
+    // not a project objective — see the HPWL ablation in
+    // `docs/layout-adr.md` ("for schematics we maximise READABILITY; area
+    // is not important at all"). What is a readability defect is ink that
+    // wanders past the route it needed to take, and that is scale-free.
+    //
+    // HISTORY — this verifier was VACUOUS from introduction until now.
+    // Its baseline was derived from *labels* (`pin_pair_manhattan_sum`),
+    // and nine of the ten fixtures emit no multi-pin labelled net at all,
+    // so they hit a `baseline < 1e-6` early-`continue` and were never
+    // graded — including all five fixtures carrying original budgets. The
+    // one fixture that did reach the assertion, `opamp_inverting`, was
+    // graded against a number that happened to mean something else. The
+    // baseline is now pin geometry, so all ten are graded.
+    //
+    // The literals below are therefore NOT a ratchet lowering; they are
+    // first honest measurements of a metric that had never run. They are
+    // zero-slack (measured value, rounded up in the 4th decimal only) and
+    // ratchet DOWN from here per CLAUDE.md § "Budgets are ratchets".
     let budgets: &[(&str, f64)] = &[
-        ("rc_lowpass", 1.5),
-        ("common_emitter", 2.5),
-        ("multivibrator", 2.5),
-        ("diff_pair", 1.5),
-        ("opamp_inverting_real", 1.5),
-        // Newly graded (the fixture list was extended to all ten).
-        //
-        // CAVEAT, and it is a large one: this metric's baseline is
-        // `pin_pair_manhattan_sum`, which is derived from *labelled*
-        // nets. Nine of the ten fixtures emit no multi-pin labelled net
-        // at all, so they hit the `baseline < 1e-6` early-`continue`
-        // above and are never actually graded here — the five original
-        // budgets are vacuous today too. `opamp_inverting` is the only
-        // fixture that reaches the assertion (its hierarchical-sheet
-        // ports carry the labels). Measured ratio 1.13; recorded tight.
-        // Making this verifier bite on the other nine means replacing
-        // the label-derived baseline with a pin-derived one, which is a
-        // separate change — see the report note.
-        ("rc_lowpass_ports", 1.5),
-        ("opamp_inverting", 1.14),
-        ("port_shapes", 1.5),
-        ("opamp_definition_level", 1.5),
-        ("named_rails", 1.5),
+        ("rc_lowpass", 1.167),
+        ("common_emitter", 1.0136),
+        ("multivibrator", 1.0481),
+        ("diff_pair", 1.0556),
+        ("opamp_inverting_real", 1.1464),
+        ("rc_lowpass_ports", 1.4001),
+        ("opamp_inverting", 1.1112),
+        ("port_shapes", 1.0852),
+        ("opamp_definition_level", 1.0984),
+        ("named_rails", 1.125),
     ];
     for (name, path) in fixtures() {
         let tmp = tempdir(name);
         let sch = common::spice_to_kicad(&path, &tmp).expect("spice2kicad");
         let root = parse_sch(&sch);
-        let total = total_all_wire_length(&root);
-        let baseline = pin_pair_manhattan_sum(&root);
-        if baseline < 1e-6 {
-            // No multi-pin labelled nets — skip.
-            continue;
-        }
+        let (total, baseline) = wire_detour(&path, &root);
+        assert!(
+            baseline > 1e-6,
+            "{name}: no wired multi-pin net — the detour metric cannot grade this \
+             fixture, which is exactly the vacuity this verifier was rebuilt to remove",
+        );
         let ratio = total / baseline;
+        // The denominator is a true lower bound on any rectilinear route
+        // of this ink, so a sub-1.0 reading is impossible for a correct
+        // measurement and means the METRIC has broken (a net whose pins
+        // are counted but whose wire is not), never that the router got
+        // clever. Guarding it here is what stops this verifier drifting
+        // back into vacuity unnoticed.
+        assert!(
+            ratio >= 1.0 - 1e-9,
+            "{name}: wire_detour = {ratio:.4} is below the theoretical floor of 1.0 — \
+             the measurement is broken, not the router (emitted wire = {total:.2} mm, \
+             rectilinear ideal = {baseline:.2} mm)",
+        );
         if std::env::var_os("S2K_QUALITY_DUMP").is_some() {
-            println!("wire_length (\"{name}\", {ratio}),");
+            println!("wire_detour (\"{name}\", {ratio}),");
             continue;
         }
         let &(_, budget) = budgets
@@ -1241,8 +1490,8 @@ fn wire_length_within_budget_across_fixtures() {
             .expect("budget for fixture");
         assert!(
             ratio <= budget,
-            "{name}: wire_length / pin_pair_manhattan = {ratio:.2} > budget {budget:.2} \
-             (total wire = {total:.2} mm, pin-pair baseline = {baseline:.2} mm)",
+            "{name}: wire_detour = {ratio:.3} > budget {budget:.3} \
+             (emitted wire = {total:.2} mm, rectilinear ideal = {baseline:.2} mm)",
         );
     }
 }

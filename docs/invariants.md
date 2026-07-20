@@ -218,7 +218,7 @@ invariant here.
   `no_symbol_symbol_overlap_across_fixtures`,
   `no_symbol_label_overlap_across_fixtures`,
   `rails_correctly_ordered_across_fixtures`,
-  `wire_length_within_budget_across_fixtures`,
+  `wire_detour_within_budget_across_fixtures`,
   `crossing_count_within_budget_across_fixtures`,
   `common_emitter_signal_flows_left_to_right`.
   Thresholds are calibrated per fixture. The channel-router floor

@@ -3016,9 +3016,24 @@ objective; "too short nets are bad for readability". HPWL is also the
 ONLY term in the SA objective that rewards *crowding* — the way to lower
 it is to move elements closer together. Its stated job ("wires shouldn't
 sprawl") is covered by two later, better measures: **V16 bends**
-(`wire_geometry.rs`, corners not distance) and the **wire-length RATIO**
-ratchet (`placement_quality.rs`, normalised by pin-pair Manhattan, so it
-measures router *detour* rather than element spacing).
+(`wire_geometry.rs`, corners not distance) and the **wire-detour**
+ratchet (`placement_quality.rs`, normalised by a rectilinear ideal, so
+it measures router *detour* rather than element spacing).
+
+**Correction to the second citation (2026-07-20).** At the time this
+ablation was written the detour ratchet was `wire_length_within_budget_
+across_fixtures`, whose baseline was derived from *labels* — and nine of
+the ten fixtures emit no multi-pin labelled net, so they hit a
+`baseline < 1e-6` early-`continue` and were never graded. The metric
+cited here as covering HPWL's job **was not running on any fixture the
+ablation table reports**. The ablation's CONCLUSION is unaffected: it
+rests on measured V16 / V5 / F5 / V13 movements, not on this ratchet.
+But the claim "HPWL's job is already covered" was, as of that writing,
+only half-supported. The verifier has since been rebuilt on pin geometry
+(`wire_detour_within_budget_across_fixtures`) and now grades all ten;
+the citation is sound going forward. If the hpwl term is re-litigated,
+re-run the ablation against the working detour metric rather than
+inheriting this table's coverage claim.
 
 **The experiment.** `hpwl` set to 0.0, nothing else changed, all ten
 fixtures re-converted and the whole `spice2kicad` suite re-run
