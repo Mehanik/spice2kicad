@@ -121,7 +121,9 @@ pub(super) fn refine(
     // reservation in `symbol_overlap_count`. A pure function of the
     // netlist — invariant across the anneal — so it is computed once
     // here and threaded down, not recomputed per proposal.
-    let glyph_prefs = crate::net_class::vertical_prefs(checked);
+    let glyph_rails = crate::net_class::vertical_prefs(checked);
+    let glyph_labels = crate::label_geom::plans_for(checked, "sa");
+    let glyph_prefs = crate::DecorationPrefs::of(&glyph_rails, &glyph_labels);
 
     let weights = CostWeights::DEFAULT;
     let mut current_breakdown = cost::breakdown(&seed, checked, library);
@@ -439,7 +441,7 @@ fn body_half_extents(el: &spice_resolve::ResolvedElement, orient: Orientation) -
 fn footprint_half_extents(
     el: &spice_resolve::ResolvedElement,
     orient: Orientation,
-    prefs: Option<&std::collections::HashMap<String, crate::net_class::VertPref>>,
+    prefs: Option<&crate::DecorationPrefs<'_>>,
 ) -> (f64, f64) {
     let (mut hw, mut hh) = body_half_extents(el, orient);
     for p in el.symbol.pins_in(orient) {
@@ -447,7 +449,10 @@ fn footprint_half_extents(
         hh = hh.max(p.y.abs());
     }
     if let Some(prefs) = prefs {
-        for (dx, dy) in crate::glyph_geom::glyph_reach(el, orient, prefs) {
+        let reach = crate::glyph_geom::glyph_reach(el, orient, prefs.rails)
+            .into_iter()
+            .chain(crate::label_geom::label_reach(el, orient, prefs.labels));
+        for (dx, dy) in reach {
             hw = hw.max(dx.abs());
             hh = hh.max(dy.abs());
         }
@@ -507,7 +512,7 @@ fn symbol_overlap_count(
     // footprint measure unions in (ADR-14 phase 3, mirroring the seed).
     // Computed once in `refine` (invariant across the anneal) and
     // threaded in, so the SA hot loop never re-runs `classify_nets`.
-    prefs: &std::collections::HashMap<String, crate::net_class::VertPref>,
+    prefs: &crate::DecorationPrefs<'_>,
 ) -> usize {
     // The cell half-extents the `overlap` cost already enforces. A body
     // within these contributes nothing here (the cost covers it).
