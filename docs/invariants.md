@@ -1038,9 +1038,25 @@ invariant here.
   and `rc_lowpass_ports` 5 are genuine blind spots: `C1` terminates
   `out` whose only other pin is `R1`'s, facing horizontally on a
   TWO-terminal element — the sideways anchor requires a multi-terminal
-  (active) device, so the idiom still declines. `named_rails` 6 is the
-  same shape. `diff_pair` 4 and `common_emitter` 4 are NOT defects
-  (a shared-centre midpoint and a two-stub group spread about its
-  anchor, both deliberate). Extending the sideways anchor to
-  two-terminal neighbours is untested and would re-open the weak-anchor
-  failure mode `rail_stub_anchor_x` documents.
+  (active) device, so the idiom still declines. `diff_pair` 4 and
+  `common_emitter` 4 are NOT defects (a shared-centre midpoint and a
+  two-stub group spread about its anchor, both deliberate). Extending
+  the sideways anchor to two-terminal neighbours is untested and would
+  re-open the weak-anchor failure mode `rail_stub_anchor_x` documents.
+
+  `named_rails` 6 was previously recorded here as "the same shape" as
+  `rc_lowpass`'s blind spot. **That was wrong**, and the correction
+  matters because it moves the fixture from the defect column to the
+  deliberate one. Measured per stub, the fixture scores
+  `CL 4, RPD 6, RPU 4` — a THREE-stub group (`RPU` up to `+5V`, `RPD`
+  down to `-5V`, `CL` down to ground) all terminating the one `out`
+  node, whose anchor pin (`RIN`, a `Device:R_US` at rot 180) is
+  VERTICAL. So the column idiom does fire — this is not the declined
+  two-terminal-horizontal case at all — and the 6 is
+  `apply_rail_stub_columns` spreading the group symmetrically about the
+  anchor so the three stubs do not stack. That is exactly the
+  deliberate behaviour already recorded as non-defect for
+  `common_emitter` 4 and `diff_pair` 4, just with three stubs rather
+  than two, hence the wider spread. Driving it down would mean stacking
+  stubs in one column, which the idiom exists to prevent. Treat 6 as
+  the fixture's correct score, not an owed fix.
