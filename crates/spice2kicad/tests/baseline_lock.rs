@@ -291,6 +291,14 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
     // `multivibrator`'s `RC1`/`RC2` drop onto their transistors' collector
     // columns, removing 17.78 mm of dog-leg each; their VCC glyphs follow.
     // 4 of 107 rows moved and no other fixture changed at all.
+    //
+    // Regenerated again for the forward-facing output-pin filter:
+    // `orient::allowed_orientations` now keeps a >=3-terminal element's
+    // `output` pin facing screen-right, so `opamp_inverting_real`'s `X1`
+    // stops emitting `(mirror y)` with its triangle pointing backwards
+    // against its own signal flow, and the grounded `+` input's GND glyph
+    // moves off `RF`'s body with it. 11 of 107 rows moved, all on that one
+    // fixture. NOT RECOMMENDED FOR LANDING — see the commit message.
     (
         "common_emitter",
         "#FLG1",
@@ -773,7 +781,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "opamp_inverting_real",
         "#FLG1",
         "power:PWR_FLAG",
-        59.69,
+        57.15,
         52.07,
         0.0,
         "",
@@ -782,7 +790,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "opamp_inverting_real",
         "#FLG2",
         "power:PWR_FLAG",
-        59.69,
+        57.15,
         64.77,
         180.0,
         "",
@@ -791,7 +799,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "opamp_inverting_real",
         "#FLG3",
         "power:PWR_FLAG",
-        59.69,
+        57.15,
         77.47,
         0.0,
         "",
@@ -800,7 +808,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "opamp_inverting_real",
         "#PWR1",
         "power:GND",
-        46.99,
+        29.21,
         41.91,
         0.0,
         "",
@@ -809,7 +817,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "opamp_inverting_real",
         "#PWR2",
         "power:VCC",
-        41.91,
+        34.29,
         36.83,
         0.0,
         "",
@@ -818,7 +826,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "opamp_inverting_real",
         "#PWR3",
         "power:VEE",
-        41.91,
+        34.29,
         52.07,
         180.0,
         "",
@@ -827,7 +835,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "opamp_inverting_real",
         "#PWR4",
         "power:GND",
-        59.69,
+        57.15,
         52.07,
         0.0,
         "",
@@ -836,7 +844,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "opamp_inverting_real",
         "#PWR5",
         "power:VCC",
-        59.69,
+        57.15,
         64.77,
         0.0,
         "",
@@ -845,7 +853,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "opamp_inverting_real",
         "#PWR6",
         "power:VEE",
-        59.69,
+        57.15,
         77.47,
         180.0,
         "",
@@ -854,7 +862,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "opamp_inverting_real",
         "RF",
         "Device:R_US",
-        48.26,
+        45.72,
         44.45,
         180.0,
         "",
@@ -872,10 +880,10 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "opamp_inverting_real",
         "X1",
         "Amplifier_Operational:OPAMP",
-        39.37,
+        36.83,
         44.45,
         0.0,
-        "y",
+        "",
     ),
     (
         "port_shapes",

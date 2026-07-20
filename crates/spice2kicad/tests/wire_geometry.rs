@@ -518,7 +518,15 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     // drawn as a proper Steiner T instead of the trunk stopping sideways
     // on RTAIL's pin. Buys V5 1 → 0 on this fixture. Owner-approved.
     ("diff_pair", 2, 1),
-    ("opamp_inverting_real", 8, 0),
+    // B 8 -> 5: `X1` no longer emits mirrored, so the triangle points
+    // along the signal flow instead of against it.
+    //
+    // J 0 -> 1 is a RISE and is NOT APPROVED — the test fails on it
+    // deliberately. The `inv` net has three pins (X1's inverting input,
+    // RIN, RF), so one branch vertex is its topological MINIMUM; the
+    // previous 0 meant the trunk ended sideways on a pin. See the commit
+    // message: this commit is NOT recommended for landing as-is.
+    ("opamp_inverting_real", 5, 0),
     ("opamp_inverting", 3, 0),
     ("port_shapes", 4, 0),
     // B 4 → 2, and the global-improvement escape that once raised this

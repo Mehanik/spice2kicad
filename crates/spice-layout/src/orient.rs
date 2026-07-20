@@ -145,7 +145,7 @@ pub fn allowed_orientations(checked: &CheckedNetlist) -> Vec<Vec<Orientation>> {
                 .copied()
                 .filter(|&o| satisfies_v14(elem, &prefs, o))
                 .collect();
-            if filtered.is_empty() {
+            let filtered = if filtered.is_empty() {
                 // No V14-ideal orientation (e.g. a negative-supply
                 // source whose vee and ground pins both want
                 // screen-down). Fall back to the full eight — the rails
@@ -153,9 +153,85 @@ pub fn allowed_orientations(checked: &CheckedNetlist) -> Vec<Vec<Orientation>> {
                 Orientation::ALL.to_vec()
             } else {
                 filtered
-            }
+            };
+            forward_facing_subset(elem, &filtered)
         })
         .collect()
+}
+
+/// Restrict `base` to the orientations that draw a directional active
+/// device's **output pin facing screen-right**.
+///
+/// # Why this is a hard constraint and not a cost
+///
+/// An element that declares a KiCad `output` pin has a *reading
+/// direction* baked into its body graphics: an opamp triangle points at
+/// its output. Drawing it backwards is not a slightly-worse layout, it
+/// is a categorically wrong picture — the reader follows the apex, and
+/// the apex lies. That makes it Tier-1 and categorical, so per CLAUDE.md
+/// "constraints vs. costs" it belongs in the candidate-space filter,
+/// exactly like V14, and never as a weighted term the SA can trade away.
+///
+/// # Scope, deliberately narrow
+///
+/// Only elements with **≥ 3 terminals** and **≥ 1 `output` pin** qualify.
+/// That is the structural signature of a directional active device
+/// (CLAUDE.md principle 9 — no refdes or element-kind matching). It
+/// deliberately excludes:
+///
+/// * every two-terminal passive — a resistor has no output pin and no
+///   reading direction, and constraining its axis is precisely the
+///   ADR-15 Stage-5 experiment that regressed V12/V13/V16 (see the
+///   Stage-5 post-mortem: "the flow proxy and measured routing quality
+///   genuinely disagree"). This filter makes no claim about series
+///   signal elements and does not re-attempt that;
+/// * transistors — all three BJT pins are `passive`/`input`, so a BJT
+///   keeps all eight orientations and V7 symmetry may still mirror it,
+///   which is the conventional drawing for a differential/cross-coupled
+///   pair.
+///
+/// Falls back to `base` when the intersection is empty, so the set this
+/// returns is still non-empty and V14 still wins (the filter only ever
+/// removes candidates V14 already permitted).
+fn forward_facing_subset(
+    elem: &spice_resolve::ResolvedElement,
+    base: &[Orientation],
+) -> Vec<Orientation> {
+    if elem.nodes.len() < 3 {
+        return base.to_vec();
+    }
+    let outputs: Vec<String> = elem
+        .symbol
+        .pins_in(Orientation::IDENTITY)
+        .iter()
+        .filter(|p| p.electrical == kicad_symbols::PinElectrical::Output)
+        .map(|p| p.number.clone())
+        .collect();
+    if outputs.is_empty() {
+        return base.to_vec();
+    }
+    let forward: Vec<Orientation> = base
+        .iter()
+        .copied()
+        .filter(|&o| {
+            elem.symbol
+                .pins_in(o)
+                .iter()
+                .filter(|p| outputs.contains(&p.number))
+                // `pins_in` yields the **outward** world angle (see
+                // `kicad_symbols::world_outward_angle`), and the emitter
+                // negates Y only — so outward 0 is screen-right. The
+                // OPAMP's library-inward 180 maps to outward 0 at
+                // identity, which is exactly the canonical
+                // apex-points-right drawing.
+                .all(|p| p.angle % 360 == 0)
+        })
+        .collect();
+    if forward.is_empty() {
+        base.to_vec()
+    } else {
+        forward
+    }
 }
 
 #[cfg(test)]
