@@ -69,6 +69,14 @@ impl Rows {
 /// assignment is deterministic and independent of `HashMap` iteration.
 #[must_use]
 pub fn assign_rows(checked: &CheckedNetlist, classes: &NetClassMap) -> Rows {
+    fn find(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+
     let n = checked.elements.len();
     let trivial = Rows {
         row: vec![None; n],
@@ -76,14 +84,6 @@ pub fn assign_rows(checked: &CheckedNetlist, classes: &NetClassMap) -> Rows {
     };
     if n == 0 {
         return trivial;
-    }
-
-    fn find(parent: &mut [usize], mut i: usize) -> usize {
-        while parent[i] != i {
-            parent[i] = parent[parent[i]];
-            i = parent[i];
-        }
-        i
     }
 
     let mut parent: Vec<usize> = (0..n).collect();

@@ -1457,7 +1457,10 @@ fn wire_detour_within_budget_across_fixtures() {
         ("rc_lowpass_ports", 1.4001),
         ("opamp_inverting", 1.1112),
         ("port_shapes", 1.0852),
-        ("opamp_definition_level", 1.0984),
+        // 1.0984 → 1.0732. Channel-row banding (Option B) reads both
+        // channels left-to-right as congruent rows, shortening the routed
+        // ink relative to its rectilinear ideal. Ratchet DOWN.
+        ("opamp_definition_level", 1.0732),
         ("named_rails", 1.125),
     ];
     for (name, path) in fixtures() {

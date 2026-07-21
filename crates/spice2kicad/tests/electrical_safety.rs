@@ -1903,6 +1903,11 @@ fn v13_pwr_flag_graphic_clear_of_power_glyphs() {
 /// Both buckets are tracked as v0.2 placer / channel-router work
 /// items. The budgets here lock in the current high-water mark — a
 /// regression trips the test.
+// `named_rails` and `opamp_definition_level` both hold at 2 but for
+// entirely different reasons (a rail-stub v0.2 work item vs. the
+// owner-approved Option B channel-row escape), so their arms are kept
+// separate with their own rationales rather than merged.
+#[allow(clippy::match_same_arms)]
 fn v5_violation_budget(name: &str) -> usize {
     match name {
         // Ratcheted high-water marks (current measured count on master).
@@ -1947,8 +1952,21 @@ fn v5_violation_budget(name: &str) -> usize {
         // orientation tie-break is the wrong lever here. Ratchets down
         // when the v0.2 placer redesign lands.
         "named_rails" => 2,
+        // V5 0 → 2. Channel-row banding (Option B, OWNER SIGN-OFF
+        // 2026-07-20) pins each inverting-amp channel to its textbook
+        // seed facing (input-left, output-right) so the deck reads
+        // left-to-right as two congruent rows. Both summing-node input
+        // pins (X1.2 / X2.2, the opamp inverting inputs on nets
+        // `inv1` / `inv2`) then face outward-left while their net
+        // legitimately continues UP to the RIN/RF feedback junction —
+        // the documented V5-vs-left-to-right-flow tension (MEMORY
+        // "flow-orientation wall"), not a wire leaving a pin into open
+        // space. Approved under the global-improvement escape: summed
+        // across this fixture, TOTAL violations fall by 6 (B −9, F5 −1,
+        // V5 +2, J +2). Ratchets down when the v0.2 placer redesign lands.
+        "opamp_definition_level" => 2,
         // diff_pair, rc_lowpass, rc_lowpass_ports, port_shapes,
-        // opamp_inverting_real, opamp_definition_level: zero violations.
+        // opamp_inverting_real: zero violations.
         _ => 0,
     }
 }

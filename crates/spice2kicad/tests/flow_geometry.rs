@@ -871,16 +871,18 @@ const FLOW_POSE_RATCHET: &[(&str, usize, usize)] = &[
     ("opamp_inverting_real", 2, 0),
     // F5: R1/R2/R3 drawn vertical (R4 is a rail stub).
     ("port_shapes", 3, 0),
-    // F5: 1. Was 4 — all of RIN1/RF1/RIN2/RF2 drawn vertical, with both
-    // channels drawn right-to-left and X-interleaved. The two channels
-    // are electrically independent and share only the rails, so V7's
-    // mirror pinned six of eight elements about an axis they do not nest
-    // about, and neither channel had an input anchor (`in1`/`in2` matched
-    // no boundary-net name). With the coupling predicate, the
-    // channel-numbered port match and the geometry-derived stacked-bucket
-    // Y stride, both channels layer left-to-right and three of the four
-    // series resistors land horizontal.
-    ("opamp_definition_level", 1, 0),
+    // F5: 0. Was 1, and 4 before that — all of RIN1/RF1/RIN2/RF2 drawn
+    // vertical, with both channels drawn right-to-left and X-interleaved.
+    // The two channels are electrically independent and share only the
+    // rails, so V7's mirror pinned six of eight elements about an axis
+    // they do not nest about, and neither channel had an input anchor
+    // (`in1`/`in2` matched no boundary-net name). With the coupling
+    // predicate, the channel-numbered port match, the geometry-derived
+    // stacked-bucket Y stride, and channel-row banding (Option B) that
+    // pins each channel's seed facing through phase 4.5, both channels
+    // layer left-to-right and ALL FOUR series resistors land horizontal.
+    // Ratchet DOWN.
+    ("opamp_definition_level", 0, 0),
     // F5: RIN drawn vertical (RPU/RPD/CL are rail stubs).
     ("named_rails", 1, 0),
 ];

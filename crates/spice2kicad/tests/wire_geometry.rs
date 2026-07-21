@@ -554,50 +554,29 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     // phase 4.5 kept whichever it enumerated first. The bend key now
     // separates them, so the fixture reaches its true floor.
     ("rc_lowpass_ports", 2, 0),
-    // B 10 → 12, J 2 → 0. The pin-angle fix in `Symbol::pins_in` stopped
-    // the router steering horizontal opamp pins inward, which removed
-    // this fixture's V5 violations (3 → 0) and both of its branch
-    // vertices, at the cost of two bends. Global-improvement escape
-    // (CLAUDE.md): TOTAL V5 across all fixtures fell 16 → 7 and no
-    // Tier-0/Tier-1 count moved anywhere. Owner signed off on the B rise;
-    // J ratchets down to its measured 0.
+    // B 15 → 6, J 0 → 2. Channel-row banding (`channels.rs` +
+    // `spice-layout::lib.rs`, Option B) now lays the two independent
+    // inverting-amp channels out as two congruent rows, and pins each
+    // channel's orientation THROUGH phase 4.5 to the `pick_orientations`
+    // seed — the textbook non-mirror facing (input-left, output-right)
+    // that reads left-to-right along the row. The prior layout let phase
+    // 4.5's V5 oracle flip the opamps to a mirror facing that scored
+    // V5=0 but drew the amp backwards in-row (B=15/16); the seed facing
+    // reads correctly (B → 6) and the two 3-pin summing-node nets
+    // (`inv1`, `inv2`) branch as proper Steiner trees (J 0 → 2) rather
+    // than the router's worse pin-chaining (old J=0).
     //
-    // Three literals rise in this commit and no others: this B, the
-    // `rc_lowpass_ports` B above (same escape), and the `diff_pair` J
-    // above (separately approved). Every other literal held or fell.
-    // B 12 -> 15. A RATCHET RISE. **NOT an explicit owner decision** —
-    // landed 2026-07-20 by the operating assistant under the owner's
-    // standing instruction to proceed without per-change confirmation.
-    // The owner never saw this specific budget. The automatic
-    // global-improvement escape does not reach it either (F5 -3 against
-    // B +3 is net zero), so this rise rests on assistant judgement plus
-    // the tier argument below, and should be re-examined rather than
-    // cited as owner precedent.
-    //
-    // What is bought: this fixture was drawn BACKWARDS and with its two
-    // channels X-interleaved, because `layers.rs::no_source_fallback`
-    // matched `in`/`out` by equality but `vin`/`vout` by prefix, so
-    // `in1`/`in2`/`out1`/`out2` — the mandatory spelling for ANY
-    // multi-channel circuit — matched nothing at all. Left-to-right
-    // signal flow is a stated core convention (docs/invariants.md V6);
-    // three bends is the price of restoring it.
-    //
-    // Measured alongside it, and strictly HIGHER-tier than the bends:
-    //   * cross-net collinear wire overlap 1 -> 0 (Tier 0, latent V11
-    //     short) — the last `CROSS_NET_V02_ESCALATIONS` entry, retired.
-    //   * V12 wires-through-foreign-bodies 4 -> 0 (Tier 1) — the "OWED,
-    //     NOT ACCEPTED" budget in `electrical_safety::v12_crossing_budget`,
-    //     paid off exactly as its comment required.
-    //   * wire crossings 6 -> 0 (Tier 2).
-    //   * F5 flow-pose violations 4 -> 1 (Tier 2).
-    // So the tier ordering is respected in the permitted direction: a
-    // Tier-2 bend count rises to buy Tier-0 and Tier-1 correctness. It
-    // is NOT the forbidden trade (higher tier regressed for a lower-tier
-    // gain). J stays 0.
-    //
-    // This literal is a high-water mark like every other: it ratchets
-    // DOWN from 15 and is never raised again without fresh sign-off.
-    ("opamp_definition_level", 15, 0),
+    // B 15 → 6 is a ratchet DOWN and SUPERSEDES the earlier unratified
+    // B=15 (itself preceded by an unratified 12); that history is retired
+    // by this commit. J 0 → 2 is a ratchet RISE, approved by explicit
+    // OWNER SIGN-OFF 2026-07-20 under the global-improvement escape:
+    // summed across this fixture, TOTAL violations fall by 6 (B −9,
+    // F5 −1, V5 +2, J +2). J = 2 is the correct branch count for two
+    // 3-pin nets; V5 = 2 (the two summing-node input pins facing outward
+    // toward the RF-feedback junction) is the documented V5-vs-flow
+    // tension, not a defect. No Tier-0 or Tier-1 count moved anywhere;
+    // the only approved rises on this fixture are Tier-2 V5 and J.
+    ("opamp_definition_level", 6, 2),
 ];
 
 #[test]

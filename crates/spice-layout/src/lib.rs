@@ -609,6 +609,32 @@ pub fn place_with_hint(
     let allowed = orient::allowed_orientations(&checked);
     pick_orientations(&mut placement, &pinned, &checked, &allowed);
 
+    // Uncoupled repeated channels (a dual opamp, a stereo pair) are
+    // seeded into congruent rows by `place_seed`/`pack_rows`: identical
+    // X within each layer (from `layers`), identical V5 orientation
+    // (from `pick_orientations` above), and a geometry-packed Y offset
+    // per row. That congruent seed IS the target layout — two clean
+    // rows — and the SA can only break it: its global HPWL/crossing cost
+    // has no congruence term, so it diverges the two channels into an
+    // asymmetric smear that measurably regresses V5, the wire-detour
+    // ratchet, and a power-glyph body crossing. So pin the channel
+    // members after orientation (never before — `pick_orientations`
+    // skips pinned elements and they would keep identity rotation).
+    // Non-row elements (a `*@power` source, a lone stub) are untouched.
+    // No-op on every single-component circuit
+    // (`Rows::is_trivial` → empty row set).
+    {
+        let classes = net_class::classify_nets(&checked);
+        let rows = channels::assign_rows(&checked, &classes);
+        if !rows.is_trivial() {
+            for (i, r) in rows.row.iter().enumerate() {
+                if r.is_some() {
+                    pinned[i] = true;
+                }
+            }
+        }
+    }
+
     let glyph_prefs = net_class::vertical_prefs(&checked);
     if !opts.refine {
         legalize_if_needed(
@@ -938,6 +964,33 @@ pub fn refinement_meta(
     let dividers = idioms::detect_dividers(checked);
     idioms::apply(&mut placement, &mut pinned, checked, &dividers);
     apply_position_idioms(&mut placement, &mut pinned, checked);
+    // Mirror the channel-row pins `place_with_hint` adds for the SA
+    // (Option B, owner sign-off 2026-07-20). Freezing the channel
+    // members here as well means phase 4.5 keeps each channel at the
+    // `pick_orientations` seed — the textbook non-mirror inverting-amp
+    // facing (input-left, output-right) that reads correctly along the
+    // row. Leaving them free (Option A) let phase 4.5's V5 oracle flip
+    // the opamps to a mirror facing that scores V5=0 but reads
+    // backwards in-row (output pin pointing back up the row, feedback
+    // trunk bending around the body): B 6→16 and the wire-detour
+    // ratchet rise. Pinning the seed facing instead reads clean
+    // left-to-right (B→6, F5→0) at the cost of the summing-node input
+    // pin facing outward toward the RF-feedback junction (V5 0→2) and
+    // the two 3-pin nets branching as proper Steiner trees (J 0→2) —
+    // both owner-approved under the global-improvement escape
+    // (−6 net violations on the fixture). Congruence is preserved
+    // because both channels are identical and get the same seed facing.
+    {
+        let classes = net_class::classify_nets(checked);
+        let rows = channels::assign_rows(checked, &classes);
+        if !rows.is_trivial() {
+            for (i, r) in rows.row.iter().enumerate() {
+                if r.is_some() {
+                    pinned[i] = true;
+                }
+            }
+        }
+    }
     let allowed = orient::allowed_orientations(checked);
     Ok(RefinementMeta { pinned, allowed })
 }
@@ -1182,25 +1235,45 @@ enum Slot {
 /// ways — its net name lands on RF2's body, the `INV2` trunk crosses its
 /// body, and RIN2 loses its outward first segment.
 ///
-/// **Scope: a bucket holding TWO OR MORE oversized bodies.** That is the
-/// categorically infeasible case and the only one measured to need
-/// fixing. A bucket with one large body among small neighbours is left
-/// alone deliberately: widening it too was implemented and measured, and
-/// it regresses a second fixture (`opamp_inverting_real` V5 0→1, V16 B
-/// 5→7) for no gain — the within-tier sideways trade the ratchet rule
-/// forbids. "Oversized" is the same key the SA overlap gate uses: a body
-/// half-extent past the cost's uniform cell. Every all-small-symbol
-/// fixture therefore keeps its previous, well-tuned 5-cell spacing
-/// exactly, and no such fixture moves.
+/// **Scope: a bucket holding TWO OR MORE oversized bodies, OR — inside a
+/// channel ROW — one oversized body stacked with any neighbour.** Two
+/// stacked oversized bodies is the categorically infeasible case in a
+/// single-component circuit. A bucket with one large body among small
+/// neighbours is left alone there deliberately: widening it
+/// unconditionally was implemented and measured, and it regresses a
+/// second fixture (`opamp_inverting_real` V5 0→1, V16 B 5→7) for no gain
+/// — the within-tier sideways trade the ratchet rule forbids. But once a
+/// multi-channel deck is split into channel rows, each row-bucket holds a
+/// single oversized opamp among its resistors, and the two-oversized test
+/// would never fire — leaving the opamp's feedback resistor stacked too
+/// tight above it, which `legalize` then repairs by shoving the opamps
+/// down by different amounts per channel and breaking the row congruence.
+/// So a genuine row-bucket (`!rows.is_trivial()` and a real row index)
+/// widens on a single oversized body too. That clause is unreachable from
+/// any single-component fixture, so `opamp_inverting_real` and the rest
+/// keep their tuned 5-cell spacing exactly. "Oversized" is the same key
+/// the SA overlap gate uses: a body half-extent past the cost's uniform
+/// cell.
 fn bucket_y_strides(
     checked: &CheckedNetlist,
     layers: &[u32],
     element_slot: &[Slot],
+    rows: &crate::channels::Rows,
     prefs: &HashMap<String, crate::net_class::VertPref>,
-) -> HashMap<(u32, Slot), i32> {
+) -> HashMap<(u32, Slot, usize), i32> {
     let cell_hh = f64::from(CELL_H) * GridPoint::STEP_MM / 2.0;
-    let mut bucket_big: HashMap<(u32, Slot), Vec<(f64, f64)>> = HashMap::new();
+    let mut bucket_big: HashMap<(u32, Slot, usize), Vec<(f64, f64)>> = HashMap::new();
+    let mut bucket_total: HashMap<(u32, Slot, usize), usize> = HashMap::new();
+    // Max downward reach among the NON-oversized members of each bucket.
+    // In a row bucket the small feedback resistor sits on top of the
+    // opamp, so the gap they need is that resistor's down-reach plus the
+    // opamp's up-reach — not the opamp's full height. Tracking it keeps
+    // the row stride tight (the opamp's own down-reach lands below it,
+    // where `pack_rows` already reserves the inter-row gap).
+    let mut bucket_small_down: HashMap<(u32, Slot, usize), f64> = HashMap::new();
     for (i, e) in checked.elements.iter().enumerate() {
+        let key = (layers[i], element_slot[i], rows.row[i].unwrap_or(rows.count));
+        *bucket_total.entry(key).or_default() += 1;
         let mut down = 0.0_f64;
         let mut up = 0.0_f64;
         if let Some(b) = e.symbol.body_bbox() {
@@ -1210,29 +1283,140 @@ fn bucket_y_strides(
                 up = up.max(ry);
             }
         }
-        if down.max(up) > cell_hh + 1e-6 {
-            for (_dx, dy) in crate::glyph_geom::glyph_reach(e, Orientation::IDENTITY, prefs) {
-                down = down.max(dy);
-                up = up.max(-dy);
-            }
-            bucket_big
-                .entry((layers[i], element_slot[i]))
-                .or_default()
-                .push((down, up));
+        // Oversized classification is body-only (the SA overlap gate's
+        // key); the glyph reach then widens the *reach* used for spacing.
+        let big = down.max(up) > cell_hh + 1e-6;
+        for (_dx, dy) in crate::glyph_geom::glyph_reach(e, Orientation::IDENTITY, prefs) {
+            down = down.max(dy);
+            up = up.max(-dy);
+        }
+        if big {
+            bucket_big.entry(key).or_default().push((down, up));
+        } else {
+            let slot = bucket_small_down.entry(key).or_default();
+            *slot = slot.max(down);
         }
     }
     bucket_big
         .into_iter()
-        .filter(|(_, big)| big.len() >= 2)
+        // Widen a bucket that stacks two oversized bodies (the original
+        // dual-opamp case), OR — inside a genuine channel ROW — a single
+        // oversized body stacked with any smaller neighbour. Splitting a
+        // multi-channel deck into rows leaves each row-bucket with just
+        // ONE oversized opamp among its resistors, so the two-oversized
+        // test never fires and the opamp's feedback resistor stacks 5
+        // cells above it: too tight, and `legalize` then shoves the
+        // opamps down by *different* amounts in index order, destroying
+        // the row congruence that is this fixture's whole point. The
+        // row-bucket clause is scoped to `!rows.is_trivial()` so no
+        // single-component fixture (every fixture but the multi-channel
+        // decks) can reach it — `opamp_inverting_real`, the fixture the
+        // unconditional single-oversized widening was measured to
+        // regress, is single-component and untouched.
+        .filter(|(k, big)| {
+            big.len() >= 2
+                || (!rows.is_trivial()
+                    && k.2 < rows.count
+                    && !big.is_empty()
+                    && bucket_total.get(k).copied().unwrap_or(0) >= 2)
+        })
         .map(|(k, big)| {
-            let down = big.iter().map(|r| r.0).fold(0.0_f64, f64::max);
             let up = big.iter().map(|r| r.1).fold(0.0_f64, f64::max);
-            (
-                k,
-                mm_up_to_cells(down + up + MIN_CLEARANCE_MM).max(Y_RANK_STRIDE),
-            )
+            // Two oversized bodies could stack in either order, so the gap
+            // must cover the max of each reach (down + up). One oversized
+            // body among small neighbours (the row case) always sits at
+            // the bottom of the stack — its down-reach lands below it, in
+            // the inter-row gap `pack_rows` reserves — so the binding gap
+            // is only its up-reach plus the top neighbour's down-reach.
+            let need = if big.len() >= 2 {
+                let down = big.iter().map(|r| r.0).fold(0.0_f64, f64::max);
+                down + up
+            } else {
+                up + bucket_small_down.get(&k).copied().unwrap_or(0.0)
+            };
+            (k, mm_up_to_cells(need + MIN_CLEARANCE_MM).max(Y_RANK_STRIDE))
         })
         .collect()
+}
+
+/// Per-element vertical reach in *world* mm at identity orientation:
+/// `(up, down)` as non-negative magnitudes measured from the origin,
+/// covering the drawn body, its pin stems and its own rail-glyph
+/// footprint. The same `world_extent_with_glyphs` measure the per-layer
+/// X spacing uses, read on the Y axis.
+fn vertical_reaches(
+    checked: &CheckedNetlist,
+    prefs: &HashMap<String, crate::net_class::VertPref>,
+) -> Vec<(f64, f64)> {
+    checked
+        .elements
+        .iter()
+        .map(|e| {
+            let ext = world_extent_with_glyphs(e, Orientation::IDENTITY, None, prefs);
+            (-ext.min_y, ext.max_y)
+        })
+        .collect()
+}
+
+/// Stack the channel rows so that no element of one row can collide with
+/// any element of the next, then re-centre the whole stack on the Mid
+/// band. A no-op when the netlist has no row structure.
+///
+/// A single fixed inter-row stride does NOT do this, and the failure is
+/// not subtle: within a row the rank stacking already spends vertical
+/// space (an inverting stage puts its feedback resistor above its
+/// op-amp), so a stride measured element-to-element leaves the ROWS
+/// overlapping even though no two origins are close. Measured on
+/// `opamp_definition_level`, a geometry-derived 18-cell stride still let
+/// `X1`'s VEE glyph land level with `X2`'s VCC glyph.
+///
+/// So the packing is measured on the rows themselves: each row's
+/// occupied span is the union of its members' resolved extents, and
+/// row `r + 1` is shifted down until its span clears row `r`'s by
+/// [`MIN_CLEARANCE_MM`], snapped to the grid. Elements belonging to no
+/// row (a `*@power` source, a lone stub) stay where the band seed put
+/// them — they are shared by every channel and belong to none.
+fn pack_rows(
+    placed: &mut [PlacedElement],
+    rows: &crate::channels::Rows,
+    reaches: &[(f64, f64)],
+) {
+    if rows.is_trivial() {
+        return;
+    }
+    // Per-row occupied span in world mm, from the band seed.
+    let mut span = vec![(f64::INFINITY, f64::NEG_INFINITY); rows.count];
+    for (i, pe) in placed.iter().enumerate() {
+        let Some(r) = rows.row[i] else { continue };
+        let (_, y) = pe.origin.to_mm();
+        let (up, down) = reaches[i];
+        span[r].0 = span[r].0.min(y - up);
+        span[r].1 = span[r].1.max(y + down);
+    }
+
+    // Shift each row down until it clears the one above it. Row 0 stays
+    // put, so a one-row-plus-shared-parts circuit cannot move.
+    let mut shift = vec![0_i32; rows.count];
+    let mut prev_bottom = span.first().map_or(f64::NEG_INFINITY, |s| s.1);
+    for r in 1..rows.count {
+        let (top, bottom) = span[r];
+        if !top.is_finite() || !bottom.is_finite() {
+            continue;
+        }
+        let need_mm = (prev_bottom + MIN_CLEARANCE_MM) - (top + f64::from(shift[r - 1]) * GridPoint::STEP_MM);
+        let cells = if need_mm > 0.0 { mm_up_to_cells(need_mm) } else { 0 };
+        shift[r] = shift[r - 1] + cells;
+        prev_bottom = bottom + f64::from(shift[r]) * GridPoint::STEP_MM;
+    }
+
+    // Re-centre the stack on the Mid band so growing it downward does
+    // not walk the circuit off the band the rails bracket.
+    let total = shift.last().copied().unwrap_or(0);
+    for (i, pe) in placed.iter_mut().enumerate() {
+        if let Some(r) = rows.row[i] {
+            pe.origin = GridPoint::new(pe.origin.x, pe.origin.y + shift[r] - total / 2);
+        }
+    }
 }
 
 /// Stage-1 placer body: returns the seed placement plus a per-element
@@ -1243,6 +1427,7 @@ fn bucket_y_strides(
 /// initial grid coordinates from `(band, layer, rank_in_layer)`. User
 /// `align`/`place`/`power` directives then override the heuristic seed
 /// via [`apply_user_constraints`], which pins the affected elements.
+#[allow(clippy::too_many_lines)] // cohesive band/layer/row seed; splitting obscures shared state.
 fn place_seed(checked: &CheckedNetlist) -> Result<(Placement, Vec<bool>), Vec<Diagnostic>> {
     use crate::bands::{Band, assign_y_bands};
     use crate::layers::assign_x_layers;
@@ -1264,6 +1449,10 @@ fn place_seed(checked: &CheckedNetlist) -> Result<(Placement, Vec<bool>), Vec<Di
     let classes = classify_nets(checked);
     let band_asg = assign_y_bands(checked, &classes);
     let layer_asg = assign_x_layers(checked, &classes);
+    // Independent sub-circuits (a dual opamp, a stereo pair) get one
+    // horizontal row each. `Rows::is_trivial()` on a single-component
+    // circuit, which is every fixture but `opamp_definition_level`.
+    let rows = crate::channels::assign_rows(checked, &classes);
     // Per-net screen-vertical preference (Power → up, Ground/negative →
     // down). Used to identify rail pins whose power-glyph footprint the
     // layer stride must reserve (ADR-14 Option A).
@@ -1348,7 +1537,7 @@ fn place_seed(checked: &CheckedNetlist) -> Result<(Placement, Vec<bool>), Vec<Di
         element_slot.push(s);
     }
 
-    let bucket_stride = bucket_y_strides(checked, &layer_asg.layers, &element_slot, &prefs);
+    let bucket_stride = bucket_y_strides(checked, &layer_asg.layers, &element_slot, &rows, &prefs);
 
     // Reserve three sub-rows in Mid: upper / centre / lower.
     let mid_span = (y_mid_bot - y_mid_top).max(1);
@@ -1356,14 +1545,17 @@ fn place_seed(checked: &CheckedNetlist) -> Result<(Placement, Vec<bool>), Vec<Di
     let mid_ctr_y = y_mid_top + mid_span / 2;
     let mid_lo_y = y_mid_top + (3 * mid_span) / 4;
 
-    // Per-(layer, slot) running rank.
-    let mut bucket_rank: HashMap<(u32, Slot), i32> = HashMap::new();
+    // Per-(layer, slot, row) running rank. Rows rank independently:
+    // stacking channel 2 under channel 1 inside one bucket is exactly
+    // the diagonal sprawl the row split exists to remove.
+    let mut bucket_rank: HashMap<(u32, Slot, usize), i32> = HashMap::new();
     let mut placed: Vec<PlacedElement> = Vec::with_capacity(n);
     for (i, e) in checked.elements.iter().enumerate() {
         let layer = layer_asg.layers[i] as usize;
         let slot = element_slot[i];
+        let row = rows.row[i];
         let rank = bucket_rank
-            .entry((layer_asg.layers[i], slot))
+            .entry((layer_asg.layers[i], slot, row.unwrap_or(rows.count)))
             .and_modify(|r| *r += 1)
             .or_insert(0);
         let rank = *rank;
@@ -1380,7 +1572,9 @@ fn place_seed(checked: &CheckedNetlist) -> Result<(Placement, Vec<bool>), Vec<Di
         let x_jitter = raw_jitter.clamp(-MAX_JITTER, MAX_JITTER);
         let x = layer_x[layer] + x_jitter;
 
-        let y_stride = bucket_stride.get(&(layer_asg.layers[i], slot)).copied();
+        let y_stride = bucket_stride
+            .get(&(layer_asg.layers[i], slot, row.unwrap_or(rows.count)))
+            .copied();
         let y_stride = y_stride.unwrap_or(Y_RANK_STRIDE);
         let y = match slot {
             Slot::Top => y_top + rank * y_stride,
@@ -1404,6 +1598,8 @@ fn place_seed(checked: &CheckedNetlist) -> Result<(Placement, Vec<bool>), Vec<Di
             },
         });
     }
+
+    pack_rows(&mut placed, &rows, &vertical_reaches(checked, &prefs));
 
     let mut placement = Placement { elements: placed };
     let mut pinned = vec![false; n];
