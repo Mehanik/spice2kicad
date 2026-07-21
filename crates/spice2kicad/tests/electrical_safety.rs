@@ -1965,8 +1965,27 @@ fn v5_violation_budget(name: &str) -> usize {
         // across this fixture, TOTAL violations fall by 6 (B −9, F5 −1,
         // V5 +2, J +2). Ratchets down when the v0.2 placer redesign lands.
         "opamp_definition_level" => 2,
-        // diff_pair, rc_lowpass, rc_lowpass_ports, port_shapes,
-        // opamp_inverting_real: zero violations.
+        // V5 0 -> 1. The series-horizontal idiom draws R1 horizontal
+        // (in-left, out-right) with C1 dropped straight below the `out`
+        // node, so `rc_lowpass_ports` reads left-to-right as a textbook
+        // single-pole RC. R1's output pin then sends its wire DOWN to
+        // C1 rather than outward along its own axis — the documented
+        // V5-vs-left-to-right-flow tension (MEMORY "flow-orientation
+        // wall", invariants.md V5: "some V5 violations are the correct
+        // flow drawing"), not a wire into open space. Net on the
+        // fixture: F5 1 -> 0, P5 1 -> 0, F6 5 -> 0, V5 0 -> 1 = -2 Tier-2
+        // violations, zero Tier-0/Tier-1 cost.
+        //
+        // PROVENANCE: this rise was landed by the operating assistant
+        // under the owner's standing instruction to proceed without
+        // per-change confirmation; it was NOT an explicit owner decision
+        // and the owner did not see this specific budget. The automatic
+        // global-improvement escape does apply (net -2 on the fixture,
+        // zero higher-tier cost). Re-examine rather than cite as owner
+        // precedent. Ratchets down when the v0.2 placer redesign lands.
+        "rc_lowpass_ports" => 1,
+        // diff_pair, rc_lowpass, port_shapes, opamp_inverting_real:
+        // zero violations.
         _ => 0,
     }
 }
