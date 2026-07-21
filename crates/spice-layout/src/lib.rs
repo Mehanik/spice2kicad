@@ -601,6 +601,15 @@ pub fn place_with_hint(
         library,
         sym_plan.as_ref().zip(sym_axis),
     );
+    // Series-on-signal-path elements go horizontal (upstream pin left)
+    // with their downstream shunts re-columned to drop straight beneath
+    // the output node — the joint position+orientation flow construction
+    // (MEMORY "flow-orientation wall"; ADR-15 Stage-5 post-mortem). Runs
+    // after the rail-stub idiom so it overrides the stub's weak `any`-pin
+    // column, and before `pick_orientations` (which skips pinned
+    // elements). Pins what it places so the SA and phase 4.5 cannot revert
+    // it. `refinement_meta` recomputes the identical pins.
+    idioms::apply_series_horizontal(&mut placement, &mut pinned, &checked);
     // V14: per-element allowed-orientation set (power pin up / ground
     // pin down). A *hard* candidate-space filter, threaded into both
     // the V5 seed chooser below and the SA refiner so the constraint is
@@ -964,6 +973,11 @@ pub fn refinement_meta(
     let dividers = idioms::detect_dividers(checked);
     idioms::apply(&mut placement, &mut pinned, checked, &dividers);
     apply_position_idioms(&mut placement, &mut pinned, checked);
+    // Mirror the series-horizontal construction `place_with_hint` runs,
+    // so phase 4.5 sees the same pins and keeps each series element at its
+    // constructed horizontal facing (it never re-orients a pinned
+    // element).
+    idioms::apply_series_horizontal(&mut placement, &mut pinned, checked);
     // Mirror the channel-row pins `place_with_hint` adds for the SA
     // (Option B, owner sign-off 2026-07-20). Freezing the channel
     // members here as well means phase 4.5 keeps each channel at the

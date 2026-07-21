@@ -2362,8 +2362,22 @@ pub(crate) fn label_specs(
                 .copied()
                 .collect();
             let shape = port_shape_token(*dir);
+            // An `output` terminal belongs at the net's RIGHTMOST pin; an
+            // `input` at the leftmost (`uniq` is sorted by X, then Y). When
+            // several pins share the rightmost X — the R-C junction of a
+            // horizontal series element feeding a shunt that drops straight
+            // down (both pins on one column) — prefer the TOPMOST of them.
+            // The topmost is where the signal arrives from the series
+            // element; anchoring on the lower pin buries the terminal
+            // against the shunt's body and pin-number text (V13). Symmetric
+            // for `input`: among leftmost-X pins prefer the topmost.
             let (px, py, pang) = if matches!(dir, PortDir::Output) {
-                *uniq.last().expect("uniq is non-empty")
+                let max_x = uniq.last().expect("uniq is non-empty").0;
+                *uniq
+                    .iter()
+                    .filter(|(x, _, _)| approx_eq(*x, max_x))
+                    .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                    .expect("at least one pin at max X")
             } else {
                 uniq[0]
             };

@@ -54,11 +54,11 @@
 use std::collections::{HashMap, HashSet};
 
 use spice_policy::CheckedNetlist;
-use spice_resolve::{ElementKind, ResolvedElement};
+use spice_resolve::{ElementKind, ElementRole, PortDir, ResolvedElement};
 
-use kicad_symbols::{Orientation, Symbol};
+use kicad_symbols::{Orientation, Rotation, Symbol};
 
-use crate::net_class::{NetClass, VertPref, classify_nets};
+use crate::net_class::{NetClass, NetClassMap, VertPref, classify_nets};
 use crate::{CELL_W, GridPoint, Placement, WorldExtent, vertical_stride_cells, world_extent};
 
 /// True for a two-terminal passive (`R` / `C` / `L`) — the element kinds
@@ -972,6 +972,236 @@ pub(crate) fn apply_rail_stub_columns(
             );
         }
     }
+}
+
+/// Draw series signal elements horizontally on the flow lane, upstream
+/// pin left, with their downstream shunts dropping straight beneath the
+/// output node (MEMORY "flow-orientation wall"; ADR-15 Stage-5 post-mortem;
+/// the ADR-15 §1.3 joint position+orientation hypothesis).
+///
+/// A **series signal element** is the ADR-15 role-model "series" role,
+/// derived structurally (pin count + net class, principle 9): 2-terminal,
+/// both nodes Signal-class (neither a rail, neither ground). Such an
+/// element lies on the signal path and reads best drawn *horizontally*,
+/// upstream pin at the lower X so the signal runs left→right.
+///
+/// The three prior flow-orientation attempts changed **orientation
+/// against an independently-chosen position** and regressed Tier-1: on
+/// `rc_lowpass_ports` the horizontal element's `out` label collided with a
+/// shunt capacitor still sitting to its *left* (ADR-15 Stage-5 "axis is
+/// only half the constraint"). This pass changes **position and
+/// orientation together**: the element is oriented horizontal AND every
+/// downstream shunt is re-columned onto the element's downstream pin, so
+/// the shunt hangs straight below the output node instead of beside it.
+/// That is the layout the real router draws cleanly (verified end to end
+/// on `rc_lowpass_ports`: a single straight `out` wire, the `out` global
+/// label clear of C1's body).
+///
+/// Pins the element and every shunt it re-columns, so the SA
+/// ([`crate::solver`]) and phase 4.5 ([`kicad-emitter`], via the same
+/// `pinned` mask recomputed in [`crate::refinement_meta`]) cannot revert
+/// the choice — the mechanism ADR-18's channel-row work relies on.
+///
+/// Runs AFTER [`apply_rail_stub_columns`] (so it overrides the stub's weak
+/// `any`-pin column with the true downstream-pin column) and BEFORE
+/// [`crate::pick_orientations`] (which skips pinned elements). Skips any
+/// element already pinned by a stronger opinion (user `align`/`place`, a
+/// cache hint, V7 symmetry, a divider).
+pub(crate) fn apply_series_horizontal(
+    placement: &mut Placement,
+    pinned: &mut [bool],
+    checked: &CheckedNetlist,
+) {
+    // Extra cells beyond a body-clean vertical stride, so a downstream
+    // shunt's top pin sits far enough below the series pin that the
+    // shared-node port label prefers the series pin (V13 pin-text).
+    // Measured on `rc_lowpass_ports`: the body-clean stride alone leaves a
+    // 1-cell pin gap (label lands on the shunt, colliding with its pin
+    // number); +2 cells clears it.
+    const SHUNT_LABEL_MARGIN_CELLS: i32 = 2;
+    let classes = classify_nets(checked);
+    let depth = signal_net_depth(checked, &classes);
+    let stubs = detect_rail_stubs(checked);
+
+    let is_signal = |n: &str| -> bool {
+        n != "0" && !matches!(classes.get(n), Some(NetClass::Power | NetClass::Ground))
+    };
+
+    for i in 0..checked.elements.len() {
+        if pinned[i] {
+            continue;
+        }
+        let e = &checked.elements[i];
+        // Series role: 2-terminal passive, both nodes on the signal path.
+        // A power source and a rail stub (one node on a rail) are excluded
+        // by construction here — they are handled by their own idioms and
+        // stay vertical.
+        if !is_two_terminal_passive(e) || matches!(e.role, ElementRole::Power(_)) {
+            continue;
+        }
+        let (na, nb) = (e.nodes[0].as_str(), e.nodes[1].as_str());
+        if na == nb || !is_signal(na) || !is_signal(nb) {
+            continue;
+        }
+        // Upstream = the node of lower flow-depth (closer to an input).
+        // Require BOTH nodes reachable from an input boundary with a
+        // strict order: a tie, or either node off the input-rooted flow
+        // graph, gives no direction to honour, so leave the element to the
+        // general orientation chooser (conservative — avoids forcing a
+        // horizontal facing on an element whose flow direction is unknown).
+        let (up, down) = match (depth.get(na).copied(), depth.get(nb).copied()) {
+            (Some(x), Some(y)) if x < y => (na, nb),
+            (Some(x), Some(y)) if x > y => (nb, na),
+            _ => continue,
+        };
+        // Series elements are pure-signal 2-pin passives → V14 allows all
+        // eight orientations, so any horizontal one is V14-legal.
+        let Some(orient) = horizontal_flow_orientation(&placement.elements[i], &e.symbol, up, down)
+        else {
+            continue;
+        };
+        placement.elements[i].orientation = orient;
+        pinned[i] = true;
+
+        // Re-column every downstream shunt onto this element's downstream
+        // pin so it drops straight beneath the output node, AND drop it far
+        // enough below that the shared-node port label attaches to THIS
+        // element's downstream pin rather than to the shunt's own top pin.
+        // The latter is load-bearing: with the shunt crammed one cell under
+        // the node, the emitter anchors the `out` global label on the
+        // shunt's top pin, whose pin-number text the label then overlaps
+        // (V13 pin-text, Tier 1). A clean drop moves the label up onto this
+        // element's pin, clear of the shunt's pin number.
+        let mut probe = placement.elements[i].clone();
+        probe.orientation = orient;
+        let Some(down_x_mm) = world_pin_x_of(&probe, &e.symbol, down) else {
+            continue;
+        };
+        #[allow(clippy::cast_possible_truncation)]
+        let down_x = (down_x_mm / GridPoint::STEP_MM).round() as i32;
+        let series_ext = world_extent(&e.symbol, orient, None);
+        for s in stubs.iter().filter(|s| s.signal_net == down) {
+            if pinned[s.element] {
+                continue;
+            }
+            let se = &checked.elements[s.element];
+            // Orient the shunt V14-correct: its rail pin faces screen-down
+            // (so a ground glyph hangs below). Pinning skips
+            // `pick_orientations`, which would otherwise choose this, so we
+            // must set it here.
+            let s_orient = rail_down_orientation(se, down)
+                .unwrap_or(placement.elements[s.element].orientation);
+            placement.elements[s.element].orientation = s_orient;
+            let shunt_ext = world_extent(&se.symbol, s_orient, None);
+            let stride = vertical_stride_cells(&series_ext, &shunt_ext) + SHUNT_LABEL_MARGIN_CELLS;
+            let new_y = placement.elements[i].origin.y + stride;
+            placement.elements[s.element].origin = GridPoint::new(down_x, new_y);
+            pinned[s.element] = true;
+        }
+    }
+}
+
+/// Pick the horizontal orientation of a vertical-native 2-pin passive that
+/// places the `up` (upstream) pin at the lower world X. `None` if the
+/// element has no terminal on both nets or no horizontal orientation
+/// separates them.
+fn horizontal_flow_orientation(
+    pe: &crate::PlacedElement,
+    symbol: &Symbol,
+    up: &str,
+    down: &str,
+) -> Option<Orientation> {
+    let mut best: Option<(Orientation, f64)> = None;
+    for &o in &Orientation::ALL {
+        // A vertical-native 2-pin passive is horizontal exactly at R90 /
+        // R270. (R0 / R180 keep it vertical.)
+        if !matches!(o.rotation, Rotation::R90 | Rotation::R270) {
+            continue;
+        }
+        let mut probe = pe.clone();
+        probe.orientation = o;
+        let up_x = world_pin_x_of(&probe, symbol, up)?;
+        let down_x = world_pin_x_of(&probe, symbol, down)?;
+        if up_x < down_x && best.is_none_or(|(_, bx)| up_x < bx) {
+            best = Some((o, up_x));
+        }
+    }
+    best.map(|(o, _)| o)
+}
+
+/// Vertical orientation (R0 / R180, no mirror preferred) of a 2-pin shunt
+/// that puts its **rail** pin (the pin on the non-signal node) facing
+/// screen-down, so a ground/negative-rail glyph hangs beneath it — the
+/// V14-correct facing [`crate::pick_orientations`] would otherwise choose
+/// (it is skipped here because the shunt is pinned). `None` if no vertical
+/// orientation faces the rail pin down.
+fn rail_down_orientation(se: &ResolvedElement, signal_net: &str) -> Option<Orientation> {
+    let rail_ti = se.nodes.iter().position(|n| n != signal_net)?;
+    let rail_pin = se.pin_mapping.get(rail_ti)?;
+    for &o in &Orientation::ALL {
+        if !matches!(o.rotation, Rotation::R0 | Rotation::R180) {
+            continue;
+        }
+        // `pins_in` yields transformed (screen-frame) angles: 90 = down.
+        if se
+            .symbol
+            .pins_in(o)
+            .iter()
+            .find(|p| &p.number == rail_pin)
+            .is_some_and(|p| p.angle % 360 == 90)
+        {
+            return Some(o);
+        }
+    }
+    None
+}
+
+/// Flow-depth of each signal net, as hop count from the input boundary.
+///
+/// Roots are declared `*@port … =input` nets; BFS walks element net
+/// adjacency, never crossing a rail (Power/Ground/`0`), so the depth
+/// orders signal nets from input to output. Nets unreachable from an
+/// input root are absent from the map (depth unknown).
+fn signal_net_depth(checked: &CheckedNetlist, classes: &NetClassMap) -> HashMap<String, u32> {
+    let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
+    for e in &checked.elements {
+        for a in &e.nodes {
+            for b in &e.nodes {
+                if a != b {
+                    adj.entry(a.as_str()).or_default().push(b.as_str());
+                }
+            }
+        }
+    }
+    let mut depth: HashMap<String, u32> = HashMap::new();
+    let mut frontier: Vec<&str> = Vec::new();
+    for p in &checked.ports {
+        if matches!(p.dir, PortDir::Input)
+            && depth.insert(p.net.clone(), 0).is_none()
+        {
+            frontier.push(p.net.as_str());
+        }
+    }
+    let mut d = 0_u32;
+    while !frontier.is_empty() {
+        let mut next: Vec<&str> = Vec::new();
+        for u in &frontier {
+            let Some(vs) = adj.get(*u) else { continue };
+            for v in vs {
+                if *v == "0" || matches!(classes.get(*v), Some(NetClass::Power | NetClass::Ground))
+                {
+                    continue;
+                }
+                if !depth.contains_key(*v) {
+                    depth.insert((*v).to_string(), d + 1);
+                    next.push(*v);
+                }
+            }
+        }
+        frontier = next;
+        d += 1;
+    }
+    depth
 }
 
 #[cfg(test)]

@@ -1013,12 +1013,20 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
     ("rc_lowpass", "#PWR2", "power:GND", 64.77, 41.91, 0.0, ""),
     ("rc_lowpass", "C1", "Device:C", 35.56, 35.56, 0.0, ""),
     ("rc_lowpass", "R1", "Device:R_US", 50.8, 35.56, 270.0, ""),
+    // `rc_lowpass_ports` was re-laid-out by the series-horizontal flow
+    // construction (`idioms::apply_series_horizontal`): R1 rot 180 → 90
+    // (the series element between `in` and `out` is now drawn HORIZONTAL,
+    // upstream `in` pin at the lower X so the signal reads left→right), and
+    // its downstream shunt C1 (35.56,35.56,"y") re-columned to (39.37,44.45)
+    // to drop straight beneath the `out` node. #PWR1/#PWR2/#FLG1 follow the
+    // moved geometry. Only this fixture moved; the other nine are
+    // byte-identical.
     (
         "rc_lowpass_ports",
         "#FLG1",
         "power:PWR_FLAG",
-        53.34,
-        41.91,
+        52.07,
+        50.8,
         0.0,
         "",
     ),
@@ -1026,8 +1034,8 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "rc_lowpass_ports",
         "#PWR1",
         "power:GND",
-        35.56,
         39.37,
+        48.26,
         0.0,
         "",
     ),
@@ -1035,19 +1043,19 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "rc_lowpass_ports",
         "#PWR2",
         "power:GND",
-        53.34,
-        41.91,
+        52.07,
+        50.8,
         0.0,
         "",
     ),
-    ("rc_lowpass_ports", "C1", "Device:C", 35.56, 35.56, 0.0, "y"),
+    ("rc_lowpass_ports", "C1", "Device:C", 39.37, 44.45, 0.0, ""),
     (
         "rc_lowpass_ports",
         "R1",
         "Device:R_US",
-        41.91,
         35.56,
-        180.0,
+        35.56,
+        90.0,
         "",
     ),
 ];

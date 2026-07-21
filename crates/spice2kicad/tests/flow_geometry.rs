@@ -848,11 +848,11 @@ const FLOW_POSE_RATCHET: &[(&str, usize, usize)] = &[
     // fixture                  F5  P5
     // F5: R1 is horizontal but MIRRORED — `in` pin right of `out` pin.
     ("rc_lowpass", 1, 0),
-    // F5: R1 is drawn vertical though it is the series element between
-    // `in` and `out`.
-    // P5: `in` and `out` land at the SAME x=41.91, stacked vertically,
-    // so the sheet shows no left→right flow at all.
-    ("rc_lowpass_ports", 1, 1),
+    // F5/P5: the series-horizontal flow construction
+    // (`idioms::apply_series_horizontal`) now draws R1 HORIZONTAL with its
+    // upstream `in` pin at the lower X, so `in` (x=31.75) sits strictly
+    // left of `out` (x=39.37): series pose correct AND terminals ordered.
+    ("rc_lowpass_ports", 0, 0),
     // F5: COUT is drawn vertical though it is the series element
     // between `c` and `out`. CIN, the other series element, is
     // correctly horizontal — see
@@ -1002,7 +1002,9 @@ const STUB_RUN_RATCHET: &[(&str, u32)] = &[
     // away; `out`'s only other pin is R1's, facing horizontally, so the
     // column idiom has no vertical anchor and declines.
     ("rc_lowpass", 9),
-    ("rc_lowpass_ports", 5),
+    // Series-horizontal construction re-columns C1 straight beneath R1's
+    // downstream pin, so its stub drops with zero lateral run.
+    ("rc_lowpass_ports", 0),
     // CE/RE share `e` with Q1's emitter (vertical pin, so the idiom does
     // fire); the 4 is the side-by-side spread of the two stubs on the
     // same node, which is deliberate — `apply_rail_stub_columns` spreads
