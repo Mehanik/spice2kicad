@@ -2675,8 +2675,21 @@ fn mid_span_same_net_t_has_junction() {
 }
 
 /// Each rail glyph's (`power:*` except `PWR_FLAG`) canonical net and
-/// world-frame BODY bbox (the drawn triangle/chevron). Net comes from the
-/// glyph's visible `Value` (canonicalised so `0`→`GND`, `vcc`→`VCC`).
+/// world-frame FOOTPRINT bbox: the drawn triangle/chevron body UNIONED
+/// with the glyph's connection point (its `(at …)`, which is the glyph
+/// symbol's local origin = its power pin). Net comes from the glyph's
+/// visible `Value` (canonicalised so `0`→`GND`, `vcc`→`VCC`).
+///
+/// The union with the connection point is load-bearing: `body_bbox` stops
+/// at the drawn chevron/triangle, so a VCC/VDD/VEE glyph leaves a ~1.27 mm
+/// stem between its open base and the pin it hangs on. A foreign wire
+/// running along that base edge grazes the *body* boundary — below the
+/// 0.1 mm interior epsilon — and slips through the empty triangle interior
+/// undetected (the `opamp_inverting_real` feedback-wire class). Extending
+/// the footprint down the stem to the pin makes such a wire strictly
+/// interior, mirroring the router's own obstacle (`rail_glyph_body_bboxes`
+/// in `kicad-emitter`). Ground glyphs already touch their pin at the body
+/// edge, so this is a no-op there.
 fn rail_glyph_bodies_with_net(root: &Value) -> Vec<(String, Bbox)> {
     let library = load_test_library();
     let mut out = Vec::new();
@@ -2710,10 +2723,15 @@ fn rail_glyph_bodies_with_net(root: &Value) -> Vec<(String, Bbox)> {
             .lookup(&lib_id)
             .and_then(kicad_symbols::Symbol::body_bbox)
         {
-            out.push((
-                net,
-                body_bbox_to_world(local, gx, gy, f64::from(grot), mirror_y),
-            ));
+            let mut b = body_bbox_to_world(local, gx, gy, f64::from(grot), mirror_y);
+            // Union with the connection point (the glyph's `at`, i.e. its
+            // power pin) so the stem between the drawn body and the pin is
+            // part of the footprint — see the doc comment.
+            b.x0 = b.x0.min(gx);
+            b.x1 = b.x1.max(gx);
+            b.y0 = b.y0.min(gy);
+            b.y1 = b.y1.max(gy);
+            out.push((net, b));
         }
     }
     out

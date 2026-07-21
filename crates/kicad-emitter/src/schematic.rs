@@ -2016,7 +2016,24 @@ pub(crate) fn rail_glyph_body_bboxes(
             continue;
         };
         for &(x, y, _ang) in pins {
-            out.push(body_bbox_to_world(local, x, y, Orientation::IDENTITY));
+            let mut b = body_bbox_to_world(local, x, y, Orientation::IDENTITY);
+            // Extend the obstacle down the stem to the connection pin.
+            // `body_bbox` stops at the drawn chevron/triangle, leaving a
+            // ~1.27 mm gap between the glyph's open base and the pin it
+            // hangs on (e.g. VCC's base at world y and the pin one cell
+            // below). A foreign wire running along that base edge grazes
+            // the body boundary — below `Bbox::intersects_segment`'s
+            // interior epsilon — so `avoid_obstacles` never fires and the
+            // wire skims the glyph. Union the body with the pin coord so
+            // the whole visual footprint (body ∪ stem to pin) is the
+            // obstacle and such a wire becomes strictly interior. Ground
+            // glyphs already touch their pin at the body edge, so this is
+            // a no-op there; it only closes the VCC/VDD/VEE-style stem.
+            b.x0 = b.x0.min(x);
+            b.x1 = b.x1.max(x);
+            b.y0 = b.y0.min(y);
+            b.y1 = b.y1.max(y);
+            out.push(b);
         }
     }
     out

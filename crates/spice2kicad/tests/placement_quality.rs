@@ -1453,7 +1453,17 @@ fn wire_detour_within_budget_across_fixtures() {
         ("common_emitter", 1.0136),
         ("multivibrator", 1.0481),
         ("diff_pair", 1.0556),
-        ("opamp_inverting_real", 1.1464),
+        // 1.1464 → 1.1952. RISE — a Tier-2 (V6 wire-detour) cost paid for a
+        // Tier-1 (V12) gain: extending the router's power-glyph obstacle to
+        // the full drawn footprint (body ∪ stem-to-pin) forces the `out`
+        // feedback trunk one grid cell up (y 30.48 → 29.21) so it clears the
+        // VCC chevron instead of grazing its open base. The detour is the
+        // minimal +2.54 mm (two vertical segments each +1 cell), adds no
+        // bends (V16 B/J unchanged), and the tier ordering permits Tier 2
+        // paying for Tier 1. NOT an owner decision — landed on assistant
+        // judgement under the standing instruction to proceed; flagged for
+        // owner sign-off, re-examine rather than cite as precedent.
+        ("opamp_inverting_real", 1.1952),
         ("rc_lowpass_ports", 1.4001),
         ("opamp_inverting", 1.1112),
         ("port_shapes", 1.0852),
