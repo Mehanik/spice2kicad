@@ -546,19 +546,16 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     ("opamp_inverting_real", 5, 1),
     ("opamp_inverting", 3, 0),
     ("port_shapes", 4, 0),
-    // B 4 → 2, and the global-improvement escape that once raised this
-    // literal to 4 is WITHDRAWN — it now ratchets down past its
-    // pre-escape mark of 3. At rot 0 the `out` net must leave C1.1
-    // upward and enter R1.2 from below at a different X, a shape whose
-    // rectilinear minimum is provably 4 bends. R1 at rot 180 puts both
-    // `out` pins on one row and measures B = 2, V5-clean, with no
-    // V11 / V12 / V13 / overlap change.
-    //
-    // That better layout was found when the escape was taken but was
-    // unreachable then: rot 0 and rot 180 tie on (V13, V12, V5), so
-    // phase 4.5 kept whichever it enumerated first. The bend key now
-    // separates them, so the fixture reaches its true floor.
-    ("rc_lowpass_ports", 2, 0),
+    // B 2 → 0 (stale-slack cleanup). The prior mark of 2 described the
+    // best layout reachable *then* — R1 at rot 180 putting both `out` pins
+    // on one row. The series-horizontal flow construction
+    // (`idioms::apply_series_horizontal`, landed a3a429d) superseded it:
+    // R1 is now drawn horizontal with C1 re-columned straight beneath the
+    // `out` node, so the `out` net is a single straight vertical drop with
+    // ZERO bends. Nothing moved for this cleanup — the layout was already
+    // this on master; only the stale literal is corrected to the measured
+    // value per the zero-slack ratchet policy.
+    ("rc_lowpass_ports", 0, 0),
     // B 15 → 6, J 0 → 2. Channel-row banding (`channels.rs` +
     // `spice-layout::lib.rs`, Option B) now lays the two independent
     // inverting-amp channels out as two congruent rows, and pins each

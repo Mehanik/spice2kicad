@@ -921,7 +921,7 @@ invariant here.
   | `opamp_inverting_real`   |  5 |  1 |
   | `opamp_inverting`        |  3 |  0 |
   | `port_shapes`            |  4 |  0 |
-  | `rc_lowpass_ports`       |  2 |  0 |
+  | `rc_lowpass_ports`       |  0 |  0 |
   | `opamp_definition_level` | 15 |  0 |
   | `named_rails`            |  2 |  2 |
 
@@ -939,9 +939,13 @@ invariant here.
   - `rc_lowpass_ports` B 3 → 4 — same escape, since **WITHDRAWN**. The
     verified 2-bend layout (R1 at rot 180 puts both `out` pins on one
     row) was unreachable while rot 0 and rot 180 tied on (V13, V12, V5);
-    the bend key added above now separates them, so the fixture ratchets
-    to its true floor of **B = 2** — below even its pre-escape mark of 3.
-    The escape is no longer claimed.
+    the bend key added above now separates them, so the fixture ratcheted
+    to **B = 2** — below even its pre-escape mark of 3. The escape is no
+    longer claimed. (**Superseded:** the series-horizontal flow
+    construction, `idioms::apply_series_horizontal`, has since re-columned
+    C1 straight beneath the `out` node, so the `out` net is a single
+    straight vertical drop and the true floor is now **B = 0**. See the
+    table above.)
   - `diff_pair` J 0 → 1 — `idioms::apply_shared_centers` now reserves a
     grid cell of vertical stub under the tail trunk, so the three-way
     node is a proper Steiner T instead of the trunk ending sideways on
@@ -953,7 +957,8 @@ invariant here.
   - `common_emitter` B 10 → 4 — COUT lands at rot 0 rather than rot 180
     and Q1 unmirrors, both previously tied on (V13, V12, V5). V5 is
     unchanged at 1; no Tier-0/Tier-1 count moved. Ratchet DOWN.
-  - `rc_lowpass_ports` B 4 → 2 — as above; escape withdrawn.
+  - `rc_lowpass_ports` B 4 → 2 — as above; escape withdrawn. (Later
+    B 2 → 0 via the series-horizontal `out`-drop; see above.)
 
   Net effect of the bend key: `opamp_definition_level`'s B is the
   only rise anywhere still standing on an escape.
