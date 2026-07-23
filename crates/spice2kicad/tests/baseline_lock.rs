@@ -1000,19 +1000,28 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
     ("port_shapes", "R2", "Device:R_US", 35.56, 44.45, 0.0, ""),
     ("port_shapes", "R3", "Device:R_US", 82.55, 41.91, 0.0, ""),
     ("port_shapes", "R4", "Device:R_US", 82.55, 50.8, 0.0, ""),
+    // `rc_lowpass` now converges byte-identically onto `rc_lowpass_ports`:
+    // the series-horizontal flow construction (`idioms::apply_series_horizontal`)
+    // fires on the un-ported fixture too, because `idioms::signal_net_depth`
+    // falls back on the leaf-input-net NAME (`in`) to root the flow graph when
+    // no `*@port` input is declared. R1 rot 270 → 90 (horizontal, upstream
+    // `in` pin at the lower X), C1 re-columned to (39.37,44.45) beneath `out`,
+    // #PWR1/#PWR2/#FLG1 following the moved geometry. V16 B 3 → 0, J 0 → 0
+    // (non-increasing per ADR-16). Only this fixture moved; the other nine
+    // are byte-identical.
     (
         "rc_lowpass",
         "#FLG1",
         "power:PWR_FLAG",
-        64.77,
-        41.91,
+        52.07,
+        50.8,
         0.0,
         "",
     ),
-    ("rc_lowpass", "#PWR1", "power:GND", 35.56, 39.37, 0.0, ""),
-    ("rc_lowpass", "#PWR2", "power:GND", 64.77, 41.91, 0.0, ""),
-    ("rc_lowpass", "C1", "Device:C", 35.56, 35.56, 0.0, ""),
-    ("rc_lowpass", "R1", "Device:R_US", 50.8, 35.56, 270.0, ""),
+    ("rc_lowpass", "#PWR1", "power:GND", 39.37, 48.26, 0.0, ""),
+    ("rc_lowpass", "#PWR2", "power:GND", 52.07, 50.8, 0.0, ""),
+    ("rc_lowpass", "C1", "Device:C", 39.37, 44.45, 0.0, ""),
+    ("rc_lowpass", "R1", "Device:R_US", 35.56, 35.56, 90.0, ""),
     // `rc_lowpass_ports` was re-laid-out by the series-horizontal flow
     // construction (`idioms::apply_series_horizontal`): R1 rot 180 → 90
     // (the series element between `in` and `out` is now drawn HORIZONTAL,

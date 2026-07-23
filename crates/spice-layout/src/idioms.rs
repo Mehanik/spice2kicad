@@ -1054,6 +1054,34 @@ pub(crate) fn apply_series_horizontal(
             (Some(x), Some(y)) if x > y => (nb, na),
             _ => continue,
         };
+        // CRITICAL GUARD — shunt-bearing only. Re-orient a series element
+        // horizontal ONLY when its downstream node actually carries a rail
+        // stub to re-column beneath the output. Applying it to every
+        // directed series element re-basins fixtures with nothing to drop
+        // (measured: `common_emitter` COUT forced, B 4→7; `opamp_inverting`
+        // regressed). A series element whose downstream node has no shunt
+        // has no re-column to anchor, so leave it to the general chooser.
+        let mut down_up_side = false;
+        let mut down_down_side = false;
+        for s in stubs.iter().filter(|s| s.signal_net == down) {
+            match s.side {
+                VertPref::Up => down_up_side = true,
+                VertPref::Down => down_down_side = true,
+            }
+        }
+        if !down_up_side && !down_down_side {
+            continue;
+        }
+        // Both-sides guard — a downstream node carrying rail stubs on BOTH
+        // the up and down rail sides is a divider THROUGH the node (e.g.
+        // `common_emitter`'s R1/R2 bias divider on the base, or
+        // `named_rails`'s pull-up/pull-down pair on `out`), not a shunt to
+        // drop beneath an output. Grabbing it re-columns the divider and
+        // perturbs it. Decline — mirrors `rail_stub_anchor_x`'s
+        // `node_has_both_sides`.
+        if down_up_side && down_down_side {
+            continue;
+        }
         // Series elements are pure-signal 2-pin passives → V14 allows all
         // eight orientations, so any horizontal one is V14-legal.
         let Some(orient) = horizontal_flow_orientation(&placement.elements[i], &e.symbol, up, down)
@@ -1176,10 +1204,47 @@ fn signal_net_depth(checked: &CheckedNetlist, classes: &NetClassMap) -> HashMap<
     let mut depth: HashMap<String, u32> = HashMap::new();
     let mut frontier: Vec<&str> = Vec::new();
     for p in &checked.ports {
-        if matches!(p.dir, PortDir::Input)
-            && depth.insert(p.net.clone(), 0).is_none()
-        {
+        if matches!(p.dir, PortDir::Input) && depth.insert(p.net.clone(), 0).is_none() {
             frontier.push(p.net.as_str());
+        }
+    }
+    // Fallback root: no `*@port …=input` was declared, so the flow graph
+    // has no seed and every series element would be left directionless
+    // (an un-ported RC filter draws differently from its `*@port`-annotated
+    // twin). Seed instead from *leaf input nets* recognised by NAME
+    // convention — a Signal-class net whose name matches
+    // `layers::boundary_net_role` (`in`/`vin`/`input`, channel digits
+    // stripped) and which is touched by exactly one element, i.e. a
+    // boundary of the signal chain. This mirrors the identical backstop
+    // `layers::no_source_fallback` already applies for X-layer ordering, so
+    // depth and layer agree. Only fires when the port loop seeded nothing,
+    // so a fixture that DOES declare an input port is byte-unchanged.
+    if frontier.is_empty() {
+        let mut net_members: HashMap<&str, usize> = HashMap::new();
+        for e in &checked.elements {
+            let mut seen: Vec<&str> = Vec::new();
+            for n in &e.nodes {
+                if !seen.contains(&n.as_str()) {
+                    seen.push(n.as_str());
+                    *net_members.entry(n.as_str()).or_default() += 1;
+                }
+            }
+        }
+        for e in &checked.elements {
+            for n in &e.nodes {
+                let net = n.as_str();
+                if net == "0"
+                    || matches!(classes.get(net), Some(NetClass::Power | NetClass::Ground))
+                {
+                    continue;
+                }
+                if net_members.get(net).copied() == Some(1)
+                    && matches!(crate::layers::boundary_net_role(net), Some(PortDir::Input))
+                    && depth.insert(net.to_string(), 0).is_none()
+                {
+                    frontier.push(net);
+                }
+            }
         }
     }
     let mut d = 0_u32;

@@ -846,8 +846,12 @@ fn flow_monotonicity_and_terminal_lanes_within_ratchet() {
 /// half.
 const FLOW_POSE_RATCHET: &[(&str, usize, usize)] = &[
     // fixture                  F5  P5
-    // F5: R1 is horizontal but MIRRORED — `in` pin right of `out` pin.
-    ("rc_lowpass", 1, 0),
+    // F5 1 -> 0. The series-horizontal flow-root fallback
+    // (`idioms::signal_net_depth`) now draws `rc_lowpass` identically to
+    // `rc_lowpass_ports`: R1 horizontal with its upstream `in` pin at the
+    // lower X (in-left, out-right), series pose correct AND terminals
+    // ordered. Ratchet DOWN.
+    ("rc_lowpass", 0, 0),
     // F5/P5: the series-horizontal flow construction
     // (`idioms::apply_series_horizontal`) now draws R1 HORIZONTAL with its
     // upstream `in` pin at the lower X, so `in` (x=31.75) sits strictly
@@ -998,10 +1002,12 @@ fn series_discriminator_separates_stub_from_series_on_common_emitter() {
 /// fixture, in grid cells. Ratchets DOWN only.
 const STUB_RUN_RATCHET: &[(&str, u32)] = &[
     // fixture                  max lateral run, grid cells
-    // C1 terminates `out` alongside R1, which the seeder puts 9 cells
-    // away; `out`'s only other pin is R1's, facing horizontally, so the
-    // column idiom has no vertical anchor and declines.
-    ("rc_lowpass", 9),
+    // F6 9 -> 0. The series-horizontal flow-root fallback
+    // (`idioms::signal_net_depth`) now fires on `rc_lowpass` (the `in` leaf
+    // net roots the flow graph without a `*@port`), re-columning C1 straight
+    // beneath R1's downstream `out` pin exactly as in `rc_lowpass_ports`, so
+    // its stub drops with zero lateral run. Ratchet DOWN.
+    ("rc_lowpass", 0),
     // Series-horizontal construction re-columns C1 straight beneath R1's
     // downstream pin, so its stub drops with zero lateral run.
     ("rc_lowpass_ports", 0),

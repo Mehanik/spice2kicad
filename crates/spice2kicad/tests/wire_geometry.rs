@@ -495,7 +495,12 @@ const FIXTURES: &[&str] = &[
 /// several `(wire …)` segments, which is exactly the re-segmentation
 /// sensitivity the ink graph is built to remove.
 const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
-    ("rc_lowpass", 3, 0),
+    // B 3 -> 0. The series-horizontal flow-root fallback
+    // (`idioms::signal_net_depth`) now draws `rc_lowpass` identically to
+    // `rc_lowpass_ports` — R1 horizontal, C1 dropped straight below `out` —
+    // so the `out` net routes as a single straight vertical drop with no
+    // bends. Ratchet DOWN.
+    ("rc_lowpass", 0, 0),
     // Newly graded: `named_rails` was absent from this file's FIXTURES
     // list until the fixture lists were unified. Measured on master,
     // zero slack; nothing moved, it was simply never counted.

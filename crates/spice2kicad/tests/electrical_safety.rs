@@ -1984,8 +1984,25 @@ fn v5_violation_budget(name: &str) -> usize {
         // zero higher-tier cost). Re-examine rather than cite as owner
         // precedent. Ratchets down when the v0.2 placer redesign lands.
         "rc_lowpass_ports" => 1,
-        // diff_pair, rc_lowpass, port_shapes, opamp_inverting_real:
-        // zero violations.
+        // V5 0 -> 1. The series-horizontal idiom's name-based flow-root
+        // fallback (`idioms::signal_net_depth`) now fires on `rc_lowpass`
+        // too (its `in` leaf net roots the flow graph even with no `*@port`),
+        // so the un-ported filter draws IDENTICALLY to `rc_lowpass_ports`:
+        // R1 horizontal (in-left, out-right), C1 dropped straight below the
+        // `out` node. R1's output pin then sends its wire DOWN to C1 rather
+        // than outward along its own axis — the SAME documented
+        // V5-vs-left-to-right-flow tension `rc_lowpass_ports` already carries
+        // (MEMORY "flow-orientation wall"; invariants.md V5). Net on the
+        // fixture: B 3 -> 0, F5 1 -> 0, F6 9 -> 0, V5 0 -> 1 = -12 Tier-2
+        // violations, zero Tier-0/Tier-1 cost.
+        //
+        // PROVENANCE: landed on assistant judgement under the owner's
+        // standing instruction to proceed; NOT an explicit owner decision,
+        // and the owner did not see this specific budget. The automatic
+        // global-improvement escape applies (net -12 on the fixture, zero
+        // higher-tier cost). Re-examine rather than cite as owner precedent.
+        "rc_lowpass" => 1,
+        // diff_pair, port_shapes, opamp_inverting_real: zero violations.
         _ => 0,
     }
 }

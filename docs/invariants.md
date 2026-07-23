@@ -914,7 +914,7 @@ invariant here.
 
   | fixture                  |  B |  J |
   | ------------------------ | -- | -- |
-  | `rc_lowpass`             |  3 |  0 |
+  | `rc_lowpass`             |  0 |  0 |
   | `common_emitter`         |  4 |  3 |
   | `multivibrator`          |  8 |  4 |
   | `diff_pair`              |  2 |  1 |
@@ -1034,11 +1034,18 @@ invariant here.
   `crates/spice2kicad/tests/flow_geometry.rs::stub_lateral_run_within_ratchet`,
   per-fixture zero-slack maximum, ratcheting down only.
 
-  **Remaining non-zero scores, and which are defects.** `rc_lowpass` 9
-  and `rc_lowpass_ports` 5 are genuine blind spots: `C1` terminates
-  `out` whose only other pin is `R1`'s, facing horizontally on a
-  TWO-terminal element — the sideways anchor requires a multi-terminal
-  (active) device, so the idiom still declines. `diff_pair` 4 and
+  **Remaining non-zero scores, and which are defects.** `rc_lowpass`
+  and `rc_lowpass_ports` now both score **0**. The old blind spot (`C1`
+  terminates `out` alongside a horizontally-facing two-terminal `R1`, so
+  the sideways rail-stub anchor — which requires a multi-terminal active
+  device — declined) is closed by a *different* idiom: the
+  series-horizontal flow construction
+  (`idioms::apply_series_horizontal`) draws `R1` horizontal and
+  re-columns `C1` straight beneath `R1`'s downstream `out` pin, giving
+  `C1` a zero lateral run. This now fires on the un-ported `rc_lowpass`
+  as well as `rc_lowpass_ports`, because `idioms::signal_net_depth` falls
+  back on the leaf-input-net NAME convention (`in`) to root the flow
+  graph when no `*@port` input is declared. `diff_pair` 4 and
   `common_emitter` 4 are NOT defects (a shared-centre midpoint and a
   two-stub group spread about its anchor, both deliberate). Extending
   the sideways anchor to two-terminal neighbours is untested and would

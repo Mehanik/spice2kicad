@@ -348,7 +348,7 @@ fn no_source_fallback(
 /// the wrong generalisation regardless: `in_amp`, `input_stage` and
 /// `inverting` are ordinary interior nets, not circuit boundaries, and a
 /// prefix rule claims all three.
-fn boundary_net_role(net: &str) -> Option<PortDir> {
+pub(crate) fn boundary_net_role(net: &str) -> Option<PortDir> {
     let lo = net.to_ascii_lowercase();
     let stem = lo.trim_end_matches(|c: char| c.is_ascii_digit());
     // Only strip the separator when digits actually preceded it, so a
