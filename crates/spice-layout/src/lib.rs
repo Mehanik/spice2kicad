@@ -26,6 +26,7 @@
 pub mod bands;
 pub mod channels;
 pub mod cost;
+pub mod footprint;
 pub mod glyph_geom;
 mod idioms;
 pub mod layers;
@@ -34,7 +35,7 @@ pub mod net_class;
 pub mod orient;
 pub mod sheets;
 pub mod sidecar;
-mod solver;
+pub(crate) mod solver;
 mod symmetry;
 
 pub use sheets::place_sheets;

@@ -436,7 +436,7 @@ fn body_half_extents(el: &spice_resolve::ResolvedElement, orient: Orientation) -
 /// halo (ADR-14's Risks flagged this shape; acceptable now, revisit if
 /// a glyph-dense fixture hits V15). This is extra outward spacing
 /// only; it changes no orientation (V5) and no glyph pose (V14).
-fn footprint_half_extents(
+pub(crate) fn footprint_half_extents(
     el: &spice_resolve::ResolvedElement,
     orient: Orientation,
     prefs: Option<&std::collections::HashMap<String, crate::net_class::VertPref>>,
