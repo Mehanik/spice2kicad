@@ -424,8 +424,12 @@ A redesign is worth doing only if it can claim all of:
 
 1. **Locality is a tested property.** `placement_stability.rs` bounds how
    many pre-existing elements move when one is added/changed, and that
-   bound ratchets down. (Today: 17/17, untested as a bound.) This is the
-   R-A fix and the thing that makes everything else incremental.
+   bound ratchets down. *(Now tested — ADR-19 Milestone 1:
+   `cache_less_placement_perturbation_within_bound`. The stale "17/17"
+   counts the V15 uniform page pan and glyph renumbering as movement; the
+   honest, page-pan-normalized user-symbol bound is `rc_lowpass` **0**,
+   `common_emitter` **8**, ratcheting down.)* This is the R-A fix and the
+   thing that makes everything else incremental.
 2. **The decoration footprint is signed and complete** — body, pins,
    glyphs (one-sided), value text, labels, PWR_FLAG bodies — with the
    ratchets re-calibrated to the honest quantity rather than the accidental

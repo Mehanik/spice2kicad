@@ -3191,3 +3191,127 @@ intermediate states of this same work (a VCC glyph inside `RF1`'s body;
 two massively overlapping opamp triangles) had passed the entire suite.
 Do not measure a placement change against a suite that cannot see the
 fixture it moves.
+
+## ADR-19 — Locality-first placement: neighbourhood-relative coordinates behind a tested locality bound
+
+**Status: DESIGN. Milestone 1 (the locality-bound verifier) LANDED with
+this ADR; Milestones 2–6 are a staged plan, each gated on owner sign-off
+per ADR-17's "escape lists brought for sign-off in advance, per stage"
+rule.** This is the design `docs/placer-redesign.md` deliberately stops
+short of. It does **not** license skipping that document's §8 bar: it is
+here *because* it targets acceptance criteria (1) locality-as-a-tested-
+property and (2) the signed-complete decoration footprint head-on, in
+that order, rather than assuming them.
+
+### Why this is not ADR-17 again
+
+ADR-17 was retired because its central promise — *determinism buys
+locality* — was falsified: the bare deterministic seed re-bases 17/17
+just like the SA (§ ADR-17 RETIRED). ADR-19 does **not** remove the SA
+and does **not** claim determinism as the fix. It keeps every mechanism
+placer-redesign.md §6 proved right (pinning, the real-router oracle, the
+lexicographic tuple + guards, tier governance, the role model) and
+changes exactly the property ADR-17 mis-attributed: **the coordinate
+model, from page-global to neighbourhood-relative.** "Determinism is not
+locality" is the premise, not a hoped-for consequence.
+
+### The mechanism, located (R-A)
+
+The blast radius is produced by three global coordinate-derivations, now
+pinned to lines by the ADR-19 code survey:
+
+1. **Y is scaled by the element count.** `y_bot = (n+4)·Y_RANK_STRIDE`
+   (`lib.rs:1527`); Bot/Mid coordinates are measured *downward from
+   `y_bot`* (`lib.rs:1593-1599`), and `pack_rows` re-centres the whole
+   stack with `y + shift[r] − total/2` (`lib.rs:1431`). Adding *any*
+   element changes `n` and re-bases every Bot/Mid absolute Y.
+2. **X is a left-to-right prefix-sum.** `layer_x[l] = layer_x[l−1] +
+   stride` with `stride` keyed on the per-layer *max* width
+   (`lib.rs:1501-1515`). Widening or inserting any layer shifts every
+   layer to its right.
+3. **Ordinals are global ranks** — longest-path layers
+   (`layers.rs:505-525`), min-index row numbering (`channels.rs:130`).
+
+The `align`/`place` path (`lib.rs:1674-1841`) is the *one* part that is
+already neighbourhood-relative: members take an anchor's fixed coord plus
+a locally-accumulated cursor. **It is the model ADR-19 generalizes to the
+whole placement.**
+
+### The design
+
+- **Order is meaning; absolute stride is slack.** Keep
+  classify→bands→layers as the *ordinal* skeleton (which band, which
+  flow-column, which row). Replace the *metric* conversion so a
+  coordinate is an offset from a **local anchor** (the element's flow /
+  band neighbour), never from a page-global prefix-sum or an `n`-scaled
+  datum. Band identity maps to a **fixed datum** (Top / Bot at constant
+  y, Mid between) independent of `n`; columns are spaced by the *local
+  pair clearance* to the immediate left neighbour only. Distant bands and
+  columns then keep their coordinates when a far element is added — the
+  P11b bound (Milestone 1) is what proves it, and it ratchets down.
+- **Signed, complete decoration footprint (R-B).** Replace the symmetric
+  `.abs()` halo (`anneal.rs:439-456`) with a first-class signed
+  `Footprint { body, pins, glyph (one-sided), value_text, labels,
+  pwr_flag }`. `glyph_geom::glyph_reach` already computes the *signed*
+  reach; stop folding it through `hw.max(dx.abs())`. Because the honest
+  AABB is a strict subset of the halo, making it honest **relaxes** the
+  gate — so the ratchets must be re-calibrated to the honest quantity **in
+  the same commit**, and the footprint must be *complete* first (label /
+  Reference-Value / PWR_FLAG classes, which today are unreserved). This is
+  the Stage-2-kill lesson made structural: **the footprint precedes any
+  spacing change, it is not a follow-up.**
+- **Joint pose (R-C), role model preserved.** Emit position + orientation
+  + mirror from one flow-role datum. The role discriminator
+  (anchor / series / rail-stub / terminal, from pin counts + net classes,
+  never refdes/name — Wall 3) is carried forward intact; ADR-15 Stage 5
+  validated it. Phase 4.5 is *promoted* from orientation-only to **bounded
+  local pose repair** (offenders only, ±2 cells, real-router oracle), with
+  the existing `(v13, v12, v5, bends)` tuple and `severed`/`v11`/`overlap`
+  /`v12` guards unchanged.
+- **The SA stays, as a *local* polisher.** It is basin-finding, not
+  compaction, and load-bearing on `common_emitter` / `named_rails` /
+  `opamp_inverting` (§ ADR-17 ablation). Its moves become
+  neighbourhood-scoped; the two cost terms that read the *moving page
+  bbox* — `rail_direction` (`cost.rs:753`) and `soft_y_residual`
+  (`cost.rs:1146`) — are re-expressed against the **fixed datum** so the
+  optimizer stops coupling every element through the page frame.
+
+### Staging (verifiers first; each stage has a kill criterion)
+
+| M | Content | Gate / kill |
+|---|---------|-------------|
+| **1** | **P11b — cache-less locality bound** (this commit). Page-pan-normalized count of pre-existing *user* symbols that move when one element is added; ratchet `rc_lowpass=0`, `common_emitter=8`. | LANDED. Pure verifier, no behaviour change. |
+| 2 | Signed **complete** footprint as a computed quantity + unit tests; **not yet wired** to any gate. | Pure add; no ratchet may move. |
+| 3 | Wire the footprint into the SA overlap gate, `legalize`, and phase-4.5 V13; **re-calibrate ratchets in the same commit**. | No Tier-0/1 rise the recalibration + owner sign-off does not cover. |
+| 4 | **Fixed-datum Y** (decouple `y_bot` from `n`; re-express the page-frame cost terms). Baseline regenerated under ADR-16 (V16 (B,J) non-increasing per fixture). | Any ratchet rise ⇒ halt. **P11b `common_emitter` must fall below 8** or the stage bought nothing. |
+| 5 | **Relative X columns** (local neighbour clearance replaces the prefix-sum). | P11b must not rise; every ratchet holds. |
+| 6 | Joint-pose construction + promoted phase 4.5 (bounded local repair). | Wall-1 flow cases (`COUT`/`RIN`) horizontal-and-clean vs the **real router**, no Tier-0/1 regression. |
+
+Y (M4) sits behind the footprint (M2–M3) and the datum work deliberately:
+**"X spacing is slack; Y spacing is meaning"** — squeezing Y collapses the
+signal band onto the rails and the router pays in bends (§ ADR-17 Stage 2,
+four measured variants). The safe/precondition work leads; the dangerous
+Y change trails, exactly as the Stage-2 kill demanded.
+
+### Must-not-repeat (from placer-redesign.md §6)
+
+Determinism-as-locality (ADR-17); a flow-orientation hard filter against
+*fixed* positions (ADR-15 Stage 5 / Wall 1); an "honest" footprint without
+same-commit recalibration (R-B); glyph-side fixes for what is a *layering*
+defect (V14 residual). ADR-19 avoids each by construction: locality is
+measured not assumed (M1); pose is joint not orientation-only (M6); the
+footprint is completed-then-recalibrated (M2–M3); roles come from topology
+not names.
+
+### Honesty check
+
+Milestone 1 is the only stage landing now, and it moves no symbol. Its
+whole value is that it converts R-A from an untested quirk into a governed,
+ratcheting number — which is placer-redesign.md acceptance criterion (1)
+and the precondition ADR-17 paid to learn ("make locality an explicit
+design property with an acceptance test, not a hoped-for consequence").
+The measured baseline **corrects** the doc's stale "17/17": on this tree,
+page-pan-normalized user-symbol movement is `rc_lowpass` **0** and
+`common_emitter` **8**. Milestones 2–6 are a plan; each returns for
+sign-off before it lands.
+

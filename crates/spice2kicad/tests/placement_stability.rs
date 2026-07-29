@@ -617,3 +617,143 @@ fn cache_path_keeps_pre_existing_symbols_in_place() {
         failures.join("\n")
     );
 }
+
+// --- P11b — cache-less placement locality bound (ADR-19 Milestone 1) -------
+
+/// One P11b case: a base fixture and ONE element spliced in.
+struct LocalityCase {
+    name: &'static str,
+    base: &'static str,
+    added: &'static str,
+    /// Zero-slack ratchet: the page-pan-normalized count of pre-existing
+    /// USER symbols whose pose is perturbed by the edit, measured on the
+    /// CACHE-LESS path. Ratchets DOWN only.
+    mover_budget: usize,
+}
+
+const LOCALITY_CASES: &[LocalityCase] = &[
+    LocalityCase {
+        name: "rc_lowpass_plus_r",
+        base: "rc_lowpass",
+        // A second series resistor splitting `out` into `out`/`mid`.
+        added: "R2 out mid 1k\nC2 mid 0 100n\n",
+        mover_budget: 0,
+    },
+    LocalityCase {
+        name: "common_emitter_plus_c",
+        base: "common_emitter",
+        // One more bypass capacitor on the existing `b` node.
+        added: "CB b 0 10n\n",
+        mover_budget: 8,
+    },
+];
+
+/// Count pre-existing USER symbols whose pose is perturbed by an edit,
+/// after factoring out the single uniform page translation V15 may apply.
+///
+/// `translate_into_page` re-anchors the whole sheet when the content bbox
+/// grows (invariants.md V15), so without normalization every element reads
+/// as "moved" by the uniform pan and the metric could never ratchet toward
+/// locality. The uniform shift is taken as the MODAL integer-grid delta
+/// over the shared user symbols; a symbol counts as a mover when its delta
+/// differs from the mode, its rotation/mirror changed, or it vanished.
+/// Glyphs are decoration (downstream of placement) and are excluded,
+/// matching the ADR-17 ablation's "poses moved = non-power symbols".
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn residual_movers(before: &BTreeMap<String, Pose>, after: &BTreeMap<String, Pose>) -> Vec<String> {
+    let round = |v: f64| (v * 1000.0).round() as i64;
+    let user = |m: &BTreeMap<String, Pose>| -> Vec<(String, Pose)> {
+        m.iter()
+            .filter(|(r, _)| !is_glyph(r))
+            .map(|(r, p)| (r.clone(), p.clone()))
+            .collect()
+    };
+    // Modal (dx, dy) over the user symbols present in both layouts.
+    let mut counts: BTreeMap<(i64, i64), usize> = BTreeMap::new();
+    for (r, p) in user(before) {
+        if let Some(q) = after.get(&r) {
+            *counts
+                .entry((round(q.0 - p.0), round(q.1 - p.1)))
+                .or_insert(0) += 1;
+        }
+    }
+    let modal = counts
+        .iter()
+        .max_by_key(|(_, c)| **c)
+        .map_or((0, 0), |(k, _)| *k);
+
+    let mut movers = Vec::new();
+    for (r, p) in user(before) {
+        match after.get(&r) {
+            None => movers.push(r),
+            Some(q) => {
+                let delta = (round(q.0 - p.0), round(q.1 - p.1));
+                let rot_or_mirror_changed = round(q.2) != round(p.2) || q.3 != p.3;
+                if delta != modal || rot_or_mirror_changed {
+                    movers.push(r);
+                }
+            }
+        }
+    }
+    movers
+}
+
+/// **P11b — cache-less placement locality bound.** ADR-19 Milestone 1.
+///
+/// placer-redesign.md's root engine R-A: because coordinates are derived
+/// from *global* structure (`n`-scaled `y_bot`, the `layer_x` prefix-sum),
+/// adding one element re-bases the whole page. This is the acceptance test
+/// criterion (1) asks for — "bounds how many pre-existing elements move
+/// when one is added, and that bound ratchets down" — made a governed
+/// number. It is distinct from P11 above: that measures the ADR-4 cache
+/// path (which already delivers 0-movement for the *user editing a deck*
+/// workflow); this measures the CACHE-LESS path a placer redesign must
+/// actually make local.
+///
+/// Measured on this tree, page-pan-normalized over user symbols:
+/// `rc_lowpass` **0**, `common_emitter` **8**. (This *corrects* the stale
+/// "17/17" the design doc cites — that figure counts the V15 uniform pan
+/// and the glyph renumbering as movement; the honest, ratchetable quantity
+/// is smaller.) These are high-water marks that ratchet DOWN only: an
+/// ADR-19 stage that lowers them updates the literal; a change that raises
+/// either is an R-A regression to diagnose, never a budget to bump.
+#[test]
+fn cache_less_placement_perturbation_within_bound() {
+    let mut failures = Vec::new();
+    for case in LOCALITY_CASES {
+        let base_src = fixtures_dir().join(format!("{}.cir", case.base));
+        let text = std::fs::read_to_string(&base_src).expect("read base fixture");
+        let grown = text.replace(".end", &format!("{}\n.end", case.added));
+        assert_ne!(grown, text, "{}: failed to splice element", case.name);
+
+        // Base and grown each convert CACHE-LESS into their own fresh
+        // directory, so neither reads a sidecar. (Sharing a directory would
+        // measure the cache path — that is P11's job, not this one.)
+        let base_out = convert_no_cache(&base_src, &tempdir(case.name));
+
+        let grow_dir = tempdir(case.name);
+        let grow_src = grow_dir.join(format!("{}.cir", case.base));
+        std::fs::write(&grow_src, &grown).expect("write grown fixture");
+        let grown_out = convert_no_cache(&grow_src, &tempdir(case.name));
+
+        let before = poses(&parse_sch(&base_out));
+        let after = poses(&parse_sch(&grown_out));
+        let movers = residual_movers(&before, &after);
+        if movers.len() > case.mover_budget {
+            failures.push(format!(
+                "{}: adding `{}` perturbed {} pre-existing user symbol(s) cache-lessly \
+                 (budget {}): {movers:?}",
+                case.name,
+                case.added.trim().replace('\n', "; "),
+                movers.len(),
+                case.mover_budget,
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "P11b: cache-less placement locality regressed (an R-A blast-radius \
+         increase — diagnose the geometry, do not raise the budget):\n{}",
+        failures.join("\n")
+    );
+}
