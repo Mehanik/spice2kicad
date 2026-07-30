@@ -26,6 +26,7 @@
 pub mod bands;
 pub mod channels;
 pub mod cost;
+pub mod flow;
 pub mod footprint;
 pub mod glyph_geom;
 mod idioms;
