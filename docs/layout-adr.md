@@ -3283,9 +3283,19 @@ whole placement.**
 | **1** | **P11b — cache-less locality bound** (this commit). Page-pan-normalized count of pre-existing *user* symbols that move when one element is added; ratchet `rc_lowpass=0`, `common_emitter=8`. | LANDED. Pure verifier, no behaviour change. |
 | 2 | Signed **complete** footprint as a computed quantity + unit tests; **not yet wired** to any gate. | Pure add; no ratchet may move. |
 | 3 | Wire the footprint into the SA overlap gate, `legalize`, and phase-4.5 V13; **re-calibrate ratchets in the same commit**. | No Tier-0/1 rise the recalibration + owner sign-off does not cover. |
-| 4 | **Fixed-datum Y** (decouple `y_bot` from `n`; re-express the page-frame cost terms). Baseline regenerated under ADR-16 (V16 (B,J) non-increasing per fixture). | **LANDED** (partial). Content-derived chained band datums (`place_seed`) + Top/Bot append-away-from-Mid + `pack_rows` re-centre removed. P11b `common_emitter` **8→7** (kill criterion met, narrowly); every ratchet green, `named_rails` V16 B 2→1. The cost-term re-expression proved **unnecessary** — the SA did not leak once `MID_SUBROW_GAP` (routing-room floor = 16 cells) preserved the Mid pitch. The residual 7 movers are X-coupling (M5) + SA, not Y. |
-| 5 | **Relative X columns** (local neighbour clearance replaces the prefix-sum). | P11b must not rise; every ratchet holds. |
+| 4 | **Fixed-datum Y** (decouple `y_bot` from `n`). Baseline regenerated under ADR-16 (V16 (B,J) non-increasing per fixture). | **LANDED** (`ed51164`). Content-derived chained band datums (`place_seed`) + Top/Bot append-away-from-Mid + `pack_rows` re-centre removed. P11b `common_emitter` **8→7**; every ratchet green, `named_rails` V16 B 2→1. The cost-term re-expression proved **unnecessary** — the SA did not leak once `MID_SUBROW_GAP` (routing-room floor = 16 cells) preserved the Mid pitch. |
+| ~~5~~ | ~~Relative X columns~~ — **DROPPED**. A `--no-refine` seed measures **1** mover after M4 (X prefix-sum shifts one column, legitimately); the residual is not the seed. | n/a |
+| **5′** | **SA trajectory decoupling.** The residual blast radius is the SA finding a different basin on any netlist change, via two *spurious* coupling channels: element selection `movable[rng.next_below(movable.len())]` (`anneal.rs:840`, couples to `n`) and the moving-page-extent cost terms `rail_direction`/`soft_y_residual`. Fix: private per-element RNG streams keyed on refdes + deterministic sweep; re-express the two cost terms against the M4 fixed datum only if needed. | **K1 PASSED** (a mere reseed moves 7/7 on `common_emitter` → the blast radius is trajectory chaos, not basin necessity — containable). K2: no Tier-0/1 or V16 rise; ≤2 keying variants. K3: movers must drop toward the physical neighbourhood (~3-4) or the coupling is physical and 5′ reverts. |
 | 6 | Joint-pose construction + promoted phase 4.5 (bounded local repair). | Wall-1 flow cases (`COUT`/`RIN`) horizontal-and-clean vs the **real router**, no Tier-0/1 regression. |
+
+**M5′ premise corrections (Fable, verified):** the SA is load-bearing for
+bends on **two** fixtures (`common_emitter` B 11→4, `opamp_inverting` B 5→3),
+not three — the "3" came from the invalid ablation table the record forbids
+reusing; `named_rails` is neutral. The Tier-0 dependency on `common_emitter`
+predates the `Measure::severed` guard and no longer exists. Default
+`refine_iterations` is 200. M5′ does **not** change spacing, so the
+footprint-precondition (which binds compaction) does not gate it; it may
+precede M3.
 
 Y (M4) sits behind the footprint (M2–M3) and the datum work deliberately:
 **"X spacing is slack; Y spacing is meaning"** — squeezing Y collapses the
