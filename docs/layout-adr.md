@@ -3285,7 +3285,17 @@ whole placement.**
 | 3 | Wire the footprint into the SA overlap gate, `legalize`, and phase-4.5 V13; **re-calibrate ratchets in the same commit**. | No Tier-0/1 rise the recalibration + owner sign-off does not cover. |
 | 4 | **Fixed-datum Y** (decouple `y_bot` from `n`). Baseline regenerated under ADR-16 (V16 (B,J) non-increasing per fixture). | **LANDED** (`ed51164`). Content-derived chained band datums (`place_seed`) + Top/Bot append-away-from-Mid + `pack_rows` re-centre removed. P11b `common_emitter` **8→7**; every ratchet green, `named_rails` V16 B 2→1. The cost-term re-expression proved **unnecessary** — the SA did not leak once `MID_SUBROW_GAP` (routing-room floor = 16 cells) preserved the Mid pitch. |
 | ~~5~~ | ~~Relative X columns~~ — **DROPPED**. A `--no-refine` seed measures **1** mover after M4 (X prefix-sum shifts one column, legitimately); the residual is not the seed. | n/a |
-| **5′** | **SA trajectory decoupling.** The residual blast radius is the SA finding a different basin on any netlist change, via two *spurious* coupling channels: element selection `movable[rng.next_below(movable.len())]` (`anneal.rs:840`, couples to `n`) and the moving-page-extent cost terms `rail_direction`/`soft_y_residual`. Fix: private per-element RNG streams keyed on refdes + deterministic sweep; re-express the two cost terms against the M4 fixed datum only if needed. | **K1 PASSED** (a mere reseed moves 7/7 on `common_emitter` → the blast radius is trajectory chaos, not basin necessity — containable). K2: no Tier-0/1 or V16 rise; ≤2 keying variants. K3: movers must drop toward the physical neighbourhood (~3-4) or the coupling is physical and 5′ reverts. |
+| **5′** | **SA trajectory decoupling** — private per-element RNG streams keyed on refdes + deterministic sweep, to make each element's proposal sequence netlist-stable. | **ATTEMPTED, MEASURED, REVERTED.** Killed by K2 **and** K3 at once: the private-stream sweep bought **no** locality (`common_emitter` movers stayed 7/7 — the acceptance cascade through the cost terms dominates, not the proposal RNG), **and** its one-time re-basin destroyed the SA's bend-finding — `common_emitter` V16 B **4→11**, `opamp_inverting_real` 5→10, `opamp_inverting` 3→5, `named_rails` 1→2. The finding sharpens the wall: **the SA's netlist-sensitivity and its basin-finding are the SAME property** — the specific random search trajectory both lands the good bend basins *and* is what shifts under a netlist edit. K1's "spurious, containable" reading was **falsified**: re-keying to netlist-stable streams keeps the move set but lands strictly worse basins. Determinism is not locality (ADR-17); *and* now: netlist-stable keying is not locality either — it is basin destruction. |
+
+**R-A locality — achieved frontier.** After M4 the *seed* is local (a `--no-refine`
+seed moves 1 element on `common_emitter`+CB). The residual cache-less blast radius
+is the SA, and M5′ proved it **inherent**: it cannot be re-keyed away without
+destroying the basin-finding the V16 ratchets depend on. This is the same wall
+ADR-17 hit from the compaction side and ADR-15 Stage-5 from the orientation side.
+The redesign's locality axis therefore stands at: **seed local (M4), SA residual
+inherent (M5′), users unaffected (ADR-4 cache gives 0 movers).** The M1 ratchet
+(`common_emitter`=7, `rc_lowpass`=0) records it and can only ratchet down if a
+*future* non-SA mechanism is found — none is known.
 | 6 | Joint-pose construction + promoted phase 4.5 (bounded local repair). | Wall-1 flow cases (`COUT`/`RIN`) horizontal-and-clean vs the **real router**, no Tier-0/1 regression. |
 
 **M5′ premise corrections (Fable, verified):** the SA is load-bearing for
