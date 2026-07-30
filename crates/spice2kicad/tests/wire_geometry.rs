@@ -504,7 +504,9 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     // Newly graded: `named_rails` was absent from this file's FIXTURES
     // list until the fixture lists were unified. Measured on master,
     // zero slack; nothing moved, it was simply never counted.
-    ("named_rails", 2, 2),
+    // B 2 -> 1: ADR-19 M4's content-derived Y datum gives this fixture a
+    // straighter rail-to-signal drop. Ratchet DOWN.
+    ("named_rails", 1, 2),
     // B 10 → 4. Phase 4.5's acceptance objective gained the V16
     // ink-graph bend count as its FINAL lexicographic key, after
     // (V13, V12, V5), so the refiner now separates orientations that tie

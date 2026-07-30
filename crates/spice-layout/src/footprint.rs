@@ -182,7 +182,11 @@ fn add_property(fp: &mut SignedFootprint, text: &str, orientation: Orientation, 
 /// come from the calibrated `text_geom` model, anchored exactly where
 /// `property_anchor` places them.
 #[must_use]
-pub fn property_text(refdes: &str, value: Option<&str>, orientation: Orientation) -> SignedFootprint {
+pub fn property_text(
+    refdes: &str,
+    value: Option<&str>,
+    orientation: Orientation,
+) -> SignedFootprint {
     let mut fp = SignedFootprint::origin();
     add_property(&mut fp, refdes, orientation, -PROP_ANCHOR_Y_MM);
     if let Some(v) = value {
@@ -338,7 +342,10 @@ mod tests {
         // by definition), i.e. the halo blocks the empty side the signed
         // box leaves free.
         let (_, hh) = g.halo_half_extents();
-        assert!(hh > 1.0, "glyph reach should be a real distance, got hh={hh}");
+        assert!(
+            hh > 1.0,
+            "glyph reach should be a real distance, got hh={hh}"
+        );
     }
 
     /// An element with no drawn value reserves no Value box — the property

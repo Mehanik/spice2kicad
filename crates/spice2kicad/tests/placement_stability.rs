@@ -644,7 +644,10 @@ const LOCALITY_CASES: &[LocalityCase] = &[
         base: "common_emitter",
         // One more bypass capacitor on the existing `b` node.
         added: "CB b 0 10n\n",
-        mover_budget: 8,
+        // 8 -> 7 with ADR-19 M4 (content-derived Y datum): `CIN` no longer
+        // moves. The residual 7 are X-coupling (the `layer_x` prefix-sum,
+        // M5) and the SA re-basing on the changed signal DAG — not Y.
+        mover_budget: 7,
     },
 ];
 
