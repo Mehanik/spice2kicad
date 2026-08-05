@@ -315,7 +315,11 @@ const Q5_NEAR_MISS_BUDGET: &[(&str, u32)] = &[
     // R1/R2 (bias divider) and Q1/RC/RE/CIN sit a cell or two off their
     // shared-net neighbours' axes — each near-miss is a candidate straight
     // drop the router currently jogs.
-    ("common_emitter", 4),
+    // 4 -> 3: reclaimed by the ADR-19 M4 revert (`docs/layout-adr.md`,
+    // "M4 reverted"). The literal was first measured on the M4 tree; the
+    // pre-M4 Y datum this restores costs one fewer near-miss here. Ratchets
+    // down only.
+    ("common_emitter", 3),
     // C1/RC1, C2/RC2 (cross-coupling caps vs collector loads) and the
     // Q/RC collector columns land just off-axis on this symmetric fixture.
     ("multivibrator", 4),
