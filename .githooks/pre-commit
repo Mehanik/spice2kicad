@@ -18,5 +18,5 @@ echo "==> cargo test (capped)"
 if command -v just >/dev/null 2>&1; then
     just test
 else
-    bash -c 'ulimit -v ${RUST_TEST_MAX_VSZ_KB:-4194304} && cargo test --workspace -- --test-threads=${RUST_TEST_THREADS:-2}'
+    bash -c 'ulimit -v ${RUST_TEST_MAX_VSZ_KB:-4194304} && cargo test --workspace --no-fail-fast -- --test-threads=${RUST_TEST_THREADS:-2}'
 fi

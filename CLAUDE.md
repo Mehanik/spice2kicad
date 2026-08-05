@@ -786,6 +786,26 @@ bash -c 'ulimit -v 4194304 && cargo test -p <crate> -- --test-threads=2'
 bash -c 'ulimit -v 4194304 && cargo run -q -p spice2kicad -- …'
 ```
 
+**Always pass `--no-fail-fast` to a workspace run, and never gate a
+change on a hand-picked subset of suites.** Both halves of that sentence
+are load-bearing, and skipping either is how a red master ships:
+
+- Cargo's default is fail-fast at the first failing **binary**. The
+  remaining binaries never run, so the printed failure list is a
+  truncated prefix, not the red set — and a ratchet suite that never
+  executed looks exactly like one that passed.
+- A commit message that enumerates *some* suites is not evidence of a
+  green tree. ADR-19 M4 (`ed51164`) listed five suites it ran;
+  `flow_geometry` was simply absent, and master stayed red behind that
+  omission until the revert in `835e073`.
+
+Corollary for any bisect or before/after claim: **the control arm must
+predate ALL the work under review.** Comparing against your own branch's
+HEAD can only show "not caused by my last edit" — it is structurally
+incapable of seeing a regression introduced earlier in the same session,
+and it will confidently report "pre-existing" when the defect is yours.
+Full narrative: `docs/layout-adr.md` § "M4 reverted".
+
 Tighten the cap (e.g. `RUST_TEST_MAX_VSZ_KB=1048576`, 1 GiB) when
 fuzzing the router or running large fixtures: a quicker abort gives
 faster feedback than a slow death-march. Loosen only when you have
