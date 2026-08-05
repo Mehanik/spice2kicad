@@ -3360,6 +3360,32 @@ basin, and there is no local argument for choosing one. **M4 is re-attemptable
 only after M3**, and its re-attempt must run `flow_geometry` (F3/F4/F5/P5/F6)
 in the gate set.
 
+**Where the code lives.** The revert removes M4's implementation from the
+mainline but does not discard it: branch **`wip/adr19-m4-pending-m3`** (at
+`619cc31`) holds the tree as M4 landed, so the post-M3 re-attempt starts from
+the code rather than re-deriving it. Read this section first — the datum-chain
+mechanism above is the thing to change, not to re-apply.
+
+**Gate-set lesson (the primary failure, distinct from the control arm).**
+`ed51164`'s commit message *enumerates* the suites it ran —
+`placement_quality`, `electrical_safety`, `placement_stability`,
+`wire_geometry`, `baseline_lock` — and `flow_geometry` is simply absent. The
+regression was therefore visible-by-omission at commit time, before any
+control-arm reasoning entered. A hand-picked suite subset is not a gate. Run
+the whole workspace with `--no-fail-fast` (cargo's default is fail-fast, which
+truncates the red list at the first failing binary and reads as a shorter
+failure than it is).
+
+**Ratchet arithmetic across the revert.** Two literals return to their pre-M4
+(`cec3fd2`) values — `wire_geometry` `named_rails` V16 B 1→2, and
+`placement_stability` P11b `common_emitter` mover 7→8. Both were lowered *by
+`ed51164` itself*; restoring them alongside the revert that created them is not
+a budget bump, and neither exceeds any mark recorded at or before M4. Owner
+signed off. In the other direction the revert *freed* slack that the suite
+hides: A3's Q5 verifier only `eprintln!`s a reclaimable value rather than
+failing on it, and `common_emitter` was reclaimed 4→3 (`9881d4f`). Any future
+change that moves Y must re-run A1/A3 with `--nocapture` for the same reason.
+
 **M5′ premise corrections (Fable, verified):** the SA is load-bearing for
 bends on **two** fixtures (`common_emitter` B 11→4, `opamp_inverting` B 5→3),
 not three — the "3" came from the invalid ablation table the record forbids
