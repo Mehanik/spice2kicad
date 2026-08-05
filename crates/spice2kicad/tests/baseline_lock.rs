@@ -220,12 +220,154 @@ fn extract_symbols(path: &std::path::Path) -> Vec<(String, String, f64, f64, f64
 /// and genuinely input-only signal nets (`diff_pair` `in1`/`in2`,
 /// base-only with no passive pin) are preserved; ERC stays 0 errors.
 const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
+    // (fixture, refdes, lib_id, x, y, rot, mirror), sorted by
+    // (fixture, refdes) to match the verifier's own ordering.
+    //
+    // Regenerated wholesale rather than patched: the rail `PWR_FLAG`
+    // markers moved off the circuit into a bottom-right driver block
+    // (each paired with its own `power:*` glyph), so the element SET
+    // changed, not merely coordinates. Absolute positions also shifted
+    // when the page frame began reserving property-text room
+    // symmetrically — see the V15 note in docs/invariants.md.
+    //
+    // Regenerated again when the collinear outward stub was restored to
+    // the Steiner stage (V5). Wires changed on most fixtures, which
+    // moved the content bbox and so the V15 page-translate offset;
+    // phase 4.5 also re-picked a few orientations now that its
+    // router-in-the-loop oracle sees the outward routes again (notably
+    // `rc_lowpass_ports` R1 → rot 180). No element was repositioned by
+    // hand; every verifier is green.
+    //
+    // This is a SNAPSHOT, not a ratchet: it catches *accidental*
+    // movement. Regenerate it deliberately when geometry changes for a
+    // reason you can name — never to make a quality budget pass.
+    //
+    // Regenerated again after: (a) the rail-stub column idiom + the
+    // un-inverted `cost::rail_direction` moved most elements, and (b)
+    // rail glyphs began keying off the declared `*@power=` tag rather
+    // than the net's spelling (`common_emitter`'s VCC glyph is now
+    // `power:+12V`). Wholesale, not patched: 107 of 107 rows changed.
+    //
+    // Regenerated again when `Symbol::pins_in` stopped reporting
+    // horizontal pins' outward direction backwards. That angle feeds the
+    // router's outward stubs AND phase 4.5's V5 oracle, so orientations
+    // moved on the fixtures with horizontal pins (opamp inputs/outputs,
+    // `rc_lowpass_ports` R1 back to rot 0). True V5 violations summed
+    // across fixtures fell 16 → 8; V16 (B, J) per fixture is unchanged
+    // on 7 of 9 — see the commit message for the two exceptions.
+    //
+    // Regenerated again for two layout changes landing together:
+    //
+    // (a) `spice_layout::idioms::apply_shared_centers` now seats the
+    //     centred passive one grid cell BELOW the clearance stride, so
+    //     its shared-net pin no longer lands on the trunk row the router
+    //     picks. Only `diff_pair` has the idiom; its `RTAIL` and the five
+    //     power glyphs / flags whose column follows it moved +1.27 mm in
+    //     Y. Buys `diff_pair` V5 1 → 0 at V16 J 0 → 1 (a three-way node
+    //     drawn as a proper Steiner T instead of the trunk ending
+    //     sideways on a pin).
+    //
+    // (b) Phase 4.5's acceptance objective gained the V16 ink-graph bend
+    //     count as its FINAL lexicographic key, after (V13, V12, V5), so
+    //     the refiner now separates orientations that tie on every
+    //     higher-tier count by how straight the resulting ink is. This
+    //     re-picked orientations on `rc_lowpass_ports` (R1 → rot 180,
+    //     B 4 → 2) and `common_emitter` (B 10 → 4). See ADR-16 "Accepted
+    //     extension" and invariants.md V16 for why a last-place
+    //     lexicographic key cannot trade against Tier 1.
+    //
+    // V5 is unchanged or lower on every fixture; no Tier-0/Tier-1 count
+    // moved anywhere. Only `opamp_definition_level` B rose (10 → 12), on
+    // the owner-approved global-improvement escape.
+    //
+    // Regenerated again for the rail-stub column idiom's symmetry unlock.
+    // Idiom 4 was a total no-op on any circuit V7 symmetry pinned, because
+    // a group containing a pinned member is skipped wholesale — so the
+    // collector-load column fix that landed for `common_emitter` was
+    // silently excluded from every symmetric fixture. It now releases a
+    // V7-ONLY pin (V7 owns a pair's mirror RELATION, not either member's
+    // absolute column) and re-mirrors afterwards, and a released group
+    // moves only on a STRONG anchor — an active device's own vertical pin.
+    // `multivibrator`'s `RC1`/`RC2` drop onto their transistors' collector
+    // columns, removing 17.78 mm of dog-leg each; their VCC glyphs follow.
+    // 4 of 107 rows moved and no other fixture changed at all.
+    //
+    // Regenerated again for the `no_source_fallback` root refinement in
+    // `layers.rs`. A power-touching element was rooted at layer 0
+    // unconditionally, so the opamp `X1` — which touches `vcc` only for
+    // its supply — was seeded level with the circuit's true input `RIN`.
+    // The router answered by MIRRORING X1 so its output faced back left.
+    // Roots are now restricted to genuine rail stubs (power-touching AND
+    // at most one Signal net); an element on two or more Signal nets is
+    // an interior node and takes its layer from the BFS. 12 of 107 rows
+    // moved, all on `opamp_inverting_real`; no other fixture changed.
+    //
+    // Regenerated again for the rail-stub OUTWARD anchor. The column
+    // idiom declined outright when a stub's node presented only
+    // sideways-facing pins (a bias resistor feeding a transistor BASE),
+    // leaving the stub at whatever column the layer seeder gave it. It
+    // now takes the column one geometry-derived stride along such a
+    // pin's OUTWARD direction and reaches the pin with a short run in —
+    // the conventional drawing, and a different proposal from the
+    // measured-and-rejected "anchor AT the pin, offset zero". A node
+    // carrying stubs on BOTH sides is a divider through the node and is
+    // deliberately excluded (it already shares one column). 16 of 107
+    // rows moved, all on `multivibrator` (RB1/RB2 in, everything else
+    // following the V15 page re-anchor); no other fixture changed.
+    //
+    // Regenerated again for the ADR-14 completion: a rail glyph's
+    // net-name Value text is CENTRED on its anchor (confirmed against
+    // `kicad-cli sch export svg` ink — a "GND" label anchored at x=25.40
+    // renders x[23.71, 27.09]), so on a HORIZONTALLY-facing rail pin
+    // roughly half the string used to lie outside the reserved zone.
+    // `glyph_reach` now reserves that text's full rendered box on
+    // horizontal pins, in BOTH consumers (seed/align stride and the SA
+    // overlap gate), so the two cannot disagree.
+    //
+    // Blast radius is one fixture: `opamp_inverting_real` shifts its
+    // right-hand cluster +2.54 mm in X (one grid cell — the reserved
+    // half-width, grid-snapped). 11 of 109 rows; the other eight
+    // fixtures are byte-identical. Pure spacing: no rotation, no mirror,
+    // no reordering. V16 (B, J) unchanged on every fixture, and every
+    // other ratchet is unchanged — consistent with ADR-14's finding that
+    // a faithful reservation buys no observable quality until something
+    // removes the slack.
+    //
+    // Regenerated again for the multi-channel layout fix: numbered
+    // channel ports (`in1`/`out2`) now read as circuit boundaries, the
+    // well-formedness fallback no longer re-admits interior opamps as
+    // layer-0 roots, V7 mirrors only genuinely COUPLED halves, and the
+    // seed's within-bucket Y stride is geometry-derived for a bucket
+    // stacking two oversized bodies. Blast radius is ONE fixture:
+    // 18 of 109 rows, all `opamp_definition_level`; the other nine
+    // fixtures are byte-identical. F5 4 → 1 (both channels now layer
+    // left-to-right instead of backwards and X-interleaved); every
+    // Tier-0 and Tier-1 verifier is green. V16 (B, J) is unchanged on
+    // every fixture EXCEPT `opamp_definition_level`, whose B rises
+    // 12 → 15 — an UNAPPROVED Tier-2 ratchet rise, which is why this
+    // sits on a branch and not on master.
+    //
+    // Regenerated again for the channel-row banding (Option B; channels.rs
+    // + spice-layout::lib.rs). The two independent inverting-amp channels
+    // are laid out as two CONGRUENT rows and each channel's orientation is
+    // pinned THROUGH phase 4.5 to the textbook seed facing (input-left,
+    // output-right), so the deck reads left-to-right. Blast radius is again
+    // ONE fixture: all 18 `opamp_definition_level` rows change (both opamps
+    // now rot 0 with NO mirror — the old baseline mirrored X2 `y` and drew
+    // RF at rot 270 in a diagonal sprawl); the other nine fixtures are
+    // byte-identical. On this fixture, summed violations fall by 6:
+    // B 15 → 6, F5 → 0, wire_detour 1.0984 → 1.0732, crossings 0; at the
+    // owner-approved cost (OWNER SIGN-OFF 2026-07-20, global-improvement
+    // escape) of V5 0 → 2 (the two summing-node input pins facing the RF
+    // feedback junction) and V16 J 0 → 2 (proper Steiner branches on the
+    // two 3-pin nets). This B 15 → 6 SUPERSEDES the earlier unratified
+    // B = 15. Every Tier-0 and Tier-1 verifier is green.
     (
         "common_emitter",
         "#FLG1",
         "power:PWR_FLAG",
-        109.22,
-        93.98,
+        102.87,
+        76.2,
         0.0,
         "",
     ),
@@ -233,8 +375,8 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "common_emitter",
         "#FLG2",
         "power:PWR_FLAG",
-        109.22,
-        106.68,
+        102.87,
+        88.9,
         180.0,
         "",
     ),
@@ -242,8 +384,8 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "common_emitter",
         "#PWR1",
         "power:GND",
-        49.53,
-        91.44,
+        55.88,
+        73.66,
         0.0,
         "",
     ),
@@ -251,8 +393,8 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "common_emitter",
         "#PWR2",
         "power:GND",
-        60.96,
-        91.44,
+        64.77,
+        73.66,
         0.0,
         "",
     ),
@@ -260,8 +402,8 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "common_emitter",
         "#PWR3",
         "power:GND",
-        66.04,
-        91.44,
+        69.85,
+        73.66,
         0.0,
         "",
     ),
@@ -269,7 +411,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "common_emitter",
         "#PWR4",
         "power:+12V",
-        50.8,
+        55.88,
         31.75,
         0.0,
         "",
@@ -278,7 +420,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "common_emitter",
         "#PWR5",
         "power:+12V",
-        55.88,
+        64.77,
         31.75,
         0.0,
         "",
@@ -287,8 +429,8 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "common_emitter",
         "#PWR6",
         "power:GND",
-        109.22,
-        93.98,
+        102.87,
+        76.2,
         0.0,
         "",
     ),
@@ -296,41 +438,41 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "common_emitter",
         "#PWR7",
         "power:+12V",
-        109.22,
-        106.68,
+        102.87,
+        88.9,
         0.0,
         "",
     ),
-    ("common_emitter", "CE", "Device:C", 66.04, 87.63, 0.0, "y"),
-    ("common_emitter", "CIN", "Device:C", 35.56, 62.23, 90.0, ""),
-    ("common_emitter", "COUT", "Device:C", 96.52, 60.96, 0.0, ""),
+    ("common_emitter", "CE", "Device:C", 69.85, 69.85, 0.0, ""),
+    ("common_emitter", "CIN", "Device:C", 35.56, 53.34, 90.0, ""),
+    ("common_emitter", "COUT", "Device:C", 90.17, 52.07, 0.0, ""),
     (
         "common_emitter",
         "Q1",
         "Device:Q_NPN_BCE",
-        58.42,
-        60.96,
+        63.5,
+        52.07,
         0.0,
         "",
     ),
-    ("common_emitter", "R1", "Device:R_US", 50.8, 35.56, 0.0, ""),
-    ("common_emitter", "R2", "Device:R_US", 49.53, 87.63, 0.0, ""),
+    ("common_emitter", "R1", "Device:R_US", 55.88, 35.56, 0.0, ""),
     (
         "common_emitter",
-        "RC",
+        "R2",
         "Device:R_US",
         55.88,
-        35.56,
+        69.85,
         0.0,
         "y",
     ),
-    ("common_emitter", "RE", "Device:R_US", 60.96, 87.63, 0.0, ""),
+    ("common_emitter", "RC", "Device:R_US", 64.77, 35.56, 0.0, ""),
+    ("common_emitter", "RE", "Device:R_US", 64.77, 69.85, 0.0, ""),
     (
         "diff_pair",
         "#FLG1",
         "power:PWR_FLAG",
         30.48,
-        68.58,
+        49.53,
         180.0,
         "",
     ),
@@ -339,7 +481,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "#FLG2",
         "power:PWR_FLAG",
         55.88,
-        68.58,
+        49.53,
         180.0,
         "",
     ),
@@ -348,7 +490,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "#FLG3",
         "power:PWR_FLAG",
         66.04,
-        83.82,
+        64.77,
         180.0,
         "",
     ),
@@ -357,26 +499,26 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "#FLG4",
         "power:PWR_FLAG",
         66.04,
-        96.52,
+        77.47,
         0.0,
         "",
     ),
     ("diff_pair", "#PWR1", "power:+12V", 38.1, 31.75, 0.0, ""),
     ("diff_pair", "#PWR2", "power:+12V", 48.26, 31.75, 0.0, ""),
-    ("diff_pair", "#PWR3", "power:VEE", 43.18, 83.82, 180.0, ""),
-    ("diff_pair", "#PWR4", "power:+12V", 66.04, 83.82, 0.0, ""),
-    ("diff_pair", "#PWR5", "power:VEE", 66.04, 96.52, 180.0, ""),
-    ("diff_pair", "Q1", "Device:Q_NPN_BCE", 35.56, 68.58, 0.0, ""),
-    ("diff_pair", "Q2", "Device:Q_NPN_BCE", 50.8, 68.58, 0.0, "y"),
+    ("diff_pair", "#PWR3", "power:VEE", 43.18, 64.77, 180.0, ""),
+    ("diff_pair", "#PWR4", "power:+12V", 66.04, 64.77, 0.0, ""),
+    ("diff_pair", "#PWR5", "power:VEE", 66.04, 77.47, 180.0, ""),
+    ("diff_pair", "Q1", "Device:Q_NPN_BCE", 35.56, 49.53, 0.0, ""),
+    ("diff_pair", "Q2", "Device:Q_NPN_BCE", 50.8, 49.53, 0.0, "y"),
     ("diff_pair", "RC1", "Device:R_US", 38.1, 35.56, 0.0, ""),
     ("diff_pair", "RC2", "Device:R_US", 48.26, 35.56, 0.0, "y"),
-    ("diff_pair", "RTAIL", "Device:R_US", 43.18, 80.01, 0.0, ""),
+    ("diff_pair", "RTAIL", "Device:R_US", 43.18, 60.96, 0.0, ""),
     (
         "multivibrator",
         "#FLG1",
         "power:PWR_FLAG",
         77.47,
-        109.22,
+        76.2,
         0.0,
         "",
     ),
@@ -385,58 +527,26 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "#FLG2",
         "power:PWR_FLAG",
         77.47,
-        121.92,
+        88.9,
         180.0,
         "",
     ),
-    (
-        "multivibrator",
-        "#PWR1",
-        "power:GND",
-        45.72,
-        106.68,
-        0.0,
-        "",
-    ),
-    (
-        "multivibrator",
-        "#PWR2",
-        "power:GND",
-        55.88,
-        106.68,
-        0.0,
-        "",
-    ),
+    ("multivibrator", "#PWR1", "power:GND", 45.72, 73.66, 0.0, ""),
+    ("multivibrator", "#PWR2", "power:GND", 55.88, 73.66, 0.0, ""),
     ("multivibrator", "#PWR3", "power:+5V", 45.72, 31.75, 0.0, ""),
     ("multivibrator", "#PWR4", "power:+5V", 55.88, 31.75, 0.0, ""),
     ("multivibrator", "#PWR5", "power:+5V", 35.56, 44.45, 0.0, ""),
     ("multivibrator", "#PWR6", "power:+5V", 66.04, 44.45, 0.0, ""),
-    (
-        "multivibrator",
-        "#PWR7",
-        "power:GND",
-        77.47,
-        109.22,
-        0.0,
-        "",
-    ),
-    (
-        "multivibrator",
-        "#PWR8",
-        "power:+5V",
-        77.47,
-        121.92,
-        0.0,
-        "",
-    ),
-    ("multivibrator", "C1", "Device:C", 43.18, 74.93, 0.0, ""),
-    ("multivibrator", "C2", "Device:C", 58.42, 74.93, 0.0, "y"),
+    ("multivibrator", "#PWR7", "power:GND", 77.47, 76.2, 0.0, ""),
+    ("multivibrator", "#PWR8", "power:+5V", 77.47, 88.9, 0.0, ""),
+    ("multivibrator", "C1", "Device:C", 43.18, 52.07, 0.0, ""),
+    ("multivibrator", "C2", "Device:C", 58.42, 52.07, 0.0, "y"),
     (
         "multivibrator",
         "Q1",
         "Device:Q_NPN_BCE",
         43.18,
-        101.6,
+        68.58,
         0.0,
         "",
     ),
@@ -445,7 +555,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "Q2",
         "Device:Q_NPN_BCE",
         58.42,
-        101.6,
+        68.58,
         0.0,
         "y",
     ),
@@ -473,8 +583,8 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "named_rails",
         "#FLG1",
         "power:PWR_FLAG",
-        57.15,
-        76.2,
+        64.77,
+        49.53,
         0.0,
         "",
     ),
@@ -482,8 +592,8 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "named_rails",
         "#FLG2",
         "power:PWR_FLAG",
-        57.15,
-        88.9,
+        64.77,
+        62.23,
         0.0,
         "",
     ),
@@ -491,27 +601,27 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "named_rails",
         "#FLG3",
         "power:PWR_FLAG",
-        57.15,
-        101.6,
+        64.77,
+        74.93,
         180.0,
         "",
     ),
-    ("named_rails", "#PWR1", "power:GND", 40.64, 73.66, 0.0, ""),
-    ("named_rails", "#PWR2", "power:VEE", 35.56, 63.5, 180.0, ""),
-    ("named_rails", "#PWR3", "power:+5V", 45.72, 33.02, 0.0, ""),
-    ("named_rails", "#PWR4", "power:GND", 57.15, 76.2, 0.0, ""),
-    ("named_rails", "#PWR5", "power:VEE", 57.15, 88.9, 180.0, ""),
-    ("named_rails", "#PWR6", "power:+5V", 57.15, 101.6, 0.0, ""),
-    ("named_rails", "CL", "Device:C", 40.64, 69.85, 0.0, "y"),
-    ("named_rails", "RIN", "Device:R_US", 39.37, 35.56, 0.0, ""),
-    ("named_rails", "RPD", "Device:R_US", 35.56, 59.69, 0.0, ""),
-    ("named_rails", "RPU", "Device:R_US", 45.72, 36.83, 0.0, "y"),
+    ("named_rails", "#PWR1", "power:GND", 48.26, 46.99, 0.0, ""),
+    ("named_rails", "#PWR2", "power:VEE", 35.56, 46.99, 180.0, ""),
+    ("named_rails", "#PWR3", "power:+5V", 53.34, 31.75, 0.0, ""),
+    ("named_rails", "#PWR4", "power:GND", 64.77, 49.53, 0.0, ""),
+    ("named_rails", "#PWR5", "power:VEE", 64.77, 62.23, 180.0, ""),
+    ("named_rails", "#PWR6", "power:+5V", 64.77, 74.93, 0.0, ""),
+    ("named_rails", "CL", "Device:C", 48.26, 43.18, 0.0, ""),
+    ("named_rails", "RIN", "Device:R_US", 43.18, 40.64, 180.0, ""),
+    ("named_rails", "RPD", "Device:R_US", 35.56, 43.18, 0.0, ""),
+    ("named_rails", "RPU", "Device:R_US", 53.34, 35.56, 0.0, "y"),
     (
         "opamp_definition_level",
         "#FLG1",
         "power:PWR_FLAG",
         76.2,
-        90.17,
+        91.44,
         0.0,
         "",
     ),
@@ -520,7 +630,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "#FLG2",
         "power:PWR_FLAG",
         76.2,
-        102.87,
+        104.14,
         180.0,
         "",
     ),
@@ -529,7 +639,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "#FLG3",
         "power:PWR_FLAG",
         76.2,
-        115.57,
+        116.84,
         0.0,
         "",
     ),
@@ -547,7 +657,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "#PWR2",
         "power:GND",
         50.8,
-        80.01,
+        81.28,
         0.0,
         "",
     ),
@@ -565,7 +675,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "#PWR4",
         "power:VCC",
         55.88,
-        74.93,
+        76.2,
         0.0,
         "",
     ),
@@ -583,7 +693,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "#PWR6",
         "power:VEE",
         55.88,
-        90.17,
+        91.44,
         180.0,
         "",
     ),
@@ -592,7 +702,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "#PWR7",
         "power:GND",
         76.2,
-        90.17,
+        91.44,
         0.0,
         "",
     ),
@@ -601,7 +711,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "#PWR8",
         "power:VCC",
         76.2,
-        102.87,
+        104.14,
         0.0,
         "",
     ),
@@ -610,7 +720,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "#PWR9",
         "power:VEE",
         76.2,
-        115.57,
+        116.84,
         180.0,
         "",
     ),
@@ -628,7 +738,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "RF2",
         "Device:R_US",
         57.15,
-        67.31,
+        68.58,
         90.0,
         "",
     ),
@@ -646,7 +756,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "RIN2",
         "Device:R_US",
         35.56,
-        67.31,
+        68.58,
         90.0,
         "",
     ),
@@ -664,7 +774,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "X2",
         "Amplifier_Operational:OPAMP",
         58.42,
-        82.55,
+        83.82,
         0.0,
         "",
     ),
@@ -890,6 +1000,15 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
     ("port_shapes", "R2", "Device:R_US", 35.56, 44.45, 0.0, ""),
     ("port_shapes", "R3", "Device:R_US", 82.55, 41.91, 0.0, ""),
     ("port_shapes", "R4", "Device:R_US", 82.55, 50.8, 0.0, ""),
+    // `rc_lowpass` now converges byte-identically onto `rc_lowpass_ports`:
+    // the series-horizontal flow construction (`idioms::apply_series_horizontal`)
+    // fires on the un-ported fixture too, because `idioms::signal_net_depth`
+    // falls back on the leaf-input-net NAME (`in`) to root the flow graph when
+    // no `*@port` input is declared. R1 rot 270 → 90 (horizontal, upstream
+    // `in` pin at the lower X), C1 re-columned to (39.37,44.45) beneath `out`,
+    // #PWR1/#PWR2/#FLG1 following the moved geometry. V16 B 3 → 0, J 0 → 0
+    // (non-increasing per ADR-16). Only this fixture moved; the other nine
+    // are byte-identical.
     (
         "rc_lowpass",
         "#FLG1",
@@ -903,6 +1022,14 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
     ("rc_lowpass", "#PWR2", "power:GND", 52.07, 50.8, 0.0, ""),
     ("rc_lowpass", "C1", "Device:C", 39.37, 44.45, 0.0, ""),
     ("rc_lowpass", "R1", "Device:R_US", 35.56, 35.56, 90.0, ""),
+    // `rc_lowpass_ports` was re-laid-out by the series-horizontal flow
+    // construction (`idioms::apply_series_horizontal`): R1 rot 180 → 90
+    // (the series element between `in` and `out` is now drawn HORIZONTAL,
+    // upstream `in` pin at the lower X so the signal reads left→right), and
+    // its downstream shunt C1 (35.56,35.56,"y") re-columned to (39.37,44.45)
+    // to drop straight beneath the `out` node. #PWR1/#PWR2/#FLG1 follow the
+    // moved geometry. Only this fixture moved; the other nine are
+    // byte-identical.
     (
         "rc_lowpass_ports",
         "#FLG1",

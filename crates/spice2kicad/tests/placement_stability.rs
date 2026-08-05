@@ -644,10 +644,13 @@ const LOCALITY_CASES: &[LocalityCase] = &[
         base: "common_emitter",
         // One more bypass capacitor on the existing `b` node.
         added: "CB b 0 10n\n",
-        // 8 -> 7 with ADR-19 M4 (content-derived Y datum): `CIN` no longer
-        // moves. The residual 7 are X-coupling (the `layer_x` prefix-sum,
-        // M5) and the SA re-basing on the changed signal DAG — not Y.
-        mover_budget: 7,
+        // Back at 8 with the ADR-19 M4 REVERT (see `docs/layout-adr.md`,
+        // "M4 reverted"): M4's content-derived Y datum had bought 8 -> 7
+        // and cost `flow_geometry`'s F6 ratchet 18 cells on
+        // `multivibrator`. Restoration of the pre-M4 measured value, not a
+        // budget bump; it ratchets DOWN only, and can only fall again once
+        // M3 (the footprint precondition) lands and M4 is re-attempted.
+        mover_budget: 8,
     },
 ];
 

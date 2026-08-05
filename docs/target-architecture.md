@@ -46,8 +46,9 @@ the axes that matter we are ahead of it:
 - **Locality.** Weave, every ELK-based viewer, ASG, MAGICAL, ALIGN all
   **globally re-base** on any edit — independently confirming our ADR-17
   finding that spacing-derived placement is intrinsically global. Our
-  ADR-4 position-stability cache and ADR-19 M4 (seed now moves ~1 element)
-  are **ahead of everyone**; there is nothing to borrow here, only to
+  ADR-4 position-stability cache is **ahead of everyone** (ADR-19 M4, the
+  other half of this claim, has since been REVERTED — see `layout-adr.md`
+  "M4 reverted" — so the seed-locality figure below is withdrawn); there is nothing to borrow here, only to
   invent. The M5′ negative result (the SA's netlist-sensitivity *is* its
   bend-basin-finding) is corroborated by the AlphaChip replication war
   (tuned SA matches learned RL even with a clean reward — arXiv 2306.09633
@@ -100,9 +101,11 @@ the axes that matter we are ahead of it:
 
 ## 4. What the field does NOT solve (so we must invent, or accept)
 
-- **Locality (W1)** — unsolved by everyone; our cache + M4 lead. The
-  achievable frontier we already reached (seed local; SA residual inherent;
-  users get 0 via the cache) is consistent with the entire field.
+- **Locality (W1)** — unsolved by everyone; our cache leads. The
+  achievable frontier we reached (seed local; SA residual inherent; users
+  get 0 via the cache) is consistent with the entire field — but its
+  seed-local half rested on M4, now reverted pending M3, so today only the
+  cache and the SA-residual finding stand.
 - **Series-element orientation from bare connectivity (W2)** — *punted by
   every tool*: lcapy demands a per-part orientation hint, SKiDL guesses and
   needs cleanup, Weave doesn't address it, SKiDL's author **tried ELK and
@@ -191,8 +194,8 @@ layer**); pinning; the real-router phase-4.5 oracle; the lexicographic
 acceptance tuple; the ADR-15 role model (validated as a discriminator, only
 its enforcement failed); the ADR-4 position-stability cache (ahead of the
 field on locality). R-A locality is **already at its achievable frontier**
-(M1+M4; users get 0 via the cache; the SA residual is inherent to *any*
-spacing-derived placement) — stop spending on it.
+(M1 + the ADR-4 cache; M4 is reverted pending M3; the SA residual is
+inherent to *any* spacing-derived placement) — stop spending on it.
 
 1. **Sugiyama-layered seed replacing `bands → layers`.** Rails classified
    fully out of the layout graph (extend V10/V14 — rails never perturb

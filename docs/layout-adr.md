@@ -3283,20 +3283,82 @@ whole placement.**
 | **1** | **P11b — cache-less locality bound** (this commit). Page-pan-normalized count of pre-existing *user* symbols that move when one element is added; ratchet `rc_lowpass=0`, `common_emitter=8`. | LANDED. Pure verifier, no behaviour change. |
 | 2 | Signed **complete** footprint as a computed quantity + unit tests; **not yet wired** to any gate. | Pure add; no ratchet may move. |
 | 3 | Wire the footprint into the SA overlap gate, `legalize`, and phase-4.5 V13; **re-calibrate ratchets in the same commit**. | No Tier-0/1 rise the recalibration + owner sign-off does not cover. |
-| 4 | **Fixed-datum Y** (decouple `y_bot` from `n`). Baseline regenerated under ADR-16 (V16 (B,J) non-increasing per fixture). | **LANDED** (`ed51164`). Content-derived chained band datums (`place_seed`) + Top/Bot append-away-from-Mid + `pack_rows` re-centre removed. P11b `common_emitter` **8→7**; every ratchet green, `named_rails` V16 B 2→1. The cost-term re-expression proved **unnecessary** — the SA did not leak once `MID_SUBROW_GAP` (routing-room floor = 16 cells) preserved the Mid pitch. |
-| ~~5~~ | ~~Relative X columns~~ — **DROPPED**. A `--no-refine` seed measures **1** mover after M4 (X prefix-sum shifts one column, legitimately); the residual is not the seed. | n/a |
+| 4 | **Fixed-datum Y** (decouple `y_bot` from `n`; re-express the page-frame cost terms). Baseline regenerated under ADR-16 (V16 (B,J) non-increasing per fixture). | **LANDED `ed51164`, then REVERTED — pending M3.** See "M4 reverted" below. |
+| 5 | **Relative X columns** (local neighbour clearance replaces the prefix-sum). It was DROPPED on a measurement taken *after M4* (a `--no-refine` seed moving 1 mover); M4 is reverted, so that measurement no longer describes the tree and the drop is **withdrawn**, not re-affirmed. | P11b must not rise; every ratchet holds. |
 | **5′** | **SA trajectory decoupling** — private per-element RNG streams keyed on refdes + deterministic sweep, to make each element's proposal sequence netlist-stable. | **ATTEMPTED, MEASURED, REVERTED.** Killed by K2 **and** K3 at once: the private-stream sweep bought **no** locality (`common_emitter` movers stayed 7/7 — the acceptance cascade through the cost terms dominates, not the proposal RNG), **and** its one-time re-basin destroyed the SA's bend-finding — `common_emitter` V16 B **4→11**, `opamp_inverting_real` 5→10, `opamp_inverting` 3→5, `named_rails` 1→2. The finding sharpens the wall: **the SA's netlist-sensitivity and its basin-finding are the SAME property** — the specific random search trajectory both lands the good bend basins *and* is what shifts under a netlist edit. K1's "spurious, containable" reading was **falsified**: re-keying to netlist-stable streams keeps the move set but lands strictly worse basins. Determinism is not locality (ADR-17); *and* now: netlist-stable keying is not locality either — it is basin destruction. |
 
-**R-A locality — achieved frontier.** After M4 the *seed* is local (a `--no-refine`
-seed moves 1 element on `common_emitter`+CB). The residual cache-less blast radius
-is the SA, and M5′ proved it **inherent**: it cannot be re-keyed away without
+| 6 | Joint-pose construction + promoted phase 4.5 (bounded local repair). | Wall-1 flow cases (`COUT`/`RIN`) horizontal-and-clean vs the **real router**, no Tier-0/1 regression. |
+
+**R-A locality — frontier, as of the M4 revert.** M5′ proved the cache-less
+blast radius of the SA **inherent**: it cannot be re-keyed away without
 destroying the basin-finding the V16 ratchets depend on. This is the same wall
 ADR-17 hit from the compaction side and ADR-15 Stage-5 from the orientation side.
-The redesign's locality axis therefore stands at: **seed local (M4), SA residual
-inherent (M5′), users unaffected (ADR-4 cache gives 0 movers).** The M1 ratchet
-(`common_emitter`=7, `rc_lowpass`=0) records it and can only ratchet down if a
-*future* non-SA mechanism is found — none is known.
-| 6 | Joint-pose construction + promoted phase 4.5 (bounded local repair). | Wall-1 flow cases (`COUT`/`RIN`) horizontal-and-clean vs the **real router**, no Tier-0/1 regression. |
+M4's seed-locality claim (a `--no-refine` seed moving 1 element on
+`common_emitter`+CB) is **withdrawn with M4**; the M1 ratchet is back at its
+pre-M4 value (`common_emitter`=8, `rc_lowpass`=0). The two findings that survive
+the revert are M5′'s (determinism/netlist-stable keying is not locality) and
+the M4 post-mortem below (the Y datum cannot be re-derived before M3).
+
+### M4 reverted — the Y datum cannot lead M3
+
+`ed51164` (M4, content-derived n-independent Y datum) was **reverted**. It
+landed with a false green: its commit message claims "all ratchet suites green"
+having enumerated `placement_quality`, `electrical_safety`,
+`placement_stability`, `wire_geometry` and `baseline_lock` — **`flow_geometry`
+was never run**, and the later working sessions compared against the session's
+own HEAD rather than pre-session `master`, so the regression stayed invisible.
+
+True bisect of `flow_geometry.rs::stub_lateral_run_within_ratchet`
+(`multivibrator` F6 budget 2), one command, one machine:
+
+| commit | state |
+|---|---|
+| `e476d2a` (pre-session master) | PASS |
+| `cec3fd2` (M2, signed footprint) | PASS |
+| `ed51164` (M4) | **FAIL — 18 cells** |
+| `619cc31` (HEAD) | FAIL — 18 cells |
+
+**Mechanism.** M4 makes each Mid sub-row datum chain as
+`next = prev + depth[prev] + max(MID_SUBROW_GAP, reach_clearance)`, so the
+16-cell floor is applied *on top of* the reserved bucket depth. On
+`multivibrator` (seed, `--no-refine`, cache off) the MidUp→MidCtr datum pitch
+goes 13 → 31 cells and MidLo follows: `RC1 19→7, RB1 29→17, C1 32→38,
+Q1 45→59`. The bias resistors `RB1`/`RB2` (MidUp) end up ~39 cells above the
+transistor bases they feed (MidLo). F6 anchors a rail stub on the *Manhattan-
+nearest* other pin of its own net; past that stretch, `RB1`'s nearest pin on
+net `b1` flips from `Q1`'s base (2 cells laterally) to the cross-coupling
+capacitor `C2` in the **other channel's column** — 18 cells laterally. The
+number F6 reports is real: net `b1` now runs 39 cells vertically and 18
+laterally instead of hanging off the base.
+
+**Why no targeted repair landed.** Two were measured, both trade one fixture
+for another (forbidden sideways under the within-tier rule), with a chaotic
+response that has no monotone structure:
+
+| variant | `common_emitter` F6 | `multivibrator` F6 | `named_rails` F6 |
+|---|---|---|---|
+| ratchet (budget) | 4 | 2 | 6 |
+| `MID_SUBROW_GAP` 16 (as landed) | 4 | **18** | 6 |
+| `MID_SUBROW_GAP` 14 | 4 | 2 | 4 |
+| `MID_SUBROW_GAP` 12 | **7** | 2 | 3 |
+| `MID_SUBROW_GAP` 10 | **5** | 2 | 4 |
+| `MID_SUBROW_GAP` 8 | 4 | 2 | **9** |
+| floor as datum *pitch*, `max(GAP, depth+reach)` | **7** | 2 | **9** |
+
+`MID_SUBROW_GAP = 14` is the only all-green row, and it passes by **one cell**
+of Manhattan tie-break margin on the very flip described above — a knife-edge,
+not a fix. The principled reformulation (treat the floor as a minimum datum
+*pitch* rather than an additive clearance, which is arguably what a
+depth-reserving chain should do) regresses two fixtures.
+
+**The finding.** ADR-19 states of M3 that "the footprint precedes any spacing
+change, it is not a follow-up", and stages the safe/precondition work ahead of
+the dangerous Y change. M4 shipped with M3 skipped. The table above is what
+that costs: with the SA gate still reading the *halo* rather than the honest
+signed footprint, every Y-spacing value lands in a different, unattributable
+basin, and there is no local argument for choosing one. **M4 is re-attemptable
+only after M3**, and its re-attempt must run `flow_geometry` (F3/F4/F5/P5/F6)
+in the gate set.
 
 **M5′ premise corrections (Fable, verified):** the SA is load-bearing for
 bends on **two** fixtures (`common_emitter` B 11→4, `opamp_inverting` B 5→3),

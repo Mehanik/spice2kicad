@@ -504,9 +504,13 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     // Newly graded: `named_rails` was absent from this file's FIXTURES
     // list until the fixture lists were unified. Measured on master,
     // zero slack; nothing moved, it was simply never counted.
-    // B 2 -> 1: ADR-19 M4's content-derived Y datum gives this fixture a
-    // straighter rail-to-signal drop. Ratchet DOWN.
-    ("named_rails", 1, 2),
+    // B is back at 2 with the ADR-19 M4 REVERT (see `docs/layout-adr.md`,
+    // "M4 reverted"). M4's content-derived Y datum had bought B 2 -> 1 on
+    // this fixture and cost `flow_geometry`'s F6 ratchet 18 cells on
+    // `multivibrator`; undoing it restores the pre-M4 measured value. This
+    // is a restoration, not a budget bump — the literal is again exactly
+    // what `master` measured before M4, and it ratchets DOWN only.
+    ("named_rails", 2, 2),
     // B 10 → 4. Phase 4.5's acceptance objective gained the V16
     // ink-graph bend count as its FINAL lexicographic key, after
     // (V13, V12, V5), so the refiner now separates orientations that tie

@@ -1430,14 +1430,12 @@ fn pack_rows(placed: &mut [PlacedElement], rows: &crate::channels::Rows, reaches
         prev_bottom = bottom + f64::from(shift[r]) * GridPoint::STEP_MM;
     }
 
-    // Apply each row's downward shift, anchoring row 0 in place. The old
-    // `- total/2` re-centre re-based every row member on the TOTAL stack
-    // growth, so adding one row moved them all (ADR-19 R-A in miniature).
-    // Anchoring row 0 makes the stack grow append-only downward; the M4
-    // band datums already leave room below Mid for that growth.
+    // Re-centre the stack on the Mid band so growing it downward does
+    // not walk the circuit off the band the rails bracket.
+    let total = shift.last().copied().unwrap_or(0);
     for (i, pe) in placed.iter_mut().enumerate() {
         if let Some(r) = rows.row[i] {
-            pe.origin = GridPoint::new(pe.origin.x, pe.origin.y + shift[r]);
+            pe.origin = GridPoint::new(pe.origin.x, pe.origin.y + shift[r] - total / 2);
         }
     }
 }
@@ -1458,15 +1456,6 @@ fn place_seed(checked: &CheckedNetlist) -> Result<(Placement, Vec<bool>), Vec<Di
 
     // Geometry constants in grid cells (1.27 mm each).
     const Y_BAND_GAP: i32 = 6; // gap from rail edge into Mid band
-    // Floor gap between the three Mid sub-rows (upper/centre/lower).
-    // Replaces the old `mid_span/4` fraction pitch, which was scaled by
-    // the *total element count* `n` and so re-based every Mid position
-    // whenever any element was added (ADR-19 R-A). Content-derived depth
-    // and reach widen it further where needed; it never narrows below
-    // this floor. Value chosen at the population median of the old
-    // n-scaled pitch (ADR-19 M4); may be tuned UP only, gated on the V16
-    // bend ratchets — never down to compact ("Y spacing is meaning").
-    const MID_SUBROW_GAP: i32 = 16;
     // Bound on the per-bucket left/right jitter (cells). Adjacent
     // layers' X positions must clear each other even after both layers
     // jitter toward one another, so the layer-spacing derivation adds
@@ -1540,9 +1529,11 @@ fn place_seed(checked: &CheckedNetlist) -> Result<(Placement, Vec<bool>), Vec<Di
     // This ordering preserves rail-above-Mid-above-rail without
     // letting `rank_in_layer` drift Power-only elements past
     // Ground-only ones (V6/T8).
-    // Band datums are content-derived and computed below, after the
-    // per-bucket sizing — see the ADR-19 M4 block. They are NOT scaled by
-    // `n`; adding an element to one column leaves other columns' bands put.
+    let n_i32 = i32::try_from(n).unwrap_or(i32::MAX);
+    let y_top: i32 = 0;
+    let y_bot: i32 = (n_i32 + 4) * Y_RANK_STRIDE;
+    let y_mid_top = y_top + Y_BAND_GAP;
+    let y_mid_bot = y_bot - Y_BAND_GAP;
 
     // Buckets: within a layer, classify each element into one of
     // five bands (Top, MidUp, MidCtr, MidLo, Bot) and stack within
@@ -1569,62 +1560,11 @@ fn place_seed(checked: &CheckedNetlist) -> Result<(Placement, Vec<bool>), Vec<Di
 
     let bucket_stride = bucket_y_strides(checked, &layer_asg.layers, &element_slot, &rows, &prefs);
 
-    // --- ADR-19 M4: content-derived, n-independent band datums ---------
-    //
-    // A band's datum is the world Y of its rank-0 row; datums chain
-    // downward by MEASURED content depth, never by the element count, so
-    // adding an element to one bucket cannot move a bucket it does not
-    // deepen. Top stacks *upward* (away from Mid) and Bot stacks
-    // *downward*, so growing either band is append-only — no datum reads
-    // their depth and the addition never shifts a sibling.
-    let reaches = vertical_reaches(checked, &prefs);
-    let slot_index = |s: Slot| -> usize {
-        match s {
-            Slot::Top => 0,
-            Slot::MidUp => 1,
-            Slot::MidCtr => 2,
-            Slot::MidLo => 3,
-            Slot::Bot => 4,
-        }
-    };
-    // Per-bucket element counts (same (layer, slot, row) key the rank and
-    // stride maps use), then per-slot stack DEPTH: the origin offset of a
-    // bucket's last element from its rank-0 origin, maxed across the
-    // slot's buckets. A 1-element bucket is 0, so the *first* addition to
-    // any bucket moves no datum.
-    let mut bucket_count: HashMap<(u32, Slot, usize), i32> = HashMap::new();
-    for (i, _e) in checked.elements.iter().enumerate() {
-        let key = (
-            layer_asg.layers[i],
-            element_slot[i],
-            rows.row[i].unwrap_or(rows.count),
-        );
-        *bucket_count.entry(key).or_insert(0) += 1;
-    }
-    let mut depth = [0_i32; 5];
-    for (key, &cnt) in &bucket_count {
-        let stride = bucket_stride.get(key).copied().unwrap_or(Y_RANK_STRIDE);
-        depth[slot_index(key.1)] = depth[slot_index(key.1)].max((cnt - 1).max(0) * stride);
-    }
-    // Per-slot reach maxima (world mm) for the inter-band clearance gaps.
-    let mut slot_up = [0.0_f64; 5];
-    let mut slot_down = [0.0_f64; 5];
-    for (i, _e) in checked.elements.iter().enumerate() {
-        let si = slot_index(element_slot[i]);
-        slot_up[si] = slot_up[si].max(reaches[i].0);
-        slot_down[si] = slot_down[si].max(reaches[i].1);
-    }
-    // Inter-band gap: the larger of a floor and the reach clearance the
-    // two adjacent rows actually need (derive-only-widens, never narrows).
-    let gap = |down_upper: f64, up_lower: f64, floor: i32| -> i32 {
-        floor.max(mm_up_to_cells(down_upper + up_lower + MIN_CLEARANCE_MM))
-    };
-    let (t, mu, mc, ml, bt) = (0usize, 1usize, 2usize, 3usize, 4usize);
-    let y_top: i32 = 0;
-    let mid_up_y = y_top + gap(slot_down[t], slot_up[mu], Y_BAND_GAP);
-    let mid_ctr_y = mid_up_y + depth[mu] + gap(slot_down[mu], slot_up[mc], MID_SUBROW_GAP);
-    let mid_lo_y = mid_ctr_y + depth[mc] + gap(slot_down[mc], slot_up[ml], MID_SUBROW_GAP);
-    let y_bot = mid_lo_y + depth[ml] + gap(slot_down[ml], slot_up[bt], Y_BAND_GAP);
+    // Reserve three sub-rows in Mid: upper / centre / lower.
+    let mid_span = (y_mid_bot - y_mid_top).max(1);
+    let mid_up_y = y_mid_top + mid_span / 4;
+    let mid_ctr_y = y_mid_top + mid_span / 2;
+    let mid_lo_y = y_mid_top + (3 * mid_span) / 4;
 
     // Per-(layer, slot, row) running rank. Rows rank independently:
     // stacking channel 2 under channel 1 inside one bucket is exactly
@@ -1658,14 +1598,11 @@ fn place_seed(checked: &CheckedNetlist) -> Result<(Placement, Vec<bool>), Vec<Di
             .copied();
         let y_stride = y_stride.unwrap_or(Y_RANK_STRIDE);
         let y = match slot {
-            // Top and Bot stack AWAY from Mid (up / down respectively) so
-            // band growth is append-only and never shifts a sibling row —
-            // the datums deliberately do not reserve their depth.
-            Slot::Top => y_top - rank * y_stride,
+            Slot::Top => y_top + rank * y_stride,
             Slot::MidUp => mid_up_y + rank * y_stride,
             Slot::MidCtr => mid_ctr_y + rank * y_stride,
             Slot::MidLo => mid_lo_y + rank * y_stride,
-            Slot::Bot => y_bot + rank * y_stride,
+            Slot::Bot => y_bot - rank * y_stride,
         };
         placed.push(PlacedElement {
             refdes: e.refdes.clone(),
@@ -1683,7 +1620,7 @@ fn place_seed(checked: &CheckedNetlist) -> Result<(Placement, Vec<bool>), Vec<Di
         });
     }
 
-    pack_rows(&mut placed, &rows, &reaches);
+    pack_rows(&mut placed, &rows, &vertical_reaches(checked, &prefs));
 
     let mut placement = Placement { elements: placed };
     let mut pinned = vec![false; n];
