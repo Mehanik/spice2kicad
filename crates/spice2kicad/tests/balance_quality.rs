@@ -277,7 +277,12 @@ const Q6_DEGENERATE_CEILING: f64 = 3.5;
 const Q6_REFERENCE: &[(&str, f64)] = &[
     ("rc_lowpass", 2.6458),
     ("rc_lowpass_ports", 2.6458),
-    ("common_emitter", 1.0000),
+    // 1.0000 -> 1.2247: the ADR-19 M4 revert (`835e073`) restored the pre-M4
+    // Y datum and this fixture's content spread with it. Informational
+    // bookkeeping, not a ratchet — the only hard gate here is
+    // `Q6_DEGENERATE_CEILING`, and 1.2247 sits far below it. Measured on
+    // `c968cbd` with `S2K_Q6_DUMP=1`; every other fixture is unchanged.
+    ("common_emitter", 1.2247),
     ("multivibrator", 1.0000),
     ("diff_pair", 1.4832),
     ("opamp_inverting", 2.6458),
