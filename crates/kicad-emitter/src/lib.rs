@@ -39,6 +39,30 @@ pub enum EmitError {
     /// detour for it — so this error path never fires there.
     #[error("V11 correctness invariant: {0}")]
     V11Violation(String),
+
+    /// V11, Tier 0 — two or more pins belonging to *different* nets
+    /// share a coordinate in the placement handed to the emitter. KiCad
+    /// joins coincident pins unconditionally, so the schematic would be
+    /// a different circuit from the source netlist.
+    ///
+    /// Unlike [`EmitError::V11Violation`] (unresolved `v11:` *wire*
+    /// residue, which the router can often detour and which is therefore
+    /// gated behind `SPICE2KICAD_V11_STRICT`), this one is
+    /// unconditional: no routing pass can move a pin, so there is no
+    /// downstream stage that could repair it and nothing to trade.
+    #[error("V11 correctness invariant (Tier 0): {0}")]
+    PinCoincidence(String),
+
+    /// Tier 0 — the emitted wires leave at least one net's pins in two
+    /// or more electrically separate islands. The file is well-formed
+    /// and opens fine; the circuit is simply not the source circuit.
+    ///
+    /// Previously this condition only printed a line on stderr and let
+    /// the emit succeed, which meant a severed net shipped silently
+    /// unless the CLI's optional `kicad-cli` connectivity check happened
+    /// to be available *and* to agree. It is now a refusal.
+    #[error("Tier-0 connectivity: {0}")]
+    DisconnectedNet(String),
 }
 
 pub fn emit_netlist(netlist: &Netlist) -> Result<String, EmitError> {

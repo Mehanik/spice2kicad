@@ -94,11 +94,28 @@ pub(super) fn refine(
                 .is_some_and(|a| a.len() < Orientation::ALL.len())
         })
         .collect();
-    // The V11-coincidence gate (which keeps the mirror-Y move from
-    // shorting two foreign pins) is engaged only when there is a
-    // V14-reoriented active device to protect; otherwise the all-passive
-    // fixtures keep their exact pre-V14 SA trajectory.
-    let gates_active = !mirror_eligible.is_empty();
+    // The V11-coincidence gate below used to be scoped to runs that had
+    // a mirror-eligible (V14-reoriented) element, on the premise that
+    // "the all-passive fixtures' V11 cleanliness is already maintained
+    // by the router". **That premise is false**, and it cost a Tier-0
+    // defect: the router can jog *wires*, but it cannot move *pins*.
+    // When two foreign-net pins land on the same coordinate,
+    // `conflict::resolve_conflicts` correctly declines to jog (jogging
+    // off a pin would disconnect it), exhausts its iteration bound, and
+    // the emitted schematic shorts the two nets. `shunt_feedback_amp`
+    // did exactly that: at the default 200 iterations the SA slid Q1's
+    // base pin onto RE's pin-1 coordinate, merging the base and emitter
+    // nets. The fixture has no rail-constrained active device, so
+    // `mirror_eligible` was empty and the one gate that would have
+    // rejected the move was switched off.
+    //
+    // The gate is therefore unconditional. It is a pure *filter* on the
+    // candidate space (CLAUDE.md constraints-vs-costs: Tier-0 and
+    // categorical ⇒ hard constraint, never a weighted term), and it only
+    // rejects moves that *raise* the coincidence count — so on every
+    // placement whose seed is already V11-clean it holds the count at
+    // zero, and on every fixture that never proposes such a move the SA
+    // trajectory stays byte-identical.
 
     // Bucket movable elements by layer so the swap-Y-rank move can pick
     // a peer cheaply. Layer index → indices of movable elements in it.
@@ -215,14 +232,12 @@ pub(super) fn refine(
         // after V14 and cost, keeping the common path cheap.
         let cost_accept = delta <= 0.0 || rng.next_f64() < (-delta / temperature.max(1e-12)).exp();
         let alive = cost_accept && !v14_infeasible;
-        // The V11 foreign-pin-coincidence gate exists to make the new
-        // mirror-Y move safe (a flip that overlaps two foreign pins is a
-        // short the router cannot undo). It is engaged only when this
-        // run actually has a mirror-eligible (V14-reoriented active)
-        // element; otherwise it is skipped so the SA trajectory of the
-        // all-passive fixtures stays byte-identical to the pre-V14 path
-        // (their V11 cleanliness is already maintained by the router).
-        let trial_coincidences = if alive && gates_active {
+        // The V11 foreign-pin-coincidence gate (Tier 0): two pins on
+        // different nets at the same coordinate are electrically joined,
+        // and no router pass can undo it. Applies to *every* move on
+        // *every* fixture — see the note at `mirror_eligible` for why
+        // the old mirror-only scoping was a defect, not an optimisation.
+        let trial_coincidences = if alive {
             foreign_pin_coincidences(&seed, checked)
         } else {
             current_coincidences

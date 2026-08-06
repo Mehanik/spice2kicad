@@ -20,8 +20,9 @@
 //! non-pinned, non-symmetry element it trial-routes each V14-allowed
 //! orientation (reusing `spice_layout::orient::allowed_orientations` — it
 //! never widens V14) and keeps a candidate ONLY if it *strictly* improves the
-//! lexicographic objective `(V13, V12, V5, bends)` without increasing V11
-//! residue, symbol-body overlap, or foreign-body (V12) crossings.
+//! lexicographic objective
+//! `(severed, coincident, V11, V13, V12, V5, bends)` — Tier-0 keys first —
+//! without increasing symbol-body overlap or foreign-body (V12) crossings.
 //!
 //! **Ordering contract for the objective** (`docs/invariants.md` V16): V16
 //! bends are the FINAL key and must stay there. They may appear in the
@@ -88,18 +89,21 @@ pub fn refine_orientations(placement: &mut Placement, library: &Library, meta: &
 
     // Baseline measurement of the placement as received.
     let mut baseline = measure(placement, library);
-    // Nothing to chase only when BOTH the Tier-1 V12 count and the
-    // Tier-2 V5 count are already zero. Returning on `v5 == 0` alone
-    // would skip the pass on a placement whose only defect is a wire
-    // speared through a body — the higher-tier problem.
-    if baseline.v5 == 0 && baseline.v12 == 0 {
+    log::debug!("refine: baseline {}", summarise(&baseline));
+    // Nothing to chase only when every count the objective can act on is
+    // already zero. Returning on `v5 == 0` alone would skip the pass on a
+    // placement whose only defect is a wire speared through a body (V12,
+    // higher tier) — or, worse, one that is Tier-0 broken: a severed net
+    // or a pin-on-pin short can exist with V5 and V12 both clean, and
+    // that is precisely the case the pass must not walk away from.
+    if is_settled(&baseline) {
         return;
     }
 
     // Greedy single-element descent first: cheap, each accepted step
     // *strictly* reduces real V5, so it converges in at most `v5` steps.
     greedy_descent(placement, library, meta, &mut baseline);
-    if baseline.v5 == 0 && baseline.v12 == 0 {
+    if is_settled(&baseline) {
         return;
     }
 
@@ -112,6 +116,16 @@ pub fn refine_orientations(placement: &mut Placement, library: &Library, meta: &
     // zero-V5 combination, so its worst-case cost binds only when no full
     // fix exists.
     joint_search(placement, library, meta, &mut baseline);
+    log::debug!("refine: final {}", summarise(&baseline));
+}
+
+/// One-line rendering of a [`Measure`] for the debug log, in objective
+/// order. Cheap: it reads counts already computed, never re-routes.
+fn summarise(m: &Measure) -> String {
+    format!(
+        "severed={} coincident={} v11={} v13={} v12={} v5={} bends={} (overlap={})",
+        m.severed, m.coincident, m.v11, m.v13, m.v12, m.v5, m.bends, m.overlap
+    )
 }
 
 /// Phase 4.5's acceptance predicate: may the candidate measurement `m`
@@ -120,38 +134,105 @@ pub fn refine_orientations(placement: &mut Placement, library: &Library, meta: &
 /// Two mechanisms, and which one a property uses is load-bearing
 /// (CLAUDE.md, "Constraints vs. costs"):
 ///
-/// 1. **The lexicographic objective** `(v13, v12, v5, bends)` — the
-///    *continuous quality gradients*, in strict tier order: Tier-1 V13
-///    and V12 lead, Tier-2 V5 next, V16 bends LAST. A candidate must
-///    strictly improve this tuple to be considered at all. The ordering
-///    contract on `bends` is documented at the module head and in
-///    `docs/invariants.md` V16: bends must stay the final key.
+/// 1. **The lexicographic objective**
+///    `(severed, coincident, v11, v13, v12, v5, bends)` — read in strict
+///    CLAUDE.md tier order: **Tier-0 first** (`severed`, `coincident`,
+///    `v11`), then Tier-1 (`v13`, `v12`), then Tier-2 (`v5`, and V16
+///    `bends` LAST). A candidate must strictly improve this tuple to be
+///    considered at all. The ordering contract on `bends` is documented
+///    at the module head and in `docs/invariants.md` V16: bends must
+///    stay the final key.
 ///
-/// 2. **Hard non-regression guards** — `severed` / `v11` / `overlap` /
-///    `v12`, each `<=` its baseline. These are *categorical* properties
-///    with one correct answer, so they filter the candidate space
-///    outright rather than trading against anything.
+/// 2. **Hard non-regression guards** — `overlap` / `v12`, each
+///    `<=` its baseline. These are *categorical* properties with one
+///    correct answer, so they filter the candidate space outright rather
+///    than trading against anything. They are lifted for — and *only*
+///    for — a candidate that strictly repairs Tier 0, which is the one
+///    trade CLAUDE.md's ordering rule mandates rather than forbids.
 ///
-/// `severed` (Tier-0 connectivity) is deliberately in group 2 and MUST
-/// NOT be moved into the tuple. As a guard it is untradeable: no amount
-/// of V13/V12/V5/bend improvement can buy a severed net. As a tuple key
-/// it would become tradeable in the `best`-selection comparison the
-/// callers run over accepted candidates, and — worse — a *reduction* in
-/// `severed` could then outrank a Tier-1 V13/V12 regression. There is
-/// nothing to seek here: connectivity is a floor, not a gradient.
+/// ## Why the two Tier-0 counts lead the tuple
 ///
-/// Demonstrated hazard this guard closes: on `common_emitter`, rotating
-/// `COUT` to 180 boxes its `c` pin between a foreign pin (V11 blocks one
-/// L-route) and `Q1`'s body (V12 blocks the other); the router's
-/// conflict cascade exhausts its detours and drops the branch, and the
-/// CLI's post-emit connectivity check refuses the file. See
+/// Both used to be `<=` guards, and an earlier revision of this comment
+/// argued `severed` *must* stay one, on the reasoning that as a tuple key
+/// "a *reduction* in `severed` could outrank a Tier-1 V13/V12
+/// regression". That reasoning inverts CLAUDE.md's ordering rule. The
+/// rule is "never trade a Tier-0 violation for any Tier-1/2 gain" — it
+/// forbids *losing* Tier 0 to buy Tier 1, and mandates exactly the
+/// opposite direction: a Tier-0 repair outranks any Tier-1 cost.
+///
+/// As leading keys the two counts subsume their old guards — a candidate
+/// with a higher `severed` or `coincident` is strictly greater in the
+/// tuple and rejected however much V13/V12/V5/bend it saves — and they
+/// additionally make a Tier-0 defect something this phase can *seek*.
+/// That is the difference that mattered: on `shunt_feedback_amp` the SA
+/// handed phase 4.5 a placement with **two severed signal nets**, and
+/// because `severed` was only a floor, the phase had no reason to repair
+/// it. It repaired it by accident instead — rotating `Q1` into the one
+/// pose that reconnects the nets by putting `Q1`'s base pin exactly on
+/// `RE`'s pin, i.e. by *shorting the base to the emitter*. Every metric
+/// the tuple could see improved. With Tier 0 leading, the phase looks
+/// for a pose that fixes the severance without the short, and `Q1`'s
+/// upright R0 pose is one.
+///
+/// The blast radius of putting them in front is provably nil for a
+/// placement that is not already Tier-0 broken: when `severed` and
+/// `coincident` are 0 on both sides the comparison falls straight
+/// through to `(v13, v12, v5, bends)`. All eleven pre-existing fixtures
+/// measure 0/0 at both baseline and final.
+///
+/// `coincident` also closes a hole neither `v11` nor `overlap` covered:
+/// `v11` counts *wire*-touches-foreign-pin warnings, and the router
+/// emits none when two **pins** coincide (there is no wire it could
+/// detour); `overlap` uses strict body-bbox interiors, so two bodies
+/// that merely kiss — exactly what abutting pin tips look like — are not
+/// an overlap. A reorientation that shorted two nets therefore scored as
+/// a clean improvement.
+///
+/// Demonstrated hazard the `severed` term closes: on `common_emitter`,
+/// rotating `COUT` to 180 boxes its `c` pin between a foreign pin (V11
+/// blocks one L-route) and `Q1`'s body (V12 blocks the other); the
+/// router's conflict cascade exhausts its detours and drops the branch,
+/// and the CLI's post-emit connectivity check refuses the file. See
 /// `severed_guard_tests`.
 fn accepts(baseline: &Measure, m: &Measure) -> bool {
-    (m.v13, m.v12, m.v5, m.bends) < (baseline.v13, baseline.v12, baseline.v5, baseline.bends)
-        && m.severed <= baseline.severed
-        && m.v11 <= baseline.v11
-        && m.overlap <= baseline.overlap
-        && m.v12 <= baseline.v12
+    if objective(m) >= objective(baseline) {
+        return false;
+    }
+    // A candidate that strictly repairs Tier 0 is taken even if a Tier-1
+    // guard would otherwise veto it. This is CLAUDE.md ordering rule 1
+    // read in the direction it actually points: "never trade a Tier-0
+    // violation for any Tier-1/2 gain" forbids losing Tier 0 to buy
+    // Tier 1, and therefore requires paying Tier 1 to recover Tier 0. It
+    // is unreachable on a placement that is not already Tier-0 broken.
+    if tier0(m) < tier0(baseline) {
+        return true;
+    }
+    m.overlap <= baseline.overlap && m.v12 <= baseline.v12
+}
+
+/// The lexicographic objective tuple — see [`accepts`] for the ordering
+/// contract. Used both by the acceptance predicate and by the
+/// `best`-candidate selection, so the two can never disagree.
+fn objective(m: &Measure) -> (usize, usize, usize, usize, usize, usize, usize) {
+    (m.severed, m.coincident, m.v11, m.v13, m.v12, m.v5, m.bends)
+}
+
+/// The Tier-0 prefix of [`objective`]: connectivity, pin-on-pin shorts,
+/// and unresolved wire-on-foreign-pin residue. All three are V11/V2
+/// correctness, so the Tier-1 guard exemption in [`accepts`] must NOT
+/// reach them — lifting `v11` for a `severed` repair would be trading
+/// Tier 0 for Tier 0, and it measurably was: phase 4.5 answered
+/// `shunt_feedback_amp`'s two severed nets with a pose that left one
+/// unresolved `v11:` residue behind.
+fn tier0(m: &Measure) -> (usize, usize, usize) {
+    (m.severed, m.coincident, m.v11)
+}
+
+/// Is there nothing left for this phase to chase? True only when every
+/// count the objective can act on is zero — Tier 0 included, so a
+/// severed or shorted placement is never mistaken for a finished one.
+fn is_settled(m: &Measure) -> bool {
+    tier0(m) == (0, 0, 0) && m.v5 == 0 && m.v12 == 0
 }
 
 /// Greedy single-element orientation descent: repeatedly pick, for each
@@ -184,7 +265,18 @@ fn greedy_descent(
             let refdes = &placement.elements[i].refdes;
             let is_v5_offender = baseline.offenders.iter().any(|v| &v.refdes == refdes);
             let is_v12_offender = baseline.v12_offenders.contains(refdes);
-            if !is_v5_offender && !is_v12_offender {
+            // Tier-0 repair mode: when the placement arrives severed or
+            // shorted, the at-risk filter does not apply. Neither
+            // `offenders` nor `v12_offenders` names the element whose
+            // pose would reconnect a dropped branch — the V5/V12
+            // violations sit on the *wires*, and the element to rotate
+            // may have none of its own. Restricting the sweep to
+            // offenders is a cost bound for a healthy placement; on a
+            // broken one it would hide the only available repair. Costs
+            // a full sweep of trial routes, and only ever on a placement
+            // the CLI would otherwise refuse to ship.
+            let tier0_repair = tier0(baseline) != (0, 0, 0);
+            if !tier0_repair && !is_v5_offender && !is_v12_offender {
                 continue;
             }
 
@@ -243,9 +335,7 @@ fn greedy_descent(
                 if accepts(baseline, &m) {
                     let take = match &best {
                         None => true,
-                        Some((_, bm)) => {
-                            (m.v13, m.v12, m.v5, m.bends) < (bm.v13, bm.v12, bm.v5, bm.bends)
-                        }
+                        Some((_, bm)) => objective(&m) < objective(bm),
                     };
                     if take {
                         best = Some((cand, m));
@@ -257,7 +347,7 @@ fn greedy_descent(
                 placement.elements[i].orientation = orient;
                 *baseline = m;
                 improved_this_sweep = true;
-                if baseline.v13 == 0 && baseline.v12 == 0 && baseline.v5 == 0 {
+                if is_settled(baseline) && baseline.v13 == 0 {
                     return;
                 }
             }
@@ -396,7 +486,7 @@ fn joint_search(
         if accepts(baseline, &m) {
             let take = match &best {
                 None => true,
-                Some((_, bm)) => (m.v13, m.v12, m.v5, m.bends) < (bm.v13, bm.v12, bm.v5, bm.bends),
+                Some((_, bm)) => objective(&m) < objective(bm),
             };
             if take {
                 // Stop only when NOTHING is left to improve on ANY key,
@@ -477,6 +567,23 @@ struct Measure {
     /// in the `best`-selection comparison; as a `<=` guard it is instead
     /// excluded from the candidate space outright.
     severed: usize,
+    /// Tier-0 **short** count: places where two different nets end up
+    /// electrically joined by geometry no later pass can separate —
+    /// pin-on-pin (including a rail glyph's anchor pin), plus a wire
+    /// running through a rail glyph's anchor pin. See
+    /// [`crate::schematic::tier0_short_count`] for both hazards.
+    ///
+    /// A pure non-regression guard, alongside `severed` and for the same
+    /// reason: this is a categorical floor, not a gradient. It is also
+    /// the one hazard the `v11` field CANNOT see. `v11` counts the
+    /// router's `v11:` warnings — *wires* that still touch a foreign
+    /// pin — and the router emits none for a pin-on-pin overlap, because
+    /// there is no detour it could even attempt. Rotating an element
+    /// moves its pins, so phase 4.5 can create the overlap outright:
+    /// on `shunt_feedback_amp` it reoriented `Q1` until its base pin sat
+    /// exactly on `RE`'s pin 1, merging the base and emitter nets, and
+    /// every other metric in `Measure` reported an improvement.
+    coincident: usize,
     offenders: Vec<Violation>,
     v12_offenders: Vec<String>,
 }
@@ -495,6 +602,7 @@ fn measure(placement: &Placement, library: &Library) -> Measure {
         v5: offenders.len(),
         v11: route.v11_count,
         severed: route.severed,
+        coincident: route.shorts,
         overlap,
         v12,
         v13,
@@ -970,15 +1078,26 @@ mod tests {
     }
 }
 
-/// Tier-0 connectivity guard in phase 4.5's acceptance predicate.
+/// The two Tier-0 terms of phase 4.5's acceptance predicate.
 ///
-/// The hazard: the predicate scores `(v13, v12, v5, bends)` and guards
-/// `v11` / `overlap` / `v12`, none of which can see a net the router
-/// gave up on. A candidate orientation that boxes a pin in between a
-/// foreign pin (V11 blocks one L-route) and a symbol body (V12 blocks
-/// the other) makes the router's conflict cascade exhaust its detours
-/// and drop the branch — while every metric the predicate *can* see
-/// improves. `Measure::severed` closes that, as a hard guard.
+/// The predicate's Tier-1/2 half — `(v13, v12, v5, bends)` scored,
+/// `v11` / `overlap` / `v12` guarded — is blind to both ways a
+/// reorientation can produce an electrically wrong schematic:
+///
+///  * **`severed`.** A candidate that boxes a pin in between a foreign
+///    pin (V11 blocks one L-route) and a symbol body (V12 blocks the
+///    other) makes the router's conflict cascade exhaust its detours and
+///    drop the branch — while every metric the predicate *can* see
+///    improves.
+///  * **`coincident`.** A candidate that lands two foreign nets' pins on
+///    one coordinate shorts them, and no router pass can undo it (the
+///    router moves wires, not pins). It emits no `v11:` warning, because
+///    there is no wire it could detour, and two bodies whose pin tips
+///    abut do not strictly overlap — so `v11` and `overlap` both read
+///    clean.
+///
+/// Both are the LEADING keys of the objective, which makes them
+/// untradeable downward *and* seekable upward — see [`accepts`].
 #[cfg(test)]
 mod severed_guard_tests {
     use super::{Measure, accepts, measure, refine_orientations};
@@ -1006,12 +1125,28 @@ mod severed_guard_tests {
             v5,
             v11: 0,
             severed,
+            coincident: 0,
             overlap: 0,
             v12,
             v13,
             bends,
             offenders: Vec::new(),
             v12_offenders: Vec::new(),
+        }
+    }
+
+    /// As [`m`], with the Tier-0 pin-on-pin count set too.
+    fn m_coinc(
+        v13: usize,
+        v12: usize,
+        v5: usize,
+        bends: usize,
+        severed: usize,
+        coincident: usize,
+    ) -> Measure {
+        Measure {
+            coincident,
+            ..m(v13, v12, v5, bends, severed)
         }
     }
 
@@ -1040,23 +1175,81 @@ mod severed_guard_tests {
         );
     }
 
-    /// `severed` is a GUARD, not a key of the lexicographic objective.
+    /// `severed` is the LEADING key of the objective, and a Tier-0
+    /// repair outranks a Tier-1 regression.
     ///
-    /// If it were a key, a candidate that *reduces* `severed` would be
-    /// able to outrank a Tier-1 V13/V12 regression. As a `<=` guard it
-    /// cannot: reducing `severed` buys nothing, because the objective
-    /// tuple must still strictly improve on its own.
+    /// This test previously asserted the opposite ("a `severed`
+    /// reduction must not buy a Tier-1 V13 regression"), on the reading
+    /// that connectivity is "a floor to hold, never a gradient to
+    /// trade". That reading inverts CLAUDE.md's ordering rule, which is
+    /// explicitly asymmetric: rule 1 is "never trade a **Tier-0
+    /// violation** for any Tier-1/2 gain", i.e. Tier 0 must be satisfied
+    /// *first*, and paying Tier 1 to recover Tier 0 is the mandated
+    /// direction, not the forbidden one. Held as a floor, `severed`
+    /// meant that a placement arriving at phase 4.5 already severed had
+    /// no route back: on `shunt_feedback_amp` the phase could only
+    /// repair the severance *by accident*, and the accident it found was
+    /// rotating `Q1` until its base pin sat on `RE`'s — a Tier-0 short
+    /// traded for a Tier-0 severance.
+    ///
+    /// Note both readings agree whenever the baseline is Tier-0 clean,
+    /// which is every fixture in [`FIXTURES`]; the change is reachable
+    /// only on a placement the CLI would otherwise refuse to ship.
     #[test]
-    fn severed_is_a_guard_not_an_objective_key() {
+    fn a_tier0_repair_outranks_a_tier1_regression() {
         let baseline = m(0, 0, 1, 4, 1);
-        // Tier-1 V13 regresses; `severed` falls 1 → 0. A tuple key would
-        // let the connectivity gain pay for the V13 loss.
-        let tier1_regression = m(3, 0, 1, 4, 0);
+        // Tier-1 V13 regresses 0 → 3; `severed` falls 1 → 0.
+        let tier0_repair = m(3, 0, 1, 4, 0);
         assert!(
-            !accepts(&baseline, &tier1_regression),
-            "a `severed` reduction must not buy a Tier-1 V13 regression — \
-             connectivity is a floor to hold, never a gradient to trade"
+            accepts(&baseline, &tier0_repair),
+            "reconnecting a severed net outranks a Tier-1 V13 cost — CLAUDE.md \
+             tier rule 1 forbids the *other* direction, not this one"
         );
+    }
+
+    /// The forbidden direction, which is the half that has not changed:
+    /// no Tier-1/2 gain buys a Tier-0 loss.
+    #[test]
+    fn a_tier1_gain_never_buys_a_tier0_loss() {
+        let baseline = m(3, 1, 5, 9, 0);
+        assert!(
+            !accepts(&baseline, &m(0, 0, 0, 0, 1)),
+            "a candidate that severs a net is refused however much V13/V12/V5/\
+             bends improve"
+        );
+        assert!(
+            !accepts(&baseline, &m_coinc(0, 0, 0, 0, 0, 1)),
+            "a candidate that lands two foreign nets' pins on one coordinate is \
+             refused however much V13/V12/V5/bends improve"
+        );
+    }
+
+    /// A pin-on-pin short is invisible to every OTHER field of
+    /// [`Measure`], which is why it needed its own term: `v11` counts
+    /// router `v11:` *wire* warnings (none are emitted for coincident
+    /// pins — there is no wire to detour) and `overlap` uses strict body
+    /// interiors (abutting pin tips do not overlap). Without
+    /// `coincident` the shorting candidate below is a clean win.
+    #[test]
+    fn a_pin_on_pin_short_is_invisible_without_the_coincident_term() {
+        let baseline = m(1, 1, 3, 9, 0);
+        let shorting = m_coinc(0, 0, 1, 4, 0, 1);
+        assert_eq!(
+            (shorting.v11, shorting.overlap),
+            (baseline.v11, baseline.overlap),
+            "the short leaves v11 and overlap untouched — that is the hole"
+        );
+        assert!(
+            accepts(
+                &baseline,
+                &Measure {
+                    coincident: 0,
+                    ..shorting.clone()
+                }
+            ),
+            "control: the same candidate without the short is accepted"
+        );
+        assert!(!accepts(&baseline, &shorting));
     }
 
     /// Build a fixture's placement exactly as the CLI does
@@ -1138,14 +1331,14 @@ mod severed_guard_tests {
             "the severed-net guard must reject the demonstrated COUT rot-180 \
              candidate"
         );
-        // …and it is the `severed` GUARD that must do the rejecting, not
-        // the objective tuple happening to disagree as well. Master's SA
-        // is what makes the tuple disagree here — that coincidence is
+        // …and it must be the `severed` TERM that does the rejecting,
+        // not the Tier-1/2 tuple happening to disagree as well. Master's
+        // SA is what makes it disagree here — that coincidence is
         // precisely the mask this defect was hiding behind, and any
         // future placer change can remove it. So re-ask the predicate
-        // with the REAL measured `severed` count but an objective tuple
+        // with the REAL measured `severed` count but a Tier-1/2 tail
         // that strictly improves, i.e. the situation the ADR observed
-        // under compaction: the guard must still refuse.
+        // under compaction: the leading key must still refuse.
         let tempting = Measure {
             v13: base.v13,
             v12: base.v12,
@@ -1166,8 +1359,9 @@ mod severed_guard_tests {
         );
         assert!(
             !accepts(&base, &tempting),
-            "the `severed` guard — not the objective — is what must reject the \
-             COUT rot-180 candidate; without it phase 4.5 ships a broken netlist"
+            "the leading `severed` key — not the Tier-1/2 tail — is what must \
+             reject the COUT rot-180 candidate; without it phase 4.5 ships a \
+             broken netlist"
         );
     }
 
@@ -1189,5 +1383,64 @@ mod severed_guard_tests {
                 "{name}: phase 4.5 accepted an orientation that disconnects a net"
             );
         }
+    }
+
+    /// The Tier-0 case this reordering was built for, end to end.
+    ///
+    /// `shunt_feedback_amp` is the one fixture whose SA end-state (at the
+    /// default 200 iterations) hands phase 4.5 a placement that is
+    /// **already Tier-0 broken** — two signal nets severed. It is still a
+    /// defect lock (`spice2kicad/tests/f0_defects.rs`), because the
+    /// placement is not repairable by orientation alone; what this test
+    /// pins down is that phase 4.5 does not make it *worse*, which is
+    /// exactly what it used to do.
+    ///
+    /// Three assertions, each load-bearing:
+    ///
+    ///  * the incoming placement really is severed, so this exercises the
+    ///    repair path rather than a clean no-op. If the placer is ever
+    ///    fixed so the seed arrives clean, this fires and tells you to
+    ///    retire the test instead of letting it rot into a tautology;
+    ///  * phase 4.5 reconnects the severed nets. Under the old objective
+    ///    — Tier-1/2 tuple scored, `severed` held as a floor it could
+    ///    never *seek* — it had no reason to;
+    ///  * it does **not** reconnect them by shorting. The repair the old
+    ///    objective stumbled into was rotating `Q1` until its base pin sat
+    ///    exactly on `RE`'s pin 1, merging base into emitter: a Tier-0
+    ///    short bought with a Tier-0 severance.
+    ///
+    /// A `v11` residue remains (the `c` trunk terminating on `RC`'s `vcc`
+    /// pin), and the final assertion is its unexpected-pass tripwire: the
+    /// day it reaches zero the fixture is convertible and belongs in the
+    /// graded suite.
+    #[test]
+    fn shunt_feedback_amp_tier0_repair_does_not_short() {
+        let (mut placement, library, meta) = fixture("shunt_feedback_amp");
+        let before = measure(&placement, &library);
+        assert!(
+            before.severed > 0,
+            "the placement entering phase 4.5 is no longer severed — the SA-side \
+             defect this test exercises is gone, so retire the test (or re-point \
+             it) instead of leaving a tautology behind"
+        );
+        assert_eq!(
+            before.coincident, 0,
+            "the placer must not hand phase 4.5 a pin-on-pin short"
+        );
+
+        refine_orientations(&mut placement, &library, &meta);
+
+        let after = measure(&placement, &library);
+        assert_eq!(after.severed, 0, "phase 4.5 must repair the severed nets");
+        assert_eq!(
+            after.coincident, 0,
+            "…and must not repair them by shorting two pins together"
+        );
+        assert!(
+            after.v11 > 0,
+            "UNEXPECTED PASS: no V11 residue is left on `shunt_feedback_amp`. The \
+             remaining Tier-0 defect is FIXED — promote the fixture out of \
+             tests/f0_defects.rs into the graded suite and re-point this test."
+        );
     }
 }

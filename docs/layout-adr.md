@@ -3559,3 +3559,160 @@ page-pan-normalized user-symbol movement is `rc_lowpass` **0** and
 `common_emitter` **8**. Milestones 2–6 are a plan; each returns for
 sign-off before it lands.
 
+
+## ADR-20 — Tier 0 leads phase 4.5's objective; the `shunt_feedback_amp` Tier-0 short
+
+**Status:** landed (the acceptance-predicate + oracle changes); the
+remaining `shunt_feedback_amp` defect is diagnosed and **owner-gated**
+(it is R-5, see "Root cause" below).
+
+### The report
+
+`shunt_feedback_amp` — a textbook shunt-feedback CE amplifier — converted
+at default settings into a schematic that **shorted the transistor's base
+net to its emitter net**, and the CLI's own post-emit connectivity check
+rejected it. `--refine-iterations` 0/1/20/40/60/80/100/400 converted
+cleanly; 150 and 200 (the default) failed. Not a gradient — one specific
+SA end-state.
+
+### Mechanism, precisely
+
+1. At 200 iterations the SA lands `Q1` at `(46.99, 45.72)`, and the
+   placement reaching layout phase 4.5 **already has two severed signal
+   nets** (`severed = 2`, measured by phase 4.5's real-router oracle).
+   Nothing after the placer can move an element, so this is a *placer*
+   defect, not a router one.
+2. Phase 4.5's acceptance predicate scored `(v13, v12, v5, bends)` and
+   held `severed` as a **floor** — a `<=` guard it could never *seek*.
+   With the incoming baseline already at 2, the phase had no reason to
+   repair the severance, and the repair it stumbled into (because it
+   improved the Tier-1/2 tuple) was rotating `Q1` until its **base pin sat
+   exactly on `RE`'s pin 1**.
+3. Two pins of different nets on one coordinate is a short **no router
+   pass can undo**: `spice-route` moves wires, not pins, and
+   `conflict::resolve_conflicts` deliberately declines to jog a wire
+   endpoint that sits on a pin (that would disconnect the pin). It burned
+   its whole derived iteration bound, emitted `conflict: … endpoint
+   conflicts left after 6 resolve iterations` as a **warning**, and the
+   emitter wrote coincident geometry.
+4. The only thing that turned this into a non-zero exit was the CLI's
+   *optional* post-emit `kicad-cli` connectivity check — skipped by
+   `--no-verify` and skipped entirely on a machine without KiCad. On such
+   a machine the converter shipped a wrong circuit silently.
+
+### What the earlier reading got wrong
+
+The defect lock originally read this as "the router's conflict-resolution
+cascade cannot legalise the SA's placement". True, but it names the
+*victim*. The cascade behaved correctly at every step; what was missing
+was that **three separate stages had no term for the hazard**:
+
+* the SA's V11 foreign-pin-coincidence gate was scoped off
+  (`gates_active = !mirror_eligible.is_empty()`) on the premise that
+  all-passive fixtures' "V11 cleanliness is already maintained by the
+  router" — false for pin-on-pin, which the router cannot touch;
+* phase 4.5's `v11` term counts the router's `v11:` *wire* warnings, of
+  which a pin-on-pin overlap produces none, and its `overlap` term uses
+  strict body interiors, so two bodies whose pin tips abut read clean;
+* phase 4.5's oracle routed against a **smaller obstacle set** than the
+  real emit path (it omitted rail-glyph bodies), and had no model at all
+  of rail-glyph *anchor pins*, which are live.
+
+### Decisions
+
+**D1. The two Tier-0 counts lead the lexicographic objective.** It is now
+`(severed, coincident, v11, v13, v12, v5, bends)`. As leading keys they
+subsume their old `<=` guards *and* become seekable. The previous comment
+argued `severed` must stay a guard because "a reduction in `severed` could
+outrank a Tier-1 V13 regression" — that inverts CLAUDE.md's ordering rule,
+which is asymmetric: rule 1 forbids trading a *Tier-0 violation* away for
+Tier-1/2 gain, and therefore mandates paying Tier 1 to recover Tier 0. The
+Tier-1 guards (`overlap`, `v12`) are lifted only for a candidate that
+strictly improves the Tier-0 prefix.
+
+`v11` sits in the Tier-0 prefix, not among the lifted guards. Exempting it
+for a `severed` repair is trading Tier 0 for Tier 0 — measured: the first
+version of this change answered the two severed nets with a pose carrying
+one unresolved `v11:` residue.
+
+**Blast radius: nil by construction and by measurement.** When both Tier-0
+counts are 0 on each side the comparison falls straight through to the old
+tuple. All eleven graded fixtures measure `severed = coincident = v11 = 0`
+at both baseline and final, and all eleven emit **byte-identical**
+`.kicad_sch` before and after.
+
+**D2. `coincident` measures what KiCad joins, including glyph pins.**
+`schematic::tier0_short_count` counts (a) pin-on-pin across nets, host
+pins *and* rail-glyph anchor pins, and (b) a wire touching a rail-glyph
+anchor beyond its own stub. (b) needs no net attribution: rail nets are
+drawn as glyphs, not trunks (V10), so an anchor's legitimate wire budget is
+at most one incident end and never a crossing. Endpoints count, not just
+interiors — the short that survived the interior-only version was the `c`
+trunk *turning a corner* on `RC`'s `+12V` anchor.
+
+`spice_route::rails::glyph_anchor` is exported for this: the anchor offset
+rule is decoration geometry and must have one definition.
+
+**D3. Phase 4.5's oracle routes against the real obstacle set.** It now
+appends `rail_glyph_body_bboxes`, as `emit_root` does. ADR-16 rejected
+*freezing* the oracle precisely to avoid optimising against a router that
+does not exist; an oracle that sees fewer obstacles than the real one is
+the same failure in a quieter form. Verified faithful afterwards: for the
+final `shunt_feedback_amp` placement the trial route's 19 segments are
+**identical** to the emitted wires modulo the page shift.
+
+**D4. Two Tier-0 conditions are now refusals, not log lines.**
+
+* *Pin-on-pin* (`EmitError::PinCoincidence`) — checked in `route_nets`
+  before a wire is routed, unconditional, no external tool needed, and
+  deliberately **not** behind `SPICE2KICAD_V11_STRICT` (that env-gate
+  covers repairable `v11:` wire residue).
+* *Severed net* (`EmitError::DisconnectedNet`) — `report_disconnected_nets`
+  used to print `ERROR: net "c" is not fully connected` and then return
+  `Ok`. Measured: a `shunt_feedback_amp` pose printed exactly that and
+  **exited 0**. A converter that has already told you the circuit is wrong
+  must not also tell the shell it succeeded.
+
+**D5. The SA's V11 gate is unconditional.** The `mirror_eligible` scoping
+was an optimisation resting on a false premise. Byte-identical output on
+all eleven fixtures: a filter that only rejects coincidence-*increasing*
+moves is inert wherever no such move is proposed.
+
+### Root cause of the residual — R-5, and why it stops here
+
+With D1–D3 in place the base/emitter short is gone (`severed` 2 → 0,
+`coincident` 0), but `shunt_feedback_amp` still does not convert: one
+`v11:` residue remains, the `c` trunk terminating on `RC`'s own `vcc` pin.
+**All eight V14-allowed poses of `Q1` were enumerated against the real
+router at this position; every one scores non-zero on at least one Tier-0
+count.** Orientation is not a sufficient lever here — the lever is
+position, and phase 4.5 owns orientation only.
+
+The reason the position is unroutable is the deferred **R-5 rail-pin**
+defect: `RC` and `RB` are placed with their rail pin facing *into* the
+circuit (`RC` is rot 180, so its `vcc` pin is its lower pin), and the
+`+12V` glyph therefore hangs **downward into the routing channel** the
+collector and emitter trunks need.
+`placement_quality::v14_rail_pin_faces_rail` measures exactly this and
+flags the fixture (`#PWR3` below `RB`'s body centre).
+
+R-5 is owner-gated: CLAUDE.md records that the R-5 fix "could not land
+because it tripped a single fixture's Tier-1 ratchet", and the
+global-improvement escape requires owner sign-off. **This ADR contributes
+new evidence for that decision: on `shunt_feedback_amp` R-5 escalates from
+a Tier-1 aesthetic defect to a Tier-0 correctness failure.** It is no
+longer only about how the page reads.
+
+Until that lands, `shunt_feedback_amp` stays a defect lock in
+`crates/spice2kicad/tests/f0_defects.rs` — with a corrected diagnosis and
+the same unexpected-pass tripwire — and the converter **refuses** rather
+than shipping the wrong circuit.
+
+### Measurement artifact worth recording
+
+An early probe drove `Q1` through all eight poses via the ADR-4 layout
+sidecar and reported `rot 0 + mirror-Y` as **clean** (exit 0). It is not:
+that pose emits `v11: … 1 interior foreign-pin coincidence` and a severed
+`c` net. The probe read the CLI's exit code, which at the time was 0 for a
+severed net (see D4). MEMORY "verify what a number measures" again: the
+control arm was the thing under test.

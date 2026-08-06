@@ -240,6 +240,28 @@ fn outward_delta(dir: Direction) -> (f64, f64) {
     }
 }
 
+/// World coordinate of the anchor **pin** of the `power:*` glyph this
+/// stage will draw for `pin`.
+///
+/// A rail glyph carries a single pin at its anchor, so this coordinate
+/// is electrically live: KiCad joins anything that lands on it. That
+/// makes it a V11 (Tier-0) hazard the *signal* router cannot see —
+/// `foreign_pin_sets` is built from `NetSpec::pins`, i.e. host-symbol
+/// pins, and a glyph anchor is derived geometry that does not exist
+/// until this stage runs. Callers that need to reason about V11 before
+/// decoration (phase 4.5's orientation refinement) must ask for it here
+/// rather than re-deriving the offset rule, which is the whole point of
+/// exporting it.
+///
+/// Usually the anchor is the host pin itself; it is offset one cell (or
+/// [`SHEET_EDGE_GLYPH_OFFSET_CELLS`]) outward in the forced-sideways and
+/// sheet-edge cases — see [`glyph_offset`].
+#[must_use]
+pub fn glyph_anchor(pin: &PinRef, class: NetClass, negative_rail: bool) -> (f64, f64) {
+    let (x, y, _rot) = symbol_pose(pin, canonical_axis(class, negative_rail));
+    (x, y)
+}
+
 /// Compute (x, y, rotation_degrees) for the power symbol's anchor pin.
 ///
 /// V14 locks the glyph rotation to its conventional orientation (rot 0

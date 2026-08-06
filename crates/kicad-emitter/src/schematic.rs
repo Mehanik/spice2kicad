@@ -304,8 +304,17 @@ pub fn emit_root(
     nudge_property_text(&mut items, placement, library);
     nudge_power_glyph_value_text(&mut items, placement, library);
 
-    // Correctness self-check, after every wire is final.
-    report_disconnected_nets(&items, &net_pins, None, &rail_tags);
+    // Correctness self-check, after every wire is final. This is a hard
+    // stop, not a log line. It used to *print* `ERROR: … is not fully
+    // connected` and then return `Ok`, so the only thing that turned a
+    // severed net into a non-zero exit was the CLI's optional post-emit
+    // `kicad-cli` connectivity check — skipped by `--no-verify`, skipped
+    // on any machine without KiCad installed, and demonstrably not
+    // equivalent: a `shunt_feedback_amp` placement was measured emitting
+    // a severed `c` net, printing this ERROR, and exiting 0.
+    // V11/V2 are Tier-0 correctness; a converter that refuses beats one
+    // that ships a schematic it has already told you is wrong.
+    report_disconnected_nets(&items, &net_pins, None, &rail_tags)?;
 
     let mut root = Sexpr::List(items);
     let shift = translate_into_page(&mut root, preferred_shift);
@@ -466,7 +475,7 @@ pub fn emit_child_sheet(
     nudge_property_text(&mut items, child.placement, library);
     nudge_power_glyph_value_text(&mut items, child.placement, library);
 
-    report_disconnected_nets(&items, &net_pins, Some(&child.name), &child_rail_tags);
+    report_disconnected_nets(&items, &net_pins, Some(&child.name), &child_rail_tags)?;
 
     let mut root = Sexpr::List(items);
     let shift = translate_into_page(&mut root, preferred_shift);
@@ -1405,6 +1414,46 @@ pub(crate) fn collect_net_pins(
     nets
 }
 
+/// Every world coordinate at which pins belonging to **two or more
+/// distinct nets** land, with the net names that meet there.
+///
+/// This is the Tier-0 / V11 short hazard in its most literal form.
+/// KiCad joins any two pins that share a coordinate, so such a
+/// placement is a short *no router pass can undo*: `spice-route`'s
+/// conflict resolver can jog a wire, but it cannot move a pin, and it
+/// deliberately declines to jog a wire endpoint that sits on a pin
+/// (jogging there would disconnect that pin). The result is the
+/// resolver exhausting its iteration bound and the emitter writing
+/// coincident geometry anyway — which is how `shunt_feedback_amp` came
+/// to merge its base and emitter nets.
+///
+/// Measured on the *emitted* pin set (`collect_net_pins`), so it is
+/// exactly what KiCad will see: `;@ power` sources are already excluded
+/// (they draw no symbol), and pins on the *same* net coinciding is
+/// connectivity, not a short.
+///
+/// Deterministic order: coordinates ascend by quantised `(x, y)`.
+pub(crate) fn pin_coincidences(
+    nets: &std::collections::BTreeMap<String, Vec<(f64, f64, u16)>>,
+) -> Vec<((f64, f64), Vec<String>)> {
+    #[allow(clippy::cast_possible_truncation)]
+    let qk = |x: f64, y: f64| ((x * 1000.0).round() as i64, (y * 1000.0).round() as i64);
+    let mut at: std::collections::BTreeMap<(i64, i64), (f64, f64, Vec<String>)> =
+        std::collections::BTreeMap::new();
+    for (name, pins) in nets {
+        for &(x, y, _) in pins {
+            let e = at.entry(qk(x, y)).or_insert_with(|| (x, y, Vec::new()));
+            if !e.2.iter().any(|n| n == name) {
+                e.2.push(name.clone());
+            }
+        }
+    }
+    at.into_values()
+        .filter(|(_, _, names)| names.len() >= 2)
+        .map(|(x, y, names)| ((x, y), names))
+        .collect()
+}
+
 /// Set of net names that have at least one *driving* pin — a pin whose
 /// KiCad electrical type drives connectivity (Output, Power-output,
 /// bidirectional, tri-state, open-collector / open-emitter). Used by
@@ -1587,6 +1636,44 @@ fn route_nets(
         });
     }
 
+    // Tier-0 precondition, unconditional. Two pins of different nets on
+    // the same coordinate are joined by KiCad, and *nothing downstream
+    // can fix it*: the router moves wires, not pins, and
+    // `conflict::resolve_conflicts` explicitly declines to jog a wire
+    // endpoint that sits on a pin (that would disconnect the pin), so it
+    // burns its whole iteration bound, logs "endpoint conflicts left
+    // after N resolve iterations" as a *warning*, and the emitter writes
+    // a shorted schematic.
+    //
+    // That warning-tier treatment is what made `shunt_feedback_amp` a
+    // latent Tier-0 defect. The only thing that turned it into a nonzero
+    // exit was the CLI's post-emit `kicad-cli` connectivity check — which
+    // is skipped by `--no-verify` **and skipped entirely on any machine
+    // without KiCad installed**. On such a machine the converter happily
+    // emitted a schematic whose base and emitter nets were one node.
+    //
+    // So the refusal moves here, before a single wire is routed: it is
+    // unconditional, needs no external tool, and does not depend on
+    // `SPICE2KICAD_V11_STRICT` (that env-gate covers the *quality*-tier
+    // `v11:` wire residue, a different and repairable class). CLAUDE.md:
+    // V11 "is a correctness invariant, not a quality one", and a
+    // converter that refuses is vastly better than one that emits a
+    // wrong schematic.
+    let coincident = pin_coincidences(nets);
+    if !coincident.is_empty() {
+        let detail = coincident
+            .iter()
+            .map(|((x, y), nets)| format!("({x:.2}, {y:.2}): {}", nets.join(" + ")))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(EmitError::PinCoincidence(format!(
+            "{} coordinate(s) in `{scope}` carry pins of two or more different nets, \
+             which KiCad joins into one node — {detail}. This is a placer defect: no \
+             routing can separate coincident pins.",
+            coincident.len(),
+        )));
+    }
+
     let suuid = sheet_uuid();
     let result = spice_route::route(RouteRequest {
         nets: &specs,
@@ -1662,6 +1749,11 @@ pub(crate) struct TrialRoute {
     /// Every other metric in `Measure` improved, so without this term the
     /// gate accepted it.
     pub severed: usize,
+    /// Tier-0 **short** count for this candidate: coordinates where two
+    /// different nets are electrically joined by geometry no routing
+    /// pass can separate. See [`tier0_short_count`] for the two
+    /// contributing hazards and why neither is visible in `v11_count`.
+    pub shorts: usize,
 }
 
 /// Run the *real* router over `placement` and return its wire segments
@@ -1676,7 +1768,23 @@ pub(crate) fn trial_route(placement: &Placement, library: &Library) -> TrialRout
 
     let net_pins = collect_net_pins(placement, library, &[]);
     let rail_tags = spice_layout::net_class::rail_tags(placement);
-    let obstacles = placement_obstacles(placement, library);
+    let negative_rails = spice_layout::net_class::negative_rail_nets(placement);
+    // ORACLE FIDELITY (ADR-16). The obstacle set must be the one
+    // `emit_root` routes against, or phase 4.5 optimises orientations
+    // for a router that does not exist. It used to be
+    // `placement_obstacles` alone, while the real route additionally
+    // repels foreign wires from every **rail-glyph body** (V13 item 2A).
+    // A candidate could therefore measure clean here and short two nets
+    // in the emitted file — measured on `shunt_feedback_amp`, where the
+    // model called `Q1` at R180 Tier-0 clean and the real route merged
+    // `c` into `vcc`, while calling the one genuinely clean pose
+    // (R0 + mirror-Y) a V11 violation.
+    let mut obstacles = placement_obstacles(placement, library);
+    obstacles.extend(
+        rail_glyph_body_bboxes(&net_pins, library, &negative_rails, &rail_tags)
+            .iter()
+            .copied(),
+    );
 
     let mut specs: Vec<NetSpec> = Vec::with_capacity(net_pins.len());
     for (name, pins) in &net_pins {
@@ -1748,11 +1856,116 @@ pub(crate) fn trial_route(placement: &Placement, library: &Library) -> TrialRout
         .filter_map(wire_segment_from_lexpr)
         .collect();
     let severed = severed_net_count(&specs, &segments);
+    // The negative-rail set comes from the placement, NOT from the spec
+    // flag above: `trial_route` deliberately leaves `negative_rail`
+    // false so glyph *identity* never feeds back into placement, but a
+    // glyph's anchor *position* depends on it (a negative rail attaches
+    // downward like ground), and getting that position wrong would make
+    // the Tier-0 measure lie on `named_rails`.
+    let shorts = tier0_short_count(&specs, &negative_rails, &segments);
     TrialRoute {
         segments,
         v11_count,
         severed,
+        shorts,
     }
+}
+
+/// Count the Tier-0 **short** hazards in a trial route: places where two
+/// different nets end up electrically joined by geometry that no later
+/// pass can separate.
+///
+/// Two contributors, and the point of this function is that **neither is
+/// visible in `v11_count`**, which counts the router's own `v11:`
+/// warnings:
+///
+/// 1. **Pin on pin.** Two host-symbol pins, or a host pin and a rail
+///    glyph's anchor pin, on one coordinate. The router emits no `v11:`
+///    warning here because there is no wire it could detour — it moves
+///    wires, not pins. `conflict::resolve_conflicts` correctly declines
+///    to jog a wire endpoint off a pin, burns its iteration bound, and
+///    the emitter writes coincident geometry.
+/// 2. **A wire through a rail glyph's anchor pin.** The signal router's
+///    foreign-pin sets are built from `NetSpec::pins` — host-symbol pins
+///    — and a glyph anchor does not exist until the decoration stage
+///    runs, so it is invisible to the V11 cascade. A glyph pin is fully
+///    live, though: KiCad joins whatever lands on it.
+///
+/// Hazard 2 needs no net attribution, because a rail-glyph anchor has a
+/// known legitimate wire budget: **at most one incident wire end, and
+/// never a wire through it**. Rail nets are drawn as glyphs rather than
+/// trunks (V10), so the only wire that may touch an anchor is its own
+/// offset stub, which *ends* there. Anything else — a second endpoint,
+/// or any strict-interior crossing — is a foreign net landing on a live
+/// pin. Counting endpoints as well as interiors is load-bearing: the
+/// `shunt_feedback_amp` short that survived the interior-only version
+/// was the `c` trunk *turning a corner* exactly on `RC`'s `+12V` anchor.
+///
+/// Measured on `shunt_feedback_amp`: with only hazard 1 in the tuple,
+/// phase 4.5 repaired the fixture's severed nets by rotating `Q1` into a
+/// pose whose emitter trunk ran straight through `RC`'s `+12V` glyph
+/// pin, merging `e` into `vcc`. `Q1` has a pose that is clean on both
+/// counts, and with hazard 2 measured the search finds it.
+fn tier0_short_count(
+    specs: &[spice_route::NetSpec],
+    negative_rails: &std::collections::BTreeSet<String>,
+    segments: &[crate::v5::WireSegment],
+) -> usize {
+    const EPS: f64 = 1e-6;
+    #[allow(clippy::cast_possible_truncation)]
+    let qk = |x: f64, y: f64| ((x * 1000.0).round() as i64, (y * 1000.0).round() as i64);
+
+    let mut at: std::collections::BTreeMap<(i64, i64), std::collections::BTreeSet<&str>> =
+        std::collections::BTreeMap::new();
+    let mut anchors: std::collections::BTreeSet<(i64, i64)> = std::collections::BTreeSet::new();
+    for spec in specs {
+        let rail = matches!(
+            spec.class,
+            spice_layout::net_class::NetClass::Power | spice_layout::net_class::NetClass::Ground
+        );
+        for pin in &spec.pins {
+            at.entry(qk(pin.x_mm, pin.y_mm))
+                .or_default()
+                .insert(spec.name.as_str());
+            if rail {
+                let (ax, ay) = spice_route::rails::glyph_anchor(
+                    pin,
+                    spec.class,
+                    negative_rails.contains(&spec.name),
+                );
+                let k = qk(ax, ay);
+                at.entry(k).or_default().insert(spec.name.as_str());
+                anchors.insert(k);
+            }
+        }
+    }
+    let mut n = at.values().filter(|nets| nets.len() >= 2).count();
+
+    for &(ax, ay) in &anchors {
+        #[allow(clippy::cast_precision_loss)]
+        let (gx, gy) = (ax as f64 / 1000.0, ay as f64 / 1000.0);
+        let mut ends = 0usize;
+        let mut through = 0usize;
+        for &((x1, y1), (x2, y2)) in segments {
+            for (px, py) in [(x1, y1), (x2, y2)] {
+                if (px - gx).abs() < EPS && (py - gy).abs() < EPS {
+                    ends += 1;
+                }
+            }
+            let interior = if (y1 - y2).abs() < EPS && (gy - y1).abs() < EPS {
+                x1.min(x2) + EPS < gx && gx < x1.max(x2) - EPS
+            } else if (x1 - x2).abs() < EPS && (gx - x1).abs() < EPS {
+                y1.min(y2) + EPS < gy && gy < y1.max(y2) - EPS
+            } else {
+                false
+            };
+            if interior {
+                through += 1;
+            }
+        }
+        n += through + ends.saturating_sub(1);
+    }
+    n
 }
 
 /// How many `Signal` nets in `specs` are left disconnected by `segments`.
@@ -2641,15 +2854,24 @@ fn report_disconnected_nets(
     net_pins: &std::collections::BTreeMap<String, Vec<(f64, f64, u16)>>,
     sheet: Option<&str>,
     rail_tags: &std::collections::BTreeMap<String, String>,
-) {
-    for net in disconnected_nets(items, net_pins, rail_tags) {
-        let where_ = sheet.map_or_else(String::new, |s| format!(" on sheet {s}"));
+) -> Result<(), EmitError> {
+    let bad = disconnected_nets(items, net_pins, rail_tags);
+    if bad.is_empty() {
+        return Ok(());
+    }
+    let where_ = sheet.map_or_else(String::new, |s| format!(" on sheet {s}"));
+    for net in &bad {
         eprintln!(
             "spice2kicad: ERROR: net {net:?}{where_} is not fully connected in the \
              emitted schematic — at least one of its pins has no wire path to the \
              others. This is a converter bug; the schematic is electrically wrong."
         );
     }
+    Err(EmitError::DisconnectedNet(format!(
+        "{} net(s){where_} have a pin with no wire path to the rest: {}",
+        bad.len(),
+        bad.join(", "),
+    )))
 }
 
 /// Names of nets whose pins the emitted wires do **not** all connect.

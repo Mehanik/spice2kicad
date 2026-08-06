@@ -9,8 +9,10 @@
 //!
 //!  * **`shunt_feedback_amp` — Tier-0.** The converter's own post-emit
 //!    connectivity check rejects its own output: the emitted schematic
-//!    shorts the `b` (base) and `e` (emitter) nets. Deterministic, and
-//!    caused by the stage-3 SA at its *default* iteration count.
+//!    merges two source nets. Deterministic, and rooted in the stage-3
+//!    SA end-state at its *default* iteration count — see the full
+//!    diagnosis on the test below, which supersedes the original
+//!    "base/emitter short" reading.
 //!  * **`two_stage_amp` — runtime.** It converts *correctly*, but takes
 //!    ~112 s where the median fixture takes 0.4 s. Registering it across
 //!    ~15 verifiers would add ~25 CPU-minutes to every suite run.
@@ -76,45 +78,86 @@ fn convert(fixture: &str, out_dir: &Path, extra: &[&str]) -> Output {
     cmd.output().expect("invoke spice2kicad")
 }
 
-// --- shunt_feedback_amp: Tier-0 base/emitter short ------------------------
+// --- shunt_feedback_amp: Tier-0 net short ---------------------------------
 
 /// **Defect lock (Tier-0, V11).** Converting `shunt_feedback_amp` with
 /// default settings emits a schematic that does not wire up the source
-/// circuit, and the CLI's post-emit connectivity check rejects it:
+/// circuit, and the CLI's post-emit connectivity check rejects it. The
+/// CLI exits non-zero, which is the correct behaviour for a converter
+/// that cannot honour Tier-0.
+///
+/// **Current failure (measured on this tree, deterministic):**
 ///
 /// ```text
-/// route: conflict: net index 0 has endpoint conflicts left after 6 resolve iterations
+/// route: v11: net index 1 has 1 endpoint and 0 interior foreign-pin
+///        coincidences left after active rerouting
 /// ERROR: the emitted schematic does not wire up the source circuit.
-///   net in the source but split in the schematic: {"CE.0", "Q1.2", "RE.0"}
-///   net in the source but split in the schematic: {"CIN.1", "Q1.1", "RB.1", "RF.1"}
-///   net in the schematic but not the source: {"CE.0", "CIN.1", "Q1.1", "Q1.2", …}
+///   net in the source but split in the schematic: {"COUT.0", "Q1.0", "RC.1", "RF.0"}
+///   net in the source but split in the schematic: {"RB.0", "RC.0"}
 /// ```
 ///
-/// The two source nets `e` and `b` are merged into one — a silent short
-/// of the transistor's base to its emitter (V11: "geometric coincidence
-/// must not silently short two nets"). Nothing is emitted that a user
-/// could open; the CLI exits non-zero, which is the correct behaviour
-/// for a converter that cannot honour Tier-0.
+/// i.e. the collector net `c` and the `vcc` rail are merged: the `c`
+/// trunk terminates on `RC`'s own `vcc` pin.
 ///
-/// **Measured on `7f707e6`, deterministic**: three consecutive
-/// `--no-layout-cache` runs produced byte-identical output and the same
-/// non-zero exit.
+/// # Diagnosis (superseding the original entry)
 ///
-/// **Localised to the stage-3 SA, not the router and not phase 4.5.**
-/// Sweeping `--refine-iterations`: 0, 1, 20, 40, 60, 80, 100 and 400 all
-/// convert **cleanly**; 150 and 200 (200 is the default) both fail.
-/// `--no-refine` is clean too. The failure is therefore not a monotone
-/// "more annealing is worse" gradient — it is one specific SA end-state
-/// whose placement the router's conflict-resolution cascade cannot
-/// legalise, so it gives up ("endpoint conflicts left after 6 resolve
-/// iterations") and leaves two nets coincident. That is the
-/// placement-vs-router disagreement recorded in MEMORY
-/// "flow-orientation wall", here escalated from a Tier-2 aesthetic
-/// disagreement to a Tier-0 correctness failure.
+/// The first version of this lock recorded the defect as a base/emitter
+/// short and localised it to "one specific SA end-state whose placement
+/// the router's conflict-resolution cascade cannot legalise". Both
+/// halves were investigated; the second is right, the first was only the
+/// *first* symptom. What is actually going on:
+///
+/// 1. **The SA end-state is Tier-0 broken before decoration.** At the
+///    default 200 refine iterations the annealer places `Q1` at
+///    `(46.99, 45.72)`, and the placement that reaches layout phase 4.5
+///    already leaves **two signal nets severed** (`severed = 2`, measured
+///    by phase 4.5's own real-router oracle). Nothing downstream of the
+///    placer can move an element, so this is a *placer* defect.
+/// 2. **Phase 4.5 used to "repair" it by shorting.** Its acceptance
+///    objective scored `(v13, v12, v5, bends)` and held `severed` as a
+///    mere floor, so it had no reason to *seek* the repair — and the
+///    repair it stumbled into was rotating `Q1` until its base pin sat
+///    exactly on `RE`'s pin 1. That is the original recorded symptom:
+///    base merged into emitter. Two pins on one coordinate is a short no
+///    router can undo (it moves wires, not pins), which is why
+///    `conflict::resolve_conflicts` burned its whole iteration bound and
+///    logged "endpoint conflicts left after 6 resolve iterations".
+/// 3. **With Tier-0 leading the objective, that specific short is gone
+///    and the underlying placement defect is exposed.** Phase 4.5 now
+///    scores `(severed, coincident, v11, v13, v12, v5, bends)` and its
+///    oracle sees rail-glyph pins and the real obstacle set. It repairs
+///    the severance (`severed` 2 → 0) without a pin-on-pin short
+///    (`coincident` 0), but the best pose available still leaves one
+///    unresolved wire-on-foreign-pin residue (`v11` 1) — the `c` trunk
+///    on `RC`'s `vcc` pin.
+/// 4. **No orientation of `Q1` fixes it.** All eight V14-allowed poses
+///    were enumerated against the real router at this position; every one
+///    scores non-zero on at least one Tier-0 count. The lever is
+///    *position*, and phase 4.5 owns orientation only.
+/// 5. **Root cause: the deferred R-5 rail-pin defect.** `RC` (and `RB`)
+///    are placed with their **rail pin facing into the circuit** — `RC`
+///    is rot 180, so its `vcc` pin is its *lower* pin, and the `+12V`
+///    glyph therefore hangs *downward* into the routing channel the
+///    collector and emitter trunks need. `tests/placement_quality.rs::
+///    v14_rail_pin_faces_rail` measures exactly this and flags
+///    `shunt_feedback_amp` (`#PWR3` below `RB`'s body centre). R-5 is a
+///    known, owner-gated item: CLAUDE.md records that the R-5 fix "could
+///    not land because it tripped a single fixture's Tier-1 ratchet", and
+///    the global-improvement escape needs owner sign-off. On this fixture
+///    the same defect escalates from Tier-1 aesthetics to Tier-0
+///    correctness, which is new evidence for that decision.
+///
+/// **`--refine-iterations` sweep** (unchanged, and now explained): 0, 1,
+/// 20, 40, 60, 80, 100 and 400 all convert cleanly; 150 and 200 (the
+/// default) fail. It is not a monotone gradient — it is which placement
+/// the SA lands on, and only some of them box `Q1` in.
+///
+/// **Do not chase this by moving the `--refine-iterations` default.**
+/// That relocates the trap rather than removing it.
 ///
 /// This test is deliberately **not** `#[ignore]`d: the failing
-/// conversion costs ~4 s, well within the suite's budget, and an
-/// `#[ignore]`d lock would never notice the day the defect is fixed.
+/// conversion costs a few seconds, and an `#[ignore]`d lock would never
+/// notice the day the defect is fixed.
 #[test]
 fn shunt_feedback_amp_conversion_is_a_tier0_net_short() {
     let tmp = tempdir("shunt_feedback_amp");

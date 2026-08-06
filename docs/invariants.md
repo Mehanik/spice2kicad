@@ -847,9 +847,18 @@ invariant here.
   (`kicad-emitter/src/refine.rs`) in exactly two shapes:
 
   (a) a **non-regression guard**, alongside the existing
-      `v11` / `overlap` / `v12` guards; or
+      `overlap` / `v12` guards; or
   (b) the **final key of the lexicographic objective**, strictly after
       `(v13, v12, v5)`.
+
+  As of ADR-20 the objective carries a **Tier-0 prefix** —
+  `(severed, coincident, v11, v13, v12, v5, bends)` — so "strictly
+  after `(v13, v12, v5)`" now also means strictly after those three.
+  Prepending keys does not weaken the argument below: it only adds
+  terms that dominate `bends` even harder. `v11` moved out of the guard
+  list into that prefix (it is V11, i.e. Tier 0, not a Tier-1
+  preference); `overlap` and `v12` remain guards, lifted only for a
+  candidate that strictly improves the Tier-0 prefix.
 
   Both are safe for the same structural reason, and it is a proof rather
   than a preference: under lexicographic comparison a candidate that
