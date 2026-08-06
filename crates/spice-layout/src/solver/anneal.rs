@@ -499,6 +499,22 @@ pub(crate) fn footprint_half_extents(
 /// every fixture whose symbols are all small: their overlaps are
 /// entirely handled by the cost, so the gate's count stays 0 and the SA
 /// trajectory is unchanged.
+///
+/// # ADR-19 M3 — why this gate still reads the halo
+///
+/// M3 wired [`crate::footprint`]'s signed AABB in here and **measured a
+/// Tier-1 regression**; the wiring is reverted, the measurement is
+/// recorded in `docs/layout-adr.md` § "M3 blocked", and the branch
+/// `wip/adr19-m3-signed-gate` holds the code. In one line: making this
+/// reservation honest *frees* space (the signed box is a strict subset
+/// of the halo on body ∪ pins ∪ glyph), and the freed space is taken by
+/// the one decoration class the placer still does **not** reserve —
+/// routed net labels. `named_rails` V13 item(3) 0 → 1. The relaxation is
+/// only safe once `label_geom` lands (ADR-19 M6); until then the halo's
+/// over-reservation is load-bearing slack, not merely conservative.
+///
+/// Do not re-wire it piecemeal. The three ablations are already
+/// measured — see the ADR table.
 #[allow(clippy::similar_names)] // ahw/ahh, bhw/bhh: half-extent pairs.
 fn symbol_overlap_count(
     placement: &Placement,

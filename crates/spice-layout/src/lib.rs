@@ -381,6 +381,22 @@ pub(crate) struct WorldExtent {
     max_y: f64,
 }
 
+/// A [`footprint::SignedFootprint`] *is* a world extent — same frame,
+/// same sign convention, same "origin is always inside" construction.
+/// The conversion exists so the M2 footprint can be wired into the
+/// extent-consuming call sites (ADR-19 M3) without duplicating the
+/// sweep in each of them.
+impl From<footprint::SignedFootprint> for WorldExtent {
+    fn from(fp: footprint::SignedFootprint) -> Self {
+        Self {
+            min_x: fp.min_x,
+            max_x: fp.max_x,
+            min_y: fp.min_y,
+            max_y: fp.max_y,
+        }
+    }
+}
+
 /// Compute the resolved world extent of `symbol` placed at the origin
 /// in the given `orientation`, with an optional `value` text whose
 /// estimated width pads the +X side. World frame matches the emitter:

@@ -24,6 +24,44 @@
 //! model is a tight superset of what KiCad renders, so the model cannot
 //! silently drift back.
 
+/// The direction a symbol's `Reference` / `Value` field text actually
+/// reads on screen, expressed as the rotation [`text_bbox`] needs.
+///
+/// A field's own `(at … 0)` token is *not* what KiCad draws. The parent
+/// symbol's transform is applied on top of it: `SCH_FIELD::GetDrawRotation`
+/// swaps horizontal ↔ vertical whenever the symbol is rotated 90° or 270°
+/// (`transform.y1 != 0`), and `SCH_FIELD::GetEffectiveHorizJustify` flips
+/// left ↔ right whenever the rendered text lands on the other side of its
+/// anchor — which is exactly what a 180° rotation or a Y mirror does
+/// (`../kicad-source/eeschema/sch_field.cpp:396-415, 446-501`).
+///
+/// Net effect, measured against `kicad-cli sch export svg` for every
+/// orientation the placer emits (rot 0/90/180/270 × mirror-y on/off): the
+/// text advances along the symbol's own rotation, and a Y mirror reflects
+/// that direction about the vertical axis — leaving vertical text (90/270)
+/// untouched and reversing horizontal text (0 ↔ 180).
+///
+/// It lives here, beside the bbox model, because **three** places now
+/// need the same answer: the emitter (which draws the field), the
+/// phase-4.5 V13 model (which grades it), and — since ADR-19 M3 — the
+/// placer's [`crate::text_geom`]-based property reservation
+/// (`spice_layout::footprint::property_text`). A private copy in any one
+/// of them is exactly the drift this module exists to prevent.
+#[must_use]
+pub fn field_render_rotation(orient: crate::Orientation) -> u16 {
+    let rot = match orient.rotation {
+        crate::Rotation::R0 => 0,
+        crate::Rotation::R90 => 90,
+        crate::Rotation::R180 => 180,
+        crate::Rotation::R270 => 270,
+    };
+    if orient.mirror_y {
+        (540 - rot) % 360
+    } else {
+        rot
+    }
+}
+
 /// Axis-aligned bounding box in world mm.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TextBox {

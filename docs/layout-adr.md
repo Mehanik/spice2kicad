@@ -3282,7 +3282,7 @@ whole placement.**
 |---|---------|-------------|
 | **1** | **P11b — cache-less locality bound** (this commit). Page-pan-normalized count of pre-existing *user* symbols that move when one element is added; ratchet `rc_lowpass=0`, `common_emitter=8`. | LANDED. Pure verifier, no behaviour change. |
 | 2 | Signed **complete** footprint as a computed quantity + unit tests; **not yet wired** to any gate. | Pure add; no ratchet may move. |
-| 3 | Wire the footprint into the SA overlap gate, `legalize`, and phase-4.5 V13; **re-calibrate ratchets in the same commit**. | No Tier-0/1 rise the recalibration + owner sign-off does not cover. |
+| 3 | Wire the footprint into the SA overlap gate, `legalize`, and phase-4.5 V13; **re-calibrate ratchets in the same commit**. | **ATTEMPTED, MEASURED, BLOCKED — kill criterion fired.** Only the two zero-movement parts landed (`legalize::extent_of` de-duplication + the `property_text` fidelity fix). Wiring either consumer regresses Tier-1 V13 and the F6/detour ratchets. See "M3 blocked" below. |
 | 4 | **Fixed-datum Y** (decouple `y_bot` from `n`; re-express the page-frame cost terms). Baseline regenerated under ADR-16 (V16 (B,J) non-increasing per fixture). | **LANDED `ed51164`, then REVERTED — pending M3.** See "M4 reverted" below. |
 | 5 | **Relative X columns** (local neighbour clearance replaces the prefix-sum). It was DROPPED on a measurement taken *after M4* (a `--no-refine` seed moving 1 mover); M4 is reverted, so that measurement no longer describes the tree and the drop is **withdrawn**, not re-affirmed. | P11b must not rise; every ratchet holds. |
 | **5′** | **SA trajectory decoupling** — private per-element RNG streams keyed on refdes + deterministic sweep, to make each element's proposal sequence netlist-stable. | **ATTEMPTED, MEASURED, REVERTED.** Killed by K2 **and** K3 at once: the private-stream sweep bought **no** locality (`common_emitter` movers stayed 7/7 — the acceptance cascade through the cost terms dominates, not the proposal RNG), **and** its one-time re-basin destroyed the SA's bend-finding — `common_emitter` V16 B **4→11**, `opamp_inverting_real` 5→10, `opamp_inverting` 3→5, `named_rails` 1→2. The finding sharpens the wall: **the SA's netlist-sensitivity and its basin-finding are the SAME property** — the specific random search trajectory both lands the good bend basins *and* is what shifts under a netlist edit. K1's "spurious, containable" reading was **falsified**: re-keying to netlist-stable streams keeps the move set but lands strictly worse basins. Determinism is not locality (ADR-17); *and* now: netlist-stable keying is not locality either — it is basin destruction. |
@@ -3298,6 +3298,99 @@ M4's seed-locality claim (a `--no-refine` seed moving 1 element on
 pre-M4 value (`common_emitter`=8, `rc_lowpass`=0). The two findings that survive
 the revert are M5′'s (determinism/netlist-stable keying is not locality) and
 the M4 post-mortem below (the Y datum cannot be re-derived before M3).
+
+### M3 blocked — the honest footprint is a *subset*, and the freed space is label space
+
+**Status: the wiring is NOT landed. Two zero-movement parts of M3 are.**
+The kill criterion in the M3 row fired: every way of consuming
+`footprint.rs` measured so far raises a Tier-1 V13 budget, and F6 / wire
+detour with it.
+
+**What landed** (empty `baseline_lock` diff, whole workspace green):
+
+1. `legalize::extent_of` now *is* `footprint::body_and_pins`. The tight
+   legality geometry had been open-coded a third time; it is one
+   definition now. Byte-identical output — this is a de-duplication.
+2. `footprint::property_text` was **wrong** as M2 shipped it. It modelled
+   host Reference/Value as `TextKind::CenteredProperty` at rotation 0.
+   The emitter writes those fields with `(justify left)` and KiCad draws
+   them at `field_render_rotation(orientation)`. So the M2 box was
+   half-a-string too wide behind the anchor, half-a-string too short
+   ahead of it, and pointed the wrong way for every mirrored or rotated
+   symbol. `field_render_rotation` moved from `kicad-emitter` down into
+   `kicad_symbols::text_geom` — the crate all three consumers share —
+   and the placer-side box now matches `placement_property_bboxes`
+   exactly. Nothing consumes it yet, so this moves nothing; it is the
+   precondition for M6 consuming a box that is actually the drawn one.
+3. Phase 4.5's V13 model **needed no change and got none**. It already
+   scores real body bboxes and real property bboxes; it is the *more*
+   faithful model of the two. M3's honest action there was to align the
+   placer to it, which is (2).
+
+**What was measured and reverted.** Three trees, one machine, whole
+workspace, `--no-fail-fast`, fresh output dirs, cache off:
+
+| variant | SA overlap gate | `legalize` roomy | result |
+|---|---|---|---|
+| **C (landed)** | halo (unchanged) | `world_extent_with_glyphs` | **green; `baseline_lock` empty** |
+| **B** | signed `body ∪ pins ∪ one-sided glyph` | unchanged | 23 `baseline_lock` rows; **V13(1), V13(7), V13 item(3) each 0 → 1 on `named_rails`**; F6 `common_emitter` 4 → 5; detour `common_emitter` 1.014 → 1.025; Q3 `common_emitter` 1 → 3; Q5 `named_rails` 2 → 4 (while `common_emitter` 3 → 2 — a sideways trade) |
+| **A** | as B | signed `element_footprint` | identical failure set to B — the roomy change is **inert** on this suite |
+| **full M3** | as B **plus directional property text** | as A | 52 `baseline_lock` rows; V16 **B** `common_emitter` 4→5, `opamp_inverting_real` 5→9, `opamp_inverting` 3→5; crossings `opamp_inverting` 0→1; detour `common_emitter` 1.014→1.048; F6 4→6; Q3 1→2; Q5 `common_emitter` 3→6, `opamp_inverting_real` 0→2; P11 cache-path stability breaks (4 glyph poses); the `severed`-guard's demonstrated `COUT` rot-180 case stops reproducing |
+
+**The mechanism, and it is not a tuning problem.** M2's own test proves
+the signed footprint is a **subset** of the halo on the classes both
+model. So making the gate honest can only *free* space. The freed space
+is not empty — it is where `spice-route` will later plant a **net
+label**, the one decoration class the placer still does not reserve at
+all. Three independent V13 verifiers caught the same `named_rails` label
+landing on a body / on pin text / on a foreign body. The halo's
+over-reservation was **doing the label class's job by accident**; remove
+it and the accident stops.
+
+This is ADR-17's Stage-2 kill, measured a second time from the opposite
+direction. Stage 2 relocated collisions by *compacting*; M3-B relocates
+them by *un-reserving*. Same cause: an incomplete reservation cannot be
+consumed, in either direction.
+
+**Corollary that changes the staging.** ADR-19's design text says "the
+footprint must be *complete* first (label / Reference-Value / PWR_FLAG
+classes, which today are unreserved)". M2 delivered the
+Reference-Value class and deferred labels/`PWR_FLAG` to M6. The
+measurement says that deferral is not available: **the label class is
+not an M6 refinement of M3, it is a precondition of M3.** M3 cannot be
+consumed until `label_geom` lands, so ADR-19's dependency edge is
+M2 → *label reservation* → M3 → M4, not M2 → M3 → … → M6.
+
+That is awkward, because `wip/label-reservation` (`0214412`) already
+computes exactly this geometry and its own commit message records that
+wiring it "nets out worse". So the two halves of the reservation are
+*each* individually unlandable, and the open question is whether they
+are landable **together** — the halo shrinking and the label box
+appearing in the same commit, so no intermediate state has a hole. That
+is the next experiment, and nobody has run it.
+
+**Additional findings.**
+
+- The full-M3 direction (property text in the SA's *hard* gate) is
+  independently wrong on doctrine, and the numbers agree. Property text
+  is repairable downstream — `nudge_property_text` moves it — so it is
+  not the categorical yes/no fact CLAUDE.md's decision rule requires of
+  a hard constraint. Making it one over-constrains the SA and costs V16
+  bends on three fixtures. If property text is ever reserved, it belongs
+  in a *preference* (the `legalize` roomy extent), not in the gate.
+- The `legalize` roomy extent is **inert** on the current fixtures:
+  swapping it for the signed footprint changed no verifier outcome
+  (A ≡ B). Do not spend effort there.
+- Pre-existing, unrelated to M3: `balance_quality`'s informational
+  `Q6_REFERENCE` for `common_emitter` is stale on `master` — measured
+  1.2247 against a literal of 1.0000, on a pristine `c968cbd` tree. It
+  is informational-only (the hard gate is the degeneracy ceiling), but
+  the M4 revert appears to have freed it and nothing reclaimed it.
+- **Where the code lives.** Branch `wip/adr19-m3-signed-gate` holds the
+  full wiring as measured (all three variants are one `#[cfg]`-free edit
+  apart in `solver/anneal.rs` and `legalize.rs`). Read this section
+  first; the mechanism above is the thing to change, not the wiring to
+  re-apply.
 
 ### M4 reverted — the Y datum cannot lead M3
 
