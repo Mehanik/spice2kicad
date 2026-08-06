@@ -436,6 +436,7 @@ fn body_half_extents(el: &spice_resolve::ResolvedElement, orient: Orientation) -
 /// halo (ADR-14's Risks flagged this shape; acceptable now, revisit if
 /// a glyph-dense fixture hits V15). This is extra outward spacing
 /// only; it changes no orientation (V5) and no glyph pose (V14).
+#[cfg(test)]
 pub(crate) fn footprint_half_extents(
     el: &spice_resolve::ResolvedElement,
     orient: Orientation,
@@ -500,21 +501,14 @@ pub(crate) fn footprint_half_extents(
 /// entirely handled by the cost, so the gate's count stays 0 and the SA
 /// trajectory is unchanged.
 ///
-/// # ADR-19 M3 — why this gate still reads the halo
+/// # ADR-19 M3 wiring — MEASURED AND REJECTED, preserved here only
 ///
-/// M3 wired [`crate::footprint`]'s signed AABB in here and **measured a
-/// Tier-1 regression**; the wiring is reverted, the measurement is
-/// recorded in `docs/layout-adr.md` § "M3 blocked", and the branch
-/// `wip/adr19-m3-signed-gate` holds the code. In one line: making this
-/// reservation honest *frees* space (the signed box is a strict subset
-/// of the halo on body ∪ pins ∪ glyph), and the freed space is taken by
-/// the one decoration class the placer still does **not** reserve —
-/// routed net labels. `named_rails` V13 item(3) 0 → 1. The relaxation is
-/// only safe once `label_geom` lands (ADR-19 M6); until then the halo's
-/// over-reservation is load-bearing slack, not merely conservative.
-///
-/// Do not re-wire it piecemeal. The three ablations are already
-/// measured — see the ADR table.
+/// This branch is the code behind `docs/layout-adr.md` § "M3 blocked".
+/// It is NOT for master: it regresses Tier-1 V13 on `named_rails` (three
+/// verifiers), F6 and wire detour on `common_emitter`, and — with the
+/// property-text term below — V16 bends on three fixtures. The three
+/// measured ablations differ only in which of the two `fp.union` calls
+/// below is present, plus `legalize`'s roomy extent.
 #[allow(clippy::similar_names)] // ahw/ahh, bhw/bhh: half-extent pairs.
 fn symbol_overlap_count(
     placement: &Placement,
@@ -530,7 +524,8 @@ fn symbol_overlap_count(
     let cell_hw = f64::from(crate::CELL_W) * GridPoint::STEP_MM / 2.0;
     let cell_hh = f64::from(crate::CELL_H) * GridPoint::STEP_MM / 2.0;
 
-    let extents: Vec<(f64, f64, f64, f64, bool)> = checked
+    // World-frame `(x0, x1, y0, y1)` reservation box per element.
+    let boxes: Vec<(f64, f64, f64, f64)> = checked
         .elements
         .iter()
         .zip(&placement.elements)
@@ -557,19 +552,32 @@ fn symbol_overlap_count(
             // overlap is still removed from the consumer side. (The
             // remaining opamp `#FLG4`/PWR_FLAG residual is a distinct
             // sheet-port-flavoured defect, scoped out per ADR-14.)
-            let prefs_for = if oversized { None } else { Some(prefs) };
-            let (fhw, fhh) = footprint_half_extents(el, placed.orientation, prefs_for);
+            let mut fp = crate::footprint::body_and_pins(&el.symbol, placed.orientation);
+            if !oversized {
+                fp = fp.union(&crate::footprint::glyph(el, placed.orientation, prefs));
+            }
+            // Ablations B/A drop this union; the "full" variant keeps it.
+            if !placed.is_power_source {
+                fp = fp.union(&crate::footprint::property_text(
+                    &el.refdes,
+                    Some(crate::footprint::drawn_value(
+                        &el.refdes,
+                        placed.value.as_deref(),
+                    )),
+                    placed.orientation,
+                ));
+            }
             let (ox, oy) = placed.origin.to_mm();
-            (ox, oy, fhw, fhh, oversized)
+            (ox + fp.min_x, ox + fp.max_x, oy + fp.min_y, oy + fp.max_y)
         })
         .collect();
     let eps = 1e-3;
     let mut count = 0;
-    for a in 0..extents.len() {
-        for b in (a + 1)..extents.len() {
-            let (ax, ay, ahw, ahh, _a_big) = extents[a];
-            let (bx, by, bhw, bhh, _b_big) = extents[b];
-            if (ax - bx).abs() + eps < ahw + bhw && (ay - by).abs() + eps < ahh + bhh {
+    for a in 0..boxes.len() {
+        for b in (a + 1)..boxes.len() {
+            let (ax0, ax1, ay0, ay1) = boxes[a];
+            let (bx0, bx1, by0, by1) = boxes[b];
+            if ax0 + eps < bx1 && bx0 + eps < ax1 && ay0 + eps < by1 && by0 + eps < ay1 {
                 count += 1;
             }
         }
