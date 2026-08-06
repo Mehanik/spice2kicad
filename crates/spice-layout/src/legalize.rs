@@ -323,11 +323,16 @@ pub fn legalize(
     //
     // ADR-19 M3 measured swapping this for the signed
     // `footprint::element_footprint` — same three classes, told the truth
-    // about direction — and it regresses. Making the box honest makes it
+    // about direction — and it regresses: V16 B on `common_emitter`
+    // 4 -> 7, plus a real-SVG-ink text overlap, on top of everything the
+    // SA-gate half already breaks. Making the box honest makes it
     // SMALLER, so the shove stops steering candidates away from spots the
-    // (still unreserved) net labels then want. The over-broad symmetric
-    // box is standing in for the missing label class, not merely being
-    // conservative. See `docs/layout-adr.md` § "M3 blocked".
+    // (still unreserved) net labels then want. Note the symmetry with the
+    // paragraph above: legalizing on the *roomier* extent was also wrong.
+    // Both ends of the tight/roomy split are calibrated, and the
+    // over-broad symmetric box is standing in for the missing label
+    // class, not merely being conservative.
+    // See `docs/layout-adr.md` § "M3 blocked".
     let roomy: Vec<WorldExtent> = placement
         .elements
         .iter()

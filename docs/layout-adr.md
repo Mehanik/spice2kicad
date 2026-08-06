@@ -3334,7 +3334,7 @@ workspace, `--no-fail-fast`, fresh output dirs, cache off:
 |---|---|---|---|
 | **C (landed)** | halo (unchanged) | `world_extent_with_glyphs` | **green; `baseline_lock` empty** |
 | **B** | signed `body ∪ pins ∪ one-sided glyph` | unchanged | 23 `baseline_lock` rows; **V13(1), V13(7), V13 item(3) each 0 → 1 on `named_rails`**; F6 `common_emitter` 4 → 5; detour `common_emitter` 1.014 → 1.025; Q3 `common_emitter` 1 → 3; Q5 `named_rails` 2 → 4 (while `common_emitter` 3 → 2 — a sideways trade) |
-| **A** | as B | signed `element_footprint` | identical failure set to B — the roomy change is **inert** on this suite |
+| **A** | as B | signed `element_footprint` | B's eight failures **plus two**: V16 **B** `common_emitter` 4 → 7, and `rendered_text_does_not_overlap_across_fixtures` (real `kicad-cli` SVG ink) 0 → 1 on `common_emitter`. The roomy change is not neutral; it is strictly worse than leaving it alone. |
 | **full M3** | as B **plus directional property text** | as A | 52 `baseline_lock` rows; V16 **B** `common_emitter` 4→5, `opamp_inverting_real` 5→9, `opamp_inverting` 3→5; crossings `opamp_inverting` 0→1; detour `common_emitter` 1.014→1.048; F6 4→6; Q3 1→2; Q5 `common_emitter` 3→6, `opamp_inverting_real` 0→2; P11 cache-path stability breaks (4 glyph poses); the `severed`-guard's demonstrated `COUT` rot-180 case stops reproducing |
 
 **The mechanism, and it is not a tuning problem.** M2's own test proves
@@ -3378,9 +3378,13 @@ is the next experiment, and nobody has run it.
   a hard constraint. Making it one over-constrains the SA and costs V16
   bends on three fixtures. If property text is ever reserved, it belongs
   in a *preference* (the `legalize` roomy extent), not in the gate.
-- The `legalize` roomy extent is **inert** on the current fixtures:
-  swapping it for the signed footprint changed no verifier outcome
-  (A ≡ B). Do not spend effort there.
+- The `legalize` roomy extent is the **second-worst** place to put the
+  signed footprint. Its doc comment already records that an earlier
+  version legalized on the *roomier* `world_extent_with_glyphs` and had
+  to be pulled back; M3 pushed the same lever the other way and it
+  regresses too — V16 **B** `common_emitter` 4 → 7 and a real-SVG-ink
+  text overlap on top of everything B already breaks. The tight/roomy
+  split is calibrated; both ends of it are load-bearing.
 - Pre-existing, unrelated to M3: `balance_quality`'s informational
   `Q6_REFERENCE` for `common_emitter` is stale on `master` — measured
   1.2247 against a literal of 1.0000, on a pristine `c968cbd` tree. It
