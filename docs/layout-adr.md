@@ -3361,13 +3361,52 @@ not an M6 refinement of M3, it is a precondition of M3.** M3 cannot be
 consumed until `label_geom` lands, so ADR-19's dependency edge is
 M2 → *label reservation* → M3 → M4, not M2 → M3 → … → M6.
 
-That is awkward, because `wip/label-reservation` (`0214412`) already
-computes exactly this geometry and its own commit message records that
-wiring it "nets out worse". So the two halves of the reservation are
-*each* individually unlandable, and the open question is whether they
-are landable **together** — the halo shrinking and the label box
-appearing in the same commit, so no intermediate state has a hole. That
-is the next experiment, and nobody has run it.
+That is awkward, because `wip/label-reservation` already computes exactly
+this geometry and its own commit message records that wiring it "nets out
+worse". So the two halves of the reservation are *each* individually
+unlandable.
+
+**CORRECTION — the "land them together" experiment is NOT untried; it was
+run, and it failed.** An earlier draft of this section proposed combining
+them as the next experiment. The ADR-14 reservation post-mortem *in this
+same file* already records it: "*Measured — directional PLUS the complete
+label reservation … an **identical failure set**. The reservation recovers
+nothing the directional model gave away. With `legalize` in scope it is
+strictly worse (`opamp_definition_level` V5 0→5, V16 B 12→13).*" Its stated
+general result subsumes M3 entirely:
+
+> An exact directional model plus a complete label reservation together
+> reserve strictly LESS space than the accident does. … There is no
+> remaining unreserved class large enough to close the gap, because the gap
+> is not an unreserved class: it is the mirrored copy of a reach that does
+> not exist.
+
+So M3 is **not** blocked pending an untried experiment. M3 is the **third
+independent reproduction** of an established negative — genuinely
+corroborating (it fired on `named_rails`, where the earlier runs fired on
+`rc_lowpass` / `common_emitter`, and it arrived from the SA-gate side rather
+than the seed side), but not a new frontier. The post-mortem's own
+instruction governs: *"Do not re-derive; re-measure only against a variant
+this post-mortem does not already cover."*
+
+**Consequence for ADR-19.** The dependency edge M2 → label reservation →
+M3 → M4 is correct as a *statement of what M3 needs*, but it is not a route
+forward, because the label reservation has been measured not to supply it.
+M3 is dead as specified, and M4 sits behind M3. The only variant the ADR-14
+post-mortem records as untried is **directional extents plus an explicit
+compensating outward margin** — sized to preserve today's total reach,
+inverting the failed premise by treating the halo's *magnitude* as the
+calibrated quantity and its *placement* as the bug. That variant is flagged
+there as UNTRIED, NOT ENDORSED, a re-parameterisation of every layout in the
+suite, and requiring an owner escape request with the full ratchet table.
+Milestone D (bounded joint-pose repair) is the remaining ADR-19 work that
+does **not** sit behind this chain.
+
+*Record-keeping note.* ADR-14's "Recoverable work" paragraph attributes
+`8b060cf` to `wip/label-reservation` and `d176b9e` to
+`wip/directional-footprint`. The live branch heads are the other way round:
+`wip/directional-footprint` is `8b060cf`, `wip/label-reservation` is
+`0214412`. The measurements stand; only the SHA attribution is stale.
 
 **Additional findings.**
 
