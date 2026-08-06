@@ -84,29 +84,17 @@ fn footprint_at(ext: WorldExtent, origin: GridPoint) -> Footprint {
 ///
 /// Reserving glyph space is a legitimate *seed spacing* concern and stays
 /// where it is. Legality is a different, narrower question.
+///
+/// ADR-19 M3: this used to open-code the body ∪ pin sweep. It now
+/// delegates to [`crate::footprint::body_and_pins`], the M2 signed
+/// footprint's `body ∪ pins` component — the *same* quantity, byte for
+/// byte (both start at the origin and grow over the orientation-
+/// transformed body corners and pin tips in the page frame). The
+/// delegation is a de-duplication, not a behaviour change: legality must
+/// keep matching `no_symbol_symbol_overlap_across_fixtures` exactly, and
+/// now there is one definition of that geometry instead of three.
 fn extent_of(element: &spice_resolve::ResolvedElement, orientation: Orientation) -> WorldExtent {
-    let mut ext = WorldExtent {
-        min_x: 0.0,
-        max_x: 0.0,
-        min_y: 0.0,
-        max_y: 0.0,
-    };
-    if let Some(b) = element.symbol.body_bbox() {
-        for (lx, ly) in [(b.x0, b.y0), (b.x0, b.y1), (b.x1, b.y0), (b.x1, b.y1)] {
-            let (rx, ry) = orientation.apply_point(lx, ly);
-            ext.min_x = ext.min_x.min(rx);
-            ext.max_x = ext.max_x.max(rx);
-            ext.min_y = ext.min_y.min(-ry);
-            ext.max_y = ext.max_y.max(-ry);
-        }
-    }
-    for tp in element.symbol.pins_in(orientation) {
-        ext.min_x = ext.min_x.min(tp.x);
-        ext.max_x = ext.max_x.max(tp.x);
-        ext.min_y = ext.min_y.min(-tp.y);
-        ext.max_y = ext.max_y.max(-tp.y);
-    }
-    ext
+    crate::footprint::body_and_pins(&element.symbol, orientation).into()
 }
 
 /// Candidate displacements in grid cells, nearest first.
@@ -332,6 +320,14 @@ pub fn legalize(
     // Tier-1 text invariants for the overlap fix. So candidates that also
     // clear the roomy extent are preferred, and the tight one is the
     // fallback.
+    //
+    // ADR-19 M3 measured swapping this for the signed
+    // `footprint::element_footprint` — same three classes, told the truth
+    // about direction — and it regresses. Making the box honest makes it
+    // SMALLER, so the shove stops steering candidates away from spots the
+    // (still unreserved) net labels then want. The over-broad symmetric
+    // box is standing in for the missing label class, not merely being
+    // conservative. See `docs/layout-adr.md` § "M3 blocked".
     let roomy: Vec<WorldExtent> = placement
         .elements
         .iter()

@@ -1,12 +1,33 @@
-//! Signed, directional decoration footprint (ADR-19 Milestone 2).
+//! Signed, directional decoration footprint (ADR-19 Milestones 2–3).
 //!
-//! **UNWIRED.** This module is a computed quantity plus its unit tests. No
-//! gate, cost term, or stride consumes it yet. It lands ahead of the rest
-//! of ADR-19 so Milestone 3 can wire the *honest* footprint into the SA
-//! overlap gate / `legalize` / phase-4.5 in place of the symmetric halo —
-//! recalibrating the ratchets against it **in the same commit**, because
-//! (as the tests here prove) the honest quantity is both smaller and
-//! larger than the halo depending on the class.
+//! **Partly wired (M3).** Where it stands after Milestone 3:
+//!
+//! * [`crate::legalize`]'s `extent_of` — the tight legality geometry —
+//!   *is* [`body_and_pins`]. One definition of "body ∪ pin reach"
+//!   instead of three. Zero behaviour change; verified by an empty
+//!   `baseline_lock` diff.
+//! * [`property_text`] now reserves the box the emitter actually draws:
+//!   [`TextKind::LeftProperty`] at
+//!   [`kicad_symbols::text_geom::field_render_rotation`], the same
+//!   shared model `kicad-emitter`'s `placement_property_bboxes` uses.
+//!   (The M2 draft used `CenteredProperty` at rot 0 — wrong on both
+//!   axes, and wrong for every mirrored or rotated symbol.)
+//! * **NOT wired** into the SA overlap gate, and **not** into
+//!   `legalize`'s roomy shove preference. Both were implemented and
+//!   measured; both regress. See `docs/layout-adr.md` § "M3 blocked" for
+//!   the three-way ablation table, and
+//!   `solver::anneal::symbol_overlap_count`'s own note.
+//!
+//! The short version of the block: this footprint is a strict **subset**
+//! of the halo on the classes both model, so honesty *frees* space — and
+//! the freed space is claimed by the one decoration class still
+//! unreserved, routed net labels (see "Known residual"). Completing the
+//! reservation is a precondition for consuming it, not a follow-up; that
+//! is ADR-17's Stage-2 lesson restated with a second measurement.
+//!
+//! Phase 4.5's own V13 model needed no change: it already scores real
+//! body bboxes and real property bboxes. It is the *more* faithful
+//! model, so M3 aligned this one to it, not the reverse.
 //!
 //! # Why it exists (placer-redesign.md R-B)
 //!
@@ -167,8 +188,8 @@ fn add_property(fp: &mut SignedFootprint, text: &str, orientation: Orientation, 
         text,
         (ax, ay),
         text_geom::DEFAULT_TEXT_SIZE_MM,
-        0,
-        TextKind::CenteredProperty,
+        text_geom::field_render_rotation(orientation),
+        TextKind::LeftProperty,
     );
     fp.grow(b.x0, b.y0);
     fp.grow(b.x1, b.y1);
@@ -181,6 +202,18 @@ fn add_property(fp: &mut SignedFootprint, text: &str, orientation: Orientation, 
 /// the emitter draws Reference on one side and Value on the other. Boxes
 /// come from the calibrated `text_geom` model, anchored exactly where
 /// `property_anchor` places them.
+///
+/// **Kind and rotation match the emitter exactly** (ADR-19 M3). The
+/// emitter writes host fields with `(justify left)`
+/// (`schematic::property_effects`) and grades them as
+/// [`TextKind::LeftProperty`] at
+/// [`text_geom::field_render_rotation`] — so this reserves the same
+/// thing. The M2 draft used `CenteredProperty` at rot 0, which both
+/// over-reserved behind the anchor and under-reserved ahead of it, and
+/// pointed every mirrored/rotated symbol's text the wrong way; a
+/// reservation that is not the box the emitter draws is not a
+/// reservation. `spice2kicad`'s V13 suite is what holds the two
+/// together — it grades the emitted ink, not this model.
 #[must_use]
 pub fn property_text(
     refdes: &str,
@@ -193,6 +226,22 @@ pub fn property_text(
         add_property(&mut fp, v, orientation, PROP_ANCHOR_Y_MM);
     }
     fp
+}
+
+/// The string the emitter actually draws in a host's **Value** field:
+/// the rendered value if there is one, else the refdes
+/// (`schematic.rs`'s `el.value.as_deref().unwrap_or(&el.refdes)`, at
+/// both the root and sheet emit sites). A KiCad symbol instance always
+/// carries a Value property, so "no value" means "the field reads the
+/// refdes", not "the field is absent" — reserving nothing for it would
+/// under-reserve every valueless part (`Q1`, an opamp instance).
+///
+/// [`property_text`] keeps its `Option` so the *absence* case stays
+/// expressible and testable; this is the rule callers modelling the
+/// emitter should apply before calling it.
+#[must_use]
+pub fn drawn_value<'a>(refdes: &'a str, value: Option<&'a str>) -> &'a str {
+    value.unwrap_or(refdes)
 }
 
 /// Power-glyph reach (body + net-name value text) of every rail pin,
@@ -217,12 +266,24 @@ pub fn glyph(
 /// The honest, as-complete-as-the-placer-can-know footprint:
 /// body ∪ pins ∪ one-sided glyph ∪ directional property text.
 ///
-/// This is the quantity Milestone 3 wires into the SA overlap gate /
-/// `legalize` in place of `footprint_half_extents`, recalibrating the
-/// ratchets against it in the same commit. `value` is the *rendered* value
-/// string (as the emitter draws it, e.g. `"4.7k"`); pass `None` for an
-/// element with no drawn value. See the module "Known residual" note for
-/// the classes deliberately left to M6.
+/// **No production consumer.** M3 wired this into `legalize`'s roomy
+/// shove preference and into the SA overlap gate; both regressed and
+/// both are reverted (module docs, and `docs/layout-adr.md` §
+/// "M3 blocked"). It stays computable — and unit-tested against the
+/// halo — because the ablation table is the evidence a future stage
+/// starts from, and because M6 consumes it once `label_geom` closes the
+/// residual below.
+///
+/// `value` is the string the emitter draws in the **Value** field — use
+/// [`drawn_value`] to derive it — or `None` when the element draws **no
+/// property text at all**, which is exactly the suppressed `;@ power`
+/// source (`schematic::placement_property_bboxes` skips those too).
+/// `None` therefore suppresses the Reference box as well: a part that
+/// renders nothing reserves nothing.
+///
+/// The glyph term here is unconditional. The SA gate scopes it to
+/// *non-oversized* hosts (ADR-14); that is a deliberate gate property,
+/// not a footprint property, so it does not belong in here.
 #[must_use]
 #[allow(clippy::implicit_hasher)] // callers always pass the default-hasher prefs map.
 pub fn element_footprint(
@@ -231,9 +292,11 @@ pub fn element_footprint(
     value: Option<&str>,
     prefs: &HashMap<String, VertPref>,
 ) -> SignedFootprint {
-    body_and_pins(&elem.symbol, orientation)
-        .union(&property_text(&elem.refdes, value, orientation))
-        .union(&glyph(elem, orientation, prefs))
+    let mut fp = body_and_pins(&elem.symbol, orientation).union(&glyph(elem, orientation, prefs));
+    if let Some(v) = value {
+        fp = fp.union(&property_text(&elem.refdes, Some(v), orientation));
+    }
+    fp
 }
 
 #[cfg(test)]
@@ -358,6 +421,70 @@ mod tests {
         assert!(
             without.max_x < with.max_x || without.min_y > with.min_y || without.max_y < with.max_y,
             "dropping the value must shrink the reserved box: with={with:?} without={without:?}",
+        );
+    }
+
+    /// [`drawn_value`] pins one non-obvious emitter fact: a KiCad symbol
+    /// instance ALWAYS carries a Value property, so a part with no SPICE
+    /// value renders its **refdes** there
+    /// (`schematic.rs`: `el.value.as_deref().unwrap_or(&el.refdes)`).
+    /// Reserving nothing for it would under-reserve every valueless part.
+    #[test]
+    fn a_valueless_part_still_draws_its_refdes_as_the_value() {
+        assert_eq!(drawn_value("R1", Some("1k")), "1k");
+        assert_eq!(drawn_value("Q1", None), "Q1");
+    }
+
+    /// The property box must be the box the emitter DRAWS, not a
+    /// centred guess. The emitter left-justifies host fields, so the
+    /// text sits entirely on the +reading-direction side of its anchor;
+    /// at rot 0 that means the box starts at the anchor's X and never
+    /// reaches behind it. The M2 draft used `CenteredProperty`, which
+    /// straddles — over-reserving behind and under-reserving ahead.
+    #[test]
+    fn property_text_is_left_anchored_like_the_emitter_draws_it() {
+        let fp = property_text("R1", Some("1k"), Orientation::IDENTITY);
+        // Anchors are local (2.54, ∓2.54); left-justified text extends
+        // only to +X from there, so nothing may reach left of the anchor.
+        assert!(
+            fp.min_x > -1e-9,
+            "left-justified property text must not reach behind its +X anchor: {fp:?}",
+        );
+        assert!(
+            fp.max_x > PROP_ANCHOR_X_MM,
+            "the string must extend past its own anchor: {fp:?}",
+        );
+    }
+
+    /// ...and the reading direction follows the placed orientation, not
+    /// a hardcoded 0. A 90°-rotated symbol draws its fields vertically,
+    /// so the string's own length lands on the OTHER axis. Modelling
+    /// every field as rot 0 (the M2 draft) is wrong for half of all
+    /// placed symbols — a Y-mirrored resistor's Value extends left of
+    /// its anchor, a 270° one downward.
+    ///
+    /// Uses a deliberately long string so the reading direction dominates
+    /// the anchor offsets, and compares the two orientations against each
+    /// other rather than asserting an absolute aspect (the union of the
+    /// Reference and Value boxes straddles ±Y at every rotation).
+    #[test]
+    fn property_text_follows_the_placed_orientation() {
+        let long = "4700000000";
+        let flat = property_text("R1", Some(long), Orientation::IDENTITY);
+        let turned = property_text(
+            "R1",
+            Some(long),
+            Orientation {
+                rotation: kicad_symbols::Rotation::R90,
+                mirror_y: false,
+            },
+        );
+        let width = |f: &SignedFootprint| f.max_x - f.min_x;
+        let height = |f: &SignedFootprint| f.max_y - f.min_y;
+        assert!(
+            width(&flat) > width(&turned) && height(&turned) > height(&flat),
+            "rotating the symbol must move the string's length onto the other \
+             axis; got flat={flat:?} turned={turned:?}",
         );
     }
 }

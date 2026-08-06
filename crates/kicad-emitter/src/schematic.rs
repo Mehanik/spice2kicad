@@ -2598,30 +2598,17 @@ pub(crate) fn text_bbox(text: &str, anchor: (f64, f64), rot_deg: u16) -> TextBbo
 /// The direction a symbol's `Reference` / `Value` field text actually
 /// reads on screen, expressed as the rotation [`text_bbox`] needs.
 ///
-/// A field's own `(at … 0)` token is *not* what KiCad draws. The parent
-/// symbol's transform is applied on top of it: `SCH_FIELD::GetDrawRotation`
-/// swaps horizontal ↔ vertical whenever the symbol is rotated 90° or 270°
-/// (`transform.y1 != 0`), and `SCH_FIELD::GetEffectiveHorizJustify` flips
-/// left ↔ right whenever the rendered text lands on the other side of its
-/// anchor — which is exactly what a 180° rotation or a Y mirror does
-/// (`../kicad-source/eeschema/sch_field.cpp:396-415, 446-501`).
+/// Hoisted to [`kicad_symbols::text_geom::field_render_rotation`] by
+/// ADR-19 M3 — the placer's property reservation needs the same answer,
+/// and `kicad-symbols` is the crate all three consumers share. The
+/// rationale (and the `sch_field.cpp` citations) live with the
+/// definition there.
 ///
-/// Net effect, measured against `kicad-cli sch export svg` for every
-/// orientation the placer emits (rot 0/90/180/270 × mirror-y on/off): the
-/// text advances along the symbol's own rotation, and a Y mirror reflects
-/// that direction about the vertical axis — leaving vertical text (90/270)
-/// untouched and reversing horizontal text (0 ↔ 180).
-///
-/// Modelling every field as rot 0, as this code used to, is therefore
-/// wrong for *half* of all placed symbols: a Y-mirrored resistor's Value
-/// extends left of its anchor, not right, and a 270° one extends downward.
+/// Modelling every field as rot 0, as this code used to, is wrong for
+/// *half* of all placed symbols: a Y-mirrored resistor's Value extends
+/// left of its anchor, not right, and a 270° one extends downward.
 fn field_render_rotation(orient: Orientation) -> u16 {
-    let rot = rotation_degrees(orient);
-    if orient.mirror_y {
-        (540 - rot) % 360
-    } else {
-        rot
-    }
+    kicad_symbols::text_geom::field_render_rotation(orient)
 }
 
 /// Reference / Value property-text bboxes for every placed element, in
