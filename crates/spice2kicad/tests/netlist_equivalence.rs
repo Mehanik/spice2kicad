@@ -59,6 +59,7 @@ const FIXTURES: &[&str] = &[
     "port_shapes",
     "rc_lowpass_ports",
     "named_rails",
+    "rc_phase_shift",
 ];
 
 fn fixtures_dir() -> PathBuf {

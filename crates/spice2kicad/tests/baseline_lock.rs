@@ -1067,6 +1067,147 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         90.0,
         "",
     ),
+    // --- F0 (v0.2 roadmap): `rc_phase_shift` APPENDED, nothing above
+    // moved. This fixture is new geometry, so its rows are additive; the
+    // ten v0.1 fixtures' rows above are byte-identical to what they were
+    // before F0 (verified: the S2K_BASELINE_DUMP output for those rows
+    // was unchanged, and no ratchet moved on any of them).
+    (
+        "rc_phase_shift",
+        "#FLG1",
+        "power:PWR_FLAG",
+        91.44,
+        82.55,
+        0.0,
+        "",
+    ),
+    (
+        "rc_phase_shift",
+        "#FLG2",
+        "power:PWR_FLAG",
+        91.44,
+        95.25,
+        180.0,
+        "",
+    ),
+    ("rc_phase_shift", "#PWR1", "power:GND", 39.37, 63.5, 0.0, ""),
+    (
+        "rc_phase_shift",
+        "#PWR2",
+        "power:GND",
+        53.34,
+        57.15,
+        0.0,
+        "",
+    ),
+    (
+        "rc_phase_shift",
+        "#PWR3",
+        "power:GND",
+        68.58,
+        57.15,
+        0.0,
+        "",
+    ),
+    (
+        "rc_phase_shift",
+        "#PWR4",
+        "power:GND",
+        40.64,
+        80.01,
+        0.0,
+        "",
+    ),
+    (
+        "rc_phase_shift",
+        "#PWR5",
+        "power:GND",
+        57.15,
+        80.01,
+        0.0,
+        "",
+    ),
+    (
+        "rc_phase_shift",
+        "#PWR6",
+        "power:+12V",
+        54.61,
+        66.04,
+        0.0,
+        "",
+    ),
+    (
+        "rc_phase_shift",
+        "#PWR7",
+        "power:+12V",
+        49.53,
+        31.75,
+        0.0,
+        "",
+    ),
+    (
+        "rc_phase_shift",
+        "#PWR8",
+        "power:GND",
+        91.44,
+        82.55,
+        0.0,
+        "",
+    ),
+    (
+        "rc_phase_shift",
+        "#PWR9",
+        "power:+12V",
+        91.44,
+        95.25,
+        0.0,
+        "",
+    ),
+    ("rc_phase_shift", "C1", "Device:C", 39.37, 59.69, 0.0, ""),
+    ("rc_phase_shift", "C2", "Device:C", 53.34, 53.34, 0.0, ""),
+    ("rc_phase_shift", "C3", "Device:C", 68.58, 53.34, 0.0, ""),
+    ("rc_phase_shift", "CE", "Device:C", 57.15, 76.2, 0.0, "y"),
+    ("rc_phase_shift", "CIN", "Device:C", 46.99, 52.07, 90.0, ""),
+    ("rc_phase_shift", "COUT", "Device:C", 78.74, 44.45, 0.0, ""),
+    (
+        "rc_phase_shift",
+        "Q1",
+        "Device:Q_NPN_BCE",
+        45.72,
+        59.69,
+        180.0,
+        "",
+    ),
+    ("rc_phase_shift", "R1", "Device:R_US", 35.56, 50.8, 90.0, ""),
+    (
+        "rc_phase_shift",
+        "R2",
+        "Device:R_US",
+        49.53,
+        44.45,
+        90.0,
+        "",
+    ),
+    (
+        "rc_phase_shift",
+        "R3",
+        "Device:R_US",
+        64.77,
+        44.45,
+        90.0,
+        "",
+    ),
+    (
+        "rc_phase_shift",
+        "RB",
+        "Device:R_US",
+        54.61,
+        60.96,
+        180.0,
+        "",
+    ),
+    ("rc_phase_shift", "RC", "Device:R_US", 49.53, 35.56, 0.0, ""),
+    ("rc_phase_shift", "RE", "Device:R_US", 40.64, 76.2, 0.0, ""),
 ];
 
 #[test]
@@ -1074,10 +1215,16 @@ fn baseline_lock_all_fixtures() {
     let mut failures = Vec::new();
     let mut all_actual = Vec::new();
 
-    // All nine emitted fixtures. The port and definition-level sheets
-    // were absent here while the rest of the suite had already been
-    // extended to grade them, so accidental movement in the newest
-    // features was the least protected.
+    // Every emitted fixture, in alphabetical order. The port and
+    // definition-level sheets were absent here while the rest of the
+    // suite had already been extended to grade them, so accidental
+    // movement in the newest features was the least protected.
+    //
+    // `rc_phase_shift` (F0) sorts last, so its rows APPEND to `BASELINE`
+    // rather than interleaving: the ten v0.1 fixtures' rows stayed
+    // byte-identical when F0 landed, which is the property CLAUDE.md's
+    // "existing fixtures' budgets must not move" rule demands of a
+    // fixture addition.
     let fixtures = [
         "common_emitter",
         "diff_pair",
@@ -1089,6 +1236,7 @@ fn baseline_lock_all_fixtures() {
         "port_shapes",
         "rc_lowpass",
         "rc_lowpass_ports",
+        "rc_phase_shift",
     ];
 
     for fix in fixtures {

@@ -777,6 +777,9 @@ const FLOW_RATCHET: &[(&str, usize, usize)] = &[
     ("port_shapes", 0, 0),
     ("opamp_definition_level", 0, 0),
     ("named_rails", 0, 0),
+    // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE, owner-approved:
+    // two F3 flow inversions (CIN→Q1, R3→CIN); F4 clean. Ratchet DOWN.
+    ("rc_phase_shift", 2, 0),
 ];
 
 #[test]
@@ -889,6 +892,10 @@ const FLOW_POSE_RATCHET: &[(&str, usize, usize)] = &[
     ("opamp_definition_level", 0, 0),
     // F5: RIN drawn vertical (RPU/RPD/CL are rail stubs).
     ("named_rails", 1, 0),
+    // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE, owner-approved: COUT,
+    // a series coupling cap, is drawn vertical (the exact `COUT`-drawn-
+    // vertical defect Milestone D targets). P5 clean. Ratchet DOWN.
+    ("rc_phase_shift", 1, 0),
 ];
 
 #[test]
@@ -1031,6 +1038,11 @@ const STUB_RUN_RATCHET: &[(&str, u32)] = &[
     ("port_shapes", 0),
     ("opamp_definition_level", 0),
     ("named_rails", 6),
+    // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE, owner-approved: RC hangs
+    // 23 cells (29.21 mm) sideways of its node — nearly 4x the previous
+    // suite worst (named_rails, 6). This sprawl is the compaction
+    // headroom F0 exists to expose. Ratchet DOWN.
+    ("rc_phase_shift", 23),
 ];
 
 /// F6 ratchet. A rail stub should hang straight off the node it

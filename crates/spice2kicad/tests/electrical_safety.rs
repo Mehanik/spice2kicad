@@ -260,6 +260,7 @@ const SHEETS: &[&str] = &[
     "rc_lowpass_ports",
     "opamp_definition_level",
     "named_rails",
+    "rc_phase_shift",
 ];
 
 /// Per-fixture crossing budget. After the V11/V12 cascade + Steiner-
@@ -1791,7 +1792,8 @@ fn v13_power_glyph_value_text_clear_of_bodies_and_pintext() {
     // pin-number/name text, or any hierarchical-sheet port-NAME text.
     // Issues [1] (text hanging into a host/neighbour body) and [4]
     // (sheet-port glyph text on the port name) live here.
-    let mut failures: Vec<String> = Vec::new();
+    let mut xf =
+        common::xfail::Guard::new("v13_power_glyph_value_text_clear_of_bodies_and_pintext");
     let with_sheets: Vec<&str> = {
         let mut v: Vec<&str> = SHEETS.to_vec();
         v.push("opamp_inverting");
@@ -1828,17 +1830,18 @@ fn v13_power_glyph_value_text_clear_of_bodies_and_pintext() {
             }
         }
         let b = v13_power_glyph_text_budget(name);
-        if hits > b {
-            failures.push(format!(
-                "{name}: {hits} power-glyph-text overlaps > V13(6a) budget {b}"
-            ));
-        }
+        // The budget stays a hard 0 for EVERY fixture (see
+        // `v13_power_glyph_text_budget`); a fixture that re-exposes the
+        // deferred decoration-phase nudge defect is excluded by name in
+        // `tests/common/xfail.rs`, which fails the test the day that
+        // fixture starts passing.
+        xf.record(
+            name,
+            (hits > b)
+                .then(|| format!("{name}: {hits} power-glyph-text overlaps > V13(6a) budget {b}")),
+        );
     }
-    assert!(
-        failures.is_empty(),
-        "V13(6a) regressions:\n  {}",
-        failures.join("\n  "),
-    );
+    xf.finish();
 }
 
 #[test]
@@ -2002,6 +2005,18 @@ fn v5_violation_budget(name: &str) -> usize {
         // global-improvement escape applies (net -12 on the fixture, zero
         // higher-tier cost). Re-examine rather than cite as owner precedent.
         "rc_lowpass" => 1,
+        // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE, owner-approved.
+        // `rc_phase_shift` is the F0 benchmark fixture: a three-section RC
+        // ladder feeding a CE stage — a long rooted chain the current
+        // placer sprawls. Its five residuals are exactly the Tier-2
+        // headroom F0 exists to expose, and are the same class as every
+        // arm above (a shared-net wire that leaves the pin sideways rather
+        // than outward): `R1.2` / `R3.2` in the ladder, `CIN.2` on the
+        // coupling cap, and `Q1.1` / `Q1.3` on the transistor. This is a
+        // recorded high-water mark on a fixture that did not exist before,
+        // NOT a loosened budget on an existing one — no v0.1 fixture's
+        // count moved. Ratchet DOWN.
+        "rc_phase_shift" => 5,
         // diff_pair, port_shapes, opamp_inverting_real: zero violations.
         _ => 0,
     }
@@ -2405,6 +2420,7 @@ const PHASE1_ERC_FIXTURES: &[&str] = &[
     "port_shapes",
     "opamp_definition_level",
     "named_rails",
+    "rc_phase_shift",
 ];
 
 #[test]
@@ -2955,6 +2971,7 @@ const ALL_FIXTURES_FOR_CROSS_NET: &[&str] = &[
     "port_shapes",
     "rc_lowpass_ports",
     "named_rails",
+    "rc_phase_shift",
 ];
 
 /// Symmetric fixtures whose two mirror-image sub-circuits force two

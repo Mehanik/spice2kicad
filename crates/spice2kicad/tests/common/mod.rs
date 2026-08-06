@@ -16,6 +16,7 @@
 
 pub mod sexp;
 pub mod text_model;
+pub mod xfail;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;

@@ -47,6 +47,7 @@ const FIXTURES: &[&str] = &[
     "port_shapes",
     "opamp_definition_level",
     "named_rails",
+    "rc_phase_shift",
 ];
 
 // --- driver bits ---------------------------------------------------------

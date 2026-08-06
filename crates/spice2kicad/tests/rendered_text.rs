@@ -55,6 +55,7 @@ const FIXTURES: &[&str] = &[
     "rc_lowpass_ports",
     "opamp_definition_level",
     "named_rails",
+    "rc_phase_shift",
 ];
 
 // --- environment ---------------------------------------------------------
@@ -253,7 +254,12 @@ fn rendered_text_does_not_overlap_across_fixtures() {
     // bump (CLAUDE.md, "Budgets are ratchets").
     let budget = |_fixture: &str| -> usize { 0 };
 
-    let mut failures = Vec::new();
+    // The budget stays a hard 0 for EVERY fixture. A fixture that
+    // re-exposes a *deferred* text-overlap defect is excluded by name in
+    // `tests/common/xfail.rs`, which fails this test the day that
+    // fixture starts passing — unlike a `continue`, which reports as
+    // "passed" forever.
+    let mut xf = common::xfail::Guard::new("rendered_text_does_not_overlap_across_fixtures");
     for fixture in FIXTURES {
         if EXCLUDED_FIXTURES.contains(fixture) {
             continue;
@@ -277,15 +283,12 @@ fn rendered_text_does_not_overlap_across_fixtures() {
                 }
             }
         }
-        if hits > budget(fixture) {
-            failures.push(format!("{fixture}: {hits} rendered-text overlaps"));
-        }
+        xf.record(
+            fixture,
+            (hits > budget(fixture)).then(|| format!("{fixture}: {hits} rendered-text overlaps")),
+        );
     }
-    assert!(
-        failures.is_empty(),
-        "rendered text overlaps (measured from kicad-cli SVG ink):\n  {}",
-        failures.join("\n  "),
-    );
+    xf.finish();
 }
 
 // --- test 2: calibrate the model against the ink -------------------------

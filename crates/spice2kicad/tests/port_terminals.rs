@@ -260,7 +260,12 @@ fn run_erc(sch: &Path, out_dir: &Path) -> Option<usize> {
 fn erc_clean_on_port_annotated_fixtures() {
     // Declaring a port is a readability + position marker, not an ERC
     // driver: it must not add/remove PWR_FLAGs or otherwise disturb ERC.
-    for name in ["rc_lowpass_ports", "port_shapes", "rc_lowpass"] {
+    for name in [
+        "rc_lowpass_ports",
+        "port_shapes",
+        "rc_lowpass",
+        "rc_phase_shift",
+    ] {
         let src = fixtures_dir().join(format!("{name}.cir"));
         let tmp = tempdir(name);
         let sch = spice_to_kicad(&src, &tmp).expect("spice2kicad");

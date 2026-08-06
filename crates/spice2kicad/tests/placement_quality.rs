@@ -554,6 +554,7 @@ const FIXTURES_FOR_QUALITY: &[(&str, &str)] = &[
     ("port_shapes", "port_shapes.cir"),
     ("opamp_definition_level", "opamp_definition_level.cir"),
     ("named_rails", "named_rails.cir"),
+    ("rc_phase_shift", "rc_phase_shift.cir"),
 ];
 
 fn fixtures() -> Vec<(&'static str, PathBuf)> {
@@ -1076,6 +1077,9 @@ fn refdes_to_nets(spice_path: &Path) -> std::collections::HashMap<String, Vec<St
 
 #[test]
 fn rails_correctly_ordered_across_fixtures() {
+    // Collect-all + XFAIL registry — see `tests/common/xfail.rs` and the
+    // note on `v14_rail_pin_faces_rail`.
+    let mut xf = common::xfail::Guard::new("rails_correctly_ordered_across_fixtures");
     for (name, path) in fixtures() {
         let tmp = tempdir(name);
         let sch = common::spice_to_kicad(&path, &tmp).expect("spice2kicad");
@@ -1117,18 +1121,26 @@ fn rails_correctly_ordered_across_fixtures() {
             }
         }
         if power_ys.is_empty() || ground_ys.is_empty() {
+            // Nothing to grade — but still tell the guard, so a stale
+            // registry entry naming this fixture is reported.
+            xf.record(name, None);
             continue;
         }
         let max_power = power_ys.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         let min_ground = ground_ys.iter().copied().fold(f64::INFINITY, f64::min);
         // KiCad Y grows downward → Power should be at smaller Y than
         // Ground. Allow one grid cell of slack.
-        assert!(
-            max_power < min_ground + 1.27,
-            "{name}: rails not ordered. max(Power Y) = {max_power:.2}, \
-             min(Ground Y) = {min_ground:.2} (Power should be above Ground)",
+        xf.record(
+            name,
+            (max_power >= min_ground + 1.27).then(|| {
+                format!(
+                    "{name}: rails not ordered. max(Power Y) = {max_power:.2}, \
+                     min(Ground Y) = {min_ground:.2} (Power should be above Ground)"
+                )
+            }),
         );
     }
+    xf.finish();
 }
 
 /// Quantise a millimetre coordinate to an integer key. One grid step is
@@ -1472,6 +1484,11 @@ fn wire_detour_within_budget_across_fixtures() {
         // ink relative to its rectilinear ideal. Ratchet DOWN.
         ("opamp_definition_level", 1.0732),
         ("named_rails", 1.125),
+        // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE, owner-approved.
+        // Deliberately high wander — 1.23 is the worst in the suite by a
+        // wide margin (next worst: named_rails at 1.125), and it is the
+        // Tier-2 headroom F0 exists to expose. Ratchet DOWN.
+        ("rc_phase_shift", 1.2314),
     ];
     for (name, path) in fixtures() {
         let tmp = tempdir(name);
@@ -1576,6 +1593,9 @@ fn crossing_count_within_budget_across_fixtures() {
         // fault was fixed. It was, and it did. Ratchet DOWN.
         ("opamp_definition_level", 0),
         ("named_rails", 0),
+        // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE, owner-approved: the
+        // long ladder + gain stage crosses twice. Ratchet DOWN.
+        ("rc_phase_shift", 2),
     ];
     for (name, path) in fixtures() {
         let tmp = tempdir(name);
@@ -1653,7 +1673,14 @@ struct HostPin {
 #[test]
 fn v14_rail_pin_faces_rail() {
     let library = load_test_library();
+    // Collect-all rather than fail-fast: a hard `assert!` inside the
+    // fixture loop aborts at the first offender, which hides how many
+    // fixtures are affected and makes an XFAIL entry look broader than
+    // it needs to be. `xf` also carries the unexpected-pass tripwire —
+    // see `tests/common/xfail.rs`.
+    let mut xf = common::xfail::Guard::new("v14_rail_pin_faces_rail");
     for (name, path) in fixtures() {
+        let mut violation: Option<String> = None;
         let tmp = tempdir(name);
         let sch = common::spice_to_kicad(&path, &tmp).expect("spice2kicad");
         let root = parse_sch(&sch);
@@ -1754,24 +1781,30 @@ fn v14_rail_pin_faces_rail() {
                 continue;
             }
             if want_up {
-                assert!(
-                    ay <= host.body_cy + f64::EPSILON,
-                    "{name}: positive-rail glyph {refdes} ({lib_id}) at y={ay} is BELOW its \
-                     host {}'s body centre y={} — rail pin faces into the body (V14/R-5)",
-                    host.refdes,
-                    host.body_cy,
-                );
-            } else {
-                assert!(
-                    ay >= host.body_cy - f64::EPSILON,
-                    "{name}: ground/negative-rail glyph {refdes} ({lib_id}) at y={ay} is ABOVE \
-                     its host {}'s body centre y={} — rail pin faces into the body (V14/R-5)",
-                    host.refdes,
-                    host.body_cy,
-                );
+                if ay > host.body_cy + f64::EPSILON {
+                    violation.get_or_insert_with(|| {
+                        format!(
+                            "{name}: positive-rail glyph {refdes} ({lib_id}) at y={ay} is BELOW \
+                             its host {}'s body centre y={} — rail pin faces into the body \
+                             (V14/R-5)",
+                            host.refdes, host.body_cy,
+                        )
+                    });
+                }
+            } else if ay < host.body_cy - f64::EPSILON {
+                violation.get_or_insert_with(|| {
+                    format!(
+                        "{name}: ground/negative-rail glyph {refdes} ({lib_id}) at y={ay} is \
+                         ABOVE its host {}'s body centre y={} — rail pin faces into the body \
+                         (V14/R-5)",
+                        host.refdes, host.body_cy,
+                    )
+                });
             }
         }
+        xf.record(name, violation);
     }
+    xf.finish();
 }
 
 #[test]
@@ -2300,6 +2333,8 @@ const MAX_HOST_ATTACH_MM: f64 = 3.0 * 1.27;
 #[test]
 fn no_power_glyph_foreign_body_overlap_across_fixtures() {
     let library = load_test_library();
+    // Collect-all + XFAIL registry — see `tests/common/xfail.rs`.
+    let mut xf = common::xfail::Guard::new("no_power_glyph_foreign_body_overlap_across_fixtures");
     for (name, path) in fixtures() {
         let tmp = tempdir(name);
         let sch = common::spice_to_kicad(&path, &tmp).expect("spice2kicad");
@@ -2363,14 +2398,24 @@ fn no_power_glyph_foreign_body_overlap_across_fixtures() {
             }
         }
 
+        // The budget stays a hard 0 for EVERY fixture; a fixture that
+        // re-exposes the deferred issue-[3] defect is excluded by name in
+        // `tests/common/xfail.rs`, which fails the test the day that
+        // fixture starts passing.
         let budget = power_glyph_foreign_body_overlap_budget(name);
-        assert!(
-            overlaps <= budget,
-            "{name}: {overlaps} power-glyph/foreign-body overlaps exceed ratchet budget {budget} \
-             (issue [3], deferred V14 placer item — budgets only ratchet DOWN):\n  {}",
-            detail.join("\n  "),
+        xf.record(
+            name,
+            (overlaps > budget).then(|| {
+                format!(
+                    "{name}: {overlaps} power-glyph/foreign-body overlaps exceed ratchet budget \
+                     {budget} (issue [3], deferred V14 placer item — budgets only ratchet \
+                     DOWN):\n  {}",
+                    detail.join("\n  "),
+                )
+            }),
         );
     }
+    xf.finish();
 }
 
 /// No placed symbol's resolved extent (body + pin reach) and no power

@@ -290,6 +290,8 @@ const Q6_REFERENCE: &[(&str, f64)] = &[
     ("port_shapes", 1.7321),
     ("opamp_definition_level", 1.2910),
     ("named_rails", 1.7321),
+    // F0 (v0.2 roadmap) — informational master reference, not a gate.
+    ("rc_phase_shift", 0.8938),
 ];
 
 #[test]

@@ -302,6 +302,11 @@ const Q3_FLOW_MONOTONICITY_BUDGET: &[(&str, u32)] = &[
     ("opamp_definition_level", 0),
     // RPU (pull-up rail stub) drawn right of the CL it shares `out` with.
     ("named_rails", 1),
+    // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE, owner-approved.
+    // Four inversions (Q1→RE, RB→CIN, RB→Q1, RC→Q1) against a suite
+    // whose previous worst was 1. Deliberately POOR: this is precisely
+    // the flow-monotonicity headroom F0 exists to expose. Ratchet DOWN.
+    ("rc_phase_shift", 4),
 ];
 
 #[test]

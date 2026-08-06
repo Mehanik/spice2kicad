@@ -472,6 +472,7 @@ const FIXTURES: &[&str] = &[
     "rc_lowpass_ports",
     "opamp_definition_level",
     "named_rails",
+    "rc_phase_shift",
 ];
 
 /// Per-fixture `(name, B, J)` high-water marks — **zero slack**, each
@@ -511,6 +512,14 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     // is a restoration, not a budget bump — the literal is again exactly
     // what `master` measured before M4, and it ratchets DOWN only.
     ("named_rails", 2, 2),
+    // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE, owner-approved.
+    // `rc_phase_shift` — a three-section RC ladder feeding a CE stage —
+    // is the long-chain circuit the current placer sprawls: B = 19 is
+    // 2.4x the worst v0.1 fixture (multivibrator's 8), from 36 raw
+    // segments over 28 maximal runs. Deliberately POOR;
+    // this IS the Tier-2 V16 headroom F0 exists to expose. Adding it
+    // moved no v0.1 fixture's (B, J). Ratchet DOWN.
+    ("rc_phase_shift", 19, 3),
     // B 10 → 4. Phase 4.5's acceptance objective gained the V16
     // ink-graph bend count as its FINAL lexicographic key, after
     // (V13, V12, V5), so the refiner now separates orientations that tie

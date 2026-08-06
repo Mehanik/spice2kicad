@@ -1,0 +1,35 @@
+* RC phase-shift network (three cascaded RC sections) feeding one
+* common-emitter gain stage. A long rooted chain in → n1 → n2 → n3 → b
+* → c → out that stresses layer assignment: the current placer spreads
+* the ladder awkwardly, giving the flow layering real headroom.
+*@symbol Device:R_US      for=R*
+*@symbol Device:C         for=C*
+*@symbol Device:Q_NPN_BCE for=Q*
+*@port in=input
+*@port out=output
+
+VCC vcc 0   DC 12         ;@ power=+12V
+VIN in  0   AC 1          ;@ ignore
+
+* --- three-section RC phase-shift ladder ---
+R1  in  n1  10k
+C1  n1  0   10n
+R2  n1  n2  10k
+C2  n2  0   10n
+R3  n2  n3  10k
+C3  n3  0   10n
+
+* --- common-emitter gain stage ---
+CIN n3  b   1u
+RB  vcc b   100k
+RC  vcc c   4k7
+RE  e   0   1k
+CE  e   0   100u
+COUT c   out 1u
+RL  out 0   100k          ;@ ignore
+
+Q1  c b e   QGENERIC
+
+.model QGENERIC NPN (BF=200 IS=1e-15)
+.ac dec 20 10 10Meg
+.end

@@ -149,6 +149,7 @@ fn conversion_is_byte_deterministic_across_fixtures() {
         "port_shapes",
         "opamp_definition_level",
         "named_rails",
+        "rc_phase_shift",
     ];
     let mut failures = Vec::new();
     for name in FIXTURES {

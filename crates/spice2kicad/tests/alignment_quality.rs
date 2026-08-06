@@ -332,6 +332,9 @@ const Q5_NEAR_MISS_BUDGET: &[(&str, u32)] = &[
     ("opamp_definition_level", 2),
     // CL/RIN and RIN/RPU near-miss on the shared `out`/input nets.
     ("named_rails", 2),
+    // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE, owner-approved:
+    // C3/CIN, CIN/Q1 and Q1/RB each miss a shared axis by a hair.
+    ("rc_phase_shift", 3),
 ];
 
 #[test]
