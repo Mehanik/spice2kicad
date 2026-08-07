@@ -563,6 +563,15 @@ invariant here.
   Recall the contrast with V5/V6/V7 (quality) and V10 (routing
   surface): V10 says *what* the router emits; V11 says *what it
   is forbidden to emit*.
+  **Residue is a refusal, unconditionally** (ADR-20 D4, ADR-21).
+  `kicad-emitter`'s `route_nets` errors — before writing a single
+  byte — on pin-on-pin across nets (`EmitError::PinCoincidence`,
+  pre-route) and on any `v11:` line the router's conflict cascade
+  leaves behind at its fixed point (`EmitError::V11Violation`,
+  post-route). Neither depends on `--verify`, on `kicad-cli` being
+  installed, or on any env var; there is no opt-out from a Tier-0
+  refusal. Note the asymmetry with V12, which is Tier 1 and
+  legitimately warns with a budgeted fallback.
 
 - **V12 — Wires do not cross foreign symbol bodies.** Every emitted
   `(wire …)` segment's axis-parallel path must not strictly enter

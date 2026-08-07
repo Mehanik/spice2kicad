@@ -1653,9 +1653,9 @@ fn route_nets(
     // emitted a schematic whose base and emitter nets were one node.
     //
     // So the refusal moves here, before a single wire is routed: it is
-    // unconditional, needs no external tool, and does not depend on
-    // `SPICE2KICAD_V11_STRICT` (that env-gate covers the *quality*-tier
-    // `v11:` wire residue, a different and repairable class). CLAUDE.md:
+    // unconditional and needs no external tool. Its sibling — a routed
+    // *wire* left on a foreign pin — is refused just as
+    // unconditionally after the route below (ADR-21). CLAUDE.md:
     // V11 "is a correctness invariant, not a quality one", and a
     // converter that refuses is vastly better than one that emits a
     // wrong schematic.
@@ -1686,30 +1686,44 @@ fn route_nets(
         bounds: None,
     });
     // Split V11 (correctness) residue from other warnings. A `v11:`
-    // prefix indicates a wire still touches a foreign pin after the
-    // active rerouter ran — KiCad would silently short the two nets
-    // on load. We escalate that to a hard `EmitError` when the
-    // `SPICE2KICAD_V11_STRICT` env var is set; the env-gate keeps the
-    // existing single fixture with a known placer-level pin overlap
-    // (`opamp_inverting_real`) emittable for the V12/V13 verifier
-    // suite while still giving callers a way to opt into nonzero
-    // exit-status on V11 residue. The `v11-placer:` tag (router-
-    // detected placer overlap, see `conflict::avoid_foreign_pins`)
-    // is logged as a warning regardless. Other warnings (V12 body
-    // crossings, missing `power:*` lib_id, conflict-resolver cap)
-    // stay at the warning tier.
+    // prefix means a routed wire still touches a pin owned by a
+    // *different* net after the active rerouter ran to exhaustion —
+    // KiCad joins the two nets on load, so the emitted schematic is a
+    // different circuit from the source netlist.
+    //
+    // This is Tier 0 and therefore an **unconditional** refusal, the
+    // same tier and the same unconditionality as `PinCoincidence`
+    // above (ADR-21). It used to be gated behind
+    // `SPICE2KICAD_V11_STRICT`; that gate was a hole. The stated
+    // reason for it — "keeps `opamp_inverting_real` emittable" — was
+    // already stale on the ADR-20 tree: `opamp_inverting_real` emits
+    // no `v11:` warning at all, and of the thirteen fixtures only
+    // `shunt_feedback_amp` (an F0 defect lock, not a graded fixture)
+    // trips it. What the gate actually did was let `--no-verify`, and
+    // every machine without `kicad-cli`, ship a shorted schematic at
+    // exit 0.
+    //
+    // Note that "repairable in principle" is not a reason to warn:
+    // the router has *already* run its full V11 cascade to a derived
+    // fixed point by the time this warning exists, and nothing
+    // downstream of `route_nets` moves a wire. The residue is final.
+    //
+    // Other warnings stay at the warning tier: `obstacle:` /
+    // `v12-placer:` are V12 (Tier 1, budgeted fallback by design),
+    // `rails:` / `pwrflag:` are missing-library fallbacks. `conflict:`
+    // is Tier-0-shaped and audited in ADR-21 § "Sibling holes".
     let mut v11_errors: Vec<&String> = Vec::new();
     for w in &result.warnings {
+        eprintln!("spice2kicad route: {w}");
         if w.starts_with("v11:") {
             v11_errors.push(w);
-            eprintln!("spice2kicad route: {w}");
-        } else {
-            eprintln!("spice2kicad route: {w}");
         }
     }
-    if !v11_errors.is_empty() && std::env::var_os("SPICE2KICAD_V11_STRICT").is_some() {
+    if !v11_errors.is_empty() {
         return Err(EmitError::V11Violation(format!(
-            "{} unresolved foreign-pin coincidence(s) in `{scope}`: {}",
+            "{} unresolved foreign-pin coincidence(s) in `{scope}`: {}. A wire \
+             endpoint or interior lying on a foreign net's pin is joined by KiCad, \
+             so the schematic would not be the source circuit.",
             v11_errors.len(),
             v11_errors
                 .iter()

@@ -3666,7 +3666,10 @@ final `shunt_feedback_amp` placement the trial route's 19 segments are
 * *Pin-on-pin* (`EmitError::PinCoincidence`) — checked in `route_nets`
   before a wire is routed, unconditional, no external tool needed, and
   deliberately **not** behind `SPICE2KICAD_V11_STRICT` (that env-gate
-  covers repairable `v11:` wire residue).
+  covered `v11:` wire residue). *Superseded by ADR-21*: the env-gate is
+  gone and `v11:` residue is refused just as unconditionally — the
+  "repairable" premise was wrong, and the gate meant `--no-verify`
+  shipped the short at exit 0.
 * *Severed net* (`EmitError::DisconnectedNet`) — `report_disconnected_nets`
   used to print `ERROR: net "c" is not fully connected` and then return
   `Ok`. Measured: a `shunt_feedback_amp` pose printed exactly that and
@@ -3716,3 +3719,194 @@ that pose emits `v11: … 1 interior foreign-pin coincidence` and a severed
 `c` net. The probe read the CLI's exit code, which at the time was 0 for a
 severed net (see D4). MEMORY "verify what a number measures" again: the
 control arm was the thing under test.
+
+## ADR-21 — A Tier-0 refusal cannot be optional: the `v11:` wire-on-foreign-pin hole
+
+**Status:** landed. Scope is deliberately narrow — one warning promoted to
+an unconditional error, plus an audit of its siblings. No placer, router
+or geometry change; `baseline_lock` diff is EMPTY and every graded
+fixture's emitted `.kicad_sch` is byte-identical.
+
+### The report
+
+ADR-20 stated the principle — *the converter must refuse rather than emit
+an electrically wrong schematic* — and implemented two refusals
+(`PinCoincidence`, `DisconnectedNet`). One case of the same class was
+still shipping at exit 0:
+
+```
+$ spice2kicad shunt_feedback_amp.cir -o out.kicad_sch --no-layout-cache --no-verify …
+spice2kicad route: v11: net index 1 has 1 endpoint and 0 interior foreign-pin
+                   coincidences left after active rerouting
+spice2kicad route: obstacle: net index 1 has 2 segment(s) crossing a symbol body
+                   after 6 outer passes
+   -> exit=0, and out.kicad_sch shorts the collector net to `vcc`.
+```
+
+Without `--no-verify` the *optional* post-emit `kicad-cli` check caught it
+and exited 1. That is precisely the situation ADR-20 D4 called
+unacceptable, still true for a third case.
+
+### Why it was a class gap, not an oversight
+
+The three ways a routed sheet can be the wrong circuit are: pins merged,
+nets merged, net severed.
+
+| condition                         | ADR-20 status        |
+| --------------------------------- | -------------------- |
+| pin-on-pin across nets            | `PinCoincidence` ✔   |
+| net severed (under-connected)     | `DisconnectedNet` ✔  |
+| **nets merged by a wire endpoint on a foreign pin** | **warning** ✘ |
+
+The third is exactly what `conflict::avoid_foreign_pins` reports as
+`v11:`. In `kicad-emitter`'s `route_nets` it was escalated to
+`EmitError::V11Violation` **only when `SPICE2KICAD_V11_STRICT` was set**.
+
+### D1. The env-gate's stated justification was already stale
+
+The gate's comment read: *"the env-gate keeps the existing single fixture
+with a known placer-level pin overlap (`opamp_inverting_real`) emittable
+for the V12/V13 verifier suite"*. Measured on the ADR-20 tree
+(`a693648`), converting all twelve routable fixtures with `--no-verify
+--no-layout-cache`:
+
+* `opamp_inverting_real` emits **no** `v11:` warning — and no warning of
+  any kind. The V14 power-pin-orientation fix removed its overlap long
+  ago; `electrical_safety.rs::v11_pin_overlap_is_a_placer_bug` and
+  `v11_violation_budget` already assert **zero on every fixture**.
+* Exactly one fixture trips `v11:` — `shunt_feedback_amp`, an F0 *defect
+  lock*, not a graded fixture.
+
+So the gate protected nothing. What it actually did was let `--no-verify`,
+and every machine without `kicad-cli`, ship a shorted schematic at exit 0.
+The gate is deleted; there is no opt-out from a Tier-0 refusal.
+
+### D2. "Repairable in principle" is not a reason to warn
+
+The old `EmitError` doc justified the softer treatment by contrasting
+`v11:` *wire* residue ("which the router can often detour") with
+`PinCoincidence` ("no routing pass can move a pin"). That contrast does
+not survive contact with where the warning is raised: the `v11:` tally in
+`conflict::avoid_foreign_pins` is taken **at the cascade's fixed point** —
+the loop above it exits on `!changed`, i.e. after every detour the router
+can find has already been tried — and nothing downstream of `route_nets`
+moves a wire. A `v11:` line is not a hint that repair is pending; it is
+the router reporting that repair is *finished and failed*.
+
+The correct axis is not repairability but *what the reader gets*: a wire
+endpoint on a foreign net's pin is joined by KiCad on load, so the
+emitted file is a different circuit. That is Tier 0 by CLAUDE.md's own
+words — V11 "is a correctness invariant, not a quality one".
+
+### D3. Refuse before writing, not after
+
+The check sits in `route_nets`, which runs inside `emit_root` /
+`emit_child_sheet` and therefore *before* any bytes reach disk. The
+refused conversion leaves **no** `.kicad_sch` behind, so no later step can
+pick up a file the converter has already judged wrong. The regression test
+asserts this second property explicitly.
+
+### Blast radius: measured nil
+
+All eleven graded fixtures convert at exit 0 both before and after, and
+their emitted `.kicad_sch` files are **byte-identical** (`diff -rq` over
+two fresh output directories, `--no-layout-cache --no-verify`). This is
+nil *by construction* as well: the new code path is unreachable unless the
+router emits a `v11:` line, and no graded fixture emits one — a fact two
+existing verifiers already ratchet at zero. No budget moved in either
+direction; there was no slack to remove.
+
+`shunt_feedback_amp` stays a defect lock (its residual is the owner-gated
+R-5 rail-pin defect — ADR-20 § "Root cause"). Its lock now asserts the
+*stronger* behaviour: the failure mode moved from "the optional
+`kicad-cli` check catches it" to "the converter refuses unconditionally",
+so the lock matches the router's own unwrapped `v11: net index` line
+instead of the connectivity report's wrapped prose.
+
+### Sibling holes — the audit
+
+Every diagnostic `route_nets` prints, classified by tier and by whether it
+can still reach exit 0.
+
+| diagnostic | what it means geometrically | tier | disposition |
+| --- | --- | --- | --- |
+| `v11:` | wire endpoint/interior on a foreign net's pin | 0 | **now a hard error** |
+| `conflict:` | wire endpoints of ≥ 2 distinct nets on one coord | 0 | **open** — see below |
+| `cross-net overlap:` | segments of 2 nets collinearly overlap | 0 | **open, and not directly escalatable** — see below |
+| `obstacle:` | V12 body crossing after the outer cap | 1 | warning is correct (budgeted fallback, per CLAUDE.md) |
+| `v12-placer:` | own pin strictly inside a foreign body; V12 skipped | 1 | warning is correct |
+| `rails:` | `power:*` lib_id missing → `(global_label)` fallback | 1 | warning is correct — the label still carries the net by name, so connectivity is preserved |
+| `pwrflag:` | `power:PWR_FLAG` missing → net left undriven | 0 (V2) | warning, but it is a *library-configuration* failure and the emitted circuit is still the right circuit; ERC reports it. Left alone. |
+
+**`conflict:` is a genuine open Tier-0 hole.** `find_conflicts` returns
+every coordinate carrying wire endpoints from ≥ 2 distinct routed nets, and
+KiCad joins wires that share an endpoint — so a surviving conflict is a
+net merge. It is reported as a warning and reaches exit 0. It is *not*
+observed on any of the thirteen fixtures, and since ADR-20 its main
+generator is gone: `resolve_conflicts` declines to jog only when *every*
+candidate at the point is a pin endpoint, i.e. pin-on-pin, which
+`PinCoincidence` now rejects before routing. The residual generator is the
+iteration cap being exhausted by an oscillating chain. It was left alone
+here rather than escalated blind, because escalating a *string* is the
+weaker instrument (see below) and there is no fixture to verify it
+against.
+
+**`cross-net overlap:` must NOT be escalated as a string.** Two nets'
+segments overlapping collinearly is a merge (at least one endpoint of one
+segment lies on the other). But the warning is emitted from
+`deconflict_cross_net_overlaps`, which runs **before** `run_cleanup`, and
+`spice-route`'s own comment records that this signal is "a pre-cleanup,
+conservative signal, and `coalesce`/`collapse` routinely resolve pairs it
+reported" — rolling back on it was measured to make `multivibrator` worse
+(V5 4 → 6). Promoting it to an error would refuse conversions that are in
+fact clean. The router already has the faithful post-cleanup predicate,
+`first_cross_net_overlap`, but only consults it to decide whether to retry
+with a suppressed stub, never to report.
+
+Measured, on the one fixture that trips it. `two_stage_amp` (an F0 runtime
+defect lock, committed but unregistered) emits **two** of these lines on
+the real emit path — not just inside phase 4.5's trial routes:
+
+```
+route: cross-net overlap: nets 3/1 unresolved by single-track jog (channel router — v0.2)
+route: cross-net overlap: nets 3/5 unresolved by single-track jog (channel router — v0.2)
+```
+
+and nonetheless converts at **exit 0 with `kicad-cli` verification on and
+clean** (kicad-cli 9.0.2; the check compares the exported netlist against
+the source and would report "net in the schematic but not the source" for
+a merge). So on the only available evidence the warning is a false
+positive for the property it looks like it is reporting. Escalating it
+would have converted a correct conversion into a failure — the precise
+outcome this work was told not to cause. It stays a warning, and the
+finding is that the *signal*, not the tier, is what needs fixing.
+
+**The structural finding.** `kicad-emitter` has an in-process geometric
+check for **severance** (`disconnected_nets`, union-find over emitted
+wires, now `DisconnectedNet`) and **no** in-process geometric check for
+**merge**. Every merge refusal today is a string match on a router
+warning, which means each new way to merge two nets needs its own string
+and its own escalation. The class fix is the mirror of
+`disconnected_nets`: union-find the emitted wires, absorb each pin, and
+refuse when two distinct source nets land in one component. That would
+subsume `v11:`, `conflict:` and `cross-net overlap:` at once, be
+faithful to final post-cleanup geometry (which the last of those is not),
+and be exactly the `kicad-cli` connectivity check the converter currently
+outsources — without needing KiCad installed. It is deliberately **not**
+built here: it is a new verifier with its own false-positive surface
+(rail glyphs and name-jump labels carry connectivity without wires), and
+this ADR's mandate was to close a hole without turning a good conversion
+into a failure. It is the recommended next step.
+
+### Verification
+
+* Twelve routable fixtures converted `--no-layout-cache --no-verify`
+  before and after: eleven at exit 0 with byte-identical output,
+  `shunt_feedback_amp` 0 → 1.
+* New regression test
+  `f0_defects.rs::v11_residue_is_refused_without_kicad_cli` asserts the
+  **exit code** (`Some(1)`) under `--no-verify`, and that no
+  `.kicad_sch` was written. It asserts no stderr substring: both the old
+  and the new path print a `v11:` line, so stderr cannot distinguish them
+  — and stderr substrings have already misled one author on this file
+  (ADR-20's lock matched prose the CLI never printed unwrapped).

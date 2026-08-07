@@ -7,10 +7,10 @@
 //! across the fixture-enumerating verifiers. The other two convert
 //! *badly*, in two different ways, and are held here instead:
 //!
-//!  * **`shunt_feedback_amp` — Tier-0.** The converter's own post-emit
-//!    connectivity check rejects its own output: the emitted schematic
-//!    merges two source nets. Deterministic, and rooted in the stage-3
-//!    SA end-state at its *default* iteration count — see the full
+//!  * **`shunt_feedback_amp` — Tier-0.** The converter refuses to emit
+//!    it: no routing of its stage-3 placement avoids merging the
+//!    collector net into the `vcc` rail. Deterministic, and rooted in
+//!    the SA end-state at its *default* iteration count — see the full
 //!    diagnosis on the test below, which supersedes the original
 //!    "base/emitter short" reading.
 //!  * **`two_stage_amp` — runtime.** It converts *correctly*, but takes
@@ -80,24 +80,32 @@ fn convert(fixture: &str, out_dir: &Path, extra: &[&str]) -> Output {
 
 // --- shunt_feedback_amp: Tier-0 net short ---------------------------------
 
-/// **Defect lock (Tier-0, V11).** Converting `shunt_feedback_amp` with
-/// default settings emits a schematic that does not wire up the source
-/// circuit, and the CLI's post-emit connectivity check rejects it. The
-/// CLI exits non-zero, which is the correct behaviour for a converter
-/// that cannot honour Tier-0.
+/// **Defect lock (Tier-0, V11).** Converting `shunt_feedback_amp` at
+/// default settings produces a placement whose collector trunk cannot
+/// be routed without terminating on `RC`'s own `vcc` pin — merging the
+/// collector net into the `vcc` rail. The converter **refuses**: it
+/// exits non-zero without writing a `.kicad_sch`, which is the correct
+/// behaviour for a converter that cannot honour Tier-0.
 ///
 /// **Current failure (measured on this tree, deterministic):**
 ///
 /// ```text
 /// route: v11: net index 1 has 1 endpoint and 0 interior foreign-pin
 ///        coincidences left after active rerouting
-/// ERROR: the emitted schematic does not wire up the source circuit.
-///   net in the source but split in the schematic: {"COUT.0", "Q1.0", "RC.1", "RF.0"}
-///   net in the source but split in the schematic: {"RB.0", "RC.0"}
+/// error: V11 correctness invariant (Tier 0): 1 unresolved foreign-pin
+///        coincidence(s) in `root`: …
 /// ```
 ///
 /// i.e. the collector net `c` and the `vcc` rail are merged: the `c`
 /// trunk terminates on `RC`'s own `vcc` pin.
+///
+/// **The refusal is unconditional (ADR-21).** Until ADR-21 the only
+/// thing turning this into a non-zero exit was the CLI's *optional*
+/// post-emit `kicad-cli` connectivity check — so with `--no-verify`, or
+/// on any machine without KiCad, the converter emitted the shorted
+/// schematic at exit 0. The `v11:` residue is now an `EmitError` in its
+/// own right; see [`v11_residue_is_refused_without_kicad_cli`], which is
+/// the regression test for that hole specifically.
 ///
 /// # Diagnosis (superseding the original entry)
 ///
@@ -173,14 +181,66 @@ fn shunt_feedback_amp_conversion_is_a_tier0_net_short() {
          DELETE this test. See docs/v0.2-roadmap.md § F0.\nstderr:\n{stderr}",
         out.status.code(),
     );
-    // Match the net-partition line, not the headline sentence: the CLI
-    // wraps "…does not wire up the   source circuit." with a run of
-    // spaces, so the obvious substring is not actually present.
+    // Match the router's own diagnostic line, which is emitted verbatim
+    // and unwrapped. Do NOT match the headline sentence of a wrapped
+    // message: the CLI's connectivity report wraps "…does not wire up
+    // the   source circuit." with a run of spaces, and an earlier
+    // version of this lock asserted a substring that was never present.
     assert!(
-        stderr.contains("net in the source but split in the schematic"),
+        stderr.contains("v11: net index"),
         "`shunt_feedback_amp` failed to convert, but NOT with the recorded Tier-0 \
-         connectivity error. This lock describes one specific defect; a different \
-         failure is a new regression to diagnose, not this one.\nstderr:\n{stderr}",
+         V11 foreign-pin residue. This lock describes one specific defect; a \
+         different failure is a new regression to diagnose, not this one.\nstderr:\n{stderr}",
+    );
+}
+
+/// **Regression test for the ADR-21 hole.** The `v11:` residue — a
+/// routed wire endpoint left sitting on a *foreign* net's pin, which
+/// KiCad joins on load — must be refused **unconditionally**: not
+/// behind `--no-verify`, not behind an env var, and not dependent on
+/// `kicad-cli` being installed.
+///
+/// Before ADR-21 this exact invocation exited **0** and wrote a
+/// `.kicad_sch` shorting the collector net to `vcc`. The escalation to
+/// `EmitError::V11Violation` was gated on `SPICE2KICAD_V11_STRICT`, so
+/// the only thing catching the short was the CLI's *optional* post-emit
+/// `kicad-cli` connectivity check — unavailable on any machine without
+/// KiCad, and skipped outright by `--no-verify`.
+///
+/// **What is under test is the exit code.** `--no-verify` removes the
+/// post-emit check, so a non-zero exit here can only come from the
+/// emitter's own refusal. Asserting on stderr text would not
+/// distinguish the two paths (both print a `v11:` line), and stderr
+/// substrings have already burned one author on this file — hence the
+/// two assertions below: exit status first, then the *absence* of an
+/// output file, which pins that the refusal happens before any bytes
+/// are written rather than after.
+///
+/// This is deliberately in the F0 defect file next to the lock it
+/// shares a fixture with. The day `shunt_feedback_amp` is promoted,
+/// this test moves rather than dies: point it at any fixture that still
+/// trips a Tier-0 residue, or delete it only once no fixture can.
+#[test]
+fn v11_residue_is_refused_without_kicad_cli() {
+    let tmp = tempdir("v11-unconditional");
+    let out = convert("shunt_feedback_amp", &tmp, &["--no-verify"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "TIER-0 HOLE REOPENED: `shunt_feedback_amp --no-verify` exited {:?}. A \
+         routed wire left on a foreign net's pin is a silent net merge on KiCad \
+         load; the converter must refuse rather than emit it, with no dependence \
+         on `kicad-cli` or on any env gate. See ADR-21.\nstderr:\n{stderr}",
+        out.status.code(),
+    );
+    let emitted = tmp.join("shunt_feedback_amp.kicad_sch");
+    assert!(
+        !emitted.exists(),
+        "the converter refused (exit 1) but still wrote {}. A refusal must not \
+         leave a schematic on disk that a later step could pick up.",
+        emitted.display(),
     );
 }
 

@@ -26,18 +26,21 @@ pub enum EmitError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
-    /// V11 — one or more routed nets still touch a pin owned by a
-    /// different net after the active rerouter ran. KiCad's
-    /// connectivity engine silently shorts those nets on schematic
-    /// load (a wrong netlist on export), so the emitter refuses to
-    /// produce a `.kicad_sch` it knows is electrically incorrect.
-    /// The string holds the concatenated `v11:` diagnostics from
-    /// `spice_route::route` so callers can show the user which nets
-    /// are affected. The single non-router-fixable case
-    /// (`opamp_inverting_real`'s placer-level pin overlap) does not
-    /// emit a `v11:` warning — the router does not generate a
-    /// detour for it — so this error path never fires there.
-    #[error("V11 correctness invariant: {0}")]
+    /// V11, Tier 0 — one or more routed *wires* still touch a pin
+    /// owned by a different net after the active rerouter ran to its
+    /// fixed point. KiCad's connectivity engine silently joins those
+    /// nets on schematic load (a wrong netlist on export), so the
+    /// emitter refuses to produce a `.kicad_sch` it knows is
+    /// electrically incorrect. The string holds the concatenated
+    /// `v11:` diagnostics from `spice_route::route` so callers can
+    /// show the user which nets are affected.
+    ///
+    /// **Unconditional** (ADR-21). This used to fire only when
+    /// `SPICE2KICAD_V11_STRICT` was set, which meant `--no-verify` —
+    /// and every machine lacking `kicad-cli` — shipped the short at
+    /// exit 0. The env-gate is gone; there is no way to opt out of a
+    /// Tier-0 refusal.
+    #[error("V11 correctness invariant (Tier 0): {0}")]
     V11Violation(String),
 
     /// V11, Tier 0 — two or more pins belonging to *different* nets
@@ -45,11 +48,11 @@ pub enum EmitError {
     /// joins coincident pins unconditionally, so the schematic would be
     /// a different circuit from the source netlist.
     ///
-    /// Unlike [`EmitError::V11Violation`] (unresolved `v11:` *wire*
-    /// residue, which the router can often detour and which is therefore
-    /// gated behind `SPICE2KICAD_V11_STRICT`), this one is
-    /// unconditional: no routing pass can move a pin, so there is no
-    /// downstream stage that could repair it and nothing to trade.
+    /// [`EmitError::V11Violation`] covers the sibling case (a routed
+    /// *wire* left on a foreign pin) and is equally unconditional. The
+    /// two differ only in what the placer would have to move to fix
+    /// them: this one needs a symbol moved, that one needs a routable
+    /// channel to exist.
     #[error("V11 correctness invariant (Tier 0): {0}")]
     PinCoincidence(String),
 

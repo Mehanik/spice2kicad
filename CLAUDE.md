@@ -438,7 +438,7 @@ Attempt-A failure (a tunable term that at safe weights does nothing).
 | Invariant                | Enforcement                          |
 | ------------------------ | ------------------------------------ |
 | grid alignment           | hard (snap at SA boundary)           |
-| V11 wire/pin coincidence | hard (emit-time refusal + SA gate + phase 4.5 tuple key) |
+| V11 wire/pin coincidence | hard, four stages: SA gate → phase 4.5 tuple key → router conflict resolution → unconditional emit refusal (ADR-20/21) |
 | V14 power-glyph orient.  | hard + detached-glyph stub fallback  |
 | V12 obstacle avoidance   | hard with budgeted-fallback (logs)   |
 | V5 pin-facing            | soft seed + routing-aware refine*    |

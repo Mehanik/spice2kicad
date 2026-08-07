@@ -394,19 +394,23 @@ pub fn avoid_foreign_pins<S: ::std::hash::BuildHasher>(
         }
     }
     // Final tally — anything left after active rerouting is reported
-    // as a diagnostic. Two flavours:
-    //   * `v11:` — router-level failure. The emitter (kicad-emitter)
-    //     promotes this to a hard EmitError so the CLI exits nonzero
-    //     rather than write a schematic it knows is electrically
-    //     wrong.
-    //   * `v11-placer:` — the foreign-pin coord coincides with one
-    //     of the routed net's OWN pin coords, i.e. two distinct nets
-    //     occupy the same world point before the router ever ran.
-    //     No detour can fix that — any wire connecting the own pin
-    //     necessarily lands at the shared coord. The emitter logs
-    //     these as warnings only; closing them is a placer-level
-    //     work item tracked by
-    //     `v11_pin_overlap_is_a_placer_bug` in the verifier.
+    // as a `v11:` diagnostic, and the emitter (`kicad-emitter`'s
+    // `route_nets`) promotes it **unconditionally** to a hard
+    // `EmitError::V11Violation` so the CLI exits nonzero rather than
+    // write a schematic it knows is electrically wrong (ADR-21).
+    //
+    // This tally is taken at the cascade's fixed point: the loop above
+    // exits on `!changed`, so every detour the router can find has
+    // already been tried. Nothing downstream moves a wire. "The router
+    // might fix it later" is therefore not available as an excuse for
+    // warning-tier treatment.
+    //
+    // The historical second flavour, `v11-placer:` (the foreign-pin
+    // coord coinciding with one of the routed net's OWN pin coords —
+    // two nets on one world point before the router ever ran), is no
+    // longer emitted here: that condition is caught earlier and
+    // harder, by `route_nets`' pre-route `PinCoincidence` check
+    // (ADR-20 D4).
     for (i, net) in routed.iter().enumerate() {
         let pins = &foreign[i];
         if pins.is_empty() {
