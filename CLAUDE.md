@@ -212,16 +212,31 @@ Layout phases (later phases never override earlier):
    `spice-route` without forming a cycle). After phases 1–4 and BEFORE
    Decoration, it trial-routes candidate orientations of at-risk,
    non-pinned, non-symmetry elements with the **real router** and
-   accepts a candidate when the router's *measured* `(V13, V12, V5,
-   bends)` tuple strictly improves **lexicographically** — V13 and V12
-   (Tier 1) lead the ordering, V5 (Tier 2) breaks ties among them, and
-   V16 bends (Tier 2) is the FINAL key, breaking ties `V5` leaves open —
-   subject to V11 and symbol-overlap never regressing (V12 also carries
-   its own non-regression guard, so it can fall but never rise sideways
-   against a V13 gain). There is deliberately **no V5 non-regression
-   guard**: a candidate that raises V5 while lowering V13 or V12 is
-   accepted, per the tier-ordering rule (never trade a Tier-1 fix away
-   to protect a Tier-2 metric). Bends may never be a *weighted* term and
+   accepts a candidate when the router's *measured*
+   `(severed, coincident, V11, V13, V12, V5, bends)` tuple strictly
+   improves **lexicographically** — read in strict tier order. The three
+   **Tier-0** keys lead (`severed` = signal nets the router could not
+   join; `coincident` = pin-on-pin across nets, including rail-glyph
+   anchor pins; `V11`), then Tier-1 V13 and V12, then Tier-2 V5 breaking
+   ties among them, and V16 bends (Tier 2) as the FINAL key. Symbol
+   overlap and V12 remain non-regression **guards**, lifted only for a
+   strict Tier-0 improvement. There is deliberately **no V5
+   non-regression guard**: a candidate that raises V5 while lowering V13
+   or V12 is accepted, per the tier-ordering rule (never trade a Tier-1
+   fix away to protect a Tier-2 metric).
+
+   *Why the Tier-0 keys are tuple keys and not guards (ADR-20).* An
+   earlier version held `severed` as a guard only, reasoning that as a
+   tuple key a *reduction* in `severed` could outrank a Tier-1 V13/V12
+   regression. That reads the ordering rule symmetrically, and it is
+   **asymmetric**: "never trade a Tier-0 violation for any Tier-1/2
+   gain" forbids giving Tier-0 away, and therefore *mandates* paying
+   Tier-1 to recover it. As a floor the phase could never *seek* a
+   repair — which is exactly how it accepted a pose that shorted a
+   transistor's base to its emitter while improving the Tier-1/2 tuple.
+   With Tier 0 leading, the tuple degenerates to the old
+   `(V13, V12, V5, bends)` whenever both sides are Tier-0 clean, so
+   healthy fixtures are unaffected. Bends may never be a *weighted* term and
    must never move earlier in the tuple — see `docs/invariants.md` V16
    and ADR-16 for the proof that last-place lexicographic ordering (not
    a weighted term) is what keeps this subordinate to V12/V13. It
@@ -423,7 +438,7 @@ Attempt-A failure (a tunable term that at safe weights does nothing).
 | Invariant                | Enforcement                          |
 | ------------------------ | ------------------------------------ |
 | grid alignment           | hard (snap at SA boundary)           |
-| V11 wire/pin coincidence | hard (router conflict resolution)    |
+| V11 wire/pin coincidence | hard (emit-time refusal + SA gate + phase 4.5 tuple key) |
 | V14 power-glyph orient.  | hard + detached-glyph stub fallback  |
 | V12 obstacle avoidance   | hard with budgeted-fallback (logs)   |
 | V5 pin-facing            | soft seed + routing-aware refine*    |
@@ -437,15 +452,18 @@ stages: a *seed-time heuristic* in `pick_orientations` (the SA
 `rotate` move may override it), AND the **routing-aware
 orientation-refinement phase** (Layout phase 4.5, ADR-11 and ADR-16) —
 a placement-stage pass in `kicad-emitter` that uses the *real router*
-as an oracle and accepts a candidate whose measured `(V13, V12, V5,
-bends)` tuple strictly improves lexicographically (Tier-1 V13/V12
-lead, V5 breaks ties among them, V16 bends is the final key), subject
-to V11 and symbol-overlap never regressing (V12 also carries its own
-non-regression guard; **there is deliberately no V5 non-regression
-guard** — a V5 rise is accepted when it buys a V13 or V12 win, per the
-tier-ordering rule). This is correct precisely because a V5 violation
-is born in the router's conflict-resolution passes, invisible to any
-placement-side cost. (b) **There is no `power_pin_outward` term** in
+as an oracle and accepts a candidate whose measured
+`(severed, coincident, V11, V13, V12, V5, bends)` tuple strictly
+improves lexicographically (the three Tier-0 keys lead, then Tier-1
+V13/V12, then V5 breaking ties among them, with V16 bends the final
+key), subject to symbol-overlap and V12 non-regression guards that are
+lifted only for a strict Tier-0 improvement (**there is deliberately no
+V5 non-regression guard** — a V5 rise is accepted when it buys a V13 or
+V12 win, per the tier-ordering rule). This is correct precisely because
+a V5 violation is born in the router's conflict-resolution passes,
+invisible to any placement-side cost. See ADR-20 for why the Tier-0
+counts must be tuple keys the phase can *seek*, not floors it can only
+avoid worsening. (b) **There is no `power_pin_outward` term** in
 `CostWeights`. (c) V14 is a hard candidate filter
 (`orient::allowed_orientations`) at both the seed chooser and the SA
 rotate move; the refinement phase only selects from that same allowed
