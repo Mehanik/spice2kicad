@@ -3898,6 +3898,11 @@ built here: it is a new verifier with its own false-positive surface
 this ADR's mandate was to close a hole without turning a good conversion
 into a failure. It is the recommended next step.
 
+*Built in **ADR-22**.* Both `v11:` and `DisconnectedNet` are gone,
+replaced by the partition check; the feared false-positive surface was
+handled by modelling KiCad's by-name rule rather than by skipping the
+nets that need it, and `two_stage_amp` still converts at exit 0.
+
 ### Verification
 
 * Twelve routable fixtures converted `--no-layout-cache --no-verify`
@@ -3910,3 +3915,258 @@ into a failure. It is the recommended next step.
   and the new path print a `v11:` line, so stderr cannot distinguish them
   — and stderr substrings have already misled one author on this file
   (ADR-20's lock matched prose the CLI never printed unwrapped).
+
+## ADR-22 — Refuse on the consequence, not the mechanism: the geometric net-partition certificate
+
+**Status:** landed. No placer, router or geometry change: the eleven
+graded fixtures plus the `OPAMP` child sheet emit **byte-identical**
+`.kicad_sch` before and after, and `baseline_lock`'s diff is EMPTY.
+
+**Design fork resolved by consultation, not by the implementer.** See
+§ "The fork the implementer was not allowed to resolve alone" below.
+
+### The report
+
+ADR-21 closed one Tier-0 hole and, in closing it, wrote down the
+structural finding that this ADR acts on:
+
+> `kicad-emitter` has an in-process geometric check for **severance**
+> (`disconnected_nets`) and **no** in-process geometric check for
+> **merge**. Every merge refusal today is a string match on a router
+> warning, which means each new way to merge two nets needs its own
+> string and its own escalation.
+
+That is not a missing feature. It is a *category error in where the gate
+sits*. There are only three ways a routed sheet can be the wrong circuit
+— pins merged, nets merged, net severed — but there are indefinitely
+many *mechanisms* that produce them, and the emitter was recognising
+mechanisms:
+
+| mechanism | recognised by | could it reach exit 0? |
+| --- | --- | --- |
+| pin-on-pin across nets | `pin_coincidences`, geometric, pre-route | no |
+| wire left on a foreign pin | **string match** on the router's `v11:` | no (since ADR-21) |
+| wire endpoints of ≥ 2 nets on one coord | `conflict:` — **nothing** | **yes** |
+| post-cleanup collinear overlap of 2 nets | `cross-net overlap:` — nothing, and *unescalatable* | **yes** |
+| pin off its own net's wire graph | `disconnected_nets`, geometric | no |
+| anything else | — | yes |
+
+The bottom row is the point. A mechanism-shaped gate is only ever as
+complete as the enumeration behind it, and the enumeration is a list
+someone has to keep extending. Worse, two of the rows show the two ways
+a *string* gate fails independently of completeness:
+
+* **`conflict:` had no escalation** — not because anyone decided it was
+  acceptable, but because writing one is a separate act that nobody had
+  performed. ADR-21 audited it, confirmed it was Tier-0-shaped, and
+  declined to escalate blind for want of a fixture to verify against.
+  A hole nobody disagrees about stayed open for want of a string.
+* **`cross-net overlap:` cannot be escalated at all.** It is emitted
+  *before* `run_cleanup`, and `two_stage_amp` prints two of them while
+  converting **correctly** (exit 0, `kicad-cli` clean). Escalating that
+  string would turn a good conversion into a failure. A string tells you
+  what a pass *observed at some intermediate moment*, which is not the
+  same question as what the file *does*.
+
+And the correct answer was being **outsourced**: the CLI's post-emit
+`kicad-cli` connectivity check *is* the partition comparison, but it is
+disabled by `--no-verify` and absent on any machine without KiCad.
+
+### The decision
+
+**D1. Refuse on the consequence.** `emit_root` and `emit_child_sheet`
+now reconstruct the ENTIRE net partition from the ink they are about to
+serialise and compare it against the source netlist's partition. A
+mismatch — two source nets in one geometric component (a short), or one
+source net in several (an open) — is `EmitError::NetPartition`,
+unconditional, no external tool, no env var, no flag.
+
+The reconstruction (`kicad_emitter::connectivity::check_partition`)
+implements exactly KiCad's two join rules and nothing else:
+
+1. **Geometric.** A wire joins its own endpoints; a pin, power-glyph
+   anchor or label anchor lying on a wire — endpoint or strict interior —
+   joins that wire; items sharing a coordinate are one connection point.
+2. **By name.** Power symbols connect by their `Value`; labels connect by
+   their text. `power:PWR_FLAG` is excluded (its Value is the literal
+   string `PWR_FLAG`, not a net name); it still participates
+   geometrically through the coordinate it shares with the rail pin it
+   drives.
+
+`(junction …)` items contribute no edges: a junction is only ever emitted
+where three or more wire *endpoints* already meet, which rule 1 has
+joined already.
+
+**Why this is the durable fix and not merely a wider net.** It is blind
+to mechanism by construction. A new router pass, a new decoration, a new
+glyph flavour — none of them needs a new escalation, because none of them
+can produce a wrong circuit without producing a wrong *partition*. The
+`conflict:` hole is closed without anyone writing a `conflict:` handler,
+which is the test of whether the fix is structural.
+
+**D2. It runs before any bytes reach disk.** Same placement in the
+pipeline as its predecessor: after routing, glyphs, labels and the
+decoration text-nudges — so it measures the FINAL ink, never an
+intermediate — and before `translate_into_page`. A refused conversion
+leaves no `.kicad_sch` behind, matching ADR-21 D3. The regression test
+asserts that property explicitly.
+
+This placement is load-bearing and is exactly what makes the check
+succeed where `cross-net overlap:` failed. That warning is a
+*pre-cleanup* sample; `coalesce`/`collapse` routinely resolve the pairs
+it reports. Measured: `two_stage_amp` emits two of those lines and
+converts at exit 0 with this check active — so the check agrees with
+`kicad-cli` and disagrees with the string, which is the correct
+disagreement.
+
+**D3. Two mechanism checks are deleted, one is kept.**
+
+* `EmitError::V11Violation` — **deleted**, with the `v11:` string
+  escalation in `route_nets`. `shunt_feedback_amp` is still refused, and
+  now with a far better diagnosis: instead of "1 unresolved foreign-pin
+  coincidence(s)" it reports `MERGE: source nets ["c", "vcc"] share one
+  geometric component`, naming the six terminals involved — which is
+  precisely ADR-20's hand-derived root cause, now printed by the tool.
+* `EmitError::DisconnectedNet` and `disconnected_nets` — **deleted**. The
+  partition check subsumes it *and strictly strengthens it*. The old one
+  was documented as "deliberately conservative": it skipped Power/Ground
+  nets (they carry no wires by design) and skipped any net with two
+  same-name labels (labels join islands by name, which a coordinate-only
+  walk cannot see). Both skips existed because it modelled only rule 1.
+  Modelling rule 2 removes the need for either, so a *broken rail* — a
+  ground pin whose glyph never got emitted — is now caught, where before
+  it was skipped by policy. A unit test pins exactly that.
+* `EmitError::PinCoincidence` — **kept**, and demoted in the docs from a
+  correctness authority to a pre-flight. It is fully subsumed (pin-on-pin
+  is a merge like any other) but it is raised *before* the router runs,
+  so it names the two coincident pins and their nets rather than the
+  component they end up in, and it does not spend a routing pass on a
+  placement already known to be wrong.
+
+**D4. `--no-verify` now means what it says.** Its help text claimed the
+`kicad-cli` check "is the only thing standing between a modelling bug and
+a silently wrong circuit". That was true when written and is now false:
+the in-process check has no opt-out. The text is rewritten to say what
+`kicad-cli` still uniquely buys — an *independent* opinion, KiCad's own
+connectivity engine rather than our model of it, which is the only thing
+that can catch the model itself being wrong.
+
+### The fork the implementer was not allowed to resolve alone
+
+`roundtrip_connectivity.rs` (the A2 verifier) already implemented this
+algorithm test-side. The obvious move — share one implementation — has a
+known failure mode in this repo: **a test that is a byte-copy of the
+thing it grades cannot falsify it.** The V13 label-overlap suite was a
+byte-copy of the emitter's own text-geometry model, and only real
+`kicad-cli` SVG ink could falsify it (MEMORY "verify text geometry
+against SVG"). The alternative — two independent implementations — buys
+falsification and pays in drift, and drift in a Tier-0 check is itself a
+hazard.
+
+The fork was referred to an outside architect rather than settled by the
+implementer. The recommendation, adopted:
+
+> Decompose the check by *epistemics*, not by module. It has three
+> separable parts and they do not have the same falsifiability:
+> **(1) pin→net attribution and pin world coordinates**, **(2) the
+> connectivity-interpretation model**, **(3) late-pipeline fidelity**
+> (page translation, serialisation, bytes on disk). Share the part where
+> duplication buys nothing; keep independent the parts where independence
+> is the whole point; delegate the part that is unfalsifiable in-repo to
+> the external oracle.
+
+The decisive observation was on axis 1: `collect_net_pins` is the same
+map that feeds the **router**. The production check therefore grades the
+router's output against the router's own input — shared fate. If that
+attribution or the pose maths behind it is wrong, the router draws to the
+wrong pin *and the check blesses it*. The production check is
+structurally blind there, permanently, and no amount of care fixes it.
+
+On axis 2 the recommendation cut the other way and is worth recording
+because it is counter-intuitive: **two in-repo implementations give no
+independence on the interpretation model.** Both authors encode the same
+beliefs about KiCad's semantics; if a belief is wrong, both agree and
+both are wrong — the V13 failure exactly. The only falsifier of the model
+is KiCad. So a second hand-written union-find would buy coverage of
+typos in the easiest part of the code and nothing else.
+
+As built:
+
+* **Production** owns the reconstruction, graded against
+  `collect_net_pins`, hard error in both sheet emitters.
+* **A2 keeps its independent inputs and shares only the engine.** It
+  re-parses the `.cir` through `spice-parser`/`spice-resolve`, re-derives
+  every terminal's world coordinate from the library through the
+  *emitted* pose, and reads the geometry back off the written **file**
+  with a different parser (`lexpr`). That covers axes 1 and 3 — the two
+  the production check cannot cover itself. A comment in the file states
+  why, because the 25-minute suite will one day tempt someone to delete
+  the derivation "since production checks it now".
+* **Axis 2's falsifier already exists and is already mandatory here**: the
+  CLI runs `kicad-cli`'s netlist comparison on every graded conversion in
+  the suite (`kicad-cli` 9.0.2 on this machine), so the model is
+  differentially graded against KiCad on all eleven fixtures every run.
+  No new differential test was added; one would have duplicated it.
+* **Vacuity and mutation guards.** A2 asserts it derived ≥ 2 terminals
+  per fixture (a silently-empty derivation would turn the file green
+  while measuring nothing), and `the_reconstruction_is_sensitive_on_real_fixtures`
+  injects, into each real fixture's real reconstruction, one defect per
+  edge class the model implements: a wire between two foreign nets' pins,
+  two same-named anchors on foreign nets, and erasure of all geometry.
+  Each must be caught. An unfired guard is worth nothing.
+
+### Blast radius: measured nil
+
+* Twelve routable fixtures converted `--no-layout-cache --no-verify` on
+  `b7b59ca` and on this tree: eleven at exit 0 with **byte-identical**
+  output (`diff -rq` over two fresh directories — 12 files including the
+  `OPAMP` child sheet), `shunt_feedback_amp` refused on both.
+* `two_stage_amp` — the fixture that killed naive string escalation —
+  still converts at **exit 0** with the check active (measured, 2 min
+  wall on this tree), while still printing its two `cross-net overlap:`
+  lines. This is the specific breakage this work was told not to cause,
+  and it did not occur.
+* Nil *by construction* as well: the new code reads `items` and returns;
+  nothing in the emit path can observe it except by not running.
+* No budget moved in either direction. There was no slack to remove: this
+  is a categorical gate, budget 0 everywhere, like V11 itself.
+
+`shunt_feedback_amp` stays a defect lock — its residual is the
+owner-gated R-5 rail-pin defect (ADR-20 § "Root cause"), untouched here.
+Its lock is updated because the failure *mode* changed: it now asserts
+the partition finding (`MERGE: source nets ["c", "vcc"]`, one unwrapped
+line, deterministic order from a `BTreeSet`) instead of the router's
+`v11:` warning.
+
+### What is still warning-tier — the re-audit
+
+ADR-21's sibling-holes table, re-derived against this change:
+
+| diagnostic | tier | disposition now |
+| --- | --- | --- |
+| `v11:` | 0 | warning again — and correctly so. Its *consequence* is refused by the partition check; the line survives as the human-readable explanation of why. |
+| `conflict:` | 0 | **closed, without a handler.** Wire endpoints of two nets on one coordinate put both nets' wires in one component. |
+| `cross-net overlap:` | 0 | **closed, without a handler, and without refusing `two_stage_amp`.** The check measures post-cleanup ink, which is the state the warning could not see. |
+| `obstacle:` / `v12-placer:` | 1 | warning is correct (V12, budgeted fallback by design) |
+| `rails:` | 1 | warning is correct — the `(global_label)` fallback still carries the net by name, and the partition check now *proves* that on every conversion rather than asserting it in a comment |
+| `pwrflag:` | 0 (V2) | warning. A missing `power:PWR_FLAG` library entry leaves a net undriven, but the emitted circuit is still the *right* circuit — the partition is unaffected — and ERC reports it. Unchanged. |
+
+**No warning-tier Tier-0 path survives** in `route_nets`: every row above
+that can make the file a different circuit is now caught by what it does
+to the partition. The one remaining Tier-0-tagged warning (`pwrflag:`) is
+a library-configuration failure that does not change connectivity.
+
+### The finding worth carrying forward
+
+The generalisable lesson is not "add a partition check". It is: **a gate
+that names a mechanism inherits the completeness of an enumeration; a
+gate that names a consequence does not.** Three of this project's Tier-0
+holes (ADR-20's severed net, ADR-21's `v11:`, ADR-22's `conflict:`) were
+each found by someone noticing a specific mechanism had no gate. That
+search does not terminate. Ask instead what property must hold of the
+*output*, and measure it there.
+
+The corollary, from the fork: when you move a verifier into production,
+ask which of its inputs the production copy will *share with the thing it
+grades*. Those are the axes on which it has just gone blind, and they are
+what the test must keep deriving independently.

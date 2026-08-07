@@ -92,20 +92,27 @@ fn convert(fixture: &str, out_dir: &Path, extra: &[&str]) -> Output {
 /// ```text
 /// route: v11: net index 1 has 1 endpoint and 0 interior foreign-pin
 ///        coincidences left after active rerouting
-/// error: V11 correctness invariant (Tier 0): 1 unresolved foreign-pin
-///        coincidence(s) in `root`: …
+/// ERROR: net partition: MERGE: source nets ["c", "vcc"] share one
+///        geometric component (KiCad imports them as ONE net); …
 /// ```
 ///
 /// i.e. the collector net `c` and the `vcc` rail are merged: the `c`
 /// trunk terminates on `RC`'s own `vcc` pin.
 ///
-/// **The refusal is unconditional (ADR-21).** Until ADR-21 the only
-/// thing turning this into a non-zero exit was the CLI's *optional*
-/// post-emit `kicad-cli` connectivity check — so with `--no-verify`, or
-/// on any machine without KiCad, the converter emitted the shorted
-/// schematic at exit 0. The `v11:` residue is now an `EmitError` in its
-/// own right; see [`v11_residue_is_refused_without_kicad_cli`], which is
-/// the regression test for that hole specifically.
+/// **The refusal is unconditional (ADR-21), and since ADR-22 it is
+/// *geometric*.** Until ADR-21 the only thing turning this into a
+/// non-zero exit was the CLI's *optional* post-emit `kicad-cli`
+/// connectivity check — so with `--no-verify`, or on any machine without
+/// KiCad, the converter emitted the shorted schematic at exit 0. ADR-21
+/// closed that by escalating the router's `v11:` warning *string*;
+/// ADR-22 replaced the string match with
+/// `kicad_emitter::connectivity::check_partition`, which reconstructs the
+/// whole net partition from the final ink and refuses on the
+/// **consequence** rather than on the diagnostic. This fixture is now
+/// refused for what its geometry does — merging `c` into `vcc` — no
+/// matter which warning the router prints on the way there. See
+/// [`v11_residue_is_refused_without_kicad_cli`], the regression test for
+/// the hole specifically.
 ///
 /// # Diagnosis (superseding the original entry)
 ///
@@ -181,21 +188,28 @@ fn shunt_feedback_amp_conversion_is_a_tier0_net_short() {
          DELETE this test. See docs/v0.2-roadmap.md § F0.\nstderr:\n{stderr}",
         out.status.code(),
     );
-    // Match the router's own diagnostic line, which is emitted verbatim
-    // and unwrapped. Do NOT match the headline sentence of a wrapped
+    // Match the emitter's own partition finding, which is printed on one
+    // unwrapped line. Do NOT match the headline sentence of a wrapped
     // message: the CLI's connectivity report wraps "…does not wire up
     // the   source circuit." with a run of spaces, and an earlier
     // version of this lock asserted a substring that was never present.
+    //
+    // The net pair is the load-bearing part: it pins *which* short this
+    // lock records (ADR-20 § "Root cause": the `c` trunk terminating on
+    // `RC`'s own `vcc` pin, rooted in the owner-gated R-5 rail-pin
+    // defect). The set is rendered from a `BTreeSet`, so the order is
+    // deterministic.
     assert!(
-        stderr.contains("v11: net index"),
+        stderr.contains(r#"MERGE: source nets ["c", "vcc"]"#),
         "`shunt_feedback_amp` failed to convert, but NOT with the recorded Tier-0 \
-         V11 foreign-pin residue. This lock describes one specific defect; a \
-         different failure is a new regression to diagnose, not this one.\nstderr:\n{stderr}",
+         merge of the collector net into the `vcc` rail. This lock describes one \
+         specific defect; a different failure is a new regression to diagnose, not \
+         this one.\nstderr:\n{stderr}",
     );
 }
 
-/// **Regression test for the ADR-21 hole.** The `v11:` residue — a
-/// routed wire endpoint left sitting on a *foreign* net's pin, which
+/// **Regression test for the ADR-21 / ADR-22 hole.** A net merge — here
+/// a routed wire endpoint left sitting on a *foreign* net's pin, which
 /// KiCad joins on load — must be refused **unconditionally**: not
 /// behind `--no-verify`, not behind an env var, and not dependent on
 /// `kicad-cli` being installed.
@@ -206,6 +220,13 @@ fn shunt_feedback_amp_conversion_is_a_tier0_net_short() {
 /// the only thing catching the short was the CLI's *optional* post-emit
 /// `kicad-cli` connectivity check — unavailable on any machine without
 /// KiCad, and skipped outright by `--no-verify`.
+///
+/// ADR-22 then removed the last dependence on the *shape* of the defect:
+/// the refusal no longer comes from string-matching the router's `v11:`
+/// warning but from `check_partition` finding two source nets in one
+/// geometric component. That matters here because it is what closes the
+/// sibling hole ADR-21 could only document — `conflict:`, which is the
+/// same Tier-0 consequence with no escalation of its own.
 ///
 /// **What is under test is the exit code.** `--no-verify` removes the
 /// post-emit check, so a non-zero exit here can only come from the
@@ -232,7 +253,7 @@ fn v11_residue_is_refused_without_kicad_cli() {
         "TIER-0 HOLE REOPENED: `shunt_feedback_amp --no-verify` exited {:?}. A \
          routed wire left on a foreign net's pin is a silent net merge on KiCad \
          load; the converter must refuse rather than emit it, with no dependence \
-         on `kicad-cli` or on any env gate. See ADR-21.\nstderr:\n{stderr}",
+         on `kicad-cli` or on any env gate. See ADR-21 / ADR-22.\nstderr:\n{stderr}",
         out.status.code(),
     );
     let emitted = tmp.join("shunt_feedback_amp.kicad_sch");

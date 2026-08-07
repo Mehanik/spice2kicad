@@ -394,10 +394,13 @@ pub fn avoid_foreign_pins<S: ::std::hash::BuildHasher>(
         }
     }
     // Final tally — anything left after active rerouting is reported
-    // as a `v11:` diagnostic, and the emitter (`kicad-emitter`'s
-    // `route_nets`) promotes it **unconditionally** to a hard
-    // `EmitError::V11Violation` so the CLI exits nonzero rather than
-    // write a schematic it knows is electrically wrong (ADR-21).
+    // as a `v11:` diagnostic. It is a *warning*: since ADR-22 the
+    // emitter does not escalate this (or any) router string. It
+    // reconstructs the net partition from the final geometry instead
+    // (`kicad_emitter::connectivity`), so a residue that really does
+    // merge two nets is refused for the merge, and one that does not
+    // costs nothing. Keep this diagnostic accurate anyway — it is the
+    // human-readable explanation of *why* the partition broke.
     //
     // This tally is taken at the cascade's fixed point: the loop above
     // exits on `!changed`, so every detour the router can find has

@@ -65,13 +65,24 @@ struct Cli {
     #[arg(long)]
     no_layout_cache: bool,
 
-    /// Skip the post-emit connectivity check.
+    /// Skip the post-emit `kicad-cli` connectivity check.
     ///
     /// By default the converter re-reads the schematic it just wrote
     /// through `kicad-cli` and confirms every net connects the same pins
-    /// the SPICE source did. That check is the only thing standing
-    /// between a modelling bug and a silently wrong circuit, so turn it
-    /// off only when `kicad-cli` is unavailable or the cost matters.
+    /// the SPICE source did. This flag skips *that* step, and only that
+    /// step.
+    ///
+    /// It does NOT disable the converter's own net-partition check: the
+    /// emitter reconstructs the whole net partition from the geometry it
+    /// is about to write and refuses, always, if two nets merged or one
+    /// came apart (ADR-22). That check needs no external tool, runs
+    /// before any bytes reach disk, and cannot be turned off — a Tier-0
+    /// refusal has no opt-out.
+    ///
+    /// What `kicad-cli` still adds is an *independent* opinion: it is
+    /// KiCad's own connectivity engine rather than our model of it, so it
+    /// is the only thing that can catch the model itself being wrong.
+    /// Turn it off when `kicad-cli` is unavailable or the cost matters.
     #[arg(long)]
     no_verify: bool,
 }

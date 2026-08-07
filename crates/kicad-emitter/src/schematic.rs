@@ -35,6 +35,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::EmitError;
+use crate::connectivity::{self, SheetGeometry, Terminal};
 use crate::sexpr::Sexpr;
 use kicad_symbols::{Library, Orientation, PinElectrical, RawSexpr, Rotation, Symbol};
 use spice_layout::{PlacedElement, Placement};
@@ -304,17 +305,11 @@ pub fn emit_root(
     nudge_property_text(&mut items, placement, library);
     nudge_power_glyph_value_text(&mut items, placement, library);
 
-    // Correctness self-check, after every wire is final. This is a hard
-    // stop, not a log line. It used to *print* `ERROR: … is not fully
-    // connected` and then return `Ok`, so the only thing that turned a
-    // severed net into a non-zero exit was the CLI's optional post-emit
-    // `kicad-cli` connectivity check — skipped by `--no-verify`, skipped
-    // on any machine without KiCad installed, and demonstrably not
-    // equivalent: a `shunt_feedback_amp` placement was measured emitting
-    // a severed `c` net, printing this ERROR, and exiting 0.
-    // V11/V2 are Tier-0 correctness; a converter that refuses beats one
+    // Correctness self-check, after every wire, glyph and label is final
+    // and before a single byte reaches disk. A hard stop, not a log line:
+    // V11 is Tier-0 correctness, and a converter that refuses beats one
     // that ships a schematic it has already told you is wrong.
-    report_disconnected_nets(&items, &net_pins, None, &rail_tags)?;
+    check_net_partition(&items, &net_pins, None)?;
 
     let mut root = Sexpr::List(items);
     let shift = translate_into_page(&mut root, preferred_shift);
@@ -475,7 +470,7 @@ pub fn emit_child_sheet(
     nudge_property_text(&mut items, child.placement, library);
     nudge_power_glyph_value_text(&mut items, child.placement, library);
 
-    report_disconnected_nets(&items, &net_pins, Some(&child.name), &child_rail_tags)?;
+    check_net_partition(&items, &net_pins, Some(&child.name))?;
 
     let mut root = Sexpr::List(items);
     let shift = translate_into_page(&mut root, preferred_shift);
@@ -1685,52 +1680,32 @@ fn route_nets(
         sheet_bodies,
         bounds: None,
     });
-    // Split V11 (correctness) residue from other warnings. A `v11:`
-    // prefix means a routed wire still touches a pin owned by a
-    // *different* net after the active rerouter ran to exhaustion —
-    // KiCad joins the two nets on load, so the emitted schematic is a
-    // different circuit from the source netlist.
+    // Every router diagnostic is a *warning* here, including the
+    // Tier-0-shaped ones (`v11:`, `conflict:`, `cross-net overlap:`).
     //
-    // This is Tier 0 and therefore an **unconditional** refusal, the
-    // same tier and the same unconditionality as `PinCoincidence`
-    // above (ADR-21). It used to be gated behind
-    // `SPICE2KICAD_V11_STRICT`; that gate was a hole. The stated
-    // reason for it — "keeps `opamp_inverting_real` emittable" — was
-    // already stale on the ADR-20 tree: `opamp_inverting_real` emits
-    // no `v11:` warning at all, and of the thirteen fixtures only
-    // `shunt_feedback_amp` (an F0 defect lock, not a graded fixture)
-    // trips it. What the gate actually did was let `--no-verify`, and
-    // every machine without `kicad-cli`, ship a shorted schematic at
-    // exit 0.
+    // Until ADR-22, `v11:` was escalated to a hard error **by matching
+    // its string** — and that was the defect, not the fix. A string
+    // escalation recognises one *mechanism* by which a sheet can be the
+    // wrong circuit, so every other mechanism needed its own string and
+    // its own escalation: `conflict:` had none and reached exit 0 for as
+    // long as nobody wrote one, while `cross-net overlap:` could not be
+    // escalated at all (it is sampled *before* `run_cleanup`, and
+    // `two_stage_amp` emits two of them while converting correctly, so
+    // escalating it would refuse a good conversion).
     //
-    // Note that "repairable in principle" is not a reason to warn:
-    // the router has *already* run its full V11 cascade to a derived
-    // fixed point by the time this warning exists, and nothing
-    // downstream of `route_nets` moves a wire. The residue is final.
+    // The consequence all three share — two nets merged, or one severed —
+    // is now measured geometrically on the final ink by
+    // [`check_net_partition`], which runs before any bytes reach disk and
+    // is blind to which warning the router happened to print. A `v11:`
+    // residue is still a refusal; it is refused for what it *does* rather
+    // than for what it is called.
     //
-    // Other warnings stay at the warning tier: `obstacle:` /
-    // `v12-placer:` are V12 (Tier 1, budgeted fallback by design),
-    // `rails:` / `pwrflag:` are missing-library fallbacks. `conflict:`
-    // is Tier-0-shaped and audited in ADR-21 § "Sibling holes".
-    let mut v11_errors: Vec<&String> = Vec::new();
+    // The remaining warnings are correctly warnings: `obstacle:` /
+    // `v12-placer:` are V12 (Tier 1, budgeted fallback by design), and
+    // `rails:` / `pwrflag:` are missing-library fallbacks that preserve
+    // connectivity.
     for w in &result.warnings {
         eprintln!("spice2kicad route: {w}");
-        if w.starts_with("v11:") {
-            v11_errors.push(w);
-        }
-    }
-    if !v11_errors.is_empty() {
-        return Err(EmitError::V11Violation(format!(
-            "{} unresolved foreign-pin coincidence(s) in `{scope}`: {}. A wire \
-             endpoint or interior lying on a foreign net's pin is joined by KiCad, \
-             so the schematic would not be the source circuit.",
-            v11_errors.len(),
-            v11_errors
-                .iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>()
-                .join("; "),
-        )));
     }
     Ok(result.sexprs.iter().map(lexpr_to_sexpr).collect())
 }
@@ -2838,6 +2813,114 @@ fn field_render_rotation(orient: Orientation) -> u16 {
     kicad_symbols::text_geom::field_render_rotation(orient)
 }
 
+/// Read the connectivity-bearing ink back off the items this sheet is
+/// about to serialise, in the form
+/// [`connectivity::check_partition`] grades.
+///
+/// Deliberately reads the *emitted* nodes rather than the placement it
+/// came from: what KiCad connects is what is in the file, so anything
+/// decoration added, moved or dropped is in scope.
+fn sheet_geometry(items: &[Sexpr]) -> SheetGeometry {
+    let mut geom = SheetGeometry::default();
+    for item in items {
+        let Sexpr::List(parts) = item else { continue };
+        match head_of(item) {
+            Some("wire") => {
+                if let Some(seg) = wire_seg_from_sexpr(parts) {
+                    geom.wires.push(seg);
+                }
+            }
+            // A power symbol connects to every other power symbol
+            // carrying the same `Value`. `PWR_FLAG` is excluded: its
+            // Value is the literal string `PWR_FLAG`, not a net name, so
+            // it carries no by-name connectivity — only the coordinate it
+            // shares with the rail pin it drives.
+            Some("symbol") => {
+                let lib_id = sexpr_symbol_lib_id(item).unwrap_or("");
+                if !lib_id.starts_with("power:") || lib_id == "power:PWR_FLAG" {
+                    continue;
+                }
+                if let (Some(name), Some((x, y, _))) =
+                    (sexpr_property_value(item, "Value"), sexpr_at(item))
+                {
+                    geom.named_anchors.push((name.to_string(), (x, y)));
+                }
+            }
+            // Labels of every flavour connect to same-named labels on
+            // their sheet.
+            Some("label" | "global_label" | "hierarchical_label") => {
+                if let (Some(Sexpr::QString(n) | Sexpr::Atom(n)), Some((x, y, _))) =
+                    (parts.get(1), sexpr_at(item))
+                {
+                    geom.named_anchors.push((n.clone(), (x, y)));
+                }
+            }
+            _ => {}
+        }
+    }
+    geom
+}
+
+/// The component terminals of a sheet: every emitted pin, tagged with
+/// the source net `collect_net_pins` attributed it to.
+fn sheet_terminals(net_pins: &BTreeMap<String, Vec<(f64, f64, u16)>>) -> Vec<Terminal> {
+    let mut out = Vec::new();
+    for (net, pins) in net_pins {
+        for &(x, y, _) in pins {
+            out.push(Terminal {
+                id: format!("{net}@({x:.2},{y:.2})"),
+                net: net.clone(),
+                at: (x, y),
+            });
+        }
+    }
+    out
+}
+
+/// **Tier-0 net-partition certificate.** Reconstruct the net partition
+/// from the ink about to be written and refuse if it is not the source
+/// circuit's partition — either because two nets were merged (a short)
+/// or one was severed (an open).
+///
+/// This is the *class* fix for a family of holes ADR-21 could only
+/// enumerate. Before it, the emitter had a geometric check for severance
+/// and none for merge, so every merge refusal was a string match on a
+/// router warning (`v11:`) — and the merge conditions that had no
+/// escalation (`conflict:`) reached exit 0. Being geometric, this no
+/// longer depends on which warning the router happened to emit, so a new
+/// way to fuse two nets needs no new string and no new escalation.
+///
+/// It runs before `translate_into_page`, i.e. before any bytes reach
+/// disk, so a refusal leaves no `.kicad_sch` behind. It needs no external
+/// tool: it is exactly the check the CLI used to outsource to
+/// `kicad-cli`, which `--no-verify` disables and which most machines
+/// lack.
+fn check_net_partition(
+    items: &[Sexpr],
+    net_pins: &BTreeMap<String, Vec<(f64, f64, u16)>>,
+    sheet: Option<&str>,
+) -> Result<(), EmitError> {
+    let terminals = sheet_terminals(net_pins);
+    let findings = connectivity::check_partition(&terminals, &sheet_geometry(items));
+    if findings.is_empty() {
+        return Ok(());
+    }
+    let where_ = sheet.map_or_else(String::new, |s| format!(" on sheet {s}"));
+    for f in &findings {
+        eprintln!("spice2kicad: ERROR: net partition{where_}: {f}");
+    }
+    Err(EmitError::NetPartition(format!(
+        "the emitted geometry{where_} does not reconstruct the source net \
+         partition ({} finding(s)): {}",
+        findings.len(),
+        findings
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("; "),
+    )))
+}
+
 /// Reference / Value property-text bboxes for every placed element, in
 /// the same world frame and offsets the emitter writes them at
 /// (Reference at local `(2.54, -2.54)`, Value at `(2.54, 2.54)`, both
@@ -2845,158 +2928,6 @@ fn field_render_rotation(orient: Orientation) -> u16 {
 /// capacitor / opamp Reference & Value are the only visible ones. The
 /// reading direction comes from [`field_render_rotation`], not from the
 /// field's own `(at … 0)`.
-/// Union-find root of `k`, with path compression.
-fn uf_find(
-    parent: &mut std::collections::BTreeMap<(i64, i64), (i64, i64)>,
-    k: (i64, i64),
-) -> (i64, i64) {
-    let p = *parent.entry(k).or_insert(k);
-    if p == k {
-        return k;
-    }
-    let r = uf_find(parent, p);
-    parent.insert(k, r);
-    r
-}
-
-/// Report every net the emitted wires fail to fully connect.
-///
-/// A dropped connection leaves the file well-formed while making the
-/// circuit WRONG, so this is loud. `sheet` names the child sheet, if any.
-fn report_disconnected_nets(
-    items: &[Sexpr],
-    net_pins: &std::collections::BTreeMap<String, Vec<(f64, f64, u16)>>,
-    sheet: Option<&str>,
-    rail_tags: &std::collections::BTreeMap<String, String>,
-) -> Result<(), EmitError> {
-    let bad = disconnected_nets(items, net_pins, rail_tags);
-    if bad.is_empty() {
-        return Ok(());
-    }
-    let where_ = sheet.map_or_else(String::new, |s| format!(" on sheet {s}"));
-    for net in &bad {
-        eprintln!(
-            "spice2kicad: ERROR: net {net:?}{where_} is not fully connected in the \
-             emitted schematic — at least one of its pins has no wire path to the \
-             others. This is a converter bug; the schematic is electrically wrong."
-        );
-    }
-    Err(EmitError::DisconnectedNet(format!(
-        "{} net(s){where_} have a pin with no wire path to the rest: {}",
-        bad.len(),
-        bad.join(", "),
-    )))
-}
-
-/// Names of nets whose pins the emitted wires do **not** all connect.
-///
-/// A placement the router finds awkward can leave a pin off its net
-/// entirely, and nothing downstream notices: the file is well-formed, it
-/// opens, and the circuit is simply wrong. Two separate placer
-/// experiments produced exactly that — `COUT` emitted as
-/// `unconnected-_COUT-Pad1_` instead of joining net `/c` — so this is a
-/// live hazard, not a theoretical one. The invariant suite catches it via
-/// `kicad-cli sch erc`, but a user converting their own netlist got no
-/// signal at all.
-///
-/// Deliberately conservative — it only reports a net when it is *sure*:
-///
-/// * Power/Ground nets are skipped. They carry no wires by design (V10
-///   routes them as `power:*` glyphs), so "no wire joins these pins" is
-///   the correct output, not a defect.
-/// * A net with fewer than two pins cannot be disconnected.
-/// * Pins are treated as connected when they share a wire-graph
-///   component, where a wire joins its own endpoints and swallows any pin
-///   lying on its span (endpoint or interior — KiCad connects both).
-/// * A net carrying two or more same-name labels is skipped: labels join
-///   islands by name, which this coordinate-only walk cannot see.
-///
-/// The residual risk is therefore false *negatives*, never false
-/// positives: anything it reports is a genuinely dropped connection.
-fn disconnected_nets(
-    items: &[Sexpr],
-    net_pins: &std::collections::BTreeMap<String, Vec<(f64, f64, u16)>>,
-    rail_tags: &std::collections::BTreeMap<String, String>,
-) -> Vec<String> {
-    #[allow(clippy::cast_possible_truncation)]
-    let key = |x: f64, y: f64| -> (i64, i64) {
-        ((x * 1000.0).round() as i64, (y * 1000.0).round() as i64)
-    };
-    let (_, _, wires) = emitted_text_obstacles(items);
-    // Count labels per name so multi-label nets can be skipped.
-    let mut label_counts: std::collections::BTreeMap<&str, usize> =
-        std::collections::BTreeMap::new();
-    for item in items {
-        if matches!(head_of(item), Some("label" | "global_label")) {
-            if let Sexpr::List(parts) = item {
-                if let Some(Sexpr::QString(n) | Sexpr::Atom(n)) = parts.get(1) {
-                    *label_counts.entry(n.as_str()).or_default() += 1;
-                }
-            }
-        }
-    }
-
-    let mut out = Vec::new();
-    for (net, pins) in net_pins {
-        if pins.len() < 2 {
-            continue;
-        }
-        if matches!(
-            classify_net(net, rail_tags),
-            spice_layout::net_class::NetClass::Power | spice_layout::net_class::NetClass::Ground
-        ) {
-            continue;
-        }
-        if label_counts.get(net.as_str()).copied().unwrap_or(0) >= 2 {
-            continue;
-        }
-        // Union-find over wire endpoints, with each pin absorbed into any
-        // wire whose span covers it.
-        let mut parent: std::collections::BTreeMap<(i64, i64), (i64, i64)> =
-            std::collections::BTreeMap::new();
-        let union = |parent: &mut std::collections::BTreeMap<_, _>, a, b| {
-            let (ra, rb) = (uf_find(parent, a), uf_find(parent, b));
-            if ra != rb {
-                parent.insert(ra, rb);
-            }
-        };
-        for &(a, b) in &wires {
-            union(&mut parent, key(a.0, a.1), key(b.0, b.1));
-        }
-        // Absorb each pin into every wire whose span covers it.
-        let on_span = |px: f64, py: f64, a: (f64, f64), b: (f64, f64)| -> bool {
-            let eps = 1e-6;
-            if (a.1 - b.1).abs() < eps && (py - a.1).abs() < eps {
-                return px >= a.0.min(b.0) - eps && px <= a.0.max(b.0) + eps;
-            }
-            if (a.0 - b.0).abs() < eps && (px - a.0).abs() < eps {
-                return py >= a.1.min(b.1) - eps && py <= a.1.max(b.1) + eps;
-            }
-            false
-        };
-        let mut roots = Vec::new();
-        let mut any_off_wire = false;
-        for &(px, py, _) in pins {
-            let mut joined = None;
-            for &(a, b) in &wires {
-                if on_span(px, py, a, b) {
-                    joined = Some(uf_find(&mut parent, key(a.0, a.1)));
-                    break;
-                }
-            }
-            match joined {
-                Some(r) => roots.push(r),
-                None => any_off_wire = true,
-            }
-        }
-        // Every pin must sit on the wire graph, in one component.
-        if any_off_wire || roots.windows(2).any(|w| w[0] != w[1]) {
-            out.push(net.clone());
-        }
-    }
-    out
-}
-
 pub(crate) fn placement_property_bboxes(placement: &Placement) -> Vec<TextBbox> {
     let mut out = Vec::new();
     for el in &placement.elements {
@@ -3678,6 +3609,43 @@ fn sexpr_symbol_refdes(sym: &Sexpr) -> Option<&str> {
                 && matches!(p.get(1), Some(Sexpr::QString(k)) if k == "Reference")
             {
                 if let Some(Sexpr::QString(v)) = p.get(2) {
+                    return Some(v.as_str());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The `lib_id` of a `(symbol …)` sexpr.
+fn sexpr_symbol_lib_id(sym: &Sexpr) -> Option<&str> {
+    let Sexpr::List(items) = sym else {
+        return None;
+    };
+    for it in items {
+        if let Sexpr::List(p) = it {
+            if matches!(p.first(), Some(Sexpr::Atom(a)) if a == "lib_id") {
+                if let Some(Sexpr::QString(v) | Sexpr::Atom(v)) = p.get(1) {
+                    return Some(v.as_str());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The named `(property …)` string of a `(symbol …)` sexpr, visible or
+/// not — connectivity does not care whether the field is drawn.
+fn sexpr_property_value<'a>(sym: &'a Sexpr, key: &str) -> Option<&'a str> {
+    let Sexpr::List(items) = sym else {
+        return None;
+    };
+    for it in items {
+        if let Sexpr::List(p) = it {
+            if matches!(p.first(), Some(Sexpr::Atom(a)) if a == "property")
+                && matches!(p.get(1), Some(Sexpr::QString(k)) if k == key)
+            {
+                if let Some(Sexpr::QString(v) | Sexpr::Atom(v)) = p.get(2) {
                     return Some(v.as_str());
                 }
             }
@@ -4847,62 +4815,126 @@ mod tests {
         ])
     }
 
+    fn power_glyph(net: &str, x: f64, y: f64) -> Sexpr {
+        list(vec![
+            atom("symbol"),
+            list(vec![atom("lib_id"), qstring("power:GND")]),
+            list(vec![
+                atom("at"),
+                atom(&format_coord(x)),
+                atom(&format_coord(y)),
+                atom("0"),
+            ]),
+            list(vec![
+                atom("property"),
+                qstring("Reference"),
+                qstring("#PWR01"),
+            ]),
+            list(vec![atom("property"), qstring("Value"), qstring(net)]),
+        ])
+    }
+
+    fn nets(pairs: &[(&str, &[(f64, f64)])]) -> BTreeMap<String, Vec<(f64, f64, u16)>> {
+        pairs
+            .iter()
+            .map(|(n, ps)| {
+                (
+                    (*n).to_string(),
+                    ps.iter().map(|&(x, y)| (x, y, 0u16)).collect(),
+                )
+            })
+            .collect()
+    }
+
+    /// The production extraction: `sheet_geometry` must read wires,
+    /// power-glyph Values and label texts back off the emitted nodes, and
+    /// must **not** read `power:PWR_FLAG` as a by-name anchor (its Value
+    /// is the literal `PWR_FLAG`, not a net name).
     #[test]
-    fn disconnected_nets_accepts_a_wired_net() {
+    fn sheet_geometry_reads_wires_glyphs_and_labels() {
+        let items = vec![
+            wire(0.0, 0.0, 10.0, 0.0),
+            power_glyph("GND", 0.0, 0.0),
+            list(vec![
+                atom("symbol"),
+                list(vec![atom("lib_id"), qstring("power:PWR_FLAG")]),
+                list(vec![atom("at"), atom("0"), atom("0"), atom("0")]),
+                list(vec![
+                    atom("property"),
+                    qstring("Reference"),
+                    qstring("#FLG01"),
+                ]),
+                list(vec![
+                    atom("property"),
+                    qstring("Value"),
+                    qstring("PWR_FLAG"),
+                ]),
+            ]),
+            list(vec![
+                atom("label"),
+                qstring("sig"),
+                list(vec![atom("at"), atom("10"), atom("0"), atom("0")]),
+            ]),
+        ];
+        let geom = sheet_geometry(&items);
+        assert_eq!(geom.wires, vec![((0.0, 0.0), (10.0, 0.0))]);
+        let mut names: Vec<&str> = geom.named_anchors.iter().map(|(n, _)| n.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, vec!["GND", "sig"]);
+    }
+
+    /// A positive control for the Tier-0 net-partition certificate: an
+    /// unfired guard is worth nothing, so prove it fires — once per
+    /// failure direction.
+    #[test]
+    fn check_net_partition_accepts_a_wired_net() {
         let items = vec![wire(0.0, 0.0, 10.0, 0.0)];
-        let mut nets = std::collections::BTreeMap::new();
-        nets.insert("sig".to_string(), vec![(0.0, 0.0, 0u16), (10.0, 0.0, 0u16)]);
-        assert!(disconnected_nets(&items, &nets, &std::collections::BTreeMap::new()).is_empty());
+        let n = nets(&[("sig", &[(0.0, 0.0), (5.0, 0.0), (10.0, 0.0)])]);
+        assert!(check_net_partition(&items, &n, None).is_ok());
     }
 
     #[test]
-    fn disconnected_nets_accepts_a_pin_on_a_wire_interior() {
-        // KiCad connects a pin landing mid-span, not only at an endpoint.
-        let items = vec![wire(0.0, 0.0, 10.0, 0.0)];
-        let mut nets = std::collections::BTreeMap::new();
-        nets.insert(
-            "sig".to_string(),
-            vec![(0.0, 0.0, 0u16), (5.0, 0.0, 0u16), (10.0, 0.0, 0u16)],
-        );
-        assert!(disconnected_nets(&items, &nets, &std::collections::BTreeMap::new()).is_empty());
-    }
-
-    #[test]
-    fn disconnected_nets_reports_a_pin_with_no_wire() {
-        // The measured failure mode: one pin left off the net entirely.
-        let items = vec![wire(0.0, 0.0, 10.0, 0.0)];
-        let mut nets = std::collections::BTreeMap::new();
-        nets.insert(
-            "sig".to_string(),
-            vec![(0.0, 0.0, 0u16), (10.0, 0.0, 0u16), (50.0, 50.0, 0u16)],
-        );
-        assert_eq!(
-            disconnected_nets(&items, &nets, &std::collections::BTreeMap::new()),
-            vec!["sig".to_string()]
-        );
-    }
-
-    #[test]
-    fn disconnected_nets_reports_two_islands() {
+    fn check_net_partition_refuses_a_severed_net() {
         // Both pins are on wires, but the wires never meet.
         let items = vec![wire(0.0, 0.0, 5.0, 0.0), wire(20.0, 0.0, 25.0, 0.0)];
-        let mut nets = std::collections::BTreeMap::new();
-        nets.insert("sig".to_string(), vec![(0.0, 0.0, 0u16), (25.0, 0.0, 0u16)]);
-        assert_eq!(
-            disconnected_nets(&items, &nets, &std::collections::BTreeMap::new()),
-            vec!["sig".to_string()]
+        let n = nets(&[("sig", &[(0.0, 0.0), (25.0, 0.0)])]);
+        let err = check_net_partition(&items, &n, None).unwrap_err();
+        assert!(
+            matches!(err, EmitError::NetPartition(ref m) if m.contains("SPLIT")),
+            "{err}"
         );
     }
 
+    /// The hole ADR-22 closes: a wire endpoint on a *foreign* net's pin.
+    /// This used to be caught only by string-matching the router's `v11:`
+    /// warning; it is now caught by what it does to the partition.
     #[test]
-    fn disconnected_nets_skips_power_and_ground() {
-        // Rails carry no wires by design (V10 routes them as glyphs), so
-        // "no wire joins these pins" is correct output, not a defect.
-        let items: Vec<Sexpr> = vec![];
-        let mut nets = std::collections::BTreeMap::new();
-        nets.insert("VCC".to_string(), vec![(0.0, 0.0, 0u16), (9.0, 9.0, 0u16)]);
-        nets.insert("0".to_string(), vec![(1.0, 1.0, 0u16), (8.0, 8.0, 0u16)]);
-        assert!(disconnected_nets(&items, &nets, &std::collections::BTreeMap::new()).is_empty());
+    fn check_net_partition_refuses_a_wire_left_on_a_foreign_pin() {
+        let items = vec![wire(0.0, 0.0, 10.0, 0.0), wire(10.0, 0.0, 20.0, 0.0)];
+        let n = nets(&[("a", &[(0.0, 0.0), (10.0, 0.0)]), ("b", &[(20.0, 0.0)])]);
+        let err = check_net_partition(&items, &n, None).unwrap_err();
+        assert!(
+            matches!(err, EmitError::NetPartition(ref m) if m.contains("MERGE")),
+            "{err}"
+        );
+    }
+
+    /// Rails carry no wires by design (V10 draws them as glyphs), so a
+    /// ground net with two glyph-terminated pins and no wire between them
+    /// is *connected*, not severed. The predecessor check bought this by
+    /// skipping power/ground nets outright; this one earns it by modelling
+    /// KiCad's by-name rule, which is why it can still catch a rail that
+    /// really is broken.
+    #[test]
+    fn check_net_partition_connects_rail_pins_by_glyph_name() {
+        let items = vec![power_glyph("GND", 0.0, 0.0), power_glyph("GND", 9.0, 9.0)];
+        let n = nets(&[("0", &[(0.0, 0.0), (9.0, 9.0)])]);
+        assert!(check_net_partition(&items, &n, None).is_ok());
+
+        // …and the same rail with one glyph missing IS severed — the
+        // case the old power/ground skip could never see.
+        let items = vec![power_glyph("GND", 0.0, 0.0)];
+        assert!(check_net_partition(&items, &n, None).is_err());
     }
 
     /// `severed_net_count` — the Tier-0 connectivity metric phase 4.5

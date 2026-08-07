@@ -438,7 +438,7 @@ Attempt-A failure (a tunable term that at safe weights does nothing).
 | Invariant                | Enforcement                          |
 | ------------------------ | ------------------------------------ |
 | grid alignment           | hard (snap at SA boundary)           |
-| V11 wire/pin coincidence | hard, four stages: SA gate → phase 4.5 tuple key → router conflict resolution → unconditional emit refusal (ADR-20/21) |
+| V11 wire/pin coincidence | hard, four stages: SA gate → phase 4.5 tuple key → router conflict resolution → unconditional emit refusal on a reconstructed-net-partition mismatch (ADR-20/21/22) |
 | V14 power-glyph orient.  | hard + detached-glyph stub fallback  |
 | V12 obstacle avoidance   | hard with budgeted-fallback (logs)   |
 | V5 pin-facing            | soft seed + routing-aware refine*    |
@@ -473,7 +473,18 @@ pass. It enters the same routing-aware refine phase as V5, but only as
 the FINAL key of the lexicographic tuple (strictly after `V13`, `V12`,
 `V5`) or as a non-regression guard; see `docs/invariants.md` V16 and
 ADR-16 for why last-place lexicographic ordering — not a coefficient —
-is what keeps it subordinate to Tier 1.
+is what keeps it subordinate to Tier 1. (e) **V11's last stage names a
+consequence, not a mechanism** (ADR-22). Before it, a merge was refused
+by *string-matching* a router warning (`v11:`) and a split by a
+wire-only union-find, so every other way to merge two nets needed its
+own string and its own escalation — `conflict:` had none and reached
+exit 0, and `cross-net overlap:` could not have one (it is sampled
+pre-cleanup and fires on a correct conversion). `emit_root` now
+reconstructs the whole net partition from the final ink
+(`kicad_emitter::connectivity`) and refuses on any mismatch with the
+source netlist's partition. **If you add a router pass, you do not
+need to add an escalation for it** — but do keep its warning accurate,
+since the warning is now the *explanation* rather than the *gate*.
 
 ## Visual quality invariants
 

@@ -1,8 +1,7 @@
 //! **A2 — round-trip connectivity certificate** (Milestone A / Weave
 //! §verification).
 //!
-//! A whole-file, self-contained companion to the V11 electrical-safety
-//! suite. Where the V11 tests
+//! Where the V11 electrical-safety tests
 //! (`electrical_safety.rs::v11_no_foreign_pin_coincidence`) ask a *local*
 //! question — "does any wire/label touch a FOREIGN pin?" — A2 asks the
 //! *global* one: reconstruct the ENTIRE net partition from the emitted
@@ -14,61 +13,67 @@
 //!    that KiCad would import as two distinct nets (an open), even though
 //!    no foreign pin is ever touched;
 //!  * a **silent merge** — two source nets fused into one geometric
-//!    component (a short). V11 catches the wire-on-foreign-pin flavour of
-//!    this; A2 also catches a merge produced purely by label/glyph naming
-//!    or by a shared coordinate that the local scan does not enumerate.
+//!    component (a short), including a merge produced purely by
+//!    label/glyph naming rather than by a wire.
 //!
-//! This is deliberately NOT the CLI's `kicad-cli`-driven post-emit
-//! connectivity check (see `placement_stability.rs::convert`): it needs
-//! no external tool, and it grades the emitted `(wire …)` / `(symbol …)`
-//! / `(label …)` geometry directly against the resolved SPICE netlist, so
-//! it runs everywhere the suite runs.
+//! # What changed when this check moved into production (ADR-22)
 //!
-//! # Reconstruction model (mirrors KiCad connectivity)
+//! A2 used to be the *only* implementation of this reconstruction. It is
+//! now production code — `kicad_emitter::connectivity::check_partition`,
+//! run inside `emit_root` / `emit_child_sheet` before any bytes reach
+//! disk, refusing with `EmitError::NetPartition`. So the obvious move
+//! would be to delete A2, or to reduce it to "call the production check
+//! and assert it passed". **Both would destroy its value**, and the
+//! reason is worth stating plainly because this project has already been
+//! burned by it once (the V13 suite was a byte-copy of the emitter's own
+//! text model, so only real `kicad-cli` SVG ink could falsify it).
 //!
-//! Nets are rebuilt by union-find over *geometric coincidence*, plus the
-//! by-name rule KiCad uses for power rails and labels:
+//! The production check grades the router's output against the router's
+//! own input: `collect_net_pins` supplies both the wires' targets and the
+//! oracle's pin→net attribution. If that attribution or the pose maths
+//! behind it is wrong, the router draws the wrong wire *and the oracle
+//! blesses it* — shared fate. It is equally blind to everything that
+//! happens after it: page translation and S-expression serialisation.
 //!
-//!  1. The two endpoints of every `(wire …)` are unioned. The router
-//!     splits every same-net attachment into an endpoint-to-endpoint join
-//!     (`spice-route/src/cleanup.rs::split_at_interior_attachments`), so
-//!     endpoint coincidence alone reconstructs the Steiner trees; the
-//!     interior-through-pin case below covers the one exception.
-//!  2. Any component pin, power-glyph anchor, or label anchor that lands
-//!     on a wire — at an endpoint OR strictly inside it (V11's
-//!     interior-through-pin electrical rule) — is unioned into that wire.
-//!  3. Same-coordinate identity is implicit: pins / glyphs / labels /
-//!     wire ends that share a quantised coordinate are the same union
-//!     node.
-//!  4. **By name**: every rail glyph (`power:*`, excluding `PWR_FLAG`) and
-//!     every label (plain or global) carrying the SAME canonical net name
-//!     is unioned — KiCad connects power nets and same-name labels by
-//!     name, not by wire.
+//! A2 therefore keeps **independent inputs** and shares only the engine:
+//!
+//!  * **Terminals** are re-derived from scratch — re-parse the `.cir`
+//!    through `spice-parser` + `spice-resolve`, and push library pin
+//!    geometry through the *emitted* symbol pose. This is the falsifier
+//!    for `collect_net_pins`, which production structurally cannot check.
+//!  * **Geometry** is read back off the `.kicad_sch` **file on disk**,
+//!    after page translation and serialisation, with an independent
+//!    parser (`lexpr`). This is the falsifier for the emit tail.
+//!  * **The union-find engine** is shared, deliberately. A second
+//!    hand-written union-find would encode the *same* beliefs about
+//!    KiCad's connectivity semantics, so it could only ever agree and be
+//!    wrong in company. The model's true falsifier is KiCad itself — the
+//!    CLI's post-emit `kicad-cli` netlist comparison, which every graded
+//!    conversion in this suite runs.
 //!
 //! # The certificate
 //!
 //! Component terminals — real `(refdes, kicad-pin)` pairs of the placed
 //! non-glyph symbols — are the shared vertex set of both partitions. The
 //! source partition groups them by `ResolvedElement::nodes`; the emitted
-//! partition groups them by reconstructed union-find component. The two
-//! must agree exactly:
-//!
-//!  * **no merge** — two terminals on DIFFERENT source nets never share a
-//!    reconstructed component;
-//!  * **no split** — two terminals on the SAME source net always share a
-//!    reconstructed component.
+//! partition groups them by reconstructed component. The two must agree
+//! exactly: no merge, no split.
 //!
 //! This is a categorical Tier-0 correctness gate, like V11: budget 0 on
-//! every fixture, no per-fixture table — a hard assert that the
-//! partitions match. `;@ ignore`d elements are undrawn and excluded
-//! (they never reach `resolved.elements`).
+//! every fixture, no per-fixture table. `;@ ignore`d elements are undrawn
+//! and excluded (they never reach `resolved.elements`).
+//!
+//! Two guards keep the gate from passing vacuously — see
+//! [`emitted_geometry_round_trips_to_source_netlist_across_fixtures`]'s
+//! terminal-count assertion and
+//! [`the_reconstruction_is_sensitive_on_real_fixtures`]'s mutations.
 
 mod common;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 
 use common::spice_to_kicad;
+use kicad_emitter::connectivity::{PartitionFinding, SheetGeometry, Terminal, check_partition};
 use kicad_symbols::{Library, Orientation, Rotation};
 use lexpr::Value;
 use spice_diagnostics::FileId;
@@ -77,7 +82,7 @@ use spice_diagnostics::FileId;
 // Fixtures / driver (mirrors electrical_safety.rs).
 // ---------------------------------------------------------------------------
 
-/// The ten fixtures every invariant verifier drives.
+/// The eleven fixtures every invariant verifier drives.
 const FIXTURES: &[&str] = &[
     "rc_lowpass",
     "common_emitter",
@@ -145,17 +150,11 @@ fn children<'a>(v: &'a Value, name: &str) -> Vec<&'a Value> {
     list_iter(v).filter(|c| head(c) == Some(name)).collect()
 }
 
-/// Quantise mm coords to integer micrometres for exact hash-key equality
-/// on the 1.27 mm KiCad grid.
-#[allow(clippy::cast_possible_truncation)]
-fn qkey(x: f64, y: f64) -> (i64, i64) {
-    ((x * 1000.0).round() as i64, (y * 1000.0).round() as i64)
-}
-
-/// Canonical net identity: SPICE ground `"0"` → `GND`, every other rail
-/// uppercased. This is the emitter's rail-name convention (R-6); applying
-/// it to both the reconstructed by-name union and the source grouping
-/// keeps `vcc` and `VCC` the same net on both sides.
+/// Canonical net identity: SPICE ground `"0"` → `GND`, every other net
+/// uppercased. Applied to the *source* net names only — SPICE node names
+/// are case-insensitive, so `vcc` and `VCC` must group as one net when
+/// the two partitions are compared. Emitted anchor *names* are compared
+/// verbatim, exactly as KiCad compares them.
 fn canonical_net(net: &str) -> String {
     if net == "0" {
         "GND".to_string()
@@ -242,19 +241,11 @@ fn symbol_value(sym: &Value) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// Emitted-geometry extraction.
+// Independent geometry extraction — off the FILE, with `lexpr`.
 // ---------------------------------------------------------------------------
 
-/// A component terminal — the shared vertex set of both partitions.
-struct Terminal {
-    refdes: String,
-    pin: String,
-    coord: (i64, i64),
-    source_net: String,
-}
-
-/// Every axis-aligned `(wire …)` segment, as quantised endpoint pairs.
-fn wire_segments(root: &Value) -> Vec<((i64, i64), (i64, i64))> {
+/// Every axis-aligned `(wire …)` segment, as endpoint pairs.
+fn wire_segments(root: &Value) -> Vec<((f64, f64), (f64, f64))> {
     let mut out = Vec::new();
     for w in children(root, "wire") {
         let Some(pts) = find_child(w, "pts") else {
@@ -264,12 +255,12 @@ fn wire_segments(root: &Value) -> Vec<((i64, i64), (i64, i64))> {
         if xys.len() < 2 {
             continue;
         }
-        let pt = |v: &Value| -> Option<(i64, i64)> {
+        let pt = |v: &Value| -> Option<(f64, f64)> {
             let mut it = list_iter(v);
             it.next();
             let x = it.next().and_then(as_f64)?;
             let y = it.next().and_then(as_f64)?;
-            Some(qkey(x, y))
+            Some((x, y))
         };
         if let (Some(a), Some(b)) = (pt(xys[0]), pt(xys[1])) {
             out.push((a, b));
@@ -278,42 +269,11 @@ fn wire_segments(root: &Value) -> Vec<((i64, i64), (i64, i64))> {
     out
 }
 
-/// Quantised interior grid coords of an axis-aligned segment (endpoints
-/// excluded). Steps the 1.27 mm grid; a diagonal (already a defect) is
-/// skipped rather than enumerated off-grid.
-fn interior_grid_coords(a: (i64, i64), b: (i64, i64)) -> Vec<(i64, i64)> {
-    const GRID_UM: i64 = 1270;
-    if a == b {
-        return Vec::new();
-    }
-    let dx = b.0 - a.0;
-    let dy = b.1 - a.1;
-    if dx != 0 && dy != 0 {
-        return Vec::new();
-    }
+/// Label anchors as `(text, coord)` — every flavour connects to a
+/// same-named label on its sheet.
+fn label_nodes(root: &Value) -> Vec<(String, (f64, f64))> {
     let mut out = Vec::new();
-    if dx == 0 {
-        let step = if dy > 0 { GRID_UM } else { -GRID_UM };
-        let mut y = a.1 + step;
-        while (step > 0 && y < b.1) || (step < 0 && y > b.1) {
-            out.push((a.0, y));
-            y += step;
-        }
-    } else {
-        let step = if dx > 0 { GRID_UM } else { -GRID_UM };
-        let mut x = a.0 + step;
-        while (step > 0 && x < b.0) || (step < 0 && x > b.0) {
-            out.push((x, a.1));
-            x += step;
-        }
-    }
-    out
-}
-
-/// Plain- and global-label anchors as `(canonical_net, coord)`.
-fn label_nodes(root: &Value) -> Vec<(String, (i64, i64))> {
-    let mut out = Vec::new();
-    for kind in ["label", "global_label"] {
+    for kind in ["label", "global_label", "hierarchical_label"] {
         for node in children(root, kind) {
             let Some(name) = list_iter(node).nth(1).and_then(as_str) else {
                 continue;
@@ -327,17 +287,17 @@ fn label_nodes(root: &Value) -> Vec<(String, (i64, i64))> {
             else {
                 continue;
             };
-            out.push((canonical_net(name), qkey(x, y)));
+            out.push((name.to_string(), (x, y)));
         }
     }
     out
 }
 
-/// Rail power-glyph anchors as `(canonical_net, coord)`. `PWR_FLAG`
-/// carries no rail net in its Value (its Value is literally `PWR_FLAG`),
-/// so it is excluded from the by-name union — it still participates
-/// geometrically via coordinate coincidence with the rail pin it sits on.
-fn rail_glyph_nodes(root: &Value) -> Vec<(String, (i64, i64))> {
+/// Rail power-glyph anchors as `(value, coord)`. `PWR_FLAG` carries no
+/// rail net in its Value (its Value is literally `PWR_FLAG`), so it is
+/// excluded from the by-name union — it still participates geometrically
+/// via coordinate coincidence with the rail pin it sits on.
+fn rail_glyph_nodes(root: &Value) -> Vec<(String, (f64, f64))> {
     let mut out = Vec::new();
     for sym in children(root, "symbol") {
         let Some((refdes, lib_id)) = placed_symbol_refdes_and_lib_id(sym) else {
@@ -355,21 +315,40 @@ fn rail_glyph_nodes(root: &Value) -> Vec<(String, (i64, i64))> {
         let Some(net) = symbol_value(sym) else {
             continue;
         };
-        out.push((canonical_net(&net), qkey(ox, oy)));
+        out.push((net, (ox, oy)));
     }
     out
 }
+
+fn geometry_for_sheet(root: &Value) -> SheetGeometry {
+    let mut named_anchors = label_nodes(root);
+    named_anchors.extend(rail_glyph_nodes(root));
+    SheetGeometry {
+        wires: wire_segments(root),
+        named_anchors,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Independent terminal derivation — source → resolver → library → pose.
+// ---------------------------------------------------------------------------
 
 /// Build the component terminals for a fixture: walk the resolved SPICE
 /// netlist for the ground-truth `(refdes, kicad-pin) → net` map, then
 /// place each library pin through the emitted symbol pose to recover its
 /// world coordinate. Power-glyph (`#PWR…`) symbols are not SPICE
 /// elements and contribute no terminals.
+///
+/// **This deliberately does not call `collect_net_pins`.** It is the one
+/// derivation of pin→net attribution and pin geometry that the production
+/// check cannot perform on itself — see the module docs.
 fn terminals_for_sheet(
     spice_path: &std::path::Path,
     root: &Value,
     library: &Library,
 ) -> Vec<Terminal> {
+    use std::collections::HashMap;
+
     let source = std::fs::read_to_string(spice_path).expect("read spice fixture");
     let parsed = spice_parser::parse(&source, FileId(0)).expect("parse spice fixture");
     let resolved = spice_resolve::resolve(&parsed.netlist, library).expect("resolve spice fixture");
@@ -408,200 +387,54 @@ fn terminals_for_sheet(
                 continue;
             };
             out.push(Terminal {
-                refdes: refdes.clone(),
-                pin: tp.number.clone(),
-                coord: qkey(ox + tp.x, oy - tp.y),
-                source_net: canonical_net(net),
+                id: format!("{}.{}", refdes, tp.number),
+                net: canonical_net(net),
+                at: (ox + tp.x, oy - tp.y),
             });
         }
     }
     out
 }
 
-// ---------------------------------------------------------------------------
-// Union-find over geometric coincidence.
-// ---------------------------------------------------------------------------
-
-struct UnionFind {
-    parent: Vec<usize>,
-}
-
-impl UnionFind {
-    fn new(n: usize) -> Self {
-        Self {
-            parent: (0..n).collect(),
-        }
-    }
-    fn find(&mut self, mut x: usize) -> usize {
-        while self.parent[x] != x {
-            self.parent[x] = self.parent[self.parent[x]];
-            x = self.parent[x];
-        }
-        x
-    }
-    fn union(&mut self, a: usize, b: usize) {
-        let (ra, rb) = (self.find(a), self.find(b));
-        if ra != rb {
-            self.parent[ra] = rb;
-        }
-    }
-}
-
-/// Interns quantised coords and unions them into geometric components.
-struct GeomPartition {
-    idx: HashMap<(i64, i64), usize>,
-    uf: UnionFind,
-}
-
-impl GeomPartition {
-    /// Build the reconstructed net partition for one sheet.
-    fn build(root: &Value, terminals: &[Terminal]) -> Self {
-        let wires = wire_segments(root);
-        let labels = label_nodes(root);
-        let glyphs = rail_glyph_nodes(root);
-
-        // Intern every coordinate the model can reference.
-        let mut idx: HashMap<(i64, i64), usize> = HashMap::new();
-        let mut coords: Vec<(i64, i64)> = Vec::new();
-        let mut intern = |k: (i64, i64), coords: &mut Vec<(i64, i64)>| -> usize {
-            *idx.entry(k).or_insert_with(|| {
-                coords.push(k);
-                coords.len() - 1
-            })
-        };
-        for (a, b) in &wires {
-            intern(*a, &mut coords);
-            intern(*b, &mut coords);
-        }
-        for t in terminals {
-            intern(t.coord, &mut coords);
-        }
-        for (_, c) in labels.iter().chain(glyphs.iter()) {
-            intern(*c, &mut coords);
-        }
-
-        let mut uf = UnionFind::new(coords.len());
-
-        // (1) wire endpoints.
-        for (a, b) in &wires {
-            uf.union(idx[a], idx[b]);
-        }
-
-        // (2) any pin / glyph / label anchor that lands on a wire —
-        // endpoint or strict interior — joins that wire. Endpoint
-        // coincidence is already covered by the shared coord key; the
-        // interior case is the V11 interior-through-pin electrical rule.
-        let attach: HashSet<(i64, i64)> = terminals
-            .iter()
-            .map(|t| t.coord)
-            .chain(labels.iter().map(|(_, c)| *c))
-            .chain(glyphs.iter().map(|(_, c)| *c))
-            .collect();
-        for (a, b) in &wires {
-            for k in interior_grid_coords(*a, *b) {
-                if attach.contains(&k) {
-                    uf.union(idx[a], idx[&k]);
-                }
-            }
-        }
-
-        // (4) by-name: rail glyphs and labels sharing a canonical net
-        // name connect by name, not by wire.
-        let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
-        for (net, c) in labels.iter().chain(glyphs.iter()) {
-            by_name.entry(net.clone()).or_default().push(idx[c]);
-        }
-        for members in by_name.values() {
-            for w in members.windows(2) {
-                uf.union(w[0], w[1]);
-            }
-        }
-
-        Self { idx, uf }
-    }
-
-    fn component_of(&mut self, coord: (i64, i64)) -> usize {
-        let i = self.idx[&coord];
-        self.uf.find(i)
-    }
+/// Convert a fixture and return `(terminals, geometry)` — both derived
+/// independently of production, from the written file.
+fn reconstruct(name: &str, library: &Library) -> (Vec<Terminal>, SheetGeometry) {
+    let src = fixtures_dir().join(format!("{name}.cir"));
+    let tmp = tempdir(name);
+    let sch = spice_to_kicad(&src, &tmp).expect("spice2kicad");
+    let root = parse(&sch);
+    (
+        terminals_for_sheet(&src, &root, library),
+        geometry_for_sheet(&root),
+    )
 }
 
 // ---------------------------------------------------------------------------
 // The certificate.
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::too_many_lines)]
 #[test]
 fn emitted_geometry_round_trips_to_source_netlist_across_fixtures() {
     let library = load_test_library();
     let mut failures: Vec<String> = Vec::new();
 
     for name in FIXTURES {
-        let src = fixtures_dir().join(format!("{name}.cir"));
-        let tmp = tempdir(name);
-        let sch = spice_to_kicad(&src, &tmp).expect("spice2kicad");
-        let root = parse(&sch);
+        let (terminals, geometry) = reconstruct(name, &library);
 
-        let terminals = terminals_for_sheet(&src, &root, &library);
-        let mut geom = GeomPartition::build(&root, &terminals);
+        // Vacuity guard. A partition check over an empty terminal set
+        // passes trivially, and a silently-empty derivation (a library
+        // lookup that stopped matching, a pose that stopped parsing)
+        // would turn this whole file green while measuring nothing.
+        assert!(
+            terminals.len() >= 2,
+            "{name}: derived only {} terminal(s) — the certificate below would \
+             pass vacuously. This is a defect in A2's own derivation, not in the \
+             emitted schematic.",
+            terminals.len(),
+        );
 
-        // Reconstructed component of each terminal, plus its source net.
-        // Terminal identity is `refdes.pin`.
-        let mut term_comp: BTreeMap<String, usize> = BTreeMap::new();
-        let mut term_src: BTreeMap<String, String> = BTreeMap::new();
-        for t in &terminals {
-            let id = format!("{}.{}", t.refdes, t.pin);
-            term_comp.insert(id.clone(), geom.component_of(t.coord));
-            term_src.insert(id, t.source_net.clone());
-        }
-
-        // --- no merge: each reconstructed component carries one source net.
-        let mut comp_to_nets: BTreeMap<usize, BTreeSet<String>> = BTreeMap::new();
-        for (id, comp) in &term_comp {
-            comp_to_nets
-                .entry(*comp)
-                .or_default()
-                .insert(term_src[id].clone());
-        }
-        for (comp, nets) in &comp_to_nets {
-            if nets.len() > 1 {
-                let members: Vec<&String> = term_comp
-                    .iter()
-                    .filter(|(_, c)| *c == comp)
-                    .map(|(id, _)| id)
-                    .collect();
-                failures.push(format!(
-                    "{name}: SILENT MERGE — reconstructed component fuses distinct source \
-                     nets {nets:?}; terminals {members:?}"
-                ));
-            }
-        }
-
-        // --- no split: each source net occupies one reconstructed component.
-        let mut net_to_comps: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
-        for (id, comp) in &term_comp {
-            net_to_comps
-                .entry(term_src[id].clone())
-                .or_default()
-                .insert(*comp);
-        }
-        for (net, comps) in &net_to_comps {
-            if comps.len() > 1 {
-                // Report the terminals grouped by their island so the
-                // offending disconnection is legible.
-                let mut islands: BTreeMap<usize, Vec<&String>> = BTreeMap::new();
-                for (id, comp) in &term_comp {
-                    if &term_src[id] == net {
-                        islands.entry(*comp).or_default().push(id);
-                    }
-                }
-                let island_list: Vec<Vec<&String>> = islands.into_values().collect();
-                failures.push(format!(
-                    "{name}: SILENT SPLIT — source net {net:?} reconstructs as \
-                     {} disconnected islands: {island_list:?}",
-                    comps.len()
-                ));
-            }
+        for f in check_partition(&terminals, &geometry) {
+            failures.push(format!("{name}: {f}"));
         }
     }
 
@@ -609,6 +442,88 @@ fn emitted_geometry_round_trips_to_source_netlist_across_fixtures() {
         failures.is_empty(),
         "A2 round-trip connectivity certificate failed \
          (emitted geometry does not reconstruct the source net partition):\n  {}",
+        failures.join("\n  "),
+    );
+}
+
+/// **Mutation guard.** The certificate above only tells you something if
+/// it *can* fail on the fixtures it grades. A reconstruction that quietly
+/// unions everything (or nothing) would pass it forever.
+///
+/// So: take each real fixture's real reconstruction and inject each of
+/// the three edge classes the model implements, one at a time, in the
+/// direction that must break it. Every injection must be caught.
+///
+/// This runs on the same read-back geometry as the certificate — no
+/// second conversion — so it costs nothing beyond the mutations.
+#[test]
+fn the_reconstruction_is_sensitive_on_real_fixtures() {
+    let library = load_test_library();
+    let mut failures: Vec<String> = Vec::new();
+
+    for name in FIXTURES {
+        let (terminals, geometry) = reconstruct(name, &library);
+
+        // Two terminals on genuinely different source nets, needed by the
+        // merge injections.
+        let a = &terminals[0];
+        let Some(b) = terminals.iter().find(|t| t.net != a.net) else {
+            failures.push(format!("{name}: fixture has only one net; cannot mutate"));
+            continue;
+        };
+
+        // (1) wire injection: a segment joining two foreign nets' pins.
+        // This is the `v11:` / `conflict:` hazard in its purest form.
+        let mut wired = geometry.clone();
+        wired.wires.push((a.at, b.at));
+        let found = check_partition(&terminals, &wired);
+        if !found
+            .iter()
+            .any(|f| matches!(f, PartitionFinding::Merge { .. }))
+        {
+            failures.push(format!(
+                "{name}: a wire drawn from {} to {} (different nets: {} vs {}) was \
+                 NOT reported as a merge — the reconstruction is not reading wires",
+                a.id, b.id, a.net, b.net,
+            ));
+        }
+
+        // (2) name injection: two same-named anchors on foreign nets.
+        // This is the merge a foreign-pin scan cannot see at all.
+        let mut named = geometry.clone();
+        named.named_anchors.push(("A2_INJECTED".to_string(), a.at));
+        named.named_anchors.push(("A2_INJECTED".to_string(), b.at));
+        let found = check_partition(&terminals, &named);
+        if !found
+            .iter()
+            .any(|f| matches!(f, PartitionFinding::Merge { .. }))
+        {
+            failures.push(format!(
+                "{name}: two same-named anchors on {} and {} (different nets) were \
+                 NOT reported as a merge — the by-name rule is not being applied",
+                a.id, b.id,
+            ));
+        }
+
+        // (3) erasure: drop every wire and every anchor. Any multi-pin
+        // net must now come apart. If nothing does, the fixture's
+        // connectivity is not being measured from geometry at all.
+        let found = check_partition(&terminals, &SheetGeometry::default());
+        if !found
+            .iter()
+            .any(|f| matches!(f, PartitionFinding::Split { .. }))
+        {
+            failures.push(format!(
+                "{name}: erasing ALL wires, glyphs and labels produced no split — \
+                 the certificate is not measuring the emitted geometry"
+            ));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "A2 mutation guard failed (the reconstruction is insensitive to defects it \
+         must catch):\n  {}",
         failures.join("\n  "),
     );
 }

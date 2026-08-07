@@ -563,15 +563,44 @@ invariant here.
   Recall the contrast with V5/V6/V7 (quality) and V10 (routing
   surface): V10 says *what* the router emits; V11 says *what it
   is forbidden to emit*.
-  **Residue is a refusal, unconditionally** (ADR-20 D4, ADR-21).
-  `kicad-emitter`'s `route_nets` errors — before writing a single
-  byte — on pin-on-pin across nets (`EmitError::PinCoincidence`,
-  pre-route) and on any `v11:` line the router's conflict cascade
-  leaves behind at its fixed point (`EmitError::V11Violation`,
-  post-route). Neither depends on `--verify`, on `kicad-cli` being
-  installed, or on any env var; there is no opt-out from a Tier-0
-  refusal. Note the asymmetry with V12, which is Tier 1 and
-  legitimately warns with a budgeted fallback.
+  **Residue is a refusal, unconditionally** (ADR-20 D4, ADR-21,
+  ADR-22), and since ADR-22 the refusal is **geometric and
+  mechanism-blind**. `emit_root` / `emit_child_sheet` reconstruct the
+  ENTIRE net partition from the ink they are about to write —
+  `kicad_emitter::connectivity::check_partition`, a union-find
+  implementing exactly the four clauses above plus KiCad's by-name
+  rule for `power:*` glyphs and same-named labels — and error with
+  `EmitError::NetPartition` if it is not the source netlist's
+  partition: two nets in one component (a short) or one net in
+  several (an open). One geometric check, both directions, before a
+  single byte reaches disk.
+  This *replaced* two mechanism-specific checks. `V11Violation`
+  recognised a merge by string-matching the router's `v11:` warning
+  and `DisconnectedNet` recognised a split by union-finding wires
+  alone; both are gone. Naming mechanisms was the defect — every
+  other way to merge two nets needed its own string and its own
+  escalation, which is why `conflict:` reached exit 0 for as long as
+  nobody wrote one, and why `cross-net overlap:` could not be
+  escalated at all. Naming the *consequence* catches all of them,
+  including ways nobody has thought of yet.
+  `EmitError::PinCoincidence` survives alongside it, not as a second
+  authority but as a pre-route pre-flight: it is raised before the
+  router runs, so it names the two coincident pins rather than the
+  component they end up in.
+  None of this depends on `--verify`, on `kicad-cli` being installed,
+  or on any env var; there is no opt-out from a Tier-0 refusal.
+  `--no-verify` skips only the *external* `kicad-cli` opinion, which
+  remains valuable for the one thing the in-process check cannot do —
+  falsify the model itself. Note the asymmetry with V12, which is
+  Tier 1 and legitimately warns with a budgeted fallback.
+  Second verifier (whole-file, independent):
+  `crates/spice2kicad/tests/roundtrip_connectivity.rs` runs the same
+  engine over terminals and geometry it derives *independently* — the
+  `.cir` re-parsed and re-resolved, pin coordinates re-derived from
+  the library through the emitted pose, and the geometry read back off
+  the written file — which is what lets it falsify `collect_net_pins`
+  and the emit tail, neither of which the production check can grade
+  itself on. It carries a vacuity guard and a mutation guard.
 
 - **V12 — Wires do not cross foreign symbol bodies.** Every emitted
   `(wire …)` segment's axis-parallel path must not strictly enter
