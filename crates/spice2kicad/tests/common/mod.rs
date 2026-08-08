@@ -20,8 +20,131 @@ pub mod text_model;
 pub mod xfail;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+// --- temp directories ----------------------------------------------------
+
+/// A scratch directory that **deletes itself when it drops**.
+///
+/// Every integration-test binary used to define its own
+/// `fn tempdir(name) -> PathBuf` that created
+/// `$TMPDIR/spice2kicad-…` and never removed it. On a tmpfs `/tmp` that
+/// is not a tidiness issue: the leak reached **29 399** stale
+/// directories, filled a 32 GB tmpfs, and the resulting ENOSPC killed a
+/// commit mid-run. Each binary now keeps its one-line `tempdir` wrapper
+/// (the tag/name convention is useful when a run *is* being inspected)
+/// but the directory itself is owned by this guard.
+///
+/// Two properties the call sites depend on:
+///
+/// * **The guard must outlive every read of anything inside it.** A
+///   helper that returns a path into its own temp directory must return
+///   the guard alongside it — see [`Emitted`] — or the file is gone
+///   before the caller opens it. Binding it to `_name` is fine (a named
+///   binding lives to end of scope); binding it to a bare `_` is not
+///   (that drops immediately).
+/// * **Re-converting into the SAME directory is a deliberate test
+///   mode**, not a bug: it is how the ADR-4 layout-cache sidecar path is
+///   exercised (`layout_cache.rs`, `placement_stability.rs`). Hold one
+///   guard across both conversions rather than taking a second one.
+///
+/// Set `SPICE2KICAD_KEEP_TEMP=1` to skip removal when a failing run
+/// needs its output kept for inspection.
+#[derive(Debug)]
+pub struct TempDir {
+    path: PathBuf,
+}
+
+impl TempDir {
+    /// Create `$TMPDIR/spice2kicad-<tag>-<pid>-<seq>-<name>`.
+    ///
+    /// `tag` names the test binary, `name` the fixture. `pid` + a
+    /// per-binary sequence keep concurrent runs — and concurrent tests
+    /// converting the *same* fixture — off each other's paths.
+    pub fn new(tag: &str, name: &str) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
+        let path = std::env::temp_dir().join(format!("spice2kicad-{tag}-{pid}-{seq}-{name}"));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("create tempdir");
+        Self { path }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl std::ops::Deref for TempDir {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl AsRef<Path> for TempDir {
+    fn as_ref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        if std::env::var_os("SPICE2KICAD_KEEP_TEMP").is_some() {
+            eprintln!("kept temp dir {}", self.path.display());
+            return;
+        }
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+/// A path produced inside a [`TempDir`], carrying that directory's
+/// lifetime with it.
+///
+/// The shape to reach for when a helper converts a fixture and hands the
+/// emitted `.kicad_sch` back to its caller: returning a bare `PathBuf`
+/// would drop the guard at the end of the helper and delete the file the
+/// caller is about to read. Derefs to the emitted path, so callers read
+/// `parse(&sch)` exactly as they did when it was a `PathBuf`.
+#[derive(Debug)]
+pub struct Emitted {
+    dir: TempDir,
+    path: PathBuf,
+}
+
+impl Emitted {
+    pub fn new(dir: TempDir, path: PathBuf) -> Self {
+        Self { dir, path }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The directory holding the emitted file — for a follow-up pass
+    /// that writes next to it (an ERC report, a round-tripped netlist).
+    pub fn dir(&self) -> &Path {
+        self.dir.path()
+    }
+}
+
+impl std::ops::Deref for Emitted {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl AsRef<Path> for Emitted {
+    fn as_ref(&self) -> &Path {
+        &self.path
+    }
+}
 
 /// One element terminal: `R1` pin 1, `Q3` pin 2 (collector), …
 type Terminal = (String, usize);

@@ -38,7 +38,7 @@
 
 mod common;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use common::spice_to_kicad;
 use lexpr::Value;
@@ -52,14 +52,8 @@ const BASE: &str = "\
 V1 in  0   AC 1   ;@ ignore
 ";
 
-fn tempdir(name: &str) -> PathBuf {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let pid = std::process::id();
-    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("spice2kicad-coincide-{pid}-{seq}-{name}"));
-    std::fs::create_dir_all(&dir).expect("create tempdir");
-    dir
+fn tempdir(name: &str) -> common::TempDir {
+    common::TempDir::new("coincide", name)
 }
 
 /// Every `(symbol (lib_id …) (at x y rot) …)` origin in the sheet,

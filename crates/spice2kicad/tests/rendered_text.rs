@@ -88,17 +88,19 @@ fn fixtures_dir() -> PathBuf {
 /// `.layout.json` placement cache beside its output, so two fixtures
 /// sharing a directory read each other's cache and produce corrupt
 /// placements.
-fn fixture_dir(test: &str, fixture: &str) -> PathBuf {
-    let pid = std::process::id();
-    let dir = std::env::temp_dir().join(format!("spice2kicad-render-{pid}-{test}-{fixture}"));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("create fixture dir");
-    dir
+fn fixture_dir(test: &str, fixture: &str) -> common::TempDir {
+    common::TempDir::new("render", &format!("{test}-{fixture}"))
 }
 
 /// Convert a fixture, then render every emitted sheet (root *and* child
-/// sheets) to SVG. Returns `(sheet_stem, svg_source)` pairs.
-fn convert_and_render(test: &str, fixture: &str) -> Vec<(String, PathBuf, String)> {
+/// sheets) to SVG. Returns the `(sheet_stem, sheet_path, svg_source)`
+/// triples together with the temp directory holding them — the caller
+/// must keep that guard bound while it reads a `sheet_path`, since
+/// dropping it deletes the directory.
+fn convert_and_render(
+    test: &str,
+    fixture: &str,
+) -> (common::TempDir, Vec<(String, PathBuf, String)>) {
     let dir = fixture_dir(test, fixture);
     let src = fixtures_dir().join(format!("{fixture}.cir"));
     let root = spice_to_kicad(&src, &dir).expect("spice2kicad");
@@ -134,7 +136,7 @@ fn convert_and_render(test: &str, fixture: &str) -> Vec<(String, PathBuf, String
         out.push((stem, sch, body));
     }
     assert!(!out.is_empty(), "{fixture}: nothing rendered");
-    out
+    (dir, out)
 }
 
 // --- SVG ink extraction --------------------------------------------------
@@ -265,7 +267,8 @@ fn rendered_text_does_not_overlap_across_fixtures() {
             continue;
         }
         let mut hits = 0;
-        for (stem, _, svg) in convert_and_render("ov", fixture) {
+        let (_dir, sheets) = convert_and_render("ov", fixture);
+        for (stem, _, svg) in sheets {
             let runs = ink_runs(&svg);
             assert!(!runs.is_empty(), "{fixture}/{stem}: no text rendered");
             for i in 0..runs.len() {
@@ -362,7 +365,8 @@ fn text_bbox_model_covers_rendered_ink() {
     let mut escapes: Vec<String> = Vec::new();
 
     for fixture in FIXTURES {
-        for (stem, sch, svg) in convert_and_render("cal", fixture) {
+        let (_dir, sheets) = convert_and_render("cal", fixture);
+        for (stem, sch, svg) in sheets {
             let root = parse_sch(&sch);
             let modelled = modelled_text(&root);
             let mut ink = ink_runs(&svg);

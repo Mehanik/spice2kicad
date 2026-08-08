@@ -63,14 +63,8 @@ fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
 
-fn tempdir(name: &str) -> PathBuf {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let pid = std::process::id();
-    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("spice2kicad-stability-{pid}-{seq}-{name}"));
-    std::fs::create_dir_all(&dir).expect("create tempdir");
-    dir
+fn tempdir(name: &str) -> common::TempDir {
+    common::TempDir::new("stability", name)
 }
 
 /// Convert with the position-stability cache DISABLED.
@@ -737,12 +731,17 @@ fn cache_less_placement_perturbation_within_bound() {
         // Base and grown each convert CACHE-LESS into their own fresh
         // directory, so neither reads a sidecar. (Sharing a directory would
         // measure the cache path — that is P11's job, not this one.)
-        let base_out = convert_no_cache(&base_src, &tempdir(case.name));
+        // Both guards stay bound for the whole iteration: they delete
+        // their directories on drop, and `base_out` / `grown_out` are
+        // read below.
+        let base_dir = tempdir(case.name);
+        let base_out = convert_no_cache(&base_src, &base_dir);
 
         let grow_dir = tempdir(case.name);
         let grow_src = grow_dir.join(format!("{}.cir", case.base));
         std::fs::write(&grow_src, &grown).expect("write grown fixture");
-        let grown_out = convert_no_cache(&grow_src, &tempdir(case.name));
+        let out_dir = tempdir(case.name);
+        let grown_out = convert_no_cache(&grow_src, &out_dir);
 
         let before = poses(&parse_sch(&base_out));
         let after = poses(&parse_sch(&grown_out));

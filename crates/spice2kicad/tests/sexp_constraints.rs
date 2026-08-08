@@ -30,11 +30,8 @@ fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
 
-fn tempdir(name: &str) -> PathBuf {
-    let pid = std::process::id();
-    let dir = std::env::temp_dir().join(format!("spice2kicad-sexp-{pid}-{name}"));
-    std::fs::create_dir_all(&dir).expect("create tempdir");
-    dir
+fn tempdir(name: &str) -> common::TempDir {
+    common::TempDir::new("sexp", name)
 }
 
 fn emit_sch(name: &str) -> KicadSch {

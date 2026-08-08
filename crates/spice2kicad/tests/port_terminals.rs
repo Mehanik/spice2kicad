@@ -27,14 +27,8 @@ fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
 
-fn tempdir(name: &str) -> PathBuf {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let pid = std::process::id();
-    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("spice2kicad-ports-{pid}-{seq}-{name}"));
-    std::fs::create_dir_all(&dir).expect("create tempdir");
-    dir
+fn tempdir(name: &str) -> common::TempDir {
+    common::TempDir::new("ports", name)
 }
 
 fn list_iter(v: &Value) -> Box<dyn Iterator<Item = &Value> + '_> {
@@ -57,15 +51,16 @@ fn find_child<'a>(v: &'a Value, name: &str) -> Option<&'a Value> {
 }
 
 /// Convert `<name>.cir` and return the parsed `.kicad_sch` root plus the
-/// path to the emitted file (kept alive by the returned `PathBuf` in
-/// `_tmp` so a follow-up ERC pass can read it).
-fn convert(name: &str) -> (Value, PathBuf) {
+/// emitted file. The [`common::Emitted`] carries its temp directory, so
+/// binding it (even as `_sch`) keeps the file on disk for a follow-up
+/// ERC pass; dropping it deletes the directory.
+fn convert(name: &str) -> (Value, common::Emitted) {
     let src = fixtures_dir().join(format!("{name}.cir"));
     let tmp = tempdir(name);
     let sch = spice_to_kicad(&src, &tmp).expect("spice2kicad");
     let text = std::fs::read_to_string(&sch).expect("read sch");
     let root = lexpr::from_str(&text).expect("parse sch as lexpr");
-    (root, sch)
+    (root, common::Emitted::new(tmp, sch))
 }
 
 /// Every `(<kind> "<net>" … (shape <s>)? …)` in the sheet, as

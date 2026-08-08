@@ -40,20 +40,15 @@ fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
 
-fn tempdir(name: &str) -> PathBuf {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let pid = std::process::id();
-    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("spice2kicad-pq-{pid}-{seq}-{name}"));
-    std::fs::create_dir_all(&dir).expect("create tempdir");
-    dir
+fn tempdir(name: &str) -> common::TempDir {
+    common::TempDir::new("pq", name)
 }
 
-fn emit(name: &str) -> PathBuf {
+fn emit(name: &str) -> common::Emitted {
     let src = fixtures_dir().join(format!("{name}.cir"));
     let tmp = tempdir(name);
-    spice_to_kicad(&src, &tmp).expect("spice2kicad")
+    let sch = spice_to_kicad(&src, &tmp).expect("spice2kicad");
+    common::Emitted::new(tmp, sch)
 }
 
 fn parse_sch(sch: &Path) -> Value {

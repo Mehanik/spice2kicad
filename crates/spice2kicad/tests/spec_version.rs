@@ -6,23 +6,22 @@
 //! normal. Uses the `-t netlist` target so no symbol libraries are
 //! needed.
 
-use std::path::PathBuf;
+use std::path::Path;
 use std::process::Command;
 
-fn tmpdir() -> PathBuf {
-    let pid = std::process::id();
-    let dir = std::env::temp_dir().join(format!("spice2kicad-specver-{pid}"));
-    std::fs::create_dir_all(&dir).expect("create tmpdir");
-    dir
-}
+mod common;
 
-fn write_input(name: &str, body: &str) -> PathBuf {
-    let path = tmpdir().join(name);
+/// Write a one-off deck into its own self-deleting directory. The
+/// returned guard must stay bound for as long as the CLI needs the file
+/// (the converter also drops its `.net` output beside it).
+fn write_input(name: &str, body: &str) -> common::Emitted {
+    let dir = common::TempDir::new("specver", name);
+    let path = dir.join(name);
     std::fs::write(&path, body).expect("write input");
-    path
+    common::Emitted::new(dir, path)
 }
 
-fn run_netlist(src: &PathBuf) -> std::process::Output {
+fn run_netlist(src: &Path) -> std::process::Output {
     let bin = env!("CARGO_BIN_EXE_spice2kicad");
     Command::new(bin)
         .arg(src)

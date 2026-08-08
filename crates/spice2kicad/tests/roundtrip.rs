@@ -45,11 +45,8 @@ fn run_roundtrip(name: &str) {
 }
 
 /// Cheap `tempdir` so we don't pull in the `tempfile` crate just for this.
-fn tempdir(name: &str) -> PathBuf {
-    let pid = std::process::id();
-    let dir = std::env::temp_dir().join(format!("spice2kicad-test-{pid}-{name}"));
-    std::fs::create_dir_all(&dir).expect("create tempdir");
-    dir
+fn tempdir(name: &str) -> common::TempDir {
+    common::TempDir::new("test", name)
 }
 
 #[test]

@@ -56,11 +56,8 @@ fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
 
-fn tempdir(name: &str) -> PathBuf {
-    let pid = std::process::id();
-    let dir = std::env::temp_dir().join(format!("spice2kicad-vq-{pid}-{name}"));
-    std::fs::create_dir_all(&dir).expect("create tempdir");
-    dir
+fn tempdir(name: &str) -> common::TempDir {
+    common::TempDir::new("vq", name)
 }
 
 fn which_kicad_cli() -> bool {
@@ -85,7 +82,7 @@ fn skip_if_no_kicad_cli() -> bool {
     true
 }
 
-fn emit(name: &str) -> (PathBuf, PathBuf) {
+fn emit(name: &str) -> (PathBuf, common::TempDir) {
     let src = fixtures_dir().join(format!("{name}.cir"));
     let tmp = tempdir(name);
     let sch = spice_to_kicad(&src, &tmp).expect("spice2kicad");

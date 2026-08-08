@@ -16,6 +16,8 @@ use std::process::Command;
 
 use lexpr::Value;
 
+mod common;
+
 // --- driver ---------------------------------------------------------------
 
 fn workspace_root() -> PathBuf {
@@ -26,14 +28,8 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn tempdir(name: &str) -> PathBuf {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let pid = std::process::id();
-    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("spice2kicad-cache-{pid}-{seq}-{name}"));
-    std::fs::create_dir_all(&dir).expect("create tempdir");
-    dir
+fn tempdir(name: &str) -> common::TempDir {
+    common::TempDir::new("cache", name)
 }
 
 /// Convert `source` SPICE text to a `.kicad_sch` at `out`, optionally

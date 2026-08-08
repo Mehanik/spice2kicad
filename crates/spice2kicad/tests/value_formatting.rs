@@ -25,27 +25,26 @@ fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
 
-fn tempdir(name: &str) -> PathBuf {
-    let pid = std::process::id();
-    let dir = std::env::temp_dir().join(format!("spice2kicad-vf-{pid}-{name}"));
-    std::fs::create_dir_all(&dir).expect("create tempdir");
-    dir
+fn tempdir(name: &str) -> common::TempDir {
+    common::TempDir::new("vf", name)
 }
 
-fn emit_fixture(name: &str) -> PathBuf {
+fn emit_fixture(name: &str) -> common::Emitted {
     let src = fixtures_dir().join(format!("{name}.cir"));
     let tmp = tempdir(name);
-    spice_to_kicad(&src, &tmp).expect("spice2kicad")
+    let sch = spice_to_kicad(&src, &tmp).expect("spice2kicad");
+    common::Emitted::new(tmp, sch)
 }
 
 /// Emit a one-off fixture written into a temp directory so this file
 /// can hold its own minimal SPICE inputs (e.g. expression values,
 /// negative voltages) without polluting `tests/fixtures/`.
-fn emit_inline(name: &str, source: &str) -> PathBuf {
+fn emit_inline(name: &str, source: &str) -> common::Emitted {
     let tmp = tempdir(name);
     let src = tmp.join(format!("{name}.cir"));
     std::fs::write(&src, source).expect("write inline fixture");
-    spice_to_kicad(&src, &tmp).expect("spice2kicad")
+    let sch = spice_to_kicad(&src, &tmp).expect("spice2kicad");
+    common::Emitted::new(tmp, sch)
 }
 
 // --- sexp helpers --------------------------------------------------------
