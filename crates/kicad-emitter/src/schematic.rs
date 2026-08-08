@@ -1753,7 +1753,7 @@ pub(crate) struct TrialRoute {
 /// affect). Routing errors collapse to an empty result so the caller
 /// simply declines the candidate.
 pub(crate) fn trial_route(placement: &Placement, library: &Library) -> TrialRoute {
-    use spice_route::{NetSpec, PinRef, RouteRequest};
+    use spice_route::RouteRequest;
 
     let net_pins = collect_net_pins(placement, library, &[]);
     let rail_tags = spice_layout::net_class::rail_tags(placement);
@@ -1775,53 +1775,7 @@ pub(crate) fn trial_route(placement: &Placement, library: &Library) -> TrialRout
             .copied(),
     );
 
-    let mut specs: Vec<NetSpec> = Vec::with_capacity(net_pins.len());
-    for (name, pins) in &net_pins {
-        let mut uniq: Vec<(f64, f64, u16)> = Vec::new();
-        for &(x, y, a) in pins {
-            if !uniq
-                .iter()
-                .any(|&(ux, uy, _)| approx_eq(ux, x) && approx_eq(uy, y))
-            {
-                uniq.push((x, y, a));
-            }
-        }
-        let class = classify_net(name, &rail_tags);
-        // trial_route only measures wire-segment geometry for V5/V11
-        // refinement; PWR_FLAG markers are not emitted as wires, so the
-        // driver flag is irrelevant here.
-        let pin_refs: Vec<PinRef> = uniq
-            .into_iter()
-            .map(|(x, y, angle)| PinRef {
-                element_idx: 0,
-                pin_number: 0,
-                x_mm: x,
-                y_mm: y,
-                outward: angle_to_direction(angle),
-                drives: false,
-                requires_driver: false,
-                on_sheet_edge: false,
-            })
-            .collect();
-        specs.push(NetSpec {
-            name: name.clone(),
-            class,
-            pins: pin_refs,
-            // Negative-rail VEE-vs-GND glyph selection is a *decoration*
-            // concern (glyph identity), not a wire-geometry one. The
-            // refinement phase measures only V5/V11 wire consequences,
-            // so the flag would only perturb orientation choice without
-            // changing any wire it measures — keep it `false` so glyph
-            // selection never feeds back into placement (CLAUDE.md:
-            // "Decoration is a strict consumer of placement output").
-            negative_rail: false,
-            rail_tag: None,
-            // PWR_FLAG-only concern (no wire geometry) — irrelevant to
-            // the V5/V11 refinement measurement, same as `drives`.
-            has_passive: false,
-            has_power_in: false,
-        });
-    }
+    let specs = trial_net_specs(&net_pins, &rail_tags);
 
     let suuid = sheet_uuid();
     let result = spice_route::route(RouteRequest {
@@ -1858,6 +1812,133 @@ pub(crate) fn trial_route(placement: &Placement, library: &Library) -> TrialRout
         severed,
         shorts,
     }
+}
+
+/// The [`NetSpec`] list phase 4.5's oracle routes — and the one its
+/// routing-free Tier-0 probe scores.
+///
+/// Factored out of [`trial_route`] so
+/// [`tier0_pin_short_lower_bound`] scores *exactly* the specs the router
+/// would see. If the two ever diverged the probe would stop being a
+/// lower bound on [`TrialRoute::shorts`], and the pre-route prune it
+/// feeds (see `refine::pruned`) would start rejecting candidates the
+/// acceptance predicate would have taken.
+fn trial_net_specs(
+    net_pins: &std::collections::BTreeMap<String, Vec<(f64, f64, u16)>>,
+    rail_tags: &std::collections::BTreeMap<String, String>,
+) -> Vec<spice_route::NetSpec> {
+    use spice_route::{NetSpec, PinRef};
+
+    let mut specs: Vec<NetSpec> = Vec::with_capacity(net_pins.len());
+    for (name, pins) in net_pins {
+        let mut uniq: Vec<(f64, f64, u16)> = Vec::new();
+        for &(x, y, a) in pins {
+            if !uniq
+                .iter()
+                .any(|&(ux, uy, _)| approx_eq(ux, x) && approx_eq(uy, y))
+            {
+                uniq.push((x, y, a));
+            }
+        }
+        let class = classify_net(name, rail_tags);
+        // trial_route only measures wire-segment geometry for V5/V11
+        // refinement; PWR_FLAG markers are not emitted as wires, so the
+        // driver flag is irrelevant here.
+        let pin_refs: Vec<PinRef> = uniq
+            .into_iter()
+            .map(|(x, y, angle)| PinRef {
+                element_idx: 0,
+                pin_number: 0,
+                x_mm: x,
+                y_mm: y,
+                outward: angle_to_direction(angle),
+                drives: false,
+                requires_driver: false,
+                on_sheet_edge: false,
+            })
+            .collect();
+        specs.push(NetSpec {
+            name: name.clone(),
+            class,
+            pins: pin_refs,
+            // Negative-rail VEE-vs-GND glyph selection is a *decoration*
+            // concern (glyph identity), not a wire-geometry one. The
+            // refinement phase measures only V5/V11 wire consequences,
+            // so the flag would only perturb orientation choice without
+            // changing any wire it measures — keep it `false` so glyph
+            // selection never feeds back into placement (CLAUDE.md:
+            // "Decoration is a strict consumer of placement output").
+            negative_rail: false,
+            rail_tag: None,
+            // PWR_FLAG-only concern (no wire geometry) — irrelevant to
+            // the V5/V11 refinement measurement, same as `drives`.
+            has_passive: false,
+            has_power_in: false,
+        });
+    }
+    specs
+}
+
+/// Hazard 1 of [`tier0_short_count`] — pin-on-pin across nets — measured
+/// **without routing**.
+///
+/// This is the routing-free *lower bound* on [`TrialRoute::shorts`] that
+/// phase 4.5's pre-route prune stands on: hazard 2 (a wire through a rail
+/// glyph's anchor) can only add to it, never subtract, so a non-zero
+/// answer here proves the candidate's `coincident` count is non-zero
+/// before a single wire is routed. See `refine::pruned` for the proof
+/// that turns that into a rejection.
+///
+/// It shares [`trial_net_specs`] with [`trial_route`] precisely so the
+/// bound cannot drift out from under the prune.
+pub(crate) fn tier0_pin_short_lower_bound(placement: &Placement, library: &Library) -> usize {
+    let net_pins = collect_net_pins(placement, library, &[]);
+    let rail_tags = spice_layout::net_class::rail_tags(placement);
+    let negative_rails = spice_layout::net_class::negative_rail_nets(placement);
+    let specs = trial_net_specs(&net_pins, &rail_tags);
+    tier0_pin_shorts(&specs, &negative_rails).0
+}
+
+/// Hazard 1 of [`tier0_short_count`]: coordinates carrying pins of two or
+/// more distinct nets, host pins and rail-glyph anchor pins alike.
+/// Returns the count plus the anchor coordinates, which hazard 2 needs.
+///
+/// Depends only on the placement's pin geometry — no segments — which is
+/// what makes it usable as a routing-free lower bound
+/// ([`tier0_pin_short_lower_bound`]).
+fn tier0_pin_shorts(
+    specs: &[spice_route::NetSpec],
+    negative_rails: &std::collections::BTreeSet<String>,
+) -> (usize, std::collections::BTreeSet<(i64, i64)>) {
+    #[allow(clippy::cast_possible_truncation)]
+    let qk = |x: f64, y: f64| ((x * 1000.0).round() as i64, (y * 1000.0).round() as i64);
+
+    let mut at: std::collections::BTreeMap<(i64, i64), std::collections::BTreeSet<&str>> =
+        std::collections::BTreeMap::new();
+    let mut anchors: std::collections::BTreeSet<(i64, i64)> = std::collections::BTreeSet::new();
+    for spec in specs {
+        let rail = matches!(
+            spec.class,
+            spice_layout::net_class::NetClass::Power | spice_layout::net_class::NetClass::Ground
+        );
+        for pin in &spec.pins {
+            at.entry(qk(pin.x_mm, pin.y_mm))
+                .or_default()
+                .insert(spec.name.as_str());
+            if rail {
+                let (ax, ay) = spice_route::rails::glyph_anchor(
+                    pin,
+                    spec.class,
+                    negative_rails.contains(&spec.name),
+                );
+                let k = qk(ax, ay);
+                at.entry(k).or_default().insert(spec.name.as_str());
+                anchors.insert(k);
+            }
+        }
+    }
+    let n = at.values().filter(|nets| nets.len() >= 2).count();
+    (n, anchors)
 }
 
 /// Count the Tier-0 **short** hazards in a trial route: places where two
@@ -1901,35 +1982,14 @@ fn tier0_short_count(
     segments: &[crate::v5::WireSegment],
 ) -> usize {
     const EPS: f64 = 1e-6;
-    #[allow(clippy::cast_possible_truncation)]
-    let qk = |x: f64, y: f64| ((x * 1000.0).round() as i64, (y * 1000.0).round() as i64);
 
-    let mut at: std::collections::BTreeMap<(i64, i64), std::collections::BTreeSet<&str>> =
-        std::collections::BTreeMap::new();
-    let mut anchors: std::collections::BTreeSet<(i64, i64)> = std::collections::BTreeSet::new();
-    for spec in specs {
-        let rail = matches!(
-            spec.class,
-            spice_layout::net_class::NetClass::Power | spice_layout::net_class::NetClass::Ground
-        );
-        for pin in &spec.pins {
-            at.entry(qk(pin.x_mm, pin.y_mm))
-                .or_default()
-                .insert(spec.name.as_str());
-            if rail {
-                let (ax, ay) = spice_route::rails::glyph_anchor(
-                    pin,
-                    spec.class,
-                    negative_rails.contains(&spec.name),
-                );
-                let k = qk(ax, ay);
-                at.entry(k).or_default().insert(spec.name.as_str());
-                anchors.insert(k);
-            }
-        }
-    }
-    let mut n = at.values().filter(|nets| nets.len() >= 2).count();
+    // Hazard 1 — routing-free, and therefore also available on its own
+    // as the prune's lower bound ([`tier0_pin_short_lower_bound`]).
+    let (mut n, anchors) = tier0_pin_shorts(specs, negative_rails);
 
+    // Hazard 2 — needs the routed segments, and can only ADD to the
+    // hazard-1 count. That monotonicity is what makes hazard 1 a lower
+    // bound rather than an estimate.
     for &(ax, ay) in &anchors {
         #[allow(clippy::cast_precision_loss)]
         let (gx, gy) = (ax as f64 / 1000.0, ay as f64 / 1000.0);

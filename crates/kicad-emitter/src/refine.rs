@@ -59,6 +59,14 @@ const MAX_SWEEPS: usize = 4;
 /// of the active elements' allowed orientations; this cap bounds the
 /// trial-route count so a large active set degrades gracefully (the
 /// search is skipped and only the greedy sweep runs).
+///
+/// It is a worst-case guard, not the binding constraint: reaching it
+/// needs four active elements each with more than four *geometrically
+/// distinct* V14-allowed orientations (four 3-pin devices at 8 each would
+/// give 4096). No fixture gets near — the measured product is 4 on
+/// `named_rails` and 32 everywhere else the joint search runs. What binds
+/// in practice is [`MAX_ACTIVE`] plus the [`distinct_orientations`]
+/// collapse.
 const MAX_COMBINATIONS: usize = 512;
 
 /// Cap on the number of *active* elements the joint search considers at
@@ -112,9 +120,12 @@ pub fn refine_orientations(placement: &mut Placement, library: &Library, meta: &
     // neighbours. Many V5 violations are removable only by rotating an
     // offender together with a neighbour (e.g. RIN+RF+X1 on the inverting
     // amp), which the strictly-improving greedy descent cannot reach on
-    // its own. The joint search early-exits the moment it finds a
-    // zero-V5 combination, so its worst-case cost binds only when no full
-    // fix exists.
+    // its own. It enumerates the whole product rather than stopping at
+    // the first clean combination: its early exit requires `bends == 0`
+    // too, which a routed sheet essentially never reaches (4–35 bends
+    // measured across the fixtures), so treat the enumeration as always
+    // running to completion. See the note on that exit in `joint_search`
+    // for why continuing is deliberate.
     joint_search(placement, library, meta, &mut baseline);
     log::debug!("refine: final {}", summarise(&baseline));
 }
@@ -292,8 +303,21 @@ fn greedy_descent(
                     continue;
                 }
                 placement.elements[i].orientation = cand;
-                let m = measure(placement, library);
+                // Routing-free half first: three of the seven objective
+                // keys need no router, and any one of them can prove
+                // `accepts` would refuse. Skipping the route then costs
+                // the search nothing — see [`pruned`] for the proof that
+                // this explores an identical candidate space.
+                let p = probe(placement, library);
+                let candidate = if pruned(baseline, &p) {
+                    None
+                } else {
+                    Some(finish(placement, library, p))
+                };
                 placement.elements[i].orientation = current;
+                let Some(m) = candidate else {
+                    continue;
+                };
 
                 // Accept when the (V13, V12, V5, bends) tuple strictly
                 // improves and no equal-/higher-tier guard regresses. V13
@@ -369,8 +393,19 @@ fn greedy_descent(
 ///
 /// Deterministic: active elements are taken in ascending index order and
 /// orientations in their allowed-set order, so the lexicographically
-/// first minimal-V5 combination wins. Skipped (leaving the greedy sweep
-/// to handle it) when the product would exceed [`MAX_COMBINATIONS`].
+/// first minimal-objective combination wins. Skipped (leaving the greedy
+/// sweep to handle it) when the product would exceed
+/// [`MAX_COMBINATIONS`].
+///
+/// The enumeration normally runs to completion. Its `break` needs a
+/// combination that is clean on `bends` as well as `(v13, v12, v5)`, and
+/// a routed sheet essentially never has zero bends — 4–35 measured across
+/// the thirteen fixtures — so the early exit is best read as unreachable
+/// rather than as a cost bound. What bounds the cost in practice is
+/// [`MAX_ACTIVE`] together with the [`distinct_orientations`] collapse
+/// (measured product: 4 on `named_rails`, 32 on every other fixture that
+/// reaches the joint search). Candidates the routing-free [`Probe`]
+/// refutes are skipped before routing, which is where the real saving is.
 // Active-set construction + mixed-radix enumeration share local state
 // (active / cand / counter / best) that helper-splitting would obscure.
 #[allow(clippy::too_many_lines)]
@@ -478,12 +513,23 @@ fn joint_search(
         for (k, &i) in active.iter().enumerate() {
             placement.elements[i].orientation = cand[k][counter[k]];
         }
-        let m = measure(placement, library);
+        // Routing-free half first — same pre-route prune as
+        // `greedy_descent`, and conservative for the same reason: it can
+        // only skip combinations `accepts` would refuse, so the
+        // enumeration's outcome is unchanged. See [`pruned`].
+        let p = probe(placement, library);
+        let candidate = if pruned(baseline, &p) {
+            None
+        } else {
+            Some(finish(placement, library, p))
+        };
         // Same lexicographic (V13, V12, V5, bends) objective as
         // `greedy_descent` — Tier-1 counts lead, Tier-2 V5 next, V16
         // bends last. See the ordering contract documented on that
         // function's acceptance gate: bends must stay the FINAL key.
-        if accepts(baseline, &m) {
+        if let Some(m) = candidate
+            && accepts(baseline, &m)
+        {
             let take = match &best {
                 None => true,
                 Some((_, bm)) => objective(&m) < objective(bm),
@@ -588,28 +634,103 @@ struct Measure {
     v12_offenders: Vec<String>,
 }
 
-/// Trial-route `placement` and measure V5, V11 residue, symbol-body
-/// overlap, V12 foreign-body crossings, and V13 label overlaps.
-fn measure(placement: &Placement, library: &Library) -> Measure {
+/// The three [`Measure`] quantities that need **no router**.
+///
+/// Trial-routing is essentially the whole cost of a measurement (measured
+/// on the fixture suite: `trial_route` is ~99.9% of [`measure`], and
+/// everything below is ~0.14%), so the only optimisation that matters to
+/// this phase is *not routing*. These three are what makes that possible:
+/// each is a function of the placement geometry alone, and each can, on
+/// its own, prove [`accepts`] would say no. See [`pruned`].
+#[derive(Clone, Copy)]
+struct Probe {
+    /// A **lower bound** on `Measure::coincident`: hazard 1 of
+    /// [`crate::schematic::tier0_short_count`] (pin-on-pin across nets,
+    /// host pins and rail-glyph anchors alike). Hazard 2 — a wire through
+    /// a glyph anchor — needs the routed segments and can only add to it.
+    coincident_floor: usize,
+    /// Exactly `Measure::overlap` (body bboxes only).
+    overlap: usize,
+    /// Exactly `Measure::v13` ([`v13_overlap_count`] takes no segments).
+    v13: usize,
+}
+
+/// Measure the routing-free part of a candidate. ~0.34 ms against a
+/// 150–2200 ms trial route.
+fn probe(placement: &Placement, library: &Library) -> Probe {
+    Probe {
+        coincident_floor: crate::schematic::tier0_pin_short_lower_bound(placement, library),
+        overlap: symbol_overlap_count(placement, library),
+        v13: v13_overlap_count(placement, library),
+    }
+}
+
+/// Can the routing-free [`Probe`] alone prove that [`accepts`] would
+/// reject this candidate? If so the caller skips the trial route.
+///
+/// This is a *conservative* filter: every candidate it rejects is one
+/// `accepts` would also reject, so the search explores an identical
+/// candidate space and phase 4.5's output is unchanged. The proof, in the
+/// only regime where the prune is armed — `tier0(baseline) == (0, 0, 0)`:
+///
+/// Counts are `usize`, so `tier0(m) >= (0, 0, 0)` for every candidate and
+/// the Tier-0-repair exemption in [`accepts`] (`tier0(m) < tier0(baseline)`)
+/// is **unreachable**. `accepts` therefore reduces to
+/// `objective(m) < objective(baseline) && m.overlap <= baseline.overlap
+/// && m.v12 <= baseline.v12`, and each arm below kills it outright:
+///
+///  1. `overlap > baseline.overlap` — fails the surviving guard directly.
+///  2. `coincident_floor > 0` — then `m.coincident >= 1 > 0`. Under
+///     lexicographic `objective`, `m < baseline` needs the leading
+///     `severed` to be 0 (it cannot be negative) and then `coincident`
+///     strictly below baseline's 0, which is impossible. If `m.severed`
+///     is instead positive, `m` is already strictly greater.
+///  3. `v13 > baseline.v13` — the leading three keys of `objective` are
+///     0 on the baseline side, so `m` can only win by matching them at 0
+///     and then beating `v13`; a larger `v13` makes the tuple strictly
+///     greater whatever `v12`/`v5`/`bends` do.
+///
+/// **The guard is load-bearing.** When the placement arrives Tier-0
+/// broken — ADR-20's ` shunt_feedback_amp`, and `two_stage_amp` mid-search
+/// — `accepts` deliberately lifts the `overlap`/`v12` guards for a
+/// candidate that repairs Tier 0, and a Tier-1 regression may legitimately
+/// be bought. Every arm above depends on the baseline's Tier-0 prefix
+/// being zero, so in repair mode the prune must (and does) disable itself
+/// and route everything.
+fn pruned(baseline: &Measure, p: &Probe) -> bool {
+    if tier0(baseline) != (0, 0, 0) {
+        return false; // ADR-20 Tier-0 repair mode: no arm below is valid.
+    }
+    p.overlap > baseline.overlap || p.coincident_floor > 0 || p.v13 > baseline.v13
+}
+
+/// Trial-route `placement` and complete a [`Measure`] from an already
+/// computed [`Probe`]. Split from [`measure`] so the caller can run the
+/// cheap half first and skip the route entirely — see [`pruned`].
+fn finish(placement: &Placement, library: &Library, p: Probe) -> Measure {
     let route = trial_route(placement, library);
     let pins = pin_probes(placement, library);
     let offenders = count_outward_violations(&pins, &route.segments);
-    let overlap = symbol_overlap_count(placement, library);
     let (v12, v12_offenders) = v12_crossings(placement, library, &route.segments);
-    let v13 = v13_overlap_count(placement, library);
     let bends = bend_count(&route.segments);
     Measure {
         v5: offenders.len(),
         v11: route.v11_count,
         severed: route.severed,
         coincident: route.shorts,
-        overlap,
+        overlap: p.overlap,
         v12,
-        v13,
+        v13: p.v13,
         bends,
         offenders,
         v12_offenders,
     }
+}
+
+/// Trial-route `placement` and measure V5, V11 residue, symbol-body
+/// overlap, V12 foreign-body crossings, and V13 label overlaps.
+fn measure(placement: &Placement, library: &Library) -> Measure {
+    finish(placement, library, probe(placement, library))
 }
 
 /// V16 bend count — the L-corners of the emitted **ink**.
