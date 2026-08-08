@@ -534,60 +534,125 @@ fn perpendicular_crossings(segments: &[Segment]) -> Vec<(f64, f64)> {
 /// It is pointwise-identical ink: the drawn result is unchanged, only the
 /// segmentation differs, so wire length, crossings and every geometric
 /// invariant are untouched.
+///
+/// # Reaching the fixed point without a truncating bound
+///
+/// This used to be `for _ in 0..64`, splitting **one** point per segment
+/// per pass, with a comment asserting 64 was "well above any real net's
+/// segment count" — and nothing checking that. A net with more than 64
+/// interior attachments simply came out unsplit, which is precisely the
+/// electrically-split net the function exists to prevent, emitted
+/// silently at exit 0. A silent truncation is not an acceptable failure
+/// mode for a Tier-0 correctness normalisation (ADR-20/21: refuse rather
+/// than emit a wrong schematic).
+///
+/// [`split_attachments_once`] instead splits every segment at **all** of
+/// its interior attachment points in one pass, which reaches the same
+/// fixed point because the attachment-point set is *invariant* under
+/// splitting: a split introduces only endpoints that were already
+/// members of the set, and a perpendicular crossing of two sub-segments
+/// is by definition a crossing of their parents, so the crossing set can
+/// only shrink. No pass can manufacture a point the first pass did not
+/// already see. The loop below therefore runs the pass once and then
+/// once more to *confirm* it changed nothing; a third would mean that
+/// invariance argument is false, and it aborts rather than emitting
+/// geometry it cannot justify.
+///
+/// # Panics
+///
+/// Panics when the fixed point is not reached within
+/// [`MAX_SPLIT_PASSES`] — see above. That is a deliberate refusal, not a
+/// recoverable condition: the alternative is emitting a schematic whose
+/// wire connectivity is not the source circuit's.
 pub fn split_at_interior_attachments(routed: &mut [RoutedNet]) {
     for net in routed.iter_mut() {
-        // Iterate to a fixed point: splitting can expose a further
-        // attachment on one of the halves. Bounded well above any real
-        // net's segment count so a pathological input cannot spin.
-        for _ in 0..64 {
-            let mut points: Vec<(f64, f64)> = net
-                .segments
-                .iter()
-                .flat_map(|s| [(s.x1, s.y1), (s.x2, s.y2)])
-                .collect();
-            points.extend(perpendicular_crossings(&net.segments));
-            let mut split_any = false;
-            let mut next: Vec<Segment> = Vec::with_capacity(net.segments.len());
-            for seg in &net.segments {
-                // Split at the attachment nearest the start, so repeated
-                // passes peel one piece at a time deterministically.
-                let mut best: Option<(f64, f64)> = None;
-                let mut best_d = f64::INFINITY;
-                for &(px, py) in &points {
-                    if point_strictly_interior(seg, px, py) {
-                        let d = (px - seg.x1).abs() + (py - seg.y1).abs();
-                        if d < best_d {
-                            best_d = d;
-                            best = Some((px, py));
-                        }
-                    }
-                }
-                match best {
-                    Some((px, py)) => {
-                        split_any = true;
-                        next.push(Segment {
-                            x1: seg.x1,
-                            y1: seg.y1,
-                            x2: px,
-                            y2: py,
-                        });
-                        next.push(Segment {
-                            x1: px,
-                            y1: py,
-                            x2: seg.x2,
-                            y2: seg.y2,
-                        });
-                    }
-                    None => next.push(*seg),
-                }
-            }
-            net.segments = next;
-            if !split_any {
-                break;
-            }
+        let mut passes = 0_usize;
+        while split_attachments_once(net) {
+            passes += 1;
+            assert!(
+                passes < MAX_SPLIT_PASSES,
+                "split_at_interior_attachments did not reach a fixed point in \
+                 {MAX_SPLIT_PASSES} passes on a net of {} segments. The pass is \
+                 manufacturing new attachment points, which means the emitted \
+                 wires would be split non-deterministically — refusing rather \
+                 than emitting a schematic whose connectivity is not the source \
+                 circuit's.",
+                net.segments.len(),
+            );
         }
     }
 }
+
+/// One full split pass. Returns `true` when anything was split.
+///
+/// Segment **order** is preserved against the old one-point-per-pass
+/// loop, which matters because the emitted `(wire …)` order follows it.
+/// That loop split at the interior point *nearest the segment start*, so
+/// successive passes peeled `p1, p2, p3 …` in increasing
+/// distance-from-start order and each parent's pieces stayed contiguous.
+/// Sorting a segment's interior points by that same distance and peeling
+/// them in one pass emits exactly the same segments in exactly the same
+/// order. Re-testing each candidate against the *remaining* piece rather
+/// than against the parent reproduces the old `EPS` behaviour too: a
+/// duplicate point, or one within `EPS` of the previous cut, fails
+/// `point_strictly_interior` on the remainder under both versions.
+fn split_attachments_once(net: &mut RoutedNet) -> bool {
+    let mut points: Vec<(f64, f64)> = net
+        .segments
+        .iter()
+        .flat_map(|s| [(s.x1, s.y1), (s.x2, s.y2)])
+        .collect();
+    points.extend(perpendicular_crossings(&net.segments));
+
+    let mut split_any = false;
+    let mut out: Vec<Segment> = Vec::with_capacity(net.segments.len());
+    let mut cuts: Vec<(f64, f64, f64)> = Vec::new(); // (distance, px, py)
+    for seg in &net.segments {
+        cuts.clear();
+        for &(px, py) in &points {
+            if point_strictly_interior(seg, px, py) {
+                cuts.push(((px - seg.x1).abs() + (py - seg.y1).abs(), px, py));
+            }
+        }
+        if cuts.is_empty() {
+            out.push(*seg);
+            continue;
+        }
+        cuts.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut head = *seg;
+        for &(_, px, py) in &cuts {
+            // The remaining piece is the authority, exactly as it was
+            // when each pass re-tested the freshly cut tail.
+            if !point_strictly_interior(&head, px, py) {
+                continue;
+            }
+            split_any = true;
+            out.push(Segment {
+                x1: head.x1,
+                y1: head.y1,
+                x2: px,
+                y2: py,
+            });
+            head = Segment {
+                x1: px,
+                y1: py,
+                x2: head.x2,
+                y2: head.y2,
+            };
+        }
+        out.push(head);
+    }
+    net.segments = out;
+    split_any
+}
+
+/// Passes [`split_at_interior_attachments`] allows before it refuses.
+///
+/// The invariance argument in that function's doc comment gives **one**
+/// productive pass; the second is the no-op that confirms the fixed
+/// point was reached. This is a tripwire on that argument, not a budget
+/// with slack — see CLAUDE.md § "Budgets are ratchets, not knobs".
+const MAX_SPLIT_PASSES: usize = 2;
 
 /// Drop recorded junctions that no longer sit where three or more rays
 /// meet.
