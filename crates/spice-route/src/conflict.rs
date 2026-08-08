@@ -2223,9 +2223,49 @@ struct MazeGrid {
     edge_blocked_v: Vec<bool>,
 }
 
+/// 4-connected move offsets, indexed `0=+x, 1=-x, 2=+y, 3=-y`.
+/// [`maze_shortest_path`] additionally uses index 4 for "no incoming
+/// direction yet" (the start state), which is a *cost* state, not a move.
+const MAZE_DX: [i32; 4] = [1, -1, 0, 0];
+const MAZE_DY: [i32; 4] = [0, 0, 1, -1];
+
 impl MazeGrid {
     fn idx(&self, c: (usize, usize)) -> usize {
         c.1 * self.cols + c.0
+    }
+
+    /// May the search occupy cell `i`?
+    ///
+    /// The start and goal cells are always open: a maze-rerouted
+    /// segment's endpoints are pin / Steiner-junction positions the
+    /// caller has already committed to, and treating them as blocked
+    /// would prevent the search from leaving the start or arriving at
+    /// the goal even when a valid path exists everywhere else.
+    /// (`maze_shortest_path` is called only for endpoints the caller has
+    /// determined are not own pins of the target net, so opening them is
+    /// safe.) Expressed as a predicate rather than a per-search cleared
+    /// *copy* of `blocked` so the flood fill and the Dijkstra cannot
+    /// drift apart — and so neither pays an O(cells) clone.
+    fn cell_open(&self, i: usize, start_i: usize, goal_i: usize) -> bool {
+        !self.blocked[i] || i == start_i || i == goal_i
+    }
+
+    /// Is the 4-connected step from `cur` to `next` in direction `nd`
+    /// blocked by an obstacle edge?
+    ///
+    /// The edge tables are keyed on the lower-index cell of the pair, so
+    /// this predicate is **symmetric**: `edge_blocked(a, b, +x)` and
+    /// `edge_blocked(b, a, -x)` read the same table entry. That symmetry
+    /// is what makes the free-cell adjacency an *undirected* graph, which
+    /// [`maze_reachable`] relies on.
+    fn edge_blocked_step(&self, cur_i: usize, next_i: usize, nd: usize) -> bool {
+        match nd {
+            0 => self.edge_blocked_h[cur_i],  // +x from cur
+            1 => self.edge_blocked_h[next_i], // -x: edge stored at next
+            2 => self.edge_blocked_v[cur_i],  // +y from cur
+            3 => self.edge_blocked_v[next_i], // -y: edge stored at next
+            _ => false,
+        }
     }
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     fn in_bounds(&self, c: (i64, i64)) -> bool {
@@ -2535,6 +2575,69 @@ fn maze_shortest_path_constrained(
     Some(path)
 }
 
+/// Is `goal` reachable from `start` at all, over the free-cell graph the
+/// Dijkstra in [`maze_shortest_path`] walks?
+///
+/// A pure O(cells) flood fill, run *before* seeding the heap. It exists
+/// because the overwhelming majority of maze searches on real fixtures
+/// find no path: on `two_stage_amp`, 1360 of 1497 searches returned
+/// `None` after exhausting the whole component, and those failures
+/// accounted for 95 % of all states popped. An unreachable goal makes
+/// Dijkstra settle **every** state in the start's component — `cells × 5`
+/// direction states, with a heap operation each — to learn what one flood
+/// fill answers in a linear scan.
+///
+/// **Output-neutral by construction.** The Dijkstra's move rule is
+/// `in_bounds(next) && cell_open(next) && !edge_blocked_step(cur, next,
+/// nd)`; the incoming direction `dir` enters only the *cost* (the bend
+/// penalty), never the feasibility test, and
+/// [`MazeGrid::edge_blocked_step`] is symmetric. So the transition
+/// relation is an undirected graph on open cells, and this fill walks
+/// exactly that relation through the very same two predicates — no
+/// relaxation, no approximation. It therefore returns `false` on exactly
+/// the set of `(grid, start, goal)` triples for which the exhaustive
+/// search returns `None`, and reachable searches are untouched.
+fn maze_reachable(grid: &MazeGrid, start: (usize, usize), goal: (usize, usize)) -> bool {
+    use std::collections::VecDeque;
+
+    if start == goal {
+        return true;
+    }
+    let start_i = grid.idx(start);
+    let goal_i = grid.idx(goal);
+    let mut seen = vec![false; grid.cols * grid.rows];
+    seen[start_i] = true;
+    let mut queue: VecDeque<(usize, usize)> = VecDeque::new();
+    queue.push_back(start);
+    while let Some(cur) = queue.pop_front() {
+        let cur_i = grid.idx(cur);
+        for nd in 0..4_usize {
+            #[allow(clippy::cast_possible_wrap)]
+            let nx = cur.0 as i64 + i64::from(MAZE_DX[nd]);
+            #[allow(clippy::cast_possible_wrap)]
+            let ny = cur.1 as i64 + i64::from(MAZE_DY[nd]);
+            if !grid.in_bounds((nx, ny)) {
+                continue;
+            }
+            #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+            let next_cell = (nx as usize, ny as usize);
+            let next_i = grid.idx(next_cell);
+            if seen[next_i]
+                || !grid.cell_open(next_i, start_i, goal_i)
+                || grid.edge_blocked_step(cur_i, next_i, nd)
+            {
+                continue;
+            }
+            if next_i == goal_i {
+                return true;
+            }
+            seen[next_i] = true;
+            queue.push_back(next_cell);
+        }
+    }
+    false
+}
+
 fn maze_shortest_path(
     grid: &MazeGrid,
     start: (usize, usize),
@@ -2543,21 +2646,18 @@ fn maze_shortest_path(
     use std::cmp::Reverse;
     use std::collections::BinaryHeap;
 
-    // Pre-clear the start and goal cells: a maze-rerouted segment's
-    // endpoints are pin / Steiner-junction positions the caller has
-    // already committed to. Treating them as blocked would prevent the
-    // search from leaving the start or arriving at the goal even when
-    // a valid path exists everywhere else. (`maze_shortest_path` is
-    // called only for endpoints the caller has determined are not
-    // own pins of the target net, so opening them is safe.)
-    let mut grid_blocked: Vec<bool> = grid.blocked.clone();
+    // The start and goal cells are open even when `blocked` says
+    // otherwise — see [`MazeGrid::cell_open`].
     let start_idx = grid.idx(start);
     let goal_idx = grid.idx(goal);
-    grid_blocked[start_idx] = false;
-    grid_blocked[goal_idx] = false;
-    // 4-connected moves, indexed 0..4: 0=+x, 1=-x, 2=+y, 3=-y, 4=initial.
-    let dx = [1_i32, -1, 0, 0];
-    let dy = [0_i32, 0, 1, -1];
+    // Bail before allocating the `cells × 5` cost/parent tables when no
+    // path can exist. See `maze_reachable` for why this cannot change
+    // the returned path.
+    if !maze_reachable(grid, start, goal) {
+        return None;
+    }
+    let dx = MAZE_DX;
+    let dy = MAZE_DY;
 
     // State key: (col, row, dir). We allow `dir = 4` for the start
     // state (no incoming direction yet).
@@ -2599,25 +2699,16 @@ fn maze_shortest_path(
             }
             #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
             let next_cell = (nx as usize, ny as usize);
-            // Skip blocked cells. Start and goal cells were pre-cleared
-            // above so the search can enter them.
-            if grid_blocked[grid.idx(next_cell)] {
+            let cur_i = grid.idx(cur);
+            let next_i = grid.idx(next_cell);
+            // Skip blocked cells (start and goal always count as open).
+            if !grid.cell_open(next_i, start_idx, goal_idx) {
                 continue;
             }
             // Skip if the step `cur → next_cell` crosses an obstacle
             // edge that the cell-blocked test missed (body edge on a
-            // grid line). The edge tables are keyed on the lower-index
-            // cell of the pair.
-            let cur_i = grid.idx(cur);
-            let next_i = grid.idx(next_cell);
-            let edge_block = match nd {
-                0 => grid.edge_blocked_h[cur_i],  // +x from cur
-                1 => grid.edge_blocked_h[next_i], // -x: edge stored at next
-                2 => grid.edge_blocked_v[cur_i],  // +y from cur
-                3 => grid.edge_blocked_v[next_i], // -y: edge stored at next
-                _ => false,
-            };
-            if edge_block {
+            // grid line).
+            if grid.edge_blocked_step(cur_i, next_i, nd) {
                 continue;
             }
             let mut step = cost.saturating_add(step_um);
