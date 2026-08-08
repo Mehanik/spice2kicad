@@ -467,6 +467,7 @@ const FIXTURES: &[&str] = &[
     "opamp_definition_level",
     "named_rails",
     "rc_phase_shift",
+    "two_stage_amp",
 ];
 
 /// Per-fixture `(name, B, J)` high-water marks — **zero slack**, each
@@ -514,6 +515,15 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     // this IS the Tier-2 V16 headroom F0 exists to expose. Adding it
     // moved no v0.1 fixture's (B, J). Ratchet DOWN.
     ("rc_phase_shift", 19, 3),
+    // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE. `two_stage_amp` — two
+    // cascaded CE stages sharing one rail — is the new worst fixture in
+    // the suite on both counts: B = 33 (from 56 raw segments over 45
+    // maximal runs) is 1.7x `rc_phase_shift`'s 19 and 4x the worst v0.1
+    // fixture; J = 9 is 3x the previous worst. Nine inter-net crossings
+    // ride along with it. Deliberately POOR — this is exactly the Tier-2
+    // V16 headroom F0 exists to expose, and promoting the fixture moved
+    // no other fixture's (B, J) by a single count. Ratchet DOWN.
+    ("two_stage_amp", 33, 9),
     // B 10 → 4. Phase 4.5's acceptance objective gained the V16
     // ink-graph bend count as its FINAL lexicographic key, after
     // (V13, V12, V5), so the refiner now separates orientations that tie

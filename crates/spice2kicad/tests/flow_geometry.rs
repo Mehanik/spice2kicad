@@ -774,6 +774,10 @@ const FLOW_RATCHET: &[(&str, usize, usize)] = &[
     // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE, owner-approved:
     // two F3 flow inversions (CIN→Q1, R3→CIN); F4 clean. Ratchet DOWN.
     ("rc_phase_shift", 2, 0),
+    // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE: one F3 flow inversion
+    // (the CC interstage coupling cap drawn downstream of the Q2 it
+    // feeds); F4 terminal lanes clean. Ratchet DOWN.
+    ("two_stage_amp", 1, 0),
 ];
 
 #[test]
@@ -892,6 +896,11 @@ const FLOW_POSE_RATCHET: &[(&str, usize, usize)] = &[
     // a series coupling cap, is drawn vertical (the exact `COUT`-drawn-
     // vertical defect Milestone D targets). P5 clean. Ratchet DOWN.
     ("rc_phase_shift", 1, 0),
+    // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE: both series coupling
+    // caps (CC interstage, CIN input) are drawn VERTICAL — the same
+    // `COUT`-drawn-vertical defect `rc_phase_shift` carries, here twice
+    // over. P5 clean. Ratchet DOWN.
+    ("two_stage_amp", 2, 0),
 ];
 
 #[test]
@@ -1041,6 +1050,12 @@ const STUB_RUN_RATCHET: &[(&str, u32)] = &[
     // suite worst (named_rails, 6). This sprawl is the compaction
     // headroom F0 exists to expose. Ratchet DOWN.
     ("rc_phase_shift", 23),
+    // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE: RC2 hangs 19 cells
+    // (24.13 mm) sideways of its node, with RE2/CE2 at 8 and RC1 at 6 —
+    // every one of the ten rail stubs drifts. Not the suite worst
+    // (`rc_phase_shift` reaches 23) but the most widespread sprawl in
+    // the suite. Ratchet DOWN.
+    ("two_stage_amp", 19),
 ];
 
 /// F6 ratchet. A rail stub should hang straight off the node it

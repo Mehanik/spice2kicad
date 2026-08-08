@@ -79,6 +79,51 @@ const XFAIL: &[(&str, &str, &str)] = &[
         "rc_phase_shift",
         "deferred rail-band ordering defect: RB (+12V-only) lands below a ground-only element",
     ),
+    // --- F0, second fixture: `two_stage_amp` --------------------------
+    // Promoted out of `tests/f0_defects.rs` once the phase-4.5 runtime
+    // defect that held it there was fixed (112 s unoptimised -> ~1.0 s).
+    // It is denser than `rc_phase_shift` (17 graded elements, two
+    // cascaded stages on one rail) and re-exposes the SAME deferred
+    // decoration and channel-router defects, plus one it is the first
+    // fixture to reach. Every entry is a tripwire that expires the day
+    // its defect is fixed; none is a budget.
+    //
+    // NOTE FOR THE OWNER: the first entry below is a **Tier-0-classified**
+    // metric and is the one judgement call in this promotion. The
+    // emitted schematic is electrically CORRECT today — the ADR-22
+    // partition certificate is clean, V11 pin coincidence is clean, ERC
+    // reports zero errors, and `kicad-cli sch export netlist` reproduces
+    // the source netlist exactly (8 distinct nets, no merge). What the
+    // verifier flags is the *latent* hazard its own doc comment
+    // describes: two different-net trunks sharing a collinear run, kept
+    // distinct only for want of a junction dot. It is the documented
+    // v0.2 channel-router wall — the same class `multivibrator` and
+    // `opamp_definition_level` once carried in
+    // `CROSS_NET_V02_ESCALATIONS`, both since resolved. Registered here
+    // rather than given budget headroom, because Tier 0 is never traded
+    // and a tripwire is the only exclusion that cannot rot.
+    (
+        "no_cross_net_collinear_wire_overlap",
+        "two_stage_amp",
+        "deferred v0.2 channel-router wall (Tier-0 LATENT short, needs owner review): the b2 and c2 \
+         trunks share a collinear run at x=57.15, and the c2/e2 trunks at y=87.63 — no junction \
+         merges them today (ERC clean, KiCad netlist exact), but the router cannot separate them",
+    ),
+    (
+        "v13_labels_dont_overlap_property_text",
+        "two_stage_amp",
+        "deferred V13(2) decoration nudge: the `b1` net label clips Q2's Value text",
+    ),
+    (
+        "v13_property_text_no_mutual_overlap",
+        "two_stage_amp",
+        "deferred V13(4) decoration nudge: RC2.Reference clips #PWR10's rail text, CE2.Value clips #PWR6's",
+    ),
+    (
+        "v13_power_glyph_value_text_clear_of_bodies_and_pintext",
+        "two_stage_amp",
+        "deferred V13(6a) decoration nudge: #PWR2's and #PWR4's GND value text clip the CE1/RE1 bodies",
+    ),
 ];
 
 /// True when `(test, fixture)` is a registered expected failure.

@@ -140,6 +140,12 @@ const METRICS: &[Metric] = &[
         1.0,
         "symbol/symbol body overlaps",
     ),
+    m(
+        "t0.cross_net_overlap",
+        Tier::T0,
+        1.0,
+        "cross-net collinear wire overlaps (latent V11 short)",
+    ),
     // --- Tier 1 — readability constraints ---------------------------
     m("v12", Tier::T1, 1.0, "wires crossing foreign symbol bodies"),
     m("v13.1_label_body", Tier::T1, 1.0, "label bbox over body"),

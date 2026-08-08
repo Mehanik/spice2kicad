@@ -255,6 +255,7 @@ const SHEETS: &[&str] = &[
     "opamp_definition_level",
     "named_rails",
     "rc_phase_shift",
+    "two_stage_amp",
 ];
 
 /// Per-fixture crossing budget. After the V11/V12 cascade + Steiner-
@@ -1145,6 +1146,12 @@ fn v13_labels_dont_overlap_property_text() {
     // and Step 6 (label rotation away from body), every v0.1 fixture
     // routes clean. Zero everywhere — a regression here is a defect.
     let budget = |_name: &str| -> usize { 0 };
+    // Collect-then-assert through the xfail guard: the budget stays a
+    // hard 0 for every fixture, and a fixture re-exposing a *deferred*
+    // decoration defect is registered in `tests/common/xfail.rs` rather
+    // than given headroom here. See that module for why an exclusion
+    // that cannot expire is worse than no exclusion at all.
+    let mut xf = common::xfail::Guard::new("v13_labels_dont_overlap_property_text");
     for name in SHEETS {
         let src = fixtures_dir().join(format!("{name}.cir"));
         let tmp = tempdir(name);
@@ -1164,11 +1171,14 @@ fn v13_labels_dont_overlap_property_text() {
         }
         common::scoreboard::record_count("v13.2_label_prop", name, hits);
         let b = budget(name);
-        assert!(
-            hits <= b,
-            "{name}: {hits} label↔property text overlaps > V13(2) budget {b}",
+        xf.record(
+            name,
+            (hits > b).then(|| {
+                format!("{name}: {hits} label↔property text overlaps > V13(2) budget {b}")
+            }),
         );
     }
+    xf.finish();
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1667,7 +1677,7 @@ fn v13_property_text_no_mutual_overlap() {
     // fixture routes clean — 0 across the board. A regression here is a
     // defect, never a budget to bump.
     let budget = |_name: &str| -> usize { 0 };
-    let mut failures: Vec<String> = Vec::new();
+    let mut xf = common::xfail::Guard::new("v13_property_text_no_mutual_overlap");
     for name in SHEETS {
         let src = fixtures_dir().join(format!("{name}.cir"));
         let tmp = tempdir(name);
@@ -1685,17 +1695,14 @@ fn v13_property_text_no_mutual_overlap() {
         }
         let b = budget(name);
         common::scoreboard::record_count("v13.4_text_mutual", name, hits);
-        if hits > b {
-            failures.push(format!(
-                "{name}: {hits} visible-text mutual overlaps > V13(4) budget {b}"
-            ));
-        }
+        xf.record(
+            name,
+            (hits > b).then(|| {
+                format!("{name}: {hits} visible-text mutual overlaps > V13(4) budget {b}")
+            }),
+        );
     }
-    assert!(
-        failures.is_empty(),
-        "V13(4) regressions:\n  {}",
-        failures.join("\n  "),
-    );
+    xf.finish();
 }
 
 // ---------------------------------------------------------------------------
@@ -2042,6 +2049,17 @@ fn v5_violation_budget(name: &str) -> usize {
         // NOT a loosened budget on an existing one — no v0.1 fixture's
         // count moved. Ratchet DOWN.
         "rc_phase_shift" => 5,
+        // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE. `two_stage_amp` is the
+        // second F0 benchmark fixture, promoted out of `tests/f0_defects.rs`
+        // once its runtime defect was fixed. Its five residuals are the same
+        // class as every arm above — a shared-net wire that leaves the pin
+        // sideways rather than outward: `RB1.2` / `RC2.2` on the two stages'
+        // rail stubs, `Q1.1` / `Q1.2` on the first transistor, and `COUT.1`
+        // on the output coupling cap. This is a recorded high-water mark on
+        // a fixture that did not exist in the graded suite before, NOT a
+        // loosened budget on an existing one — no other fixture's count
+        // moved. Ratchet DOWN.
+        "two_stage_amp" => 5,
         // diff_pair, port_shapes, opamp_inverting_real: zero violations.
         _ => 0,
     }
@@ -2447,6 +2465,7 @@ const PHASE1_ERC_FIXTURES: &[&str] = &[
     "opamp_definition_level",
     "named_rails",
     "rc_phase_shift",
+    "two_stage_amp",
 ];
 
 #[test]
@@ -2998,6 +3017,7 @@ const ALL_FIXTURES_FOR_CROSS_NET: &[&str] = &[
     "rc_lowpass_ports",
     "named_rails",
     "rc_phase_shift",
+    "two_stage_amp",
 ];
 
 /// Symmetric fixtures whose two mirror-image sub-circuits force two
@@ -3062,7 +3082,16 @@ fn no_cross_net_collinear_wire_overlap() {
     // (deferred to the v0.2 channel router — see that const for the
     // per-fixture wall). `diff_pair` is now a hard 0 via the winner-jog
     // fallback. Resolving an escalation ratchets its budget down to 0.
-    let mut failures: Vec<String> = Vec::new();
+    //
+    // Collect-then-assert through the xfail guard. The budget stays a
+    // hard 0 for every fixture — this is Tier 0 by the doc comment on
+    // `cross_net_overlap_budget`, and Tier 0 is never traded. A NEW
+    // fixture that re-exposes the deferred v0.2 channel-router wall is
+    // therefore registered in `tests/common/xfail.rs` (a tripwire that
+    // FAILS the day the defect is fixed) rather than handed headroom
+    // here, which would be indistinguishable from a regression forever
+    // after.
+    let mut xf = common::xfail::Guard::new("no_cross_net_collinear_wire_overlap");
     for name in ALL_FIXTURES_FOR_CROSS_NET {
         let src = fixtures_dir().join(format!("{name}.cir"));
         let tmp = tempdir(name);
@@ -3111,18 +3140,18 @@ fn no_cross_net_collinear_wire_overlap() {
         }
 
         let budget = cross_net_overlap_budget(name);
-        if overlaps > budget {
-            failures.push(format!(
-                "{name}: {overlaps} cross-net collinear wire overlap(s) > budget {budget} \
-                 (latent V11 short)"
-            ));
-        }
+        common::scoreboard::record_count("t0.cross_net_overlap", name, overlaps);
+        xf.record(
+            name,
+            (overlaps > budget).then(|| {
+                format!(
+                    "{name}: {overlaps} cross-net collinear wire overlap(s) > budget {budget} \
+                     (latent V11 short)"
+                )
+            }),
+        );
     }
-    assert!(
-        failures.is_empty(),
-        "cross-net collinear wire overlap regressions:\n  {}",
-        failures.join("\n  "),
-    );
+    xf.finish();
 }
 
 #[test]

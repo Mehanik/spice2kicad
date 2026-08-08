@@ -301,6 +301,13 @@ const Q3_FLOW_MONOTONICITY_BUDGET: &[(&str, u32)] = &[
     // whose previous worst was 1. Deliberately POOR: this is precisely
     // the flow-monotonicity headroom F0 exists to expose. Ratchet DOWN.
     ("rc_phase_shift", 4),
+    // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE. Eight Q3 inversions —
+    // twice `rc_phase_shift`'s 4 and the worst in the suite. The two
+    // stages' bias dividers and collector loads (RB1/RB3, RC1/RC2) are
+    // each drawn right of the parts their layer places downstream, so
+    // both stages read right-to-left locally. Deliberately POOR: this is
+    // the flow headroom F0 exists to expose. Ratchet DOWN.
+    ("two_stage_amp", 8),
 ];
 
 #[test]

@@ -60,6 +60,7 @@ const FIXTURES: &[&str] = &[
     "rc_lowpass_ports",
     "named_rails",
     "rc_phase_shift",
+    "two_stage_amp",
 ];
 
 fn fixtures_dir() -> PathBuf {

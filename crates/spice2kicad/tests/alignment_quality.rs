@@ -329,6 +329,11 @@ const Q5_NEAR_MISS_BUDGET: &[(&str, u32)] = &[
     // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE, owner-approved:
     // C3/CIN, CIN/Q1 and Q1/RB each miss a shared axis by a hair.
     ("rc_phase_shift", 3),
+    // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE: seven near-misses
+    // (CC/RB3, CE1/RE1, CIN/Q1, CIN/RB1, CIN/RB2, RB1/RB2, RB3/RB4) —
+    // the worst in the suite, roughly double `rc_phase_shift`'s 3. Each
+    // is a candidate straight drop the router currently jogs.
+    ("two_stage_amp", 7),
 ];
 
 #[test]

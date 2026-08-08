@@ -550,6 +550,7 @@ const FIXTURES_FOR_QUALITY: &[(&str, &str)] = &[
     ("opamp_definition_level", "opamp_definition_level.cir"),
     ("named_rails", "named_rails.cir"),
     ("rc_phase_shift", "rc_phase_shift.cir"),
+    ("two_stage_amp", "two_stage_amp.cir"),
 ];
 
 fn fixtures() -> Vec<(&'static str, PathBuf)> {
@@ -1493,6 +1494,13 @@ fn wire_detour_within_budget_across_fixtures() {
         // wide margin (next worst: named_rails at 1.125), and it is the
         // Tier-2 headroom F0 exists to expose. Ratchet DOWN.
         ("rc_phase_shift", 1.2314),
+        // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE. 1.8565 is the worst
+        // wire detour in the suite by a wide margin — the emitted ink is
+        // 86% longer than its rectilinear ideal (558.80 mm vs 300.99 mm),
+        // where the previous worst was `rc_phase_shift` at 1.2313. This
+        // is the Tier-2 compaction headroom F0 exists to expose.
+        // Ratchet DOWN.
+        ("two_stage_amp", 1.8566),
     ];
     // Collect-then-assert: an in-loop `assert!` truncates the report at
     // the first offending fixture, which is the ADR-19 M4 "gate-set
@@ -1612,6 +1620,10 @@ fn crossing_count_within_budget_across_fixtures() {
         // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE, owner-approved: the
         // long ladder + gain stage crosses twice. Ratchet DOWN.
         ("rc_phase_shift", 2),
+        // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE: ten wire crossings,
+        // 2.5x the previous suite worst (`multivibrator`, 4) and 5x
+        // `rc_phase_shift`'s 2. Ratchet DOWN.
+        ("two_stage_amp", 10),
     ];
     // Collect-then-assert: see `wire_detour_within_budget_across_fixtures`.
     let mut failures: Vec<String> = Vec::new();

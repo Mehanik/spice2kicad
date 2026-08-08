@@ -260,6 +260,7 @@ fn erc_clean_on_port_annotated_fixtures() {
         "port_shapes",
         "rc_lowpass",
         "rc_phase_shift",
+        "two_stage_amp",
     ] {
         let src = fixtures_dir().join(format!("{name}.cir"));
         let tmp = tempdir(name);

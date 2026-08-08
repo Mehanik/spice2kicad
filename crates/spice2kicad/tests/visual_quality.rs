@@ -48,6 +48,7 @@ const FIXTURES: &[&str] = &[
     "opamp_definition_level",
     "named_rails",
     "rc_phase_shift",
+    "two_stage_amp",
 ];
 
 // --- driver bits ---------------------------------------------------------

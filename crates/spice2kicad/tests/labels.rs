@@ -78,6 +78,7 @@ const SHEETS: &[&str] = &[
     "rc_lowpass_ports",
     "named_rails",
     "rc_phase_shift",
+    "two_stage_amp",
 ];
 
 #[test]
@@ -113,6 +114,7 @@ fn v4_global_labels_reserved_for_interface_one_pin_nets() {
         ("diff_pair", &["in1", "in2"]),
         ("opamp_inverting_real", &["in"]),
         ("rc_phase_shift", &["in", "out"]),
+        ("two_stage_amp", &["in", "out"]),
     ];
     for (name, allowed) in allowed_per_fixture {
         let src = fixtures_dir().join(format!("{name}.cir"));
