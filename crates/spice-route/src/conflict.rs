@@ -2349,6 +2349,57 @@ fn compute_maze_bounds(
     })
 }
 
+/// Inclusive cell range `[lo, hi]` covering the world interval
+/// `[w_lo, w_hi]` on one axis of a grid whose cell `k` sits at
+/// `origin + k · GRID_MM`, clamped to `0..n`. `None` when the range is
+/// empty (the interval lies entirely off-grid).
+///
+/// **This is a filter, never a decision.** Its job is only to skip cell
+/// windows an obstacle demonstrably cannot touch; the exact per-cell
+/// predicate still runs on every cell it returns. It is therefore padded
+/// by [`CELL_WINDOW_PAD`] cells on both sides so no rounding in this
+/// arithmetic can exclude a cell the exact predicate would have marked,
+/// and it deliberately widens to the whole axis on non-finite input
+/// rather than guessing.
+fn cell_window(
+    w_lo: f64,
+    w_hi: f64,
+    origin: f64,
+    n: usize,
+) -> Option<std::ops::RangeInclusive<usize>> {
+    if n == 0 {
+        return None;
+    }
+    if !(w_lo.is_finite() && w_hi.is_finite()) {
+        // Degenerate geometry: let the exact predicate decide, over the
+        // whole axis. (An infinite bbox blocks nothing under the strict
+        // `wx > x0 + 0.1 && wx < x1 - 0.1` test anyway.)
+        return Some(0..=n - 1);
+    }
+    if w_hi < w_lo {
+        return None;
+    }
+    let lo_f = (w_lo - origin) / GRID_MM - CELL_WINDOW_PAD;
+    let hi_f = (w_hi - origin) / GRID_MM + CELL_WINDOW_PAD;
+    #[allow(clippy::cast_precision_loss)]
+    let n_f = (n - 1) as f64;
+    if hi_f < 0.0 || lo_f > n_f {
+        return None;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let lo = lo_f.max(0.0).floor() as usize;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let hi = (hi_f.min(n_f).ceil() as usize).min(n - 1);
+    if lo > hi { None } else { Some(lo..=hi) }
+}
+
+/// Safety pad, in cells, applied to both ends of a [`cell_window`].
+/// Two cells is far more than the float error in one divide can
+/// produce; the cost of over-padding is a handful of extra exact
+/// predicate evaluations, the cost of under-padding would be a wrong
+/// grid.
+const CELL_WINDOW_PAD: f64 = 2.0;
+
 /// Build the maze blocked grid: a cell at (col, row) is blocked iff
 /// it strictly lies inside an obstacle bbox, on a foreign-pin coord,
 /// or on the interior of a sibling routed net's axis-parallel
@@ -2394,20 +2445,35 @@ fn build_maze_grid(
     // that segment penetrates a body bbox by ≥ 0.1 mm the verifier
     // counts it as a crossing. So we conservatively block cells that
     // are within one half-cell of any obstacle interior.
-    for cy in 0..rows {
-        #[allow(clippy::cast_precision_loss)]
-        let wy = grid.y0 + (cy as f64) * GRID_MM;
-        for cx in 0..cols {
+    //
+    // Both loops iterate **obstacles**, not cells: each obstacle marks
+    // only the cell window it can possibly reach. The window is derived
+    // from the obstacle's extent and padded (see `cell_window`), and the
+    // *same* exact per-cell predicate then decides inside it — so the
+    // grid is bit-identical to a full O(cells × obstacles) sweep, at
+    // O(cells + Σ areas).
+    for o in obstacles {
+        // Block any cell strictly inside the obstacle's
+        // 0.1-mm-inflated-inward bbox. This matches the verifier's
+        // strict-interior test.
+        let Some(col_win) = cell_window(o.x0, o.x1, grid.x0, cols) else {
+            continue;
+        };
+        let Some(row_win) = cell_window(o.y0, o.y1, grid.y0, rows) else {
+            continue;
+        };
+        for cy in row_win.clone() {
             #[allow(clippy::cast_precision_loss)]
-            let wx = grid.x0 + (cx as f64) * GRID_MM;
-            for o in obstacles {
-                // Block any cell strictly inside the obstacle's
-                // 0.1-mm-inflated-inward bbox. This matches the
-                // verifier's strict-interior test.
-                if wx > o.x0 + 0.1 && wx < o.x1 - 0.1 && wy > o.y0 + 0.1 && wy < o.y1 - 0.1 {
+            let wy = grid.y0 + (cy as f64) * GRID_MM;
+            if !(wy > o.y0 + 0.1 && wy < o.y1 - 0.1) {
+                continue;
+            }
+            for cx in col_win.clone() {
+                #[allow(clippy::cast_precision_loss)]
+                let wx = grid.x0 + (cx as f64) * GRID_MM;
+                if wx > o.x0 + 0.1 && wx < o.x1 - 0.1 {
                     let i = grid.idx((cx, cy));
                     grid.blocked[i] = true;
-                    break;
                 }
             }
         }
@@ -2416,29 +2482,37 @@ fn build_maze_grid(
     // strict-interior cell test can still be connected by a segment
     // that crosses an obstacle when the body edge sits exactly on a
     // grid line (the case for our 1.27 mm-aligned placer output).
-    for cy in 0..rows {
-        for cx in 0..cols {
-            let i = grid.idx((cx, cy));
-            #[allow(clippy::cast_precision_loss)]
-            let wx = grid.x0 + (cx as f64) * GRID_MM;
+    //
+    // An edge starts at its cell and extends one cell in `+x` / `+y`, so
+    // the window is widened by one further cell on the low side of that
+    // axis (on top of `cell_window`'s pad).
+    for o in obstacles {
+        let Some(col_win) = cell_window(o.x0 - GRID_MM, o.x1, grid.x0, cols) else {
+            continue;
+        };
+        let Some(row_win) = cell_window(o.y0 - GRID_MM, o.y1, grid.y0, rows) else {
+            continue;
+        };
+        for cy in row_win.clone() {
             #[allow(clippy::cast_precision_loss)]
             let wy = grid.y0 + (cy as f64) * GRID_MM;
-            // +x neighbour (horizontal edge).
-            if cx + 1 < cols {
-                for o in obstacles {
-                    if o.intersects_segment(wx, wy, wx + GRID_MM, wy) {
-                        grid.edge_blocked_h[i] = true;
-                        break;
-                    }
+            for cx in col_win.clone() {
+                let i = grid.idx((cx, cy));
+                #[allow(clippy::cast_precision_loss)]
+                let wx = grid.x0 + (cx as f64) * GRID_MM;
+                // +x neighbour (horizontal edge).
+                if cx + 1 < cols
+                    && !grid.edge_blocked_h[i]
+                    && o.intersects_segment(wx, wy, wx + GRID_MM, wy)
+                {
+                    grid.edge_blocked_h[i] = true;
                 }
-            }
-            // +y neighbour (vertical edge).
-            if cy + 1 < rows {
-                for o in obstacles {
-                    if o.intersects_segment(wx, wy, wx, wy + GRID_MM) {
-                        grid.edge_blocked_v[i] = true;
-                        break;
-                    }
+                // +y neighbour (vertical edge).
+                if cy + 1 < rows
+                    && !grid.edge_blocked_v[i]
+                    && o.intersects_segment(wx, wy, wx, wy + GRID_MM)
+                {
+                    grid.edge_blocked_v[i] = true;
                 }
             }
         }
