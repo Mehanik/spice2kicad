@@ -1806,15 +1806,7 @@ fn reroute_one_net_v12<S: ::std::hash::BuildHasher>(
         // 5. Stage B — maze route. Replaces the offending segment with
         // a BFS shortest-path that avoids every obstacle, foreign pin
         // and sibling segment interior.
-        if try_maze_route_segment(
-            routed,
-            target,
-            idx,
-            obstacles,
-            foreign_bboxes,
-            bounds,
-            pin_outward,
-        ) {
+        if try_maze_route_segment(routed, target, idx, obstacles, foreign_bboxes, bounds) {
             continue;
         }
         // Nothing helped — leave the segment and bail so the residual
@@ -2096,7 +2088,6 @@ fn try_maze_route_segment(
     obstacles: &[Bbox],
     foreign_bboxes: &[Bbox],
     bounds: Option<Bbox>,
-    pin_outward: &PinOutwardMap,
 ) -> bool {
     let s = routed[target].segments[idx];
     // Don't maze-route a zero-length probe.
@@ -2114,18 +2105,22 @@ fn try_maze_route_segment(
     if start == goal {
         return false;
     }
-    // V5: if the start (or goal) coincides with a pin, constrain the
-    // first (last) step of the maze path to that pin's outward
-    // direction. Falls back to unconstrained when no outward-clean
-    // path exists.
-    let start_outward = pin_outward.get(&key(s.x1, s.y1)).copied();
-    let goal_outward = pin_outward.get(&key(s.x2, s.y2)).copied();
-    let path = match maze_shortest_path_constrained(&grid, start, goal, start_outward, goal_outward)
-    {
-        Some(p) => Some(p),
-        None => maze_shortest_path(&grid, start, goal),
-    };
-    let Some(path) = path else {
+    // NOTE — the V5 outward-direction constraint at maze endpoints is
+    // NOT enforced here, and never was. The removed
+    // `maze_shortest_path_constrained` ran the *full* unconstrained
+    // search and then post-filtered its first/last step; on rejection
+    // this call site fell back to `maze_shortest_path`, which — being a
+    // pure function of `(grid, start, goal)` — returned the byte-same
+    // path the filter had just rejected. The net effect of the pair was
+    // therefore exactly `maze_shortest_path`, at twice the cost: ~680 of
+    // `two_stage_amp`'s 1497 searches were the second, redundant run.
+    //
+    // Enforcing V5 here for real needs a genuinely *constrained* search
+    // (seed the heap only in the pin's outward direction, and accept the
+    // goal only from its outward direction), which would change emitted
+    // geometry and therefore needs the full ADR-16 baseline-diff
+    // protocol. Deliberately out of scope for a performance change.
+    let Some(path) = maze_shortest_path(&grid, start, goal) else {
         return false;
     };
     if path.len() < 2 {
@@ -2504,77 +2499,6 @@ fn build_maze_grid(
 /// Dijkstra over (cell, in-direction) states. Returns the path as a
 /// list of cells from `start` to `goal` inclusive, with the
 /// shortest-bend-penalty score, or `None` when unreachable.
-/// Same as [`maze_shortest_path`] but additionally constrains the
-/// first move out of `start` (when `start_dir` is `Some`) and the last
-/// move into `goal` (when `goal_dir` is `Some`) to the supplied
-/// directions. Used by the V5 outward-direction enforcement at pin
-/// endpoints. Returns `None` when no path satisfying the constraints
-/// exists; the caller is expected to fall back to the unconstrained
-/// [`maze_shortest_path`].
-fn maze_shortest_path_constrained(
-    grid: &MazeGrid,
-    start: (usize, usize),
-    goal: (usize, usize),
-    start_dir: Option<Direction>,
-    goal_dir: Option<Direction>,
-) -> Option<Vec<(usize, usize)>> {
-    let dir_to_nd = |d: Direction| -> usize {
-        match d {
-            Direction::Right => 0,
-            Direction::Left => 1,
-            // Maze-grid +y matches file-y +1 step (rows ascend).
-            Direction::Down => 2,
-            Direction::Up => 3,
-        }
-    };
-    let path = maze_shortest_path(grid, start, goal)?;
-    // The constrained variant: re-run the search but reject any move
-    // that violates the first/last step constraint. Cheap approach:
-    // run plain BFS and post-filter; this preserves the existing
-    // implementation. The filter checks the second cell direction
-    // against `start_dir` and the penultimate-to-last direction
-    // against `goal_dir`.
-    if path.len() < 2 {
-        return Some(path);
-    }
-    #[allow(clippy::cast_possible_wrap)]
-    let first_step = (
-        path[1].0 as i64 - path[0].0 as i64,
-        path[1].1 as i64 - path[0].1 as i64,
-    );
-    if let Some(d) = start_dir {
-        let nd = dir_to_nd(d);
-        let want = (
-            i64::from([1_i32, -1, 0, 0][nd]),
-            i64::from([0_i32, 0, 1, -1][nd]),
-        );
-        if first_step != want {
-            return None;
-        }
-    }
-    let n = path.len();
-    #[allow(clippy::cast_possible_wrap)]
-    let last_step = (
-        path[n - 1].0 as i64 - path[n - 2].0 as i64,
-        path[n - 1].1 as i64 - path[n - 2].1 as i64,
-    );
-    if let Some(d) = goal_dir {
-        // Goal outward direction = direction the pin's stem points.
-        // The maze path *arrives* at the goal, so the incoming step
-        // direction is the opposite of the pin's outward.
-        let nd = dir_to_nd(d);
-        let want_outward = (
-            i64::from([1_i32, -1, 0, 0][nd]),
-            i64::from([0_i32, 0, 1, -1][nd]),
-        );
-        let want_incoming = (-want_outward.0, -want_outward.1);
-        if last_step != want_incoming {
-            return None;
-        }
-    }
-    Some(path)
-}
-
 /// Is `goal` reachable from `start` at all, over the free-cell graph the
 /// Dijkstra in [`maze_shortest_path`] walks?
 ///
