@@ -4439,3 +4439,270 @@ owner decision, and the table above is what it should be taken on.
   locks are not part of a challenger's row.
 * **Aggregation hides which fixture paid.** Always read the table; the
   scalar exists to focus attention, not to replace it.
+
+### D6. Replaying the other four reverts
+
+D5 replayed M4 and closed with "replaying the other four is now cheap and
+is the recommended next use of the instrument". This is that replay.
+Same protocol: register a `--placer` variant, dead on the default path,
+collect a whole-suite row with the sink on, aggregate. Nothing here is
+promoted; no baseline was regenerated and no budget literal moved.
+
+**First, the instrument re-validated.** The M4 row was re-collected from
+scratch on this tree and reproduces D5 exactly — `T1 = −1.00`,
+`T2 = −6.50`, `S = −1006.50`, `f6 / multivibrator 2 → 18`. Two
+independent runs, same answer.
+
+#### Recovery status
+
+| replay | recovered from | status |
+| --- | --- | --- |
+| M3 ablation **B** (pure signed gate) | `wip/adr19-m3-signed-gate` `7896f22`, verbatim | registered `m3-signed-gate` |
+| M3 **full** (B + property text + signed `legalize` roomy) | same commit, whole tree | registered `m3-signed-full` |
+| M5′ (per-refdes SA streams) | **not recoverable** | registered `m5-streams` as a *re-derivation* |
+| B2 (feedback-arc marking) | **not recoverable** | **structurally inert — not registered** |
+| B3 (DC-path direction into layering) | **not recoverable** | **skipped** |
+
+M5′, B2 and B3 were each measured in a working tree and reverted without
+ever being committed: the reflog holds only their docs commits
+(`241599e` for M5′, `619cc31` for B2/B3, docs-only, 45 lines of
+`v0.2-roadmap.md`). Only B1's `flow.rs` was ever committed, and that is
+the *unconsumed* model, not B2/B3's consumers.
+
+#### M3 ablation B — `m3-signed-gate`
+
+| metric | tier | fixture | champion | challenger | Δ |
+| --- | --- | --- | ---: | ---: | ---: |
+| `v13.1_label_body` | 1 | named_rails | 0 | 1 | **+1.00** |
+| `v13.7_label_pintext` | 1 | named_rails | 0 | 1 | **+1.00** |
+| `v13.ink_overlap` | 1 | common_emitter | 0 | 1 | **+1.00** |
+| **Tier 1 total** | | | | | **+3.00** |
+| `v5` | 2 | named_rails | 2 | 1 | −1.00 |
+| `v5` | 2 | rc_phase_shift | 5 | 6 | +1.00 |
+| `v16.bends` | 2 | common_emitter | 4 | 7 | +3.00 |
+| `v16.bends` | 2 | named_rails | 2 | 1 | −1.00 |
+| `v16.bends` | 2 | rc_phase_shift | 19 | 14 | −5.00 |
+| `v16.branches` | 2 | rc_phase_shift | 3 | 5 | +2.00 |
+| `crossings` | 2 | rc_phase_shift | 2 | 5 | +3.00 |
+| `detour` | 2 | common_emitter | 1.0135 | 1.0253 | +1.18 |
+| `detour` | 2 | named_rails | 1.1250 | 1.1111 | −1.39 |
+| `detour` | 2 | rc_phase_shift | 1.2313 | 1.1450 | −8.63 |
+| `q3` | 2 | common_emitter | 1 | 3 | +2.00 |
+| `q3` | 2 | named_rails | 1 | 0 | −1.00 |
+| `q5` | 2 | common_emitter | 3 | 2 | −1.00 |
+| `q5` | 2 | named_rails | 2 | 4 | +2.00 |
+| `f5` | 2 | rc_phase_shift | 1 | 0 | −1.00 |
+| `f6` | 2 | common_emitter | 4 | 5 | +1.00 |
+| `f6` | 2 | named_rails | 6 | 3 | −3.00 |
+| `f6` | 2 | rc_phase_shift | 23 | 14 | −9.00 |
+| `p11b.movers` | 2 | common_emitter+C | 8 | 7 | −1.00 |
+| **Tier 2 total** | | | | | **−17.84** |
+
+**Verdict: NOT PROMOTABLE** (`T1 = +3.00`; `S = +2982.16`). Twice over:
+a clear Tier-1 regression, *and* the comparison is **incomplete** — the
+challenger has no `v13.1_label_body / rc_phase_shift` cell, because that
+verifier still asserts inside its fixture loop and stopped at
+`named_rails`. D2 converted four such verifiers; this is a fifth that was
+missed. The missing cell cannot rescue the verdict (it can only add to
+T1), but it is a live instrument defect worth closing.
+
+**This is the one unambiguous result of the whole replay.** M3-B is
+worse, on the tier that leads, and the original revert was right.
+
+#### M3 full wiring — `m3-signed-full`
+
+| metric | tier | fixture | champion | challenger | Δ |
+| --- | --- | --- | ---: | ---: | ---: |
+| `v13.ink_overlap` | 1 | rc_phase_shift | 1 | 0 | −1.00 |
+| **Tier 1 total** | | | | | **−1.00** |
+| `v5` | 2 | common_emitter | 1 | 0 | −1.00 |
+| `v5` | 2 | named_rails | 2 | 1 | −1.00 |
+| `v5` | 2 | rc_phase_shift | 5 | 4 | −1.00 |
+| `v16.bends` | 2 | common_emitter | 4 | 5 | +1.00 |
+| `v16.bends` | 2 | named_rails | 2 | 1 | −1.00 |
+| `v16.bends` | 2 | opamp_inverting | 3 | 5 | +2.00 |
+| `v16.bends` | 2 | opamp_inverting_real | 5 | 9 | +4.00 |
+| `v16.bends` | 2 | rc_phase_shift | 19 | 17 | −2.00 |
+| `v16.branches` | 2 | named_rails | 2 | 1 | −1.00 |
+| `v16.branches` | 2 | opamp_inverting_real | 1 | 0 | −1.00 |
+| `crossings` | 2 | opamp_inverting | 0 | 1 | +1.00 |
+| `crossings` | 2 | rc_phase_shift | 2 | 1 | −1.00 |
+| `detour` | 2 | common_emitter | 1.0135 | 1.0476 | +3.41 |
+| `detour` | 2 | named_rails | 1.1250 | 1.1000 | −2.50 |
+| `detour` | 2 | opamp_inverting | 1.1111 | 1.1000 | −1.11 |
+| `detour` | 2 | opamp_inverting_real | 1.1951 | 1.3243 | **+12.92** |
+| `detour` | 2 | rc_phase_shift | 1.2313 | 1.2576 | +2.62 |
+| `q3` | 2 | common_emitter | 1 | 2 | +1.00 |
+| `q5` | 2 | common_emitter | 3 | 6 | +3.00 |
+| `q5` | 2 | named_rails | 2 | 0 | −2.00 |
+| `q5` | 2 | opamp_inverting_real | 0 | 2 | +2.00 |
+| `q5` | 2 | rc_phase_shift | 3 | 4 | +1.00 |
+| `f6` | 2 | common_emitter | 4 | 6 | +2.00 |
+| `f6` | 2 | named_rails | 6 | 4 | −2.00 |
+| `f6` | 2 | rc_phase_shift | 23 | 21 | −2.00 |
+| `p11b.movers` | 2 | common_emitter+C | 8 | 6 | −2.00 |
+| **Tier 2 total** | | | | | **+15.34** |
+
+**Verdict as the rule gives it: PROMOTABLE** (`T1 = −1.00`,
+`T2 = +15.34`, `S = −984.66`). **Do not act on it.** Under strict
+lexicographic ordering a single Tier-1 point outranks any Tier-2 sum, so
+this passes while being *visibly worse* on Tier 2 — `opamp_inverting_real`
+detour 1.195 → 1.324 and bends 5 → 9 are exactly the kind of defect the
+project reverts on sight. This is the rule behaving as specified, not a
+bug, and D4's "the scoreboard supplies the evidence, the owner decides"
+is what stands between it and a bad promotion.
+
+Note also that ADR-19's ablation table has **inverted**: it recorded
+`full` as strictly worse than `B` ("the roomy swap is strictly worse, not
+neutral"). Aggregated, `full` is the better of the two by a tier. Both
+readings are measurements of different things — that table counted *red
+verifiers*, this one counts *points against the champion*.
+
+#### M5′ re-derivation — `m5-streams`
+
+Not the original code. The re-derivation is: one `Rng` per movable
+element seeded `opts.seed ^ fnv1a(refdes)`, a deterministic sweep in
+refdes order, proposals *and* the Metropolis draw taken from the swept
+element's own stream, same move mix as `propose_move`.
+
+It **reproduces ADR-19's recorded signature qualitatively**: bends rise
+on exactly the four fixtures M5′ named, with `opamp_inverting` 3 → 5
+matching exactly, `opamp_inverting_real` 5 → 7 (recorded 5 → 10),
+`common_emitter` 4 → 8 (recorded 4 → 11), `named_rails` 2 → 3 (recorded
+1 → 2, against a champion that has since drifted). Same phenomenon,
+different magnitudes — treat the aggregate as *an* M5′, not *the* M5′.
+
+| metric | tier | fixture | champion | challenger | Δ |
+| --- | --- | --- | ---: | ---: | ---: |
+| `v13.4_text_mutual` | 1 | rc_phase_shift | 0 | 1 | +1.00 |
+| `v13.6a_glyphtext` | 1 | rc_phase_shift | 1 | 0 | −1.00 |
+| `v13.ink_overlap` | 1 | rc_phase_shift | 1 | 0 | −1.00 |
+| **Tier 1 total** | | | | | **−1.00** |
+| `v5` | 2 | named_rails | 2 | 1 | −1.00 |
+| `v5` | 2 | opamp_inverting | 1 | 0 | −1.00 |
+| `v5` | 2 | rc_phase_shift | 5 | 3 | −2.00 |
+| `v16.bends` | 2 | common_emitter | 4 | 8 | +4.00 |
+| `v16.bends` | 2 | named_rails | 2 | 3 | +1.00 |
+| `v16.bends` | 2 | opamp_inverting | 3 | 5 | +2.00 |
+| `v16.bends` | 2 | opamp_inverting_real | 5 | 7 | +2.00 |
+| `v16.bends` | 2 | rc_phase_shift | 19 | 14 | −5.00 |
+| `v16.branches` | 2 | common_emitter | 3 | 5 | +2.00 |
+| `v16.branches` | 2 | opamp_inverting | 0 | 1 | +1.00 |
+| `crossings` | 2 | opamp_inverting_real | 0 | 1 | +1.00 |
+| `crossings` | 2 | rc_phase_shift | 2 | 3 | +1.00 |
+| `detour` | 2 | common_emitter | 1.0135 | 1.1277 | **+11.41** |
+| `detour` | 2 | named_rails | 1.1250 | 1.1500 | +2.50 |
+| `detour` | 2 | opamp_inverting | 1.1111 | 1.0833 | −2.78 |
+| `detour` | 2 | opamp_inverting_real | 1.1951 | 1.1250 | −7.01 |
+| `detour` | 2 | rc_phase_shift | 1.2313 | 1.2882 | +5.69 |
+| `q3` | 2 | common_emitter | 1 | 3 | +2.00 |
+| `q3` | 2 | named_rails | 1 | 0 | −1.00 |
+| `q3` | 2 | rc_phase_shift | 4 | 3 | −1.00 |
+| `q5` | 2 | common_emitter | 3 | 0 | −3.00 |
+| `q5` | 2 | named_rails | 2 | 3 | +1.00 |
+| `q5` | 2 | opamp_inverting | 1 | 0 | −1.00 |
+| `q5` | 2 | opamp_inverting_real | 0 | 1 | +1.00 |
+| `f5` | 2 | common_emitter | 1 | 0 | −1.00 |
+| `f6` | 2 | common_emitter | 4 | 11 | **+7.00** |
+| `f6` | 2 | named_rails | 6 | 8 | +2.00 |
+| `f6` | 2 | rc_phase_shift | 23 | 24 | +1.00 |
+| **Tier 2 total** | | | | | **+21.81** |
+
+**Verdict as the rule gives it: PROMOTABLE** (`T1 = −1.00`,
+`T2 = +21.81`, `S = −978.19`). **Do not act on it either**, and for a
+sharper reason than M3-full: ADR-19 killed M5′ on the finding that
+re-keying the SA destroys its basin-finding, and this table *confirms
+that finding* — bends up on four of five affected fixtures, F6 up 10
+points, `common_emitter` detour +11.41 pp. The aggregate says
+"promotable" only because a lone Tier-1 point outranks all of it.
+
+Its one genuinely interesting cell: **`p11b.movers` does not move**. M5′
+was proposed to buy locality and bought none — reproduced exactly.
+
+#### B2 — structurally inert, and provably so
+
+Not registered, because the measurement is unnecessary: B2's target code
+is **unreachable on every fixture**.
+
+`assign_x_layers` returns at `if sources.is_empty() { return
+no_source_fallback(…) }`, which sits *strictly before* the
+`break_cycles(adj)` call B2 would rewrite. `is_signal_source` counts a
+`VoltageSrc`/`CurrentSrc` **not** tagged `;@ power`. Across all thirteen
+fixtures every V/I source is either `;@ power=…` (excluded by role) or
+`;@ ignore` (dropped before resolve), and `port_shapes.cir` has no source
+at all. So `sources` is empty everywhere, `break_cycles` never runs, and
+replacing its edge *reversal* with feedback-arc *marking* cannot change
+one byte of emitted output.
+
+**This is a finding, not a tie: B2 has no lever on this benchmark.** It
+also confirms `1f7ed02`'s adjacent finding (the source/non-source branch
+was a no-op) from the other side: not only is the directional branch
+dead, the entire directed-graph path downstream of it is dead too.
+
+#### B3 — skipped, with the reason
+
+B3 is the *real* lever (it replaces `no_source_fallback`, the path that
+takes 100% of the traffic), so it is not inert. It is skipped because it
+cannot be *recovered*: no B3 code was ever committed, so replaying it
+means re-implementing a layering reseed on top of a restored 728-line
+`flow.rs` (`git show 74ba098^:crates/spice-layout/src/flow.rs`) — a new
+implementation graded as if it were the old one, which is the wrong
+experiment. Its recorded outcome also has a structural blocker that the
+scoreboard cannot dissolve: the canonical feedback case is an op-amp
+`.subckt` instance that `flow.rs` treats as directionless, so the marking
+never fires there. Retry it after **B1′** (sheet-instance flow edges) and
+**F0** (fixtures with un-ignored flow), per the roadmap.
+
+#### What the five replays establish
+
+**All the Tier-1 headroom on this benchmark is one defect on one
+fixture.** The champion has exactly **one** real-`kicad-cli`-SVG-ink text
+overlap in the entire suite: `v13.ink_overlap / rc_phase_shift = 1`.
+Three of the four graded challengers — M4, M3-full, M5′ — remove it, and
+that removal is the *whole* of each one's `T1 = −1.00`. They are three
+unrelated perturbations (a Y datum, an overlap-gate box, an RNG keying)
+with nothing in common except that they move `rc_phase_shift`.
+
+So `T1 < 0` currently means **"did you perturb `rc_phase_shift`?"**, not
+"is this a better architecture". Three placers cleared the promotion bar
+on the same accidental cell while two of them were plainly worse
+everywhere else. The tier-lexicographic rule is right in principle, but
+with a champion this close to Tier-1-clean, one point of T1 is noise with
+a veto.
+
+**Were the reverts correct? Yes — four of five, and arguably all five.**
+
+* **M3-B: correct revert.** Worse on the leading tier, unambiguously.
+* **M3-full: correct revert.** Reads promotable, but only on that one
+  `rc_phase_shift` cell, while costing `opamp_inverting_real` 4 bends and
+  13 points of detour.
+* **M5′: correct revert**, and the scoreboard *confirms* ADR-19's
+  original diagnosis rather than overturning it.
+* **B2: correct — there was nothing to revert.** It could not have
+  changed anything.
+* **B3: correct on the evidence available**, and still blocked on a
+  structural precondition (B1′/F0) that no instrument change addresses.
+* **M4 remains the one real candidate** — the only challenger that
+  improves *both* tiers (`T2 = −6.50`), and even it is the residue of
+  detour −20.50 against F6 +19.00.
+
+**The instrument's own lesson.** ADR-23 was built because the ratchets
+could detect drift but not select an architecture. That is still true and
+still worth having. But this replay shows the scoreboard has the mirror
+weakness: with only one Tier-1 defect left to remove on eleven hand-tuned
+fixtures, its leading key is nearly degenerate, and "promotable" is
+cheaper to earn than it looks. **The fix is not a different weighting** —
+retuning the aggregate to fit these five results is precisely the
+overfitting this ADR exists to avoid. The fix is **F0**: fixtures the
+current placer does *poorly* on, so Tier 1 has real headroom and the
+leading key has something to measure. The roadmap already says this; the
+replay is independent evidence for it.
+
+Two smaller follow-ups this surfaced, both real:
+
+1. `v13.1_label_body` still asserts inside its fixture loop and truncated
+   the M3-B row. D2 converted four such verifiers; convert this one too.
+2. `q6.cov` printed `Δ = +0.00` for a value that moved 1.2247 → 1.4142.
+   It is informational and excluded from the aggregate by design, so the
+   zero is correct as a *contribution* — but printing it in the Δ column
+   reads as "unchanged". Print the informational rows without a Δ.
