@@ -4170,3 +4170,272 @@ The corollary, from the fork: when you move a verifier into production,
 ask which of its inputs the production copy will *share with the thing it
 grades*. Those are the axes on which it has just gone blind, and they are
 what the test must keep deriving independently.
+
+## ADR-23 — Two instruments: the ratchets detect drift, the scoreboard selects an architecture
+
+**Status:** landed (the seam, the sink, the aggregator, the promotion
+rule, and one registered challenger). Additive by construction: with no
+`--placer` flag and no scoreboard invocation, emitted output is
+**byte-identical** on all thirteen fixtures and `baseline_lock`'s diff is
+EMPTY. No verifier was weakened, skipped or `#[ignore]`d; no budget
+literal moved.
+
+### The report
+
+`git diff 0ccf3f0 HEAD -- crates/spice2kicad/tests/baseline_lock.rs`
+removes **0 rows**. Twenty-seven commits, sixteen days, five attempted
+behaviour changes (ADR-19 M3, M4, M5′, roadmap B2, B3) — net emitted
+geometry change: **zero**. Every landed behaviour change was
+byte-identical by construction; every one that moved a symbol was
+reverted.
+
+That is not timidity. The suite records ~165 zero-slack per-fixture
+scalars plus a ~120-row exact-coordinate `baseline_lock`, and **every one
+of those literals was obtained by measuring the incumbent placer's own
+output** on eleven hand-tuned circuits. Against that reference,
+"regression" and "difference" are the same measurement. Pareto
+non-regression across ~165 correlated scalars of a globally-coupled,
+chaotic map is achievable essentially only by a no-op — which is exactly
+the observed history.
+
+The ratchets are not the bug. They are the project's genuine moat for
+the *shipping* path, and this ADR does not weaken them. The bug is that
+one instrument was being asked two different questions:
+
+| question | instrument | shape |
+| --- | --- | --- |
+| Did this change break what we shipped? | per-fixture zero-slack ratchets + `baseline_lock` | conjunctive, per fixture, no slack |
+| Is placer B better than placer A? | **the scoreboard** (this ADR) | aggregate, tier-ordered, sideways trades allowed *within* a tier |
+
+The second question *must* permit sideways trades: two different placers
+produce two different global optima and neither dominates on ~165
+correlated scalars. Refusing sideways trades there is not rigour, it is a
+guarantee that no architecture can ever be selected.
+
+### D1. The seam: `--placer=<name>`, champion by default
+
+`spice_layout::Placer` (`crates/spice-layout/src/placer.rs`) is a name
+registry; `LayoutOptions::placer` carries the selection; `place_seed` and
+`pack_rows` take it, and `refinement_meta` takes it too — it *re-runs the
+seed* to reproduce phase 4.5's pin mask, so a seam that missed it would
+silently desynchronise the refiner from the placer.
+
+`Placer::Champion` is `Default`, and the CLI's `--placer` defaults to
+`champion`, so the flagless path is the incumbent bit-for-bit.
+**Verified by byte-diff, not by inference:** the pristine `2d3c81b`
+binary and the seamed binary were run over all thirteen fixtures
+(`--no-layout-cache --no-verify`, fresh output directories each) and
+`diff -rq` reports no difference — including the two F0 defect locks,
+which refuse identically. `baseline_lock` is unchanged.
+
+An unregistered name is a hard CLI error listing the registry, never a
+silent fall-back to the champion. A non-default placer prints a stderr
+banner saying it is not the shipping placer.
+
+### D2. The measurement sink, and why the scoreboard is not a measuring binary
+
+Every verifier's metric function is a private `fn` in its own
+integration-test **binary**, and Rust integration tests cannot import one
+another. A separate measuring binary could therefore only (a) move ~2 kLOC
+of measurement code into `tests/common/`, or (b) re-implement it.
+
+(b) is duplication, and duplication of a measurement is the specific
+failure this project keeps paying for (MEMORY "verify what a number
+measures"): the scoreboard would silently drift from the verifier it
+claims to mirror. (a) also **doubles the runtime** — conversion is the
+dominant cost and is completely unmemoized, so a measuring binary
+re-converts all eleven fixtures for every metric it computes.
+
+So the measurement stays where the assertion is. `common::scoreboard::record`
+is a no-op unless `S2K_SCOREBOARD_DIR` is set; each verifier reports the
+number it *already computed*, on the line before the assertion that
+grades it. There is exactly one definition of every metric and it is the
+one the ratchet asserts on. The scoreboard binary
+(`crates/spice2kicad/tests/scoreboard.rs`) is a pure aggregator over
+those records, `#[ignore]`d so it never runs in the default `cargo test`
+path.
+
+Collecting a placer's row is therefore *the suite itself*, run with the
+sink on and `S2K_PLACER=<name>`:
+
+```sh
+just scoreboard-run champion
+just scoreboard-run m4-ydatum
+just scoreboard champion m4-ydatum
+```
+
+A challenger run is **expected to be red** — every zero-slack ratchet is
+calibrated on the champion's output. `--no-fail-fast` is what keeps the
+measurements complete anyway. Four verifiers that asserted *inside* their
+fixture loop were converted to collect-then-assert (`crossings`,
+`detour`, `v12`, symbol-overlap, `v11_pin_overlap`): same assertions, all
+of them reported. That is independently the ADR-19 M4 "gate-set lesson" —
+a truncated failure list reads as a shorter failure than it is.
+
+### D3. Coverage, and the tier-weighted aggregate
+
+Metrics recorded (34): Tier 0 — conversion refusal, the ADR-22 net-partition
+certificate, placer-level pin-on-pin, V11 wire/label-on-foreign-pin,
+symbol/symbol overlap. Tier 1 — V12, ten model-side V13 families, the real
+`kicad-cli` SVG-ink V13, V14 rail-pin (R-5) and V14 glyph-over-body
+(issue [3]). Tier 2 — V5, V16 (B and J), crossings, wire detour, Q3, Q5,
+F3/F4/F5/P5/F6, P11b locality. Informational — Q6 CoV (the project's own
+record says it is not a ratchet, so it is printed and excluded).
+
+**The aggregate is lexicographic `(T1, T2)`, not a weighted blend**, because
+that *is* CLAUDE.md's ordering rule ("never introduce a Tier-1 regression to
+improve a Tier-2 metric") lifted from per-fixture to aggregate. A single
+scalar `S = 1000·T1 + T2` is printed for readability together with the
+proof obligation that makes it faithful — `|T2| < 1000` — checked and
+printed rather than assumed.
+
+Within a tier, one violation is one point. That is the only non-arbitrary
+unit for a quantity whose ideal is zero. Two metrics are not counts and
+their units are a *choice*, which the report must be read against:
+
+* **wire detour** is a ratio; one point = one percentage point of excess
+  wire;
+* **F6** is a *distance* in grid cells, deliberately (a count would hide a
+  stub drifting from 2 cells to 12), so one point = one cell.
+
+Tier 0 is **not** aggregated. It stays per-fixture hard for champion and
+challenger alike — inviolable, and cheap to satisfy, since every fixture
+measures 0 today.
+
+### D4. The promotion rule
+
+A challenger is **promotable** when, against the champion:
+
+1. **no Tier-0 regression** — every Tier-0 metric is 0 on every fixture
+   (per-fixture hard, never traded, never aggregated); and
+2. the aggregate **`(T1, T2)` strictly improves lexicographically** —
+   `T1 < 0`, or `T1 == 0` and `T2 < 0`; and
+3. the comparison is **complete** — no metric cell present on one side
+   only, and no registered metric missing its champion measurement (a
+   verifier that aborted before recording anything would otherwise read
+   as "no change").
+
+On promotion, `baseline_lock` and **every** per-fixture literal are
+regenerated at the challenger's values, and the zero-slack regime resumes
+immediately against the new champion. There is no intermediate state in
+which both placers are graded.
+
+**The scoreboard does not grant the exception; it supplies the evidence.**
+The report prints the verdict and exits green either way. Promotion
+remains an owner decision on the printed table, exactly as CLAUDE.md's
+global-improvement escape requires.
+
+**Scope, stated so it cannot be borrowed.** This applies to
+**whole-placer comparisons only** — a registered `--placer` variant
+graded end-to-end. It is *not* available to an ordinary change. A commit
+that edits `cost.rs`, adds a router pass, or tweaks a constant is still
+governed by the per-fixture zero-slack ratchets and may not cite an
+aggregate improvement to raise a budget. The distinction is not
+sentiment: a whole placer is a different global optimum, where sideways
+trades are structural; an ordinary change is a perturbation of the *same*
+optimum, where a sideways trade is just a regression with an excuse.
+
+### D5. Validating the instrument against history — the ADR-19 M4 replay
+
+An instrument that has never been run against a known answer is not an
+instrument. ADR-19 M4 (the content-derived, `n`-independent Y datum) is
+registered as `--placer=m4-ydatum` — the code from `ed51164`, preserved
+on `wip/adr19-m4-pending-m3`, re-applied as a *challenger*, dead on the
+default path.
+
+Measured, whole suite each side, one machine, `--no-fail-fast`:
+
+| metric | tier | fixture | champion | m4-ydatum | Δ points |
+| --- | --- | --- | ---: | ---: | ---: |
+| `v13.4_text_mutual` | 1 | rc_phase_shift | 0 | 1 | **+1.00** |
+| `v13.6a_glyphtext` | 1 | rc_phase_shift | 1 | 0 | −1.00 |
+| `v13.ink_overlap` (real SVG ink) | 1 | rc_phase_shift | 1 | 0 | −1.00 |
+| **Tier 1 total** | | | | | **−1.00** |
+| `v5` | 2 | rc_phase_shift | 5 | 3 | −2.00 |
+| `v16.bends` | 2 | named_rails | 2 | 1 | −1.00 |
+| `v16.bends` | 2 | rc_phase_shift | 19 | 17 | −2.00 |
+| `v16.branches` | 2 | rc_phase_shift | 3 | 4 | +1.00 |
+| `crossings` | 2 | rc_phase_shift | 2 | 1 | −1.00 |
+| `detour` | 2 | common_emitter | 1.0135 | 1.0091 | −0.44 |
+| `detour` | 2 | diff_pair | 1.0556 | 1.0208 | −3.47 |
+| `detour` | 2 | multivibrator | 1.0481 | 1.0240 | −2.40 |
+| `detour` | 2 | named_rails | 1.1250 | 1.0345 | −9.05 |
+| `detour` | 2 | rc_phase_shift | 1.2313 | 1.1800 | −5.13 |
+| `q3` | 2 | rc_phase_shift | 4 | 3 | −1.00 |
+| `q5` | 2 | common_emitter | 3 | 4 | +1.00 |
+| `q5` | 2 | rc_phase_shift | 3 | 4 | +1.00 |
+| `f6` | 2 | multivibrator | 2 | **18** | **+16.00** |
+| `f6` | 2 | named_rails | 6 | 5 | −1.00 |
+| `f6` | 2 | rc_phase_shift | 23 | 27 | +4.00 |
+| `p11b.movers` | 2 | common_emitter+CB | 8 | 7 | −1.00 |
+| **Tier 2 total** | | | | | **−6.50** |
+
+Every other cell — 34 metrics × 11 fixtures — is identical on both sides.
+Tier 0 is clean on both. Coverage is 11/11 on both sides for every
+per-fixture metric.
+
+**Verdict: `m4-ydatum` is PROMOTABLE** (`T1 = −1.00`, `T2 = −6.50`,
+`S = −1006.50`), and this is a real result, not a tuned one — the
+weighting is fixed by the tier order before the measurement, and the two
+non-count units are stated above.
+
+**What the replay actually establishes, stated carefully.**
+
+1. **The instrument reproduces the known answer.** ADR-19's M4 post-mortem
+   records the fatal defect as `flow_geometry::stub_lateral_run_within_ratchet`,
+   `multivibrator` F6 budget 2, measured 18. The scoreboard reports exactly
+   `f6 / multivibrator: 2 → 18`, from an independent run. It also reproduces
+   M4's own commit-message claims — `named_rails` V16 B 2→1 and P11b
+   `common_emitter` 8→7 — which that commit lowered its literals for. The
+   instrument is measuring what it says it measures.
+2. **The ratchets were not "wrong" about M4.** M4 *does* regress a Tier-2
+   ratchet, badly, on one fixture. Under the per-fixture rule that is a
+   revert, and the revert was correct *for a change presented as an
+   ordinary commit*. What the scoreboard adds is the information the
+   per-fixture rule structurally cannot carry: that the same change also
+   removes a Tier-1 defect and improves wire detour on five of eleven
+   fixtures, V5 and Q3 and crossings on the hardest fixture, and locality
+   (the thing ADR-19 exists to fix) on the fixture ADR-19 measures. Both
+   readings are true. They answer different questions.
+3. **The T1 verdict is thin and the T2 verdict is unit-sensitive. Say so.**
+   T1 = −1.00 rests on a single fixture (`rc_phase_shift`) and on treating
+   `v13.6a_glyphtext` and `v13.ink_overlap` as two defects; they are
+   plausibly two *views* of one crowded region, in which case the honest
+   T1 is 0 and T2 decides. T2 = −6.50 is the residue of two large opposing
+   terms (detour −20.50, F6 +19.00), so it flips under a different F6 or
+   detour unit. **A promotable verdict this close is a reason to look at
+   the table, not to skip it.** The scalar's job is to focus attention,
+   not to replace judgement — which is why the promotion rule ends at the
+   owner and not at a green test.
+4. **The general finding for the roadmap.** The negative results recorded
+   against M3/M4/M5′/B2/B3 were obtained under the per-fixture rule. At
+   least one of them (M4) does *not* survive re-measurement under the
+   architecture-selection rule. The other four have not been replayed and
+   this ADR claims nothing about them; replaying them is now cheap
+   (register a `--placer` variant, run two suites) and is the recommended
+   next use of the instrument.
+
+**M4 is NOT landed by this ADR.** It is registered as a graded challenger
+and remains off the default path. Promoting it means accepting the
+`multivibrator` F6 regression as the cost of the rest, regenerating
+`baseline_lock` and every literal at its values, and — per ADR-19's own
+post-mortem — doing so with `flow_geometry` in the gate set. That is an
+owner decision, and the table above is what it should be taken on.
+
+### Known limits of the instrument
+
+* **It grades what the verifiers measure.** A property no verifier
+  measures is invisible to the aggregate exactly as it is invisible to
+  the ratchets. Coverage is printed per metric so the blind spots are
+  visible; V1, V2 (ERC), V15 and the netlist-equivalence suite are
+  currently pass/fail only and contribute nothing.
+* **A cell absent from *both* sides is silent.** The report flags
+  one-sided cells and fully-uninstrumented metrics, but two runs that
+  aborted at the same place would agree vacuously.
+* **`f0_defects`, `layout_cache`, `symbol_mapping` and `spec_version`
+  keep their own conversion drivers** and are not placer-aware, so a
+  challenger run leaves them on the champion. That is deliberate — they
+  grade CLI behaviour, not geometry — but it means the two F0 defect
+  locks are not part of a challenger's row.
+* **Aggregation hides which fixture paid.** Always read the table; the
+  scalar exists to focus attention, not to replace it.

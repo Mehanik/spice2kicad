@@ -37,6 +37,7 @@ fn refine_opts(seed: u64) -> LayoutOptions {
         // tuning happens against `examples/` separately.
         fr_iters: 30,
         refine_iterations: 500,
+        ..LayoutOptions::default()
     }
 }
 

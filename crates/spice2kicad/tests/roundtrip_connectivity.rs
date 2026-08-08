@@ -433,7 +433,9 @@ fn emitted_geometry_round_trips_to_source_netlist_across_fixtures() {
             terminals.len(),
         );
 
-        for f in check_partition(&terminals, &geometry) {
+        let findings = check_partition(&terminals, &geometry);
+        common::scoreboard::record_count("t0.partition", name, findings.len());
+        for f in findings {
             failures.push(format!("{name}: {f}"));
         }
     }

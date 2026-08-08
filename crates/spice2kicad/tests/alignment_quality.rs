@@ -344,6 +344,7 @@ fn alignment_near_miss_within_budget_across_fixtures() {
         let elems = align_elems(name);
         let viol = q5_near_misses(&elems);
         let count = u32::try_from(viol.len()).unwrap_or(u32::MAX);
+        common::scoreboard::record_count("q5", name, viol.len());
         if std::env::var("S2K_Q5_DUMP").is_ok() {
             println!("(\"{name}\", {count}),");
             for (a, b) in &viol {

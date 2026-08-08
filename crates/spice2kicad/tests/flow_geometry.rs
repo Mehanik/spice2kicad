@@ -790,6 +790,8 @@ fn flow_monotonicity_and_terminal_lanes_within_ratchet() {
         let f = load(name);
         let inv = f3_inversions(&f);
         let viol = f4_violations(&f);
+        common::scoreboard::record_count("f3", name, inv.len());
+        common::scoreboard::record_count("f4", name, viol.len());
         if std::env::var("S2K_FLOW_DUMP").is_ok() {
             println!("(\"{name}\", {}, {}),", inv.len(), viol.len());
             for (u, v) in &inv {
@@ -906,6 +908,8 @@ fn series_pose_and_terminal_order_within_ratchet() {
         let f = load(name);
         let f5 = f5_violations(&f);
         let p5 = p5_violations(&f);
+        common::scoreboard::record_count("f5", name, f5.len());
+        common::scoreboard::record_count("p5", name, p5.len());
         if std::env::var("S2K_FLOW_DUMP").is_ok() {
             println!("(\"{name}\", {}, {}),", f5.len(), p5.len());
             for v in &f5 {
@@ -1055,6 +1059,7 @@ fn stub_lateral_run_within_ratchet() {
         let f = load(name);
         let runs = f6_stub_lateral_runs(&f);
         let worst = runs.iter().map(|(_, c)| *c).max().unwrap_or(0);
+        common::scoreboard::record_count("f6", name, worst as usize);
         if std::env::var("S2K_FLOW_DUMP").is_ok() {
             println!("(\"{name}\", {worst}),  // {runs:?}");
         }

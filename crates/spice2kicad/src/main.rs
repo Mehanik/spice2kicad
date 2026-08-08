@@ -56,6 +56,17 @@ struct Cli {
     #[arg(long)]
     refine_iterations: Option<u32>,
 
+    /// Which registered placement engine to run (ADR-23).
+    ///
+    /// `champion` (the default) is the shipping placer, bit-for-bit —
+    /// omitting the flag changes nothing. Other names are *challengers*:
+    /// alternative placers registered so the champion/challenger
+    /// scoreboard can grade them end-to-end against the same verifiers.
+    /// A challenger is not a supported output mode and is not a licence
+    /// to bypass a ratchet; see `docs/layout-adr.md` ADR-23.
+    #[arg(long, default_value = "champion", value_parser = parse_placer)]
+    placer: spice_layout::Placer,
+
     /// Disable the position-stability layout cache (ADR-4). By default
     /// the converter reads `<basename>.layout.json` next to the output
     /// `.kicad_sch` (if present) to keep untouched parts in place across
@@ -85,6 +96,17 @@ struct Cli {
     /// Turn it off when `kicad-cli` is unavailable or the cost matters.
     #[arg(long)]
     no_verify: bool,
+}
+
+/// `--placer` value parser: resolve a name against the registry, and
+/// list the registered names on a miss rather than failing silently.
+fn parse_placer(name: &str) -> Result<spice_layout::Placer, String> {
+    spice_layout::Placer::from_name(name).ok_or_else(|| {
+        format!(
+            "unknown placer `{name}`; registered placers: {}",
+            spice_layout::Placer::known_names()
+        )
+    })
 }
 
 fn load_library(paths: &[PathBuf]) -> Result<Library> {
@@ -223,8 +245,16 @@ fn emit_schematic_target(
     let opts = LayoutOptions {
         refine: !cli.no_refine,
         refine_iterations: cli.refine_iterations.unwrap_or(200),
+        placer: cli.placer,
         ..LayoutOptions::default()
     };
+    if cli.placer != spice_layout::Placer::default() {
+        eprintln!(
+            "spice2kicad: placer `{}` — {} (NOT the shipping placer; ADR-23 challenger)",
+            cli.placer.name(),
+            cli.placer.description()
+        );
+    }
 
     // Position-stability sidecar (ADR-4): when the cache is enabled and
     // an output path is known, load `<basename>.layout.json` (if present)
@@ -300,7 +330,7 @@ fn emit_schematic_target(
     // the routing-aware orientation-refinement phase below; it needs the
     // same `CheckedNetlist`, so compute it before `place_with_hint`
     // consumes `checked` by value.
-    let refine_meta = match spice_layout::refinement_meta(&checked, &hint) {
+    let refine_meta = match spice_layout::refinement_meta(&checked, &hint, opts.placer) {
         Ok(m) => m,
         Err(diags) => {
             surface_diags(&diags, sources);

@@ -283,6 +283,10 @@ fn v12_crossing_budget(_name: &str) -> usize {
 
 #[test]
 fn v12_wires_do_not_cross_foreign_symbol_bodies() {
+    // Collect-then-assert: report every fixture, not just the first
+    // offender (ADR-19 M4 "gate-set lesson"), and keep the scoreboard
+    // record complete for a challenger that trips this Tier-1 gate.
+    let mut failures: Vec<String> = Vec::new();
     for name in SHEETS {
         let src = fixtures_dir().join(format!("{name}.cir"));
         let tmp = tempdir(name);
@@ -302,12 +306,19 @@ fn v12_wires_do_not_cross_foreign_symbol_bodies() {
                 }
             }
         }
+        common::scoreboard::record_count("v12", name, crossings);
         let budget = v12_crossing_budget(name);
-        assert!(
-            crossings <= budget,
-            "{name}: {crossings} foreign-body wire crossings > V12 budget {budget}",
-        );
+        if crossings > budget {
+            failures.push(format!(
+                "{name}: {crossings} foreign-body wire crossings > V12 budget {budget}"
+            ));
+        }
     }
+    assert!(
+        failures.is_empty(),
+        "V12 regressions:\n  {}",
+        failures.join("\n  "),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -628,6 +639,7 @@ fn interior_grid_coords(seg: &(Pt, Pt)) -> Vec<(i64, i64)> {
 
 #[test]
 fn v11_pin_overlap_is_a_placer_bug() {
+    let mut failures: Vec<String> = Vec::new();
     // Companion to [`v11_no_foreign_pin_coincidence`]: surfaces any
     // *placer*-level pin-on-pin overlap (two distinct nets at the same
     // world coord before the router runs) explicitly. The V14
@@ -649,11 +661,18 @@ fn v11_pin_overlap_is_a_placer_bug() {
                 overlaps += 1;
             }
         }
-        assert_eq!(
-            overlaps, 0,
-            "{name}: expected 0 placer-level pin overlap(s), found {overlaps}"
-        );
+        common::scoreboard::record_count("t0.v11_pin_overlap", name, overlaps);
+        if overlaps > 0 {
+            failures.push(format!(
+                "{name}: expected 0 placer-level pin overlap(s), found {overlaps}"
+            ));
+        }
     }
+    assert!(
+        failures.is_empty(),
+        "V11 placer-level pin overlaps:\n  {}",
+        failures.join("\n  "),
+    );
 }
 
 /// V11 is a correctness invariant — KiCad merges any wire endpoint or
@@ -906,6 +925,7 @@ fn v11_no_foreign_pin_coincidence() {
             }
         }
 
+        common::scoreboard::record_count("t0.v11_wire_label", name, failures.len());
         let budget = v11_violation_budget(name);
         if failures.len() > budget {
             hard_failures.push(format!(
@@ -1114,6 +1134,7 @@ fn v13_labels_dont_overlap_symbol_body() {
                 }
             }
         }
+        common::scoreboard::record_count("v13.1_label_body", name, hits);
         let budget = body_overlap_budget(name);
         assert!(
             hits <= budget,
@@ -1147,6 +1168,7 @@ fn v13_labels_dont_overlap_property_text() {
                 }
             }
         }
+        common::scoreboard::record_count("v13.2_label_prop", name, hits);
         let b = budget(name);
         assert!(
             hits <= b,
@@ -1225,6 +1247,7 @@ fn v13_label_anchor_not_on_foreign_wire_interior() {
             }
         }
         let b = budget(name);
+        common::scoreboard::record_count("v13.3_label_wire_interior", name, hits);
         if hits > b {
             hard_failures.push(format!(
                 "{name}: {hits} label↔foreign-wire-interior coincidences > V13(3) budget {b}"
@@ -1366,6 +1389,7 @@ fn sheet_port_glyphs_clear_neighbour_text() {
                 }
             }
         }
+        common::scoreboard::record_count("v13.glyph_neighbour_value", name, hits);
         let b = budget(name);
         assert!(
             hits <= b,
@@ -1491,6 +1515,7 @@ fn v13_property_text_no_pin_text_overlap() {
             }
         }
         let b = budget(name);
+        common::scoreboard::record_count("v13.5_prop_pintext", name, hits);
         if hits > b {
             failures.push(format!(
                 "{name}: {hits} property↔pin-text overlaps > V13(5) budget {b}"
@@ -1534,6 +1559,7 @@ fn v13_labels_clear_power_glyph_value_text() {
                 }
             }
         }
+        common::scoreboard::record_count("v13.6_label_glyphvalue", name, hits);
         if hits > 0 {
             failures.push(format!(
                 "{name}: {hits} label↔glyph-value overlaps > budget 0"
@@ -1581,6 +1607,7 @@ fn v13_labels_no_mutual_overlap() {
                 }
             }
         }
+        common::scoreboard::record_count("v13.8_label_label", name, hits);
         if hits > 0 {
             failures.push(format!("{name}: {hits} label↔label overlaps > budget 0"));
         }
@@ -1621,6 +1648,7 @@ fn v13_labels_clear_pin_text() {
                 }
             }
         }
+        common::scoreboard::record_count("v13.7_label_pintext", name, hits);
         if hits > 0 {
             failures.push(format!("{name}: {hits} label↔pin-text overlaps > budget 0"));
         }
@@ -1662,6 +1690,7 @@ fn v13_property_text_no_mutual_overlap() {
             }
         }
         let b = budget(name);
+        common::scoreboard::record_count("v13.4_text_mutual", name, hits);
         if hits > b {
             failures.push(format!(
                 "{name}: {hits} visible-text mutual overlaps > V13(4) budget {b}"
@@ -1835,6 +1864,7 @@ fn v13_power_glyph_value_text_clear_of_bodies_and_pintext() {
         // deferred decoration-phase nudge defect is excluded by name in
         // `tests/common/xfail.rs`, which fails the test the day that
         // fixture starts passing.
+        common::scoreboard::record_count("v13.6a_glyphtext", name, hits);
         xf.record(
             name,
             (hits > b)
@@ -1876,6 +1906,7 @@ fn v13_pwr_flag_graphic_clear_of_power_glyphs() {
             }
         }
         let b = budget(name);
+        common::scoreboard::record_count("v13.6b_pwrflag_glyph", name, hits);
         if hits > b {
             failures.push(format!(
                 "{name}: {hits} PWR_FLAG↔power-glyph graphic overlaps > V13(6b) budget {b}"
@@ -2073,6 +2104,7 @@ fn v5_first_segment_extends_outward() {
                     )
                 })
                 .collect();
+        common::scoreboard::record_count("v5", name, violations.len());
         let budget = v5_violation_budget(name);
         if violations.len() > budget {
             hard_failures.push(format!(

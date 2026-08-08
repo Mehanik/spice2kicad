@@ -14,6 +14,7 @@
 
 #![allow(dead_code)]
 
+pub mod scoreboard;
 pub mod sexp;
 pub mod text_model;
 pub mod xfail;
@@ -465,6 +466,24 @@ fn split_suffix(s: &str) -> (&str, &str) {
 
 // --- driver bits ---------------------------------------------------------
 
+/// The `--placer` flag every test-side conversion should carry, if any.
+///
+/// Empty on the normal path, so a default `cargo test` run drives the
+/// champion placer with the flag *absent* — byte-identical to a build
+/// that has no seam at all. Setting `S2K_PLACER=<name>` re-runs the
+/// whole suite against a registered challenger; that is how the
+/// champion/challenger scoreboard collects a challenger's measurements
+/// (ADR-23). Unknown names are rejected by the CLI, not silently
+/// ignored.
+pub fn placer_args() -> Vec<String> {
+    match std::env::var("S2K_PLACER") {
+        Ok(name) if !name.trim().is_empty() => {
+            vec!["--placer".to_string(), name.trim().to_string()]
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// Run `spice2kicad` against a fixture, return the path to the .kicad_sch.
 pub fn spice_to_kicad(fixture: &Path, out_dir: &Path) -> Result<std::path::PathBuf, String> {
     let stem = fixture.file_stem().unwrap().to_string_lossy();
@@ -477,8 +496,8 @@ pub fn spice_to_kicad(fixture: &Path, out_dir: &Path) -> Result<std::path::PathB
         .expect("workspace root")
         .to_path_buf();
     let lib_dir = workspace.join("crates/kicad-symbols/tests/fixtures");
-    let status = Command::new(bin)
-        .arg(fixture)
+    let mut cmd = Command::new(bin);
+    cmd.arg(fixture)
         .arg("-t")
         .arg("schematic")
         .arg("-o")
@@ -491,8 +510,15 @@ pub fn spice_to_kicad(fixture: &Path, out_dir: &Path) -> Result<std::path::PathB
         .arg(lib_dir.join("Amplifier_Operational.kicad_sym"))
         .arg("-l")
         .arg(lib_dir.join("power.kicad_sym"))
+        .args(placer_args());
+    let status = cmd
         .status()
         .map_err(|e| format!("failed to invoke spice2kicad: {e}"))?;
+    // Tier-0 scoreboard signal: a placer that cannot produce a file at
+    // all is the strongest possible regression, and it is the one thing
+    // no downstream metric can report (every one of them needs the file
+    // this call failed to write).
+    scoreboard::record_count("t0.convert_fail", &stem, usize::from(!status.success()));
     if !status.success() {
         return Err(format!("spice2kicad exited with {status}"));
     }

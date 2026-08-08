@@ -300,6 +300,7 @@ fn balance_within_ceiling_across_fixtures() {
     let mut failures = Vec::new();
     for &(name, _) in Q6_REFERENCE {
         let q6 = q6_balance(name);
+        common::scoreboard::record("q6.cov", name, q6);
         if std::env::var("S2K_Q6_DUMP").is_ok() {
             println!("(\"{name}\", {q6:.4}),");
         }

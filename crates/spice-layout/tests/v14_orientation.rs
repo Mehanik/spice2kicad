@@ -169,6 +169,7 @@ fn v14_holds_across_many_sa_seeds() {
             // A healthy budget so the rotate / mirror-Y moves fire many
             // times — the gate must hold every single one.
             refine_iterations: 1500,
+            ..LayoutOptions::default()
         };
         let check = v14_violations(&checked, lib, &opts);
         assert!(

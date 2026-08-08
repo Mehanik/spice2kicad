@@ -316,6 +316,7 @@ fn flow_monotonicity_within_budget_across_fixtures() {
         let elems = flow_elems(name);
         let viol = q3_violations(&elems);
         let count = u32::try_from(viol.len()).unwrap_or(u32::MAX);
+        common::scoreboard::record_count("q3", name, viol.len());
         if std::env::var("S2K_Q3_DUMP").is_ok() {
             println!("(\"{name}\", {count}),");
             for (u, v) in &viol {

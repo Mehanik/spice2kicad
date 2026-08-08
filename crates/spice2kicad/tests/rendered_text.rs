@@ -283,6 +283,7 @@ fn rendered_text_does_not_overlap_across_fixtures() {
                 }
             }
         }
+        common::scoreboard::record_count("v13.ink_overlap", fixture, hits);
         xf.record(
             fixture,
             (hits > budget(fixture)).then(|| format!("{fixture}: {hits} rendered-text overlaps")),

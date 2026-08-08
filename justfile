@@ -30,6 +30,35 @@ test:
     # § "M4 reverted" — gate-set lesson).
     bash -c 'ulimit -v ${RUST_TEST_MAX_VSZ_KB:-4194304} && cargo test --workspace --no-fail-fast -- --test-threads=${RUST_TEST_THREADS:-2}'
 
+# --- champion/challenger scoreboard (ADR-23) --------------------------------
+#
+# The ratchets answer "did this change break what we shipped?". The
+# scoreboard answers "is placer B better than placer A?" — a different
+# question needing a different instrument. It is for WHOLE-PLACER
+# comparisons only and is NOT a licence to bypass a ratchet.
+#
+# Collect one placer's measurements. The verifiers themselves report the
+# numbers they already compute, so this is just the suite with the sink
+# switched on. A challenger run is EXPECTED to be red (every zero-slack
+# ratchet is calibrated on the champion's output); `--no-fail-fast` is
+# what keeps the measurements complete anyway.
+scoreboard-run placer="champion" out="target/scoreboard":
+    rm -rf {{out}}/{{placer}}
+    mkdir -p {{out}}/{{placer}}
+    -bash -c 'ulimit -v ${RUST_TEST_MAX_VSZ_KB:-8388608} && \
+      S2K_PLACER={{placer}} \
+      S2K_SCOREBOARD_DIR="$PWD/{{out}}/{{placer}}" \
+      cargo test --workspace --no-fail-fast -- --test-threads=${RUST_TEST_THREADS:-2}'
+
+# Print the fixture x metric table, the tier-weighted aggregate, and the
+# promotion verdict for two previously collected runs.
+scoreboard champion="champion" challenger="m4-ydatum" out="target/scoreboard":
+    S2K_SCOREBOARD_CHAMPION="$PWD/{{out}}/{{champion}}" \
+    S2K_SCOREBOARD_CHALLENGER="$PWD/{{out}}/{{challenger}}" \
+    S2K_SCOREBOARD_CHAMPION_NAME={{champion}} \
+    S2K_SCOREBOARD_CHALLENGER_NAME={{challenger}} \
+    cargo test -p spice2kicad --test scoreboard -- --ignored --nocapture
+
 # Round-trip functional tests. Requires kicad-cli on PATH (skipped otherwise;
 # set REQUIRE_KICAD_CLI=1 to fail-hard instead). Most are #[ignore]d until
 # the schematic emitter lands.

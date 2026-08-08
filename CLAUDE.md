@@ -640,6 +640,47 @@ current)` helper that prints "you may lower this to N" on pass and
 "regression: rose to N" on fail, replacing the hand-maintained
 literals above.
 
+### The ratchets are one of TWO instruments (ADR-23)
+
+The ratchets answer **"did this change break what we shipped?"** —
+per-fixture, zero-slack, conjunctive. That is the gate for every
+ordinary change and nothing above is relaxed.
+
+They cannot answer **"is placer B better than placer A?"**, and the
+reason is structural, not a matter of will: every one of the ~165
+budget literals plus the ~120-row `baseline_lock` was obtained by
+measuring *the incumbent placer's own output* on eleven hand-tuned
+circuits. Against that reference "regression" and "difference" are the
+same measurement, so Pareto non-regression across ~165 correlated
+scalars of a globally-coupled chaotic map is achievable essentially
+only by a no-op. (Evidence: `git diff 0ccf3f0 HEAD --
+crates/spice2kicad/tests/baseline_lock.rs` removes **0 rows** across
+27 commits and five attempted behaviour changes.)
+
+The second question has its own instrument: the **champion/challenger
+scoreboard**, `crates/spice2kicad/tests/scoreboard.rs`, driven by
+`--placer=<name>` and `just scoreboard-run` / `just scoreboard`. Tier 0
+stays per-fixture hard for both sides; Tier 1 and Tier 2 are judged in
+**aggregate**, lexicographically (`T1` then `T2`), so a challenger may
+make sideways trades *within* a tier. On promotion, `baseline_lock` and
+every literal are regenerated at the challenger's values and the
+zero-slack regime resumes.
+
+**The scoreboard is NOT a licence to bypass a ratchet.** It applies to
+whole-placer comparisons only — a registered `--placer` variant graded
+end-to-end. A commit that edits `cost.rs`, adds a router pass or tweaks
+a constant is still governed by the per-fixture ratchets above and may
+not cite an aggregate improvement to raise a budget. A whole placer is a
+different global optimum, where sideways trades are structural; an
+ordinary change perturbs the *same* optimum, where a sideways trade is a
+regression with an excuse. The scoreboard also does not grant the
+exception — it prints evidence; promotion stays an owner decision, as
+the global-improvement escape already requires.
+
+Full rule, coverage, unit choices and the ADR-19 M4 replay (which the
+instrument scores **net-better** in aggregate, while reproducing the
+`multivibrator` F6 2→18 regression that got it reverted): ADR-23.
+
 Summary (full definitions + verifiers: `docs/invariants.md`):
 
 | Invariant | One-line                                                         | Tier |

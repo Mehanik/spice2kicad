@@ -115,7 +115,8 @@ fn convert(src: &Path, out: &Path, no_cache: bool) {
         .arg("-l")
         .arg(lib_dir.join("Amplifier_Operational.kicad_sym"))
         .arg("-l")
-        .arg(lib_dir.join("power.kicad_sym"));
+        .arg(lib_dir.join("power.kicad_sym"))
+        .args(common::placer_args());
     if no_cache {
         cmd.arg("--no-layout-cache");
     }
@@ -746,6 +747,7 @@ fn cache_less_placement_perturbation_within_bound() {
         let before = poses(&parse_sch(&base_out));
         let after = poses(&parse_sch(&grown_out));
         let movers = residual_movers(&before, &after);
+        common::scoreboard::record_count("p11b.movers", case.name, movers.len());
         if movers.len() > case.mover_budget {
             failures.push(format!(
                 "{}: adding `{}` perturbed {} pre-existing user symbol(s) cache-lessly \

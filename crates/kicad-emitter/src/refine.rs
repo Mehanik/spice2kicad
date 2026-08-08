@@ -1486,13 +1486,14 @@ mod severed_guard_tests {
             spice_parser::parse(&src, spice_diagnostics::FileId(0)).expect("parse fixture");
         let resolved = spice_resolve::resolve(&outcome.netlist, &library).expect("resolve");
         let (checked, _) = spice_policy::check(resolved).expect("policy check");
-        let meta = spice_layout::refinement_meta(&checked, &spice_layout::Hint::default())
-            .expect("refinement meta");
         let opts = LayoutOptions {
             refine: true,
             refine_iterations: 200,
             ..LayoutOptions::default()
         };
+        let meta =
+            spice_layout::refinement_meta(&checked, &spice_layout::Hint::default(), opts.placer)
+                .expect("refinement meta");
         let placement =
             spice_layout::place_with_hint(checked, &library, &opts, &spice_layout::Hint::default())
                 .expect("place");

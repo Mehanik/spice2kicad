@@ -612,6 +612,8 @@ fn bend_and_branch_counts_within_ratchet_across_fixtures() {
                 continue;
             }
         };
+        common::scoreboard::record_count("v16.bends", name, c.bends as usize);
+        common::scoreboard::record_count("v16.branches", name, c.branches as usize);
 
         let &(_, b_budget, j_budget) = BEND_BRANCH_BUDGETS
             .iter()

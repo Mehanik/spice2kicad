@@ -757,6 +757,10 @@ fn resolved_world_extent(library: &Library, sym: &Value) -> Option<(String, Bbox
 #[test]
 fn no_symbol_symbol_overlap_across_fixtures() {
     let library = load_test_library();
+    // Collect-then-assert (Tier 0): every fixture is measured and
+    // recorded before the terminal assertion, so a failure reports the
+    // whole suite rather than the first offender.
+    let mut failures: Vec<String> = Vec::new();
     for (name, path) in fixtures() {
         let tmp = tempdir(name);
         let sch = common::spice_to_kicad(&path, &tmp).expect("spice2kicad");
@@ -765,20 +769,25 @@ fn no_symbol_symbol_overlap_across_fixtures() {
             .into_iter()
             .filter_map(|sym| resolved_world_extent(&library, sym))
             .collect();
+        let mut overlaps = 0usize;
         for i in 0..bboxes.len() {
             for j in (i + 1)..bboxes.len() {
-                assert!(
-                    !bboxes[i].1.intersects(&bboxes[j].1),
-                    "{}: symbols {} and {} overlap (resolved extents {:?} / {:?})",
-                    name,
-                    bboxes[i].0,
-                    bboxes[j].0,
-                    bboxes[i].1,
-                    bboxes[j].1,
-                );
+                if bboxes[i].1.intersects(&bboxes[j].1) {
+                    overlaps += 1;
+                    failures.push(format!(
+                        "{}: symbols {} and {} overlap (resolved extents {:?} / {:?})",
+                        name, bboxes[i].0, bboxes[j].0, bboxes[i].1, bboxes[j].1,
+                    ));
+                }
             }
         }
+        common::scoreboard::record_count("t0.sym_overlap", name, overlaps);
     }
+    assert!(
+        failures.is_empty(),
+        "symbol/symbol overlap:\n{}",
+        failures.join("\n")
+    );
 }
 
 /// World-frame AABB of a placed symbol's *body* only (no pin reach),
@@ -1490,6 +1499,11 @@ fn wire_detour_within_budget_across_fixtures() {
         // Tier-2 headroom F0 exists to expose. Ratchet DOWN.
         ("rc_phase_shift", 1.2314),
     ];
+    // Collect-then-assert: an in-loop `assert!` truncates the report at
+    // the first offending fixture, which is the ADR-19 M4 "gate-set
+    // lesson" in miniature — and it also loses every later fixture's
+    // scoreboard record. Same assertions, all of them reported.
+    let mut failures: Vec<String> = Vec::new();
     for (name, path) in fixtures() {
         let tmp = tempdir(name);
         let sch = common::spice_to_kicad(&path, &tmp).expect("spice2kicad");
@@ -1501,6 +1515,7 @@ fn wire_detour_within_budget_across_fixtures() {
              fixture, which is exactly the vacuity this verifier was rebuilt to remove",
         );
         let ratio = total / baseline;
+        common::scoreboard::record("detour", name, ratio);
         // The denominator is a true lower bound on any rectilinear route
         // of this ink, so a sub-1.0 reading is impossible for a correct
         // measurement and means the METRIC has broken (a net whose pins
@@ -1521,12 +1536,18 @@ fn wire_detour_within_budget_across_fixtures() {
             .iter()
             .find(|(n, _)| *n == name)
             .expect("budget for fixture");
-        assert!(
-            ratio <= budget,
-            "{name}: wire_detour = {ratio:.3} > budget {budget:.3} \
-             (emitted wire = {total:.2} mm, rectilinear ideal = {baseline:.2} mm)",
-        );
+        if ratio > budget {
+            failures.push(format!(
+                "{name}: wire_detour = {ratio:.3} > budget {budget:.3} \
+                 (emitted wire = {total:.2} mm, rectilinear ideal = {baseline:.2} mm)",
+            ));
+        }
     }
+    assert!(
+        failures.is_empty(),
+        "wire-detour budget exceeded:\n{}",
+        failures.join("\n")
+    );
 }
 
 /// True wire-segment crossings: count pairs of wires that intersect
@@ -1597,11 +1618,14 @@ fn crossing_count_within_budget_across_fixtures() {
         // long ladder + gain stage crosses twice. Ratchet DOWN.
         ("rc_phase_shift", 2),
     ];
+    // Collect-then-assert: see `wire_detour_within_budget_across_fixtures`.
+    let mut failures: Vec<String> = Vec::new();
     for (name, path) in fixtures() {
         let tmp = tempdir(name);
         let sch = common::spice_to_kicad(&path, &tmp).expect("spice2kicad");
         let root = parse_sch(&sch);
         let crossings = count_wire_crossings(&root);
+        common::scoreboard::record_count("crossings", name, crossings as usize);
         if std::env::var_os("S2K_QUALITY_DUMP").is_some() {
             println!("crossings (\"{name}\", {crossings}),");
             continue;
@@ -1610,11 +1634,17 @@ fn crossing_count_within_budget_across_fixtures() {
             .iter()
             .find(|(n, _)| *n == name)
             .expect("budget for fixture");
-        assert!(
-            crossings <= budget,
-            "{name}: {crossings} wire crossings > budget {budget}",
-        );
+        if crossings > budget {
+            failures.push(format!(
+                "{name}: {crossings} wire crossings > budget {budget}"
+            ));
+        }
     }
+    assert!(
+        failures.is_empty(),
+        "wire-crossing budget exceeded:\n{}",
+        failures.join("\n")
+    );
 }
 
 #[test]
@@ -1802,6 +1832,7 @@ fn v14_rail_pin_faces_rail() {
                 });
             }
         }
+        common::scoreboard::record_count("v14.rail_pin", name, usize::from(violation.is_some()));
         xf.record(name, violation);
     }
     xf.finish();
@@ -2402,6 +2433,7 @@ fn no_power_glyph_foreign_body_overlap_across_fixtures() {
         // re-exposes the deferred issue-[3] defect is excluded by name in
         // `tests/common/xfail.rs`, which fails the test the day that
         // fixture starts passing.
+        common::scoreboard::record_count("v14.glyph_body", name, overlaps);
         let budget = power_glyph_foreign_body_overlap_budget(name);
         xf.record(
             name,
