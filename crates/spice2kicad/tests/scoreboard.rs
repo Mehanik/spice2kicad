@@ -341,8 +341,26 @@ fn report(champ_dir: &Path, chal_dir: &Path, champ_name: &str, chal_name: &str) 
         .collect();
 
     // --- Tier 0: per-fixture hard, both sides -------------------------
+    //
+    // Three lists, not two. The absolute state of each side is reported
+    // (`*_bad`), but the *promotion gate* keys off `t0_worse` — the
+    // cells where the challenger is strictly worse than the champion.
+    //
+    // That distinction became load-bearing when `f0_defects` was made
+    // placer-aware: the `shunt_feedback_amp` Tier-0 net-merge refusal is
+    // now instrumented, and it is non-zero **on the champion**. ADR-23
+    // could write the gate as "every Tier-0 metric is 0" only because it
+    // also recorded that Tier 0 was "cheap to satisfy, since every
+    // fixture measures 0 today" — an artefact of that fixture being
+    // uninstrumented. Keeping the absolute form would now veto EVERY
+    // challenger, including one that leaves the refusal exactly as it
+    // found it, which turns the project's strongest acceptance test
+    // (ADR-20) into a gate no placer can pass. "No Tier-0 regression" is
+    // the rule; against an all-zero champion the two forms coincide
+    // exactly, so nothing about the M4 replay's verdict changes.
     let mut t0_champ_bad: Vec<String> = Vec::new();
     let mut t0_chal_bad: Vec<String> = Vec::new();
+    let mut t0_worse: Vec<String> = Vec::new();
     for met in METRICS.iter().filter(|m| m.tier == Tier::T0) {
         for f in &fixtures {
             let k = (met.id.to_string(), f.clone());
@@ -351,6 +369,13 @@ fn report(champ_dir: &Path, chal_dir: &Path, champ_name: &str, chal_name: &str) 
             }
             if chal.get(&k).is_some_and(|v| *v > 0.0) {
                 t0_chal_bad.push(format!("{}/{f} = {}", met.id, chal[&k]));
+            }
+            // One-sided cells are caught by the `missing` check below,
+            // which blocks the verdict outright; only compare pairs.
+            if let (Some(&a), Some(&b)) = (champ.get(&k), chal.get(&k))
+                && b > a + 1e-9
+            {
+                t0_worse.push(format!("{}/{f}: {a} -> {b}", met.id));
             }
         }
     }
@@ -442,6 +467,14 @@ fn report(champ_dir: &Path, chal_dir: &Path, champ_name: &str, chal_name: &str) 
             t0_chal_bad.join(", ")
         }
     );
+    println!(
+        "  regressed  : {}",
+        if t0_worse.is_empty() {
+            "none (no Tier-0 cell is worse than the champion)".to_string()
+        } else {
+            t0_worse.join(", ")
+        }
+    );
 
     println!("\nAggregate (lower is better; Δ = challenger − champion):");
     println!("  Tier 1 total Δ = {:+.2} points", totals.t1);
@@ -476,14 +509,14 @@ fn report(champ_dir: &Path, chal_dir: &Path, champ_name: &str, chal_name: &str) 
         );
     }
 
-    let tier0_regressed = !t0_chal_bad.is_empty();
+    let tier0_regressed = !t0_worse.is_empty();
     let aggregate_improves = totals.t1 < -1e-9 || (totals.t1.abs() <= 1e-9 && totals.t2 < -1e-9);
     let complete = missing.is_empty() && uninstrumented.is_empty();
     let promotable = !tier0_regressed && aggregate_improves && complete && c_conf.is_empty();
 
     println!("\nPromotion rule (ADR-23):");
     println!(
-        "  Tier 0 clean on the challenger .......... {}",
+        "  no Tier-0 cell worse than the champion .. {}",
         yes_no(!tier0_regressed)
     );
     println!(

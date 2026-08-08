@@ -4432,11 +4432,16 @@ owner decision, and the table above is what it should be taken on.
 * **A cell absent from *both* sides is silent.** The report flags
   one-sided cells and fully-uninstrumented metrics, but two runs that
   aborted at the same place would agree vacuously.
-* **`f0_defects`, `layout_cache`, `symbol_mapping` and `spec_version`
+* ~~**`f0_defects`, `layout_cache`, `symbol_mapping` and `spec_version`
   keep their own conversion drivers** and are not placer-aware, so a
-  challenger run leaves them on the champion. That is deliberate — they
-  grade CLI behaviour, not geometry — but it means the two F0 defect
-  locks are not part of a challenger's row.
+  challenger run leaves them on the champion.~~ **CLOSED for the two
+  that grade geometry** — see "D6" below. `symbol_mapping` (V8 symbol
+  *selection*: a resolver/emitter decision with no placement content,
+  and mostly `#[ignore]`d pending the resolver override) and
+  `spec_version` (CLI parse-time version handshake, driven with
+  `-t netlist`, which never reaches the placer) remain deliberately
+  placer-blind: forwarding the flag to them would add a code path
+  without adding a measurement.
 * **Aggregation hides which fixture paid.** Always read the table; the
   scalar exists to focus attention, not to replace it.
 
@@ -4706,3 +4711,35 @@ Two smaller follow-ups this surfaced, both real:
    It is informational and excluded from the aggregate by design, so the
    zero is correct as a *contribution* — but printing it in the Δ column
    reads as "unchanged". Print the informational rows without a Δ.
+### D7. Closing the `f0_defects` hole, and what it forced in the gate
+
+The limit above named its own most valuable extension, and it has been
+taken. `f0_defects` and `layout_cache` now forward
+`common::placer_args()`, so `S2K_PLACER=<name>` reaches them.
+
+The prize is `shunt_feedback_amp`. ADR-20 calls its Tier-0 net-merge
+refusal the strongest acceptance test the project has for a replacement
+placer, and it was invisible to every challenger's row. It now reports two
+Tier-0 metrics — `t0.convert_fail` and `t0.partition` — recorded *before*
+the lock's assertions, so a challenger that FIXES the refusal still reports
+its `0` even as the lock goes red with UNEXPECTED PASS. The measurement
+survives the outcome that makes the test fail.
+
+**This forced one correction to the promotion rule, and it is a
+correction, not a relaxation.** D4 clause 1 was written as "every Tier-0
+metric is 0 on every fixture", which D3 could call "cheap to satisfy,
+since every fixture measures 0 today" only because this fixture was
+uninstrumented. It is now non-zero **on the champion**. Left absolute, the
+gate would veto every challenger — including one that leaves the refusal
+exactly as it found it — turning the project's strongest acceptance test
+into a gate no placer can pass. The gate therefore keys off
+`t0_worse`: the cells where the challenger is strictly worse than the
+champion. Against an all-zero champion the two forms coincide exactly, so
+the M4 replay's verdict in D5 is unchanged. The report prints all three
+lists (champion absolute, challenger absolute, regressed) so the absolute
+state stays visible and is not quietly traded away.
+
+`t0.cross_net_overlap` (cross-net collinear wire overlaps — the latent
+V11 short) is registered as a Tier-0 metric in the same pass; it was
+being measured by `electrical_safety` and reported to nobody.
+

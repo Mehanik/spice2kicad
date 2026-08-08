@@ -56,6 +56,18 @@ fn tempdir(name: &str) -> common::TempDir {
 /// a used directory pins every element from the ADR-4 sidecar and the
 /// placer stage under test becomes a no-op (CLAUDE.md § "Useful
 /// commands", the layout-cache trap).
+///
+/// **Placer-aware (ADR-23).** This file keeps its own conversion driver
+/// — it needs the raw `Output`, which `common::spice_to_kicad` does not
+/// surface — so it must forward `common::placer_args()` itself or the
+/// selection silently does not reach it. ADR-23's "Known limits of the
+/// instrument" recorded exactly that hole: `f0_defects` was not
+/// placer-aware, so a `S2K_PLACER=<name>` run left this file on the
+/// champion and the strongest acceptance test the project has for a
+/// replacement placer — the `shunt_feedback_amp` Tier-0 net-merge
+/// refusal (ADR-20) — was absent from every challenger's scoreboard row.
+/// It is now forwarded, and the refusal is reported as a Tier-0 metric
+/// (see [`shunt_feedback_amp_conversion_is_a_tier0_net_short`]).
 fn convert(fixture: &str, out_dir: &Path, extra: &[&str]) -> Output {
     let src = fixtures_dir().join(format!("{fixture}.cir"));
     let out = out_dir.join(format!("{fixture}.kicad_sch"));
@@ -79,7 +91,8 @@ fn convert(fixture: &str, out_dir: &Path, extra: &[&str]) -> Output {
         .arg("-l")
         .arg(lib_dir.join("Amplifier_Operational.kicad_sym"))
         .arg("-l")
-        .arg(lib_dir.join("power.kicad_sym"));
+        .arg(lib_dir.join("power.kicad_sym"))
+        .args(common::placer_args());
     cmd.args(extra);
     cmd.output().expect("invoke spice2kicad")
 }
@@ -180,11 +193,43 @@ fn convert(fixture: &str, out_dir: &Path, extra: &[&str]) -> Output {
 /// conversion is cheap (0.18 s, current optimised dev profile — it
 /// refuses before decoration), and an `#[ignore]`d lock would never
 /// notice the day the defect is fixed.
+///
+/// # Scoreboard (ADR-23)
+///
+/// This lock reports two Tier-0 metrics, which is the point of making
+/// this file placer-aware. ADR-20 calls the refusal "the strongest
+/// acceptance test for any replacement placer", yet it was absent from
+/// every challenger's row because `f0_defects` kept its own,
+/// placer-blind conversion driver. Both are recorded BEFORE the
+/// assertions below (the sink's contract), so a challenger that FIXES
+/// the refusal still reports its `0` even as this test panics with
+/// UNEXPECTED PASS — the measurement survives the very outcome that
+/// makes the lock red.
+///
+/// * `t0.convert_fail` — the converter would not emit a file at all.
+/// * `t0.partition` — the specific ADR-22 finding: the collector net
+///   `c` and the `vcc` rail land in one geometric component.
+///
+/// Both are **1 on the champion**. That is why the scoreboard's Tier-0
+/// gate compares against the champion rather than against zero; see the
+/// Tier-0 block in `tests/scoreboard.rs` for why the absolute form would
+/// otherwise veto every challenger.
 #[test]
 fn shunt_feedback_amp_conversion_is_a_tier0_net_short() {
     let tmp = tempdir("shunt_feedback_amp");
     let out = convert("shunt_feedback_amp", &tmp, &[]);
     let stderr = String::from_utf8_lossy(&out.stderr);
+
+    common::scoreboard::record_count(
+        "t0.convert_fail",
+        "shunt_feedback_amp",
+        usize::from(!out.status.success()),
+    );
+    common::scoreboard::record_count(
+        "t0.partition",
+        "shunt_feedback_amp",
+        usize::from(stderr.contains("net partition: MERGE:")),
+    );
 
     assert!(
         !out.status.success(),

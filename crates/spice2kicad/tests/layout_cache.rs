@@ -35,6 +35,16 @@ fn tempdir(name: &str) -> common::TempDir {
 /// Convert `source` SPICE text to a `.kicad_sch` at `out`, optionally
 /// disabling the layout cache. Runs the real CLI binary so the sidecar
 /// read/write path in `main.rs` is exercised.
+///
+/// **Placer-aware (ADR-23).** Every assertion here is *relative* — an
+/// element keeps the position the previous run gave it — so the file
+/// grades a property, not a coordinate, and it holds for any placer.
+/// Forwarding `S2K_PLACER` therefore costs nothing on the champion path
+/// (the arg list is empty) and buys real coverage on a challenger: the
+/// ADR-4 sidecar round-trip is exercised against the placer actually
+/// under evaluation instead of silently against the champion. That
+/// matters because ADR-19's P11 was reformulated as *cache-path
+/// stability*, which is exactly what this file measures.
 fn convert(source: &str, out: &Path, no_cache: bool) {
     let lib_dir = workspace_root().join("crates/kicad-symbols/tests/fixtures");
     let src_path = out.with_extension("cir");
@@ -52,7 +62,8 @@ fn convert(source: &str, out: &Path, no_cache: bool) {
         .arg("-l")
         .arg(lib_dir.join("Simulation_SPICE.kicad_sym"))
         .arg("-l")
-        .arg(lib_dir.join("power.kicad_sym"));
+        .arg(lib_dir.join("power.kicad_sym"))
+        .args(common::placer_args());
     if no_cache {
         cmd.arg("--no-layout-cache");
     }
