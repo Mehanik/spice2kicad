@@ -163,7 +163,7 @@ pub(super) fn refine(
     // can slide under its wide body cost-free. Enforced as a candidate-
     // space filter (never a cost term, per CLAUDE.md), same mechanism as
     // the V11 and V14 gates below.
-    let mut current_overlaps = symbol_overlap_count(&seed, checked, &glyph_prefs);
+    let mut current_overlaps = symbol_overlap_count(&seed, checked, &glyph_prefs, opts.placer);
     // V5 pin-facing alignment, used as a "never increase" gate on the
     // mirror-Y move only (see acceptance below). Tracked from the seed so
     // a flip can never make signal pins face away from their net.
@@ -178,6 +178,38 @@ pub(super) fn refine(
     let mut best_cost = current_cost;
 
     let mut rng = Rng::new(opts.seed);
+
+    // ADR-19 M5′ (`--placer=m5-streams`, ADR-23 challenger): one private
+    // RNG stream per movable element, keyed on its REFDES, swept in a
+    // netlist-position-independent order. `Champion` builds neither and
+    // takes the global-stream path below unchanged.
+    //
+    // Not recoverable from git — M5′ was measured in a working tree and
+    // reverted without ever being committed (only its two docs commits
+    // exist). This is a re-derivation from the ADR-19 description, and
+    // the replay report says so; ADR-19's recorded numbers
+    // (`common_emitter` V16 B 4→11 and friends) are what it is checked
+    // against.
+    let m5 = opts.placer.m5_element_streams();
+    let mut m5_sweep: Vec<usize> = Vec::new();
+    let mut m5_streams: std::collections::BTreeMap<usize, Rng> = std::collections::BTreeMap::new();
+    if m5 {
+        m5_sweep.clone_from(&movable);
+        m5_sweep.sort_by(|&a, &b| {
+            let (ra, rb) = (
+                checked.elements.get(a).map(|e| e.refdes.as_str()),
+                checked.elements.get(b).map(|e| e.refdes.as_str()),
+            );
+            ra.cmp(&rb).then(a.cmp(&b))
+        });
+        for &i in &m5_sweep {
+            let key = checked
+                .elements
+                .get(i)
+                .map_or(0, |e| refdes_stream_key(&e.refdes));
+            m5_streams.insert(i, Rng::new(opts.seed ^ key));
+        }
+    }
 
     // Cooling: exponential, factor 1000 over the iteration count.
     // f64 widening only; iteration count fits comfortably.
@@ -197,14 +229,28 @@ pub(super) fn refine(
 
     let mut temperature = t0;
     for it in 0..opts.refine_iterations {
-        let proposal = propose_move(
-            &seed,
-            &movable,
-            &mirror_eligible,
-            &layer_buckets,
-            &swap_layers,
-            &mut rng,
-        );
+        // M5' only: this iteration's swept element and its private
+        // stream, lifted out of the map for the body and put back at the
+        // end. `local` is `None` on every default path.
+        let m5_elem = if m5 && !m5_sweep.is_empty() {
+            Some(m5_sweep[(it as usize) % m5_sweep.len()])
+        } else {
+            None
+        };
+        let mut local = m5_elem.and_then(|i| m5_streams.remove(&i));
+
+        let proposal = if let (Some(i), Some(r)) = (m5_elem, local.as_mut()) {
+            propose_move_m5(&seed, i, &mirror_eligible, &layer_buckets, layers, r)
+        } else {
+            propose_move(
+                &seed,
+                &movable,
+                &mirror_eligible,
+                &layer_buckets,
+                &swap_layers,
+                &mut rng,
+            )
+        };
 
         // V14 hard gate: an orientation move (rotate / mirror-Y) whose
         // result leaves the element's allowed-orientation set is
@@ -230,7 +276,15 @@ pub(super) fn refine(
         // force-rejects a move cost would otherwise accept. The
         // coincidence recount runs only when the move is still alive
         // after V14 and cost, keeping the common path cheap.
-        let cost_accept = delta <= 0.0 || rng.next_f64() < (-delta / temperature.max(1e-12)).exp();
+        // Short-circuit preserved exactly: no Metropolis draw happens
+        // when `delta <= 0.0`, so the champion stream is untouched.
+        let cost_accept = delta <= 0.0 || {
+            let u = match local.as_mut() {
+                Some(r) => r.next_f64(),
+                None => rng.next_f64(),
+            };
+            u < (-delta / temperature.max(1e-12)).exp()
+        };
         let alive = cost_accept && !v14_infeasible;
         // The V11 foreign-pin-coincidence gate (Tier 0): two pins on
         // different nets at the same coordinate are electrically joined,
@@ -248,7 +302,7 @@ pub(super) fn refine(
         // none), so it is always safe to evaluate when the move is still
         // alive after cost + V14 + the coincidence filter.
         let trial_overlaps = if alive && coincidence_ok {
-            symbol_overlap_count(&seed, checked, &glyph_prefs)
+            symbol_overlap_count(&seed, checked, &glyph_prefs, opts.placer)
         } else {
             current_overlaps
         };
@@ -292,6 +346,10 @@ pub(super) fn refine(
             }
         } else {
             revert_move(&mut seed, &saved);
+        }
+
+        if let (Some(i), Some(r)) = (m5_elem, local) {
+            m5_streams.insert(i, r);
         }
 
         temperature *= alpha;
@@ -529,7 +587,10 @@ pub(crate) fn footprint_half_extents(
 /// over-reservation is load-bearing slack, not merely conservative.
 ///
 /// Do not re-wire it piecemeal. The three ablations are already
-/// measured — see the ADR table.
+/// measured — see the ADR table. They are, however, *registered* as
+/// graded challengers (`--placer=m3-signed-gate` / `m3-signed-full`,
+/// ADR-23); `variant` selects them and is `Champion` on every default
+/// path, where this function is byte-for-byte the halo it always was.
 #[allow(clippy::similar_names)] // ahw/ahh, bhw/bhh: half-extent pairs.
 fn symbol_overlap_count(
     placement: &Placement,
@@ -539,7 +600,13 @@ fn symbol_overlap_count(
     // Computed once in `refine` (invariant across the anneal) and
     // threaded in, so the SA hot loop never re-runs `classify_nets`.
     prefs: &std::collections::HashMap<String, crate::net_class::VertPref>,
+    // ADR-23 seam: which registered placer is running. `Champion` takes
+    // the halo path below, unchanged.
+    variant: crate::Placer,
 ) -> usize {
+    if variant.m3_signed_gate() {
+        return symbol_overlap_count_m3(placement, checked, prefs, variant);
+    }
     // The cell half-extents the `overlap` cost already enforces. A body
     // within these contributes nothing here (the cost covers it).
     let cell_hw = f64::from(crate::CELL_W) * GridPoint::STEP_MM / 2.0;
@@ -585,6 +652,69 @@ fn symbol_overlap_count(
             let (ax, ay, ahw, ahh, _a_big) = extents[a];
             let (bx, by, bhw, bhh, _b_big) = extents[b];
             if (ax - bx).abs() + eps < ahw + bhw && (ay - by).abs() + eps < ahh + bhh {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+/// ADR-19 M3's rejected wiring, recovered verbatim from
+/// `wip/adr19-m3-signed-gate` (`7896f22`) and reachable only through
+/// `--placer=m3-signed-gate` / `m3-signed-full` (ADR-23 challengers).
+///
+/// Same activation key and same glyph scoping as the halo version; the
+/// only difference is that the reservation is the **signed**
+/// `footprint` AABB — a strict subset of the halo on the classes both
+/// model — so the pair test is a real rectangle intersection instead of
+/// a centre-separation test. `m3-signed-full` additionally unions the
+/// drawn property text; that single `if` is the B → full ablation.
+///
+/// NOT for the default path: see `docs/layout-adr.md` § "M3 blocked"
+/// and ADR-23's replay table.
+#[allow(clippy::similar_names)] // bhw/bhh, ax0/ay0: half-extent and corner pairs.
+fn symbol_overlap_count_m3(
+    placement: &Placement,
+    checked: &CheckedNetlist,
+    prefs: &std::collections::HashMap<String, crate::net_class::VertPref>,
+    variant: crate::Placer,
+) -> usize {
+    let cell_hw = f64::from(crate::CELL_W) * GridPoint::STEP_MM / 2.0;
+    let cell_hh = f64::from(crate::CELL_H) * GridPoint::STEP_MM / 2.0;
+
+    // World-frame `(x0, x1, y0, y1)` reservation box per element.
+    let boxes: Vec<(f64, f64, f64, f64)> = checked
+        .elements
+        .iter()
+        .zip(&placement.elements)
+        .map(|(el, placed)| {
+            let (bhw, bhh) = body_half_extents(el, placed.orientation);
+            let oversized = bhw > cell_hw + 1e-6 || bhh > cell_hh + 1e-6;
+            let mut fp = crate::footprint::body_and_pins(&el.symbol, placed.orientation);
+            if !oversized {
+                fp = fp.union(&crate::footprint::glyph(el, placed.orientation, prefs));
+            }
+            if variant.m3_property_text() && !placed.is_power_source {
+                fp = fp.union(&crate::footprint::property_text(
+                    &el.refdes,
+                    Some(crate::footprint::drawn_value(
+                        &el.refdes,
+                        placed.value.as_deref(),
+                    )),
+                    placed.orientation,
+                ));
+            }
+            let (ox, oy) = placed.origin.to_mm();
+            (ox + fp.min_x, ox + fp.max_x, oy + fp.min_y, oy + fp.max_y)
+        })
+        .collect();
+    let eps = 1e-3;
+    let mut count = 0;
+    for a in 0..boxes.len() {
+        for b in (a + 1)..boxes.len() {
+            let (ax0, ax1, ay0, ay1) = boxes[a];
+            let (bx0, bx1, by0, by1) = boxes[b];
+            if ax0 + eps < bx1 && bx0 + eps < ax1 && ay0 + eps < by1 && by0 + eps < ay1 {
                 count += 1;
             }
         }
@@ -882,6 +1012,65 @@ fn propose_move(
         if !mirror_eligible.is_empty() && rng.next_below(4) == 0 {
             let m = mirror_eligible[rng.next_below(mirror_eligible.len())];
             Proposal::MirrorY { idx: m }
+        } else {
+            Proposal::Rotate { idx }
+        }
+    } else {
+        let (dx, dy) = jitter_delta(rng);
+        Proposal::Jitter { idx, dx, dy }
+    }
+}
+
+/// FNV-1a over a refdes — a netlist-*position*-independent stream key.
+///
+/// The point of M5′ is that adding `R9` to a file must not renumber the
+/// draws `R1` sees, so the key is the name, never the index.
+fn refdes_stream_key(refdes: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in refdes.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// ADR-19 M5′ — one proposal for a *given* element, drawn from that
+/// element's private stream.
+///
+/// Same move mix and same secondary draws as [`propose_move`]; the only
+/// difference is that the element is chosen by the deterministic sweep
+/// in `refine`, not by a draw from the global stream. Reachable only
+/// through `--placer=m5-streams`.
+fn propose_move_m5(
+    placement: &Placement,
+    idx: usize,
+    mirror_eligible: &[usize],
+    layer_buckets: &std::collections::BTreeMap<u32, Vec<usize>>,
+    layers: &LayerAssignment,
+    rng: &mut Rng,
+) -> Proposal {
+    let bucket = rng.next_below(10);
+    let want_orient = bucket == 2; // 0.1, as in `propose_move`
+
+    if bucket < 2 {
+        // Swap-Y with a peer in this element's own layer bucket.
+        if let Some(elems) = layers.layers.get(idx).and_then(|l| layer_buckets.get(l))
+            && elems.len() >= 2
+        {
+            let mut j = rng.next_below(elems.len());
+            while elems[j] == idx {
+                j = rng.next_below(elems.len());
+            }
+            let b = elems[j];
+            if placement.elements[idx].origin.y != placement.elements[b].origin.y {
+                return Proposal::SwapY { a: idx, b };
+            }
+        }
+    }
+
+    if want_orient {
+        if mirror_eligible.contains(&idx) && rng.next_below(4) == 0 {
+            Proposal::MirrorY { idx }
         } else {
             Proposal::Rotate { idx }
         }

@@ -267,6 +267,50 @@ fn shove_one(
     fallback
 }
 
+/// The *roomy* per-element extent the shove loop prefers to clear.
+///
+/// `Champion` (every default path) reserves `world_extent_with_glyphs` —
+/// the symmetric box that is, per ADR-19 M3, standing in for the
+/// still-unreserved net-label class. `m3-signed-full` reserves the
+/// honest signed `footprint::element_footprint` instead; that is M3's
+/// rejected roomy swap, recovered from `7896f22` and reachable only as
+/// an ADR-23 challenger.
+fn roomy_extents(
+    placement: &Placement,
+    checked: &CheckedNetlist,
+    prefs: &std::collections::HashMap<String, crate::net_class::VertPref>,
+    variant: crate::Placer,
+) -> Vec<WorldExtent> {
+    placement
+        .elements
+        .iter()
+        .enumerate()
+        .map(|(i, placed)| {
+            checked
+                .elements
+                .get(i)
+                .map_or(WorldExtent::default(), |el| {
+                    if variant.m3_signed_legalize() {
+                        // A suppressed `;@ power` source draws no property
+                        // text at all — `None`, not "no value".
+                        let text = (!placed.is_power_source).then(|| {
+                            crate::footprint::drawn_value(&el.refdes, placed.value.as_deref())
+                        });
+                        crate::footprint::element_footprint(el, placed.orientation, text, prefs)
+                            .into()
+                    } else {
+                        world_extent_with_glyphs(
+                            el,
+                            placed.orientation,
+                            placed.value.as_deref(),
+                            prefs,
+                        )
+                    }
+                })
+        })
+        .collect()
+}
+
 /// Shove overlapping elements apart until no two footprints overlap.
 ///
 /// Returns the number of elements moved. Pinned elements are never
@@ -282,6 +326,9 @@ pub fn legalize(
     checked: &CheckedNetlist,
     _library: &Library,
     prefs: &std::collections::HashMap<String, crate::net_class::VertPref>,
+    // ADR-23 seam: `Champion` (every default path) keeps the roomy
+    // `world_extent_with_glyphs` preference below, bit-for-bit.
+    variant: crate::Placer,
 ) -> usize {
     let extents: Vec<WorldExtent> = placement
         .elements
@@ -333,19 +380,7 @@ pub fn legalize(
     // over-broad symmetric box is standing in for the missing label
     // class, not merely being conservative.
     // See `docs/layout-adr.md` § "M3 blocked".
-    let roomy: Vec<WorldExtent> = placement
-        .elements
-        .iter()
-        .enumerate()
-        .map(|(i, placed)| {
-            checked
-                .elements
-                .get(i)
-                .map_or(WorldExtent::default(), |el| {
-                    world_extent_with_glyphs(el, placed.orientation, placed.value.as_deref(), prefs)
-                })
-        })
-        .collect();
+    let roomy = roomy_extents(placement, checked, prefs, variant);
     let ring = displacement_ring(MAX_SHOVE_CELLS);
     let ctx = ShoveCtx {
         checked,
