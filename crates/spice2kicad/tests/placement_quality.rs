@@ -1494,12 +1494,13 @@ fn wire_detour_within_budget_across_fixtures() {
         // wide margin (next worst: named_rails at 1.125), and it is the
         // Tier-2 headroom F0 exists to expose. Ratchet DOWN.
         ("rc_phase_shift", 1.2314),
-        // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE. 1.8565 is the worst
+        // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE. 1.85654 is the worst
         // wire detour in the suite by a wide margin — the emitted ink is
         // 86% longer than its rectilinear ideal (558.80 mm vs 300.99 mm),
-        // where the previous worst was `rc_phase_shift` at 1.2313. This
-        // is the Tier-2 compaction headroom F0 exists to expose.
-        // Ratchet DOWN.
+        // where the previous worst was `rc_lowpass_ports` at 1.4001
+        // (NOT `rc_phase_shift`, whose 1.2314 is only third; read the
+        // column, not the last row added to it). This is the Tier-2
+        // compaction headroom F0 exists to expose. Ratchet DOWN.
         ("two_stage_amp", 1.8566),
     ];
     // Collect-then-assert: an in-loop `assert!` truncates the report at
