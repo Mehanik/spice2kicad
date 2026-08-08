@@ -806,6 +806,29 @@ always use a **fresh output directory** or pass **`--no-layout-cache`**
 a `layout cache hit (N element(s) pinned …)` line to stderr whenever it
 loads one, so a hit is no longer invisible.
 
+## Archived experiments live in `archive/*` tags, not branches
+
+Measured-and-rejected work is preserved as **annotated tags** under
+`archive/`, never as long-lived branches. Each tag's message states what
+the experiment was, what it measured, and why it must not be merged;
+`git tag -n99 -l 'archive/*'` prints them all.
+
+This matters because the ADRs repeatedly instruct readers **not to
+re-derive** a measured negative, and a tag is the durable form of that
+pointer — a wip branch invites someone to check it out and rebase it,
+and its name drifts out of sync with its contents (ADR-14's two
+footprint branches had their SHA↔name mapping backwards for weeks).
+Tags are named for what they *contain*, not for the branch they came
+from.
+
+Two of them hold code that exists **nowhere on master** and that
+master's own source forward-references by name:
+`archive/adr17-stage2-killed` (`compact.rs`, the killed ADR-17
+deterministic compactor) and `archive/adr14-directional-plus-label`
+(`label_geom.rs`, placement-side net-label geometry — see
+`footprint.rs`'s "Known residual" and `anneal.rs`'s "once `label_geom`
+lands"). Do not delete a tag without checking what only it contains.
+
 ## Committing during multi-agent / parallel work
 
 **Commit each green milestone before launching another agent (or

@@ -946,7 +946,7 @@ request with numbers, never assumed free.
 
 **Attempt (2026-07-20) — label text IS computable pre-routing; NOT
 LANDED, per-consumer measurement below.** Built and measured on branch
-`wip/label-reservation` (`spice-layout/src/label_geom.rs`). Do not
+`archive/adr14-label-reservation-alone` (`spice-layout/src/label_geom.rs`). Do not
 re-derive this; read the table.
 
 *The architectural question is answered: yes, and no new crate is
@@ -1010,10 +1010,14 @@ the SA would stay blind to a reach the seed enforces. Weighed together,
 a partial reservation is a layout move with no upside and a rule
 deviation, so it stays on the branch pending owner sign-off.
 
-*It does not unblock `fix/multichannel-layout`.* Cherry-picked on top,
-`opamp_definition_level` V13(6a) goes 3 → 2 — identical to the naive
-rebase — and V5 / V16 / F5 fail as before. The blocker is not label
-reservation.
+*It did not unblock the then-pending multi-channel work* (branch
+`fix/multichannel-layout`, since landed by other means and deleted
+2026-08-08). Cherry-picked on top, `opamp_definition_level` V13(6a) goes
+3 → 2 — identical to the naive rebase — and V5 / V16 / F5 fail as
+before. The blocker is not label reservation. *(For the record: that
+work did land, and went further — `opamp_definition_level` now measures
+F5 = 0 and V16 B = 6, against the 1 and 15 this experiment was weighed
+against.)*
 
 **POST-MORTEM (2026-07-20) — the symmetric halo is LOAD-BEARING. Do not
 "fix" it. The decoration-reservation program is CLOSED.**
@@ -1047,7 +1051,7 @@ tighter, worse layouts. Every V13 / V16 / F6 / rendered-text budget on
 `master` is calibrated against the halo, so "honesty" is a
 across-the-board loosening dressed as a bug fix.
 
-*Measured — directional alone* (branch `wip/directional-footprint`,
+*Measured — directional alone* (tag `archive/adr14-directional-plus-label`,
 `d176b9e`), vs `master`:
 
 | fixture | metric | master | directional |
@@ -1063,7 +1067,8 @@ across-the-board loosening dressed as a bug fix.
 — not one metric on one fixture.**
 
 *Measured — directional PLUS the complete label reservation*
-(`wip/label-reservation` cherry-picked on top, `8b060cf`): an
+(the label change cherry-picked on top, giving `8b060cf` — now
+`archive/adr14-directional-plus-label`): an
 **identical failure set**. The reservation recovers nothing the
 directional model gave away. With `legalize` in scope it is strictly
 worse (`opamp_definition_level` V5 0→5, V16 B 12→13).
@@ -1118,11 +1123,22 @@ and it is the only variant not yet measured. It is also a
 re-parameterisation of every layout in the suite, so it must arrive as
 an escape request with the full ratchet table, never as a cleanup.
 
-*Recoverable work.* Branches `wip/directional-footprint` (`d176b9e`,
-directional gate alone) and `wip/label-reservation` (`8b060cf`,
-directional + complete label reservation) hold the experiments. Do not
-re-derive; re-measure only against a variant this post-mortem does not
-already cover.
+*Recoverable work.* Three variants exist, preserved as tags (the wip
+branches were retired 2026-08-08; an earlier version of this paragraph
+had the SHA→branch mapping **backwards**, so read the SHAs, not the old
+names):
+
+| tag | SHA | what it is |
+| --- | --- | --- |
+| `archive/adr14-directional-plus-label` | `8b060cf` | directional gate **+** complete label reservation — and its parent `d176b9e` is the **directional gate alone**. Both experiments are successive commits on this one tag. |
+| `archive/adr14-label-reservation-alone` | `0214412` | the **label reservation alone**, on an unmodified symmetric halo, from an earlier base. The per-consumer table above is attributed to this tree. |
+
+`crates/spice-layout/src/label_geom.rs` (318 lines) is byte-identical on
+both and exists **nowhere on master** — yet master's own source
+forward-references it by name (`footprint.rs:274`, `anneal.rs:586`,
+both "once `label_geom` lands"). That file is the single reason these
+tags exist. Do not re-derive; re-measure only against a variant this
+post-mortem does not already cover.
 
 ### Problem
 
@@ -2028,8 +2044,27 @@ separate:**
    unconstrained, and a horizontal 2-pin element has two mirror states
    that V5 rates identically. The obvious next increment is a
    **port-net-facing filter** (input pin faces left, output pin faces
-   right), constraining direction rather than axis. **It was deliberately
-   NOT attempted**, because failure mode 2 blocks landing either way.
+   right), constraining direction rather than axis. It was deliberately
+   not attempted *here*, because failure mode 2 blocks landing either way.
+
+   **CORRECTION (2026-08-08): its multi-pin form WAS later attempted, and
+   the outcome differs from what this post-mortem predicts.** Tag
+   `archive/opamp-output-facing-experiment` (`34c907a`) holds a hard
+   candidate-space filter keeping only orientations that face every
+   KiCad `output` pin screen-right, for elements with ≥3 terminals (2-pin
+   passives excluded precisely to avoid re-running this Stage-5 case).
+   It works mechanically — the opamp triangle points right, V16 B 8→5,
+   the GND glyph clears `RF` — and still fails, but for a **placement**
+   reason, not failure mode 2: `X1` had been seeded *left of* `RIN`, so
+   the mirror was the router's locally-optimal answer to a bad position.
+   Orientation was the symptom; position was the cause. That defect is
+   fixed on master by the placement-side root refinement the experiment's
+   own post-mortem prescribed (`layers.rs` `no_source_fallback` roots
+   restricted to genuine rail stubs), and the textbook facing is now held
+   by channel-row seed pinning. Note also that the experiment's V5 cost
+   (`X1.1`/`X1.2` losing their outward first segment) is exactly the
+   class a genuinely constrained maze search would address — see ADR-21
+   on `maze_shortest_path_constrained` never having constrained anything.
 2. **Global (`common_emitter`) — SA basin shift.** Shrinking one
    element's allowed set perturbed the entire SA trajectory into a
    different basin: *every* element moved (R2 55.88 → 35.56, Q1 63.5 →
@@ -2708,7 +2743,7 @@ the end of its stage, against the fixture suite.
 **Outcome, in the words the kill criterion prescribes: *the wall's true
 name is the SA, and we chose to keep it.***
 
-The attempt is preserved, unmerged, on branch `adr17-stage2-killed`
+The attempt is preserved as tag `archive/adr17-stage2-killed`
 (commit `45804dc`). Master is unchanged and green with the SA intact.
 
 #### The invalidating discovery — `--no-refine` ablated TWO passes
@@ -3361,7 +3396,7 @@ not an M6 refinement of M3, it is a precondition of M3.** M3 cannot be
 consumed until `label_geom` lands, so ADR-19's dependency edge is
 M2 → *label reservation* → M3 → M4, not M2 → M3 → … → M6.
 
-That is awkward, because `wip/label-reservation` already computes exactly
+That is awkward, because `archive/adr14-label-reservation-alone` already computes exactly
 this geometry and its own commit message records that wiring it "nets out
 worse". So the two halves of the reservation are *each* individually
 unlandable.
@@ -3402,11 +3437,17 @@ suite, and requiring an owner escape request with the full ratchet table.
 Milestone D (bounded joint-pose repair) is the remaining ADR-19 work that
 does **not** sit behind this chain.
 
-*Record-keeping note.* ADR-14's "Recoverable work" paragraph attributes
-`8b060cf` to `wip/label-reservation` and `d176b9e` to
-`wip/directional-footprint`. The live branch heads are the other way round:
-`wip/directional-footprint` is `8b060cf`, `wip/label-reservation` is
-`0214412`. The measurements stand; only the SHA attribution is stale.
+*Record-keeping note — RESOLVED 2026-08-08.* ADR-14's "Recoverable work"
+paragraph used to attribute `8b060cf` to `archive/adr14-label-reservation-alone` and
+`d176b9e` to `archive/adr14-directional-plus-label`. That was backwards, and worse
+than a simple name swap: `0214412` is a **materially different variant**
+(label reservation alone, on an unmodified halo, from an earlier base),
+not another name for `8b060cf`. Both branches are now retired in favour
+of tags named for their *contents* —
+`archive/adr14-directional-plus-label` (`8b060cf`, whose parent
+`d176b9e` is the directional gate alone) and
+`archive/adr14-label-reservation-alone` (`0214412`) — so the ambiguity
+cannot recur. ADR-14's paragraph carries the corrected table.
 
 **Additional findings.**
 
@@ -3429,11 +3470,18 @@ does **not** sit behind this chain.
   1.2247 against a literal of 1.0000, on a pristine `c968cbd` tree. It
   is informational-only (the hard gate is the degeneracy ceiling), but
   the M4 revert appears to have freed it and nothing reclaimed it.
-- **Where the code lives.** Branch `wip/adr19-m3-signed-gate` holds the
-  full wiring as measured (all three variants are one `#[cfg]`-free edit
-  apart in `solver/anneal.rs` and `legalize.rs`). Read this section
-  first; the mechanism above is the thing to change, not the wiring to
-  re-apply.
+- **Where the code lives — ON MASTER, since ADR-23.** The wiring is no
+  longer only on a branch: it is live and compiled in
+  `solver/anneal.rs::symbol_overlap_count_m3` and
+  `legalize.rs::roomy_extents`, dead on the default path and reachable as
+  `--placer=m3-signed-gate` / `--placer=m3-signed-full`. Run it, don't
+  re-apply it. Tag `archive/adr19-m3-signed-gate` (`7896f22`) is retained
+  only as **provenance** — ADR-23 D6 claims those challengers are that
+  SHA verbatim, and that claim is auditable only while it resolves.
+  (Ablation **A** — signed gate + signed `legalize`, no property text —
+  is not registered; it was never a buildable tree on the branch either,
+  and adding an enum variant is now the cheaper route to it.) The
+  mechanism above is the thing to change.
 
 ### M4 reverted — the Y datum cannot lead M3
 
@@ -3497,7 +3545,7 @@ only after M3**, and its re-attempt must run `flow_geometry` (F3/F4/F5/P5/F6)
 in the gate set.
 
 **Where the code lives.** The revert removes M4's implementation from the
-mainline but does not discard it: branch **`wip/adr19-m4-pending-m3`** (at
+mainline but does not discard it: branch **`archive/adr19-m4-pending-m3`** (at
 `619cc31`) holds the tree as M4 landed, so the post-M3 re-attempt starts from
 the code rather than re-deriving it. Read this section first — the datum-chain
 mechanism above is the thing to change, not to re-apply.
@@ -4340,7 +4388,7 @@ optimum, where a sideways trade is just a regression with an excuse.
 An instrument that has never been run against a known answer is not an
 instrument. ADR-19 M4 (the content-derived, `n`-independent Y datum) is
 registered as `--placer=m4-ydatum` — the code from `ed51164`, preserved
-on `wip/adr19-m4-pending-m3`, re-applied as a *challenger*, dead on the
+on `archive/adr19-m4-pending-m3`, re-applied as a *challenger*, dead on the
 default path.
 
 Measured, whole suite each side, one machine, `--no-fail-fast`:
@@ -4462,7 +4510,7 @@ independent runs, same answer.
 
 | replay | recovered from | status |
 | --- | --- | --- |
-| M3 ablation **B** (pure signed gate) | `wip/adr19-m3-signed-gate` `7896f22`, verbatim | registered `m3-signed-gate` |
+| M3 ablation **B** (pure signed gate) | `archive/adr19-m3-signed-gate` `7896f22`, verbatim | registered `m3-signed-gate` |
 | M3 **full** (B + property text + signed `legalize` roomy) | same commit, whole tree | registered `m3-signed-full` |
 | M5′ (per-refdes SA streams) | **not recoverable** | registered `m5-streams` as a *re-derivation* |
 | B2 (feedback-arc marking) | **not recoverable** | **structurally inert — not registered** |

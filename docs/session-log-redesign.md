@@ -258,7 +258,7 @@ explicit XFAIL registry that fails when a registered fixture starts passing.
    other variant trades one fixture for another, which the within-tier rule
    forbids. `baseline_lock` is now byte-identical to `cec3fd2`, independently
    confirming the geometry is exactly pre-M4. M4's code is preserved on
-   `wip/adr19-m4-pending-m3` for the post-M3 re-attempt. Full mechanism and
+   `archive/adr19-m4-pending-m3` for the post-M3 re-attempt. Full mechanism and
    measurement tables: `docs/layout-adr.md` § "M4 reverted".
 
    *Method note (the durable lesson).* This is the `verify-what-a-number-
@@ -294,18 +294,26 @@ Then, restoring green master after the M4 regression above:
 Verified independently at `9881d4f`: **68 binaries, 765 passed, 0 failed,
 7 ignored** (`--no-fail-fast`, full workspace).
 
-**F0 is no longer in the working tree** — it is preserved as a single
-object-level snapshot commit on **`wip/f0-benchmark-expansion`** (`bf7ba24`;
-3 fixtures + 16 test files + this log), so it survives outside `/tmp`. It is
-**not landed**, and three things must happen before it can be:
-1. **Re-measure every baseline.** They were taken on the `ed51164` (M4) tree,
-   which no longer exists; `baseline_lock` in particular is wholly stale.
-2. **Drop `two_stage_amp` and file the router VM-growth defect** with it as the
-   repro — it needs >8 GB VM and is nondeterministically OOM-killed. Per
-   CLAUDE.md that is a defect to diagnose, not a ceiling to raise, and the
-   fixture must not be slimmed to hide it.
-3. **Replace the `continue` exclusions with an XFAIL registry** that fails when
-   a registered fixture starts passing (see the precision note above).
+**F0 LANDED** (`4963833`, then `e0a92d7`). This paragraph used to record F0 as
+preserved-but-unlanded on a snapshot branch, with three preconditions. All three
+are satisfied, and the snapshot branch was deleted on 2026-08-08 — its fixtures
+are byte-identical to the landed ones and its *numbers* were measured on the
+reverted `ed51164` (M4) tree, so they are wrong in **both** directions (some
+literals below today's reality → instant false failures; some above → silent
+slack). Cherry-picking it would have been actively harmful.
+
+How the three preconditions actually resolved:
+1. **Re-measure every baseline** — done; all re-derived on the post-revert tree.
+2. **Drop `two_stage_amp` and file the router defect** — *superseded by a better
+   outcome*. The defect was not a VM blow-up at all: its VmPeak is ~15 MB, and
+   the ">8 GB" figure was itself an artifact of the M4 tree. The real defect was
+   runtime (~112 s **debug**, unlabelled as such). Phase-4.5 memoisation plus the
+   router maze fixes took it to **1.05 s**, its slow-lock tripwire fired, and the
+   fixture was **promoted into the graded suite** — where it is now worst-in-suite
+   on 6 of 13 metrics, i.e. exactly the headroom F0 existed to create.
+3. **Replace the `continue` exclusions with an XFAIL registry** — done, in
+   `crates/spice2kicad/tests/common/xfail.rs`, with unexpected-pass tripwires and
+   the specific refdes each skip's prose comment lacked.
 
 ## Key durable findings (the negative results are the asset)
 
