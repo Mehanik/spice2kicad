@@ -2,7 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # This repository's default branch is `master`. It said `main` from the
+    # start, so the push trigger never fired once — CI has only ever run on
+    # pull requests, and a direct push to `master` was silently ungated.
+    branches: [master]
   pull_request:
 
 env:
@@ -21,7 +24,21 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --all-targets
+      # `--no-fail-fast` is load-bearing, not tidiness: cargo's default aborts
+      # at the first failing BINARY, so a red run reports a truncated failure
+      # list and the untouched binaries never run. A ratchet suite that never
+      # executed is indistinguishable from one that passed — that is exactly
+      # how the ADR-19 M4 regression stayed invisible for six commits
+      # (`docs/layout-adr.md` § "M4 reverted", gate-set lesson).
+      #
+      # KNOWN GAP: `kicad-cli` is not installed on these runners, so every
+      # verifier that shells out to it skips here — including the real
+      # SVG-ink V13 check, which ADR-23 § D6 found is carrying the entire
+      # Tier-1 signal in the suite. CI green is therefore strictly weaker
+      # than a local `just test` on a machine with KiCad installed. Set
+      # `REQUIRE_KICAD_CLI=1` to fail-hard instead of skipping if a runner
+      # ever gains it.
+      - run: cargo test --workspace --all-targets --no-fail-fast
 
   lint:
     name: fmt + clippy
