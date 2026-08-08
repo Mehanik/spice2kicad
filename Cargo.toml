@@ -58,3 +58,18 @@ only_used_in_recursion = "allow"
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+
+# Optimised dev/test builds. The suite is dominated by conversions of the
+# hard fixtures, and layout phase 4.5 (~94-99% of a conversion) is 13-16x
+# slower unoptimised — an unoptimised suite run costs ~39 min against ~10.
+#
+# `debug-assertions` and `overflow-checks` are held ON deliberately: this is
+# an optimised build, NOT a release build. Tests must keep the same panic
+# semantics they grade with, and the layout/route crates do enough integer
+# arithmetic that losing overflow checks in tests would hide real defects.
+# Full `--release` measures faster still; that difference is exactly the
+# assertion coverage we are declining to trade away.
+[profile.dev]
+opt-level = 2
+debug-assertions = true
+overflow-checks = true
