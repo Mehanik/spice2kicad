@@ -32,10 +32,10 @@ pub struct LayerAssignment {
 /// Assign X layers to every element in `checked`.
 ///
 /// Algorithm:
-/// 1. Build a directed adjacency list using only Signal nets.
-///    Signal sources (`VoltageSrc`/`CurrentSrc` not tagged `Power`) drive
-///    edges outward; all other elements get fully-connected undirected
-///    edges on their Signal nets (direction resolved by Tarjan + topo).
+/// 1. Build an **undirected** co-net adjacency list using only Signal
+///    nets: every pair of elements sharing a Signal net is fully
+///    connected in both directions, sources included (direction is
+///    resolved downstream by Tarjan + topo, not here).
 /// 2. If no signal sources exist, return `no_source_fallback = true`.
 /// 3. Run iterative Tarjan SCC + edge reversal to break cycles.
 /// 4. Longest-path layering (topological sort, sources at layer 0).
@@ -62,8 +62,11 @@ pub fn assign_x_layers(checked: &CheckedNetlist, classes: &NetClassMap) -> Layer
     // Identify signal sources.
     let sources: HashSet<usize> = (0..n).filter(|&i| is_signal_source(checked, i)).collect();
 
-    // Build directed adjacency: source → others on shared net;
-    // non-source: add edges to all other net members (undirected).
+    // Build the co-net adjacency: every ordered pair of distinct elements
+    // sharing a Signal net gets an edge, so the graph is **undirected** —
+    // sources are not treated directionally here, and a 2-element net is a
+    // 2-cycle. Direction is recovered downstream: Tarjan + edge reversal
+    // break the cycles, and the longest-path layering roots at `sources`.
     // Duplicate edges are harmless; they get deduplicated via HashSet
     // during cycle-break or are absorbed by topo sort.
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
@@ -71,14 +74,7 @@ pub fn assign_x_layers(checked: &CheckedNetlist, classes: &NetClassMap) -> Layer
         for &u in members {
             for &v in members {
                 if u != v {
-                    if sources.contains(&u) {
-                        // Source drives outward.
-                        adj[u].push(v);
-                    } else {
-                        // Non-source: undirected (add both directions;
-                        // Tarjan + longest-path handle the rest).
-                        adj[u].push(v);
-                    }
+                    adj[u].push(v);
                 }
             }
         }
