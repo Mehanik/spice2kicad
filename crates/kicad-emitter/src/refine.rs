@@ -95,8 +95,12 @@ pub fn refine_orientations(placement: &mut Placement, library: &Library, meta: &
         return;
     }
 
+    // One memo for the whole phase: the search revisits poses, and a
+    // repeat measurement is a repeat *trial route*. See [`MeasureCache`].
+    let mut cache = MeasureCache::default();
+
     // Baseline measurement of the placement as received.
-    let mut baseline = measure(placement, library);
+    let mut baseline = cache.measure(placement, library);
     log::debug!("refine: baseline {}", summarise(&baseline));
     // Nothing to chase only when every count the objective can act on is
     // already zero. Returning on `v5 == 0` alone would skip the pass on a
@@ -110,7 +114,7 @@ pub fn refine_orientations(placement: &mut Placement, library: &Library, meta: &
 
     // Greedy single-element descent first: cheap, each accepted step
     // *strictly* reduces real V5, so it converges in at most `v5` steps.
-    greedy_descent(placement, library, meta, &mut baseline);
+    greedy_descent(placement, library, meta, &mut baseline, &mut cache);
     if is_settled(&baseline) {
         return;
     }
@@ -126,7 +130,7 @@ pub fn refine_orientations(placement: &mut Placement, library: &Library, meta: &
     // measured across the fixtures), so treat the enumeration as always
     // running to completion. See the note on that exit in `joint_search`
     // for why continuing is deliberate.
-    joint_search(placement, library, meta, &mut baseline);
+    joint_search(placement, library, meta, &mut baseline, &mut cache);
     log::debug!("refine: final {}", summarise(&baseline));
 }
 
@@ -255,6 +259,7 @@ fn greedy_descent(
     library: &Library,
     meta: &RefinementMeta,
     baseline: &mut Measure,
+    cache: &mut MeasureCache,
 ) {
     let n = placement.elements.len();
     for _ in 0..MAX_SWEEPS {
@@ -308,12 +313,7 @@ fn greedy_descent(
                 // `accepts` would refuse. Skipping the route then costs
                 // the search nothing — see [`pruned`] for the proof that
                 // this explores an identical candidate space.
-                let p = probe(placement, library);
-                let candidate = if pruned(baseline, &p) {
-                    None
-                } else {
-                    Some(finish(placement, library, p))
-                };
+                let candidate = cache.candidate(placement, library, baseline);
                 placement.elements[i].orientation = current;
                 let Some(m) = candidate else {
                     continue;
@@ -414,6 +414,7 @@ fn joint_search(
     library: &Library,
     meta: &RefinementMeta,
     baseline: &mut Measure,
+    cache: &mut MeasureCache,
 ) {
     let n = placement.elements.len();
 
@@ -517,12 +518,7 @@ fn joint_search(
         // `greedy_descent`, and conservative for the same reason: it can
         // only skip combinations `accepts` would refuse, so the
         // enumeration's outcome is unchanged. See [`pruned`].
-        let p = probe(placement, library);
-        let candidate = if pruned(baseline, &p) {
-            None
-        } else {
-            Some(finish(placement, library, p))
-        };
+        let candidate = cache.candidate(placement, library, baseline);
         // Same lexicographic (V13, V12, V5, bends) objective as
         // `greedy_descent` — Tier-1 counts lead, Tier-2 V5 next, V16
         // bends last. See the ordering contract documented on that
@@ -637,7 +633,7 @@ struct Measure {
 /// The three [`Measure`] quantities that need **no router**.
 ///
 /// Trial-routing is essentially the whole cost of a measurement (measured
-/// on the fixture suite: `trial_route` is ~99.9% of [`measure`], and
+/// on the fixture suite: `trial_route` is ~99.9% of a measurement, and
 /// everything below is ~0.14%), so the only optimisation that matters to
 /// this phase is *not routing*. These three are what makes that possible:
 /// each is a function of the placement geometry alone, and each can, on
@@ -705,7 +701,7 @@ fn pruned(baseline: &Measure, p: &Probe) -> bool {
 }
 
 /// Trial-route `placement` and complete a [`Measure`] from an already
-/// computed [`Probe`]. Split from [`measure`] so the caller can run the
+/// computed [`Probe`]. Split from the probe so the caller can run the
 /// cheap half first and skip the route entirely — see [`pruned`].
 fn finish(placement: &Placement, library: &Library, p: Probe) -> Measure {
     let route = trial_route(placement, library);
@@ -729,8 +725,103 @@ fn finish(placement: &Placement, library: &Library, p: Probe) -> Measure {
 
 /// Trial-route `placement` and measure V5, V11 residue, symbol-body
 /// overlap, V12 foreign-body crossings, and V13 label overlaps.
+///
+/// Test-only: the phase itself goes through [`MeasureCache`], which owns
+/// the same `probe` + `finish` pair plus the pre-route prune and the
+/// per-pose memo. The tests want a one-shot measurement of a fixture
+/// with no cache to thread, and this is it.
+#[cfg(test)]
 fn measure(placement: &Placement, library: &Library) -> Measure {
     finish(placement, library, probe(placement, library))
+}
+
+/// Memo of phase 4.5's per-pose measurements.
+///
+/// A measurement is a pure function of the placement's **orientation
+/// vector**. Everything else it reads is frozen for the duration of the
+/// phase: positions may not change (the phase owns orientation only —
+/// CLAUDE.md's decoration contract), the `Library` is fixed, and the
+/// router carries no global state, RNG or clock — `sheet_uuid()` is a
+/// `Uuid::new_v5` of a constant, not a random one.
+///
+/// Purity was checked empirically before it was relied on, not assumed:
+/// logging the full `Measure` (every count plus both offender lists)
+/// against the pose key across all thirteen fixtures produced 85
+/// repeated keys and zero disagreements.
+///
+/// It pays because the search revisits poses. [`greedy_descent`] sweeps
+/// up to [`MAX_SWEEPS`] times and re-measures candidates whose
+/// neighbourhood did not change, and [`joint_search`] re-enumerates
+/// single-element deviations greedy has already tried — its combination
+/// #0 is always the current pose. Measured 36–40% exact repeats on the
+/// four fixtures that reach the joint search (18/50, 18/50, 21/59,
+/// 21/53) and 7/11 on `named_rails`. Peak size is a few dozen entries.
+#[derive(Default)]
+struct MeasureCache {
+    probes: std::collections::HashMap<Vec<Orientation>, Probe>,
+    measures: std::collections::HashMap<Vec<Orientation>, Measure>,
+}
+
+impl MeasureCache {
+    /// The memo key: every element's orientation, in placement order.
+    fn key(placement: &Placement) -> Vec<Orientation> {
+        placement.elements.iter().map(|e| e.orientation).collect()
+    }
+
+    /// Full measurement of the current pose, memoised. Used for the
+    /// baseline, which the joint search then re-enumerates as its
+    /// combination #0.
+    fn measure(&mut self, placement: &Placement, library: &Library) -> Measure {
+        let key = Self::key(placement);
+        if let Some(m) = self.measures.get(&key) {
+            return m.clone();
+        }
+        let p = self.probe(&key, placement, library);
+        let m = finish(placement, library, p);
+        self.measures.insert(key, m.clone());
+        m
+    }
+
+    /// Evaluate the current pose as a *candidate* against `baseline`:
+    /// `None` when the routing-free [`Probe`] alone proves [`accepts`]
+    /// would refuse it (no route is run), `Some(m)` otherwise.
+    ///
+    /// A cache hit returns the stored `Measure` without consulting
+    /// [`pruned`]. That is not a behaviour difference: the caller runs
+    /// the authoritative [`accepts`] on whatever comes back, and
+    /// `pruned` only ever refutes candidates `accepts` refutes too.
+    fn candidate(
+        &mut self,
+        placement: &Placement,
+        library: &Library,
+        baseline: &Measure,
+    ) -> Option<Measure> {
+        let key = Self::key(placement);
+        if let Some(m) = self.measures.get(&key) {
+            return Some(m.clone());
+        }
+        let p = self.probe(&key, placement, library);
+        if pruned(baseline, &p) {
+            return None;
+        }
+        let m = finish(placement, library, p);
+        self.measures.insert(key, m.clone());
+        Some(m)
+    }
+
+    /// The routing-free half, memoised separately: a pose the prune
+    /// refuted has no `Measure` to store, but its `Probe` is still worth
+    /// keeping — [`pruned`]'s verdict depends on the *baseline*, which
+    /// moves as the search accepts steps, so the same pose can come back
+    /// for a second opinion.
+    fn probe(&mut self, key: &[Orientation], placement: &Placement, library: &Library) -> Probe {
+        if let Some(p) = self.probes.get(key) {
+            return *p;
+        }
+        let p = probe(placement, library);
+        self.probes.insert(key.to_vec(), p);
+        p
+    }
 }
 
 /// V16 bend count — the L-corners of the emitted **ink**.
