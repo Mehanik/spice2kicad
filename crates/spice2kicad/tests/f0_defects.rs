@@ -13,9 +13,12 @@
 //!    the SA end-state at its *default* iteration count — see the full
 //!    diagnosis on the test below, which supersedes the original
 //!    "base/emitter short" reading.
-//!  * **`two_stage_amp` — runtime.** It converts *correctly*, but takes
-//!    ~112 s where the median fixture takes 0.4 s. Registering it across
-//!    ~15 verifiers would add ~25 CPU-minutes to every suite run.
+//!  * **`two_stage_amp` — runtime.** It converted *correctly* but took
+//!    ~112 s (**unoptimised** debug build, `7f707e6`) where the median
+//!    fixture took 0.4 s, so registering it across ~15 verifiers would
+//!    have added ~25 CPU-minutes to every suite run. **That no longer
+//!    reproduces**: 1.05 s on the current optimised dev profile. The
+//!    lock is kept but flagged — see the re-measurement on the test.
 //!
 //! Both `.cir` files are committed **unmodified**. Slimming a fixture
 //! until it passes hides the defect that makes it interesting, so
@@ -171,7 +174,8 @@ fn convert(fixture: &str, out_dir: &Path, extra: &[&str]) -> Output {
 /// That relocates the trap rather than removing it.
 ///
 /// This test is deliberately **not** `#[ignore]`d: the failing
-/// conversion costs a few seconds, and an `#[ignore]`d lock would never
+/// conversion is cheap (0.18 s, current optimised dev profile — it
+/// refuses before decoration), and an `#[ignore]`d lock would never
 /// notice the day the defect is fixed.
 #[test]
 fn shunt_feedback_amp_conversion_is_a_tier0_net_short() {
@@ -270,30 +274,58 @@ fn v11_residue_is_refused_without_kicad_cli() {
 /// Conversion time above which `two_stage_amp` still counts as
 /// reproducing the defect this lock records.
 ///
-/// Measured 112 s on an otherwise-idle machine (debug build, `7f707e6`);
-/// the floor is set an order of magnitude below that so machine speed
-/// cannot make the lock flaky, while still being ~75× the median
-/// fixture's 0.4 s.
+/// Measured 112 s on an otherwise-idle machine (**unoptimised** debug
+/// build — `opt-level = 0` — on `7f707e6`, before the workspace switched
+/// `[profile.dev]` to `opt-level = 2`); the floor was set an order of
+/// magnitude below that so machine speed could not make the lock flaky,
+/// while still being ~75× the median fixture's 0.4 s.
+///
+/// The floor is left where it is deliberately. It no longer holds (see
+/// the re-measurement on the test below) and moving it is a
+/// promote-or-delete decision about the whole lock, not a number to
+/// re-tune.
 const TWO_STAGE_AMP_SLOW_FLOOR_SECS: f64 = 15.0;
 
-/// **Defect lock (runtime).** `two_stage_amp` converts *correctly* —
-/// exit 0, connectivity check clean — but takes ~112 s where every v0.1
-/// fixture takes 0.3–4.5 s. It is therefore committed but **not
-/// registered**: ~15 fixture-enumerating verifiers each converting it
-/// would add roughly 25 CPU-minutes to every `just test`.
+/// **Defect lock (runtime) — STALE, kept pending a promote-or-delete
+/// decision.** As recorded, `two_stage_amp` converted *correctly* —
+/// exit 0, connectivity check clean — but took ~112 s where every v0.1
+/// fixture took 0.3–4.5 s, so it was committed but **not registered**:
+/// ~15 fixture-enumerating verifiers each converting it would have added
+/// roughly 25 CPU-minutes to every `just test`.
 ///
-/// **What was measured** (debug build, `7f707e6`, idle machine,
-/// `--no-layout-cache`):
+/// **That is no longer true on this tree.** The two levers this comment
+/// itself named as the fix have since landed (`6a18a8b` skip-the-trial-
+/// route, `2d3c81b` memoise-phase-4.5), and `[profile.dev]` moved to
+/// `opt-level = 2`. Re-measured below: **1.05 s**, i.e. under the 15 s
+/// floor, so the assertion in this test would now report UNEXPECTED
+/// PASS. The test stays `#[ignore]`d (the suite is unaffected) and the
+/// lock is left standing rather than silently deleted, because
+/// promoting the fixture means registering it across the
+/// fixture-enumerating tables with zero-slack baselines — an owner call,
+/// not a hygiene edit.
 ///
-/// | conversion                              | wall  |
-/// | --------------------------------------- | ----- |
-/// | `two_stage_amp` (default)               | 112 s |
-/// | `two_stage_amp --no-verify`             | 118 s |
-/// | `two_stage_amp --no-refine`             | 0.43 s|
-/// | `two_stage_amp --no-refine --no-verify` | 0.09 s|
-/// | `rc_phase_shift` (default)              | 11.5 s|
-/// | `common_emitter` (default)              | 4.5 s |
-/// | median v0.1 fixture                     | 0.4 s |
+/// **What was measured — original vs. now.** Both columns are idle
+/// machine, `--no-layout-cache`. `7f707e6` is an **unoptimised** debug
+/// build (`opt-level = 0`); "now" is the current **optimised dev
+/// profile** (`opt-level = 2`, `debug-assertions = true`) on
+/// `chore/hygiene`, which is exactly the binary the test harness runs
+/// (`CARGO_BIN_EXE_spice2kicad`). Median of three runs.
+///
+/// | conversion                              | `7f707e6`, unopt | now, dev opt-2 |
+/// | --------------------------------------- | ---------------- | -------------- |
+/// | `two_stage_amp` (default)               | 112 s            | 1.05 s         |
+/// | `two_stage_amp --no-verify`             | 118 s            | 0.70 s         |
+/// | `two_stage_amp --no-refine`             | 0.43 s           | 0.36 s         |
+/// | `two_stage_amp --no-refine --no-verify` | 0.09 s           | 0.04 s         |
+/// | `rc_phase_shift` (default)              | 11.5 s           | 0.44 s         |
+/// | `common_emitter` (default)              | 4.5 s            | 0.46 s         |
+/// | median v0.1 fixture                     | 0.4 s            | 0.45 s         |
+///
+/// **The profile is not the story; the code is.** Control arm, same
+/// tree, same command, rebuilt with `CARGO_PROFILE_DEV_OPT_LEVEL=0` so
+/// only the optimisation level differs: `two_stage_amp` takes **5.4 s**.
+/// So of the 112 s → 1.05 s fall, ~21× is the phase-4.5 work and ~5× is
+/// the profile. Quoting either alone would misattribute it.
 ///
 /// **It is NOT the memory defect it was once reported as.** An earlier
 /// F0 attempt recorded this fixture as needing ">8 GB of virtual memory,
@@ -304,7 +336,9 @@ const TWO_STAGE_AMP_SLOW_FLOOR_SECS: f64 = 15.0;
 /// this tree; the cost is entirely CPU. (That earlier number was taken
 /// on the `ed51164` ADR-19 M4 tree, since reverted.)
 ///
-/// **First-look diagnosis — a bounded product, not unbounded growth.**
+/// **First-look diagnosis — a bounded product, not unbounded growth**
+/// (all figures in this paragraph and the next are from the original
+/// unoptimised `7f707e6` measurement).
 /// `--no-refine` removes 99.6 % of the cost, and per CLAUDE.md /
 /// ADR-17 that flag ablates *two* passes: the SA and the phase-4.5
 /// routing-aware orientation refinement. Phase 4.5 uses the **real
@@ -326,20 +360,22 @@ const TWO_STAGE_AMP_SLOW_FLOOR_SECS: f64 = 15.0;
 /// phase 4.5 then trial-routes, and how conflicted each route is), not
 /// the iteration count.
 ///
-/// Fixing it is explicitly out of scope for F0. The plausible levers, in
-/// the order a fixer should try them, are (a) cache/memoise phase 4.5's
-/// per-candidate route measurements, and (b) give the router's conflict
-/// cascade an early-out when a candidate is already worse than the
-/// incumbent — neither of which changes emitted geometry.
+/// Fixing it was explicitly out of scope for F0. The plausible levers,
+/// in the order a fixer should try them, were (a) cache/memoise phase
+/// 4.5's per-candidate route measurements, and (b) give the router's
+/// conflict cascade an early-out when a candidate is already worse than
+/// the incumbent — neither of which changes emitted geometry. **Both
+/// have since landed** (`2d3c81b` and `6a18a8b` respectively), which is
+/// where the 21× came from.
 ///
-/// `#[ignore]`d because a 112 s test does not belong in the default
-/// suite. Run it with:
+/// Still `#[ignore]`d — not because it is slow any more (it is 1.05 s),
+/// but because un-ignoring it would fail on the stale floor. Run it with:
 ///
 /// ```sh
 /// cargo test -p spice2kicad --test f0_defects -- --ignored --nocapture
 /// ```
 #[test]
-#[ignore = "converts correctly but takes ~112 s; see the doc comment (F0 runtime defect lock)"]
+#[ignore = "STALE runtime lock: recorded ~112 s (unoptimised debug, 7f707e6), now 1.05 s on the optimised dev profile; see the doc comment (F0 runtime defect lock)"]
 fn two_stage_amp_conversion_is_pathologically_slow() {
     let tmp = tempdir("two_stage_amp");
     let start = std::time::Instant::now();
@@ -361,7 +397,8 @@ fn two_stage_amp_conversion_is_pathologically_slow() {
         elapsed > TWO_STAGE_AMP_SLOW_FLOOR_SECS,
         "UNEXPECTED PASS: `two_stage_amp` converted in {elapsed:.1} s, under the \
          {TWO_STAGE_AMP_SLOW_FLOOR_SECS} s floor this lock records (it was 112 s on \
-         7f707e6). The phase-4.5 trial-routing cost is FIXED. Register the fixture \
+         7f707e6, unoptimised debug build). The phase-4.5 trial-routing cost is \
+         FIXED. Register the fixture \
          across the fixture-enumerating tables in crates/spice2kicad/tests/ with \
          zero-slack baselines and DELETE this test. See docs/v0.2-roadmap.md § F0.",
     );
