@@ -1,0 +1,39 @@
+* Sallen-Key 2nd-order low-pass (VCVS form, gain 1.586 — Butterworth Q).
+* The textbook active filter, and the fixture the roadmap's B2/B3
+* post-mortem asked for: TWO visible top-level feedback arcs — C1 from
+* `out` back to the R1/R2 junction `n1`, and the RA/RB divider from `out`
+* back to the op-amp's inverting input `inv`.
+*
+* The op-amp carries a DEFINITION-LEVEL symbol (spec §4.1/§4.2) so it is
+* emitted flat rather than lowered to a hierarchical sheet. That is the
+* load-bearing part: `opamp_inverting` and `opamp_inverting_real` hide
+* their feedback resistor behind a `.subckt` instance the flow model
+* treats as directionless, which is precisely why B2/B3 measured no lever
+* on them. Here the feedback is on the sheet.
+*@symbol Device:R_US for=R*
+*@symbol Device:C    for=C*
+*@port in=input
+*@port out=output
+
+.subckt OPAMP inp inn out vcc vee ;@ symbol=Amplifier_Operational:OPAMP ;@ pinmap=inp:3,inn:2,out:1,vcc:8,vee:4
+E1 out 0 inp inn 1e5
+.ends
+
+VCC vcc 0   DC  15   ;@ power=+15V
+VEE vee 0   DC -15   ;@ power=-15V
+VIN in  0   DC 0 AC 1     ;@ ignore
+
+* --- the RC section; C1 is the feedback capacitor ---
+R1  in  n1  10k
+R2  n1  np  10k
+C2  np  0   10n
+C1  n1  out 10n
+
+* --- the gain-setting feedback divider ---
+RA  out inv 5k9
+RB  inv 0   10k
+
+X1  np inv out vcc vee OPAMP
+
+.ac dec 20 10 100k
+.end

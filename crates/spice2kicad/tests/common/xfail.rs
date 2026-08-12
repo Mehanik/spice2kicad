@@ -124,6 +124,42 @@ const XFAIL: &[(&str, &str, &str)] = &[
         "two_stage_amp",
         "deferred V13(6a) decoration nudge: #PWR2's and #PWR4's GND value text clip the CE1/RE1 bodies",
     ),
+    // --- F2: the second benchmark wave (v0.2 roadmap) -----------------
+    // Four new fixtures — `cascode_amp`, `lc_ladder_lpf`,
+    // `sallen_key_lpf`, `wien_bridge_osc` — chosen because the current
+    // placer draws them BADLY, so a better placer has room to win (the
+    // ADR-23 D7 finding: with one Tier-1 defect left in the whole suite,
+    // "Tier 1 improved" had degenerated into "did you perturb
+    // `rc_phase_shift`?").
+    //
+    // Every one of them is Tier-0 CLEAN — ADR-22 partition certificate,
+    // V11 pin coincidence, V11 wire/label-on-foreign-pin, symbol overlap,
+    // cross-net collinear overlap and ERC all measure 0 on all four. The
+    // three entries below are all Tier-1 *decoration/placer* defects that
+    // were deferred long before F2; not one of them is a new regression,
+    // and not one is a budget. `sallen_key_lpf` needs no entry at all.
+    (
+        "v13_labels_clear_pin_text",
+        "cascode_amp",
+        "deferred V13(7) decoration nudge: the `e1` net label clips CB2's pin text",
+    ),
+    (
+        "v13_property_text_no_mutual_overlap",
+        "lc_ladder_lpf",
+        "deferred V13(4) decoration nudge: #PWR1's and #PWR2's GND value text collide — the two \
+         ground glyphs under the source and C1 land one grid step apart",
+    ),
+    (
+        "v13_property_text_no_mutual_overlap",
+        "wien_bridge_osc",
+        "deferred V13(4) decoration nudge: #PWR1's and #PWR3's GND value text collide",
+    ),
+    (
+        "no_power_glyph_foreign_body_overlap_across_fixtures",
+        "wien_bridge_osc",
+        "deferred V14 issue-[3]: two power-glyph bodies clip foreign bodies (ADR-14 known scope \
+         limit — the same defect `rc_phase_shift` carries, here twice over)",
+    ),
 ];
 
 /// True when `(test, fixture)` is a registered expected failure.

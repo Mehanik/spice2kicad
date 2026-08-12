@@ -261,6 +261,10 @@ fn erc_clean_on_port_annotated_fixtures() {
         "rc_lowpass",
         "rc_phase_shift",
         "two_stage_amp",
+        "cascode_amp",
+        "lc_ladder_lpf",
+        "sallen_key_lpf",
+        "wien_bridge_osc",
     ] {
         let src = fixtures_dir().join(format!("{name}.cir"));
         let tmp = tempdir(name);

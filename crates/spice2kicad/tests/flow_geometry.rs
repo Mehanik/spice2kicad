@@ -778,6 +778,15 @@ const FLOW_RATCHET: &[(&str, usize, usize)] = &[
     // (the CC interstage coupling cap drawn downstream of the Q2 it
     // feeds); F4 terminal lanes clean. Ratchet DOWN.
     ("two_stage_amp", 1, 0),
+    // --- F2 (v0.2 roadmap, second benchmark wave) NEW-GEOMETRY
+    // BASELINES, zero slack, ratchet DOWN only. F4 is clean on all four.
+    ("cascode_amp", 0, 0),
+    ("lc_ladder_lpf", 0, 0),
+    // One F3 inversion: C1, the Sallen-Key feedback capacitor, is drawn
+    // upstream of the node it feeds back from. That is the FIRST visible
+    // top-level feedback arc the F3 metric has ever had to grade.
+    ("sallen_key_lpf", 1, 0),
+    ("wien_bridge_osc", 0, 0),
 ];
 
 #[test]
@@ -901,6 +910,21 @@ const FLOW_POSE_RATCHET: &[(&str, usize, usize)] = &[
     // `COUT`-drawn-vertical defect `rc_phase_shift` carries, here twice
     // over. P5 clean. Ratchet DOWN.
     ("two_stage_amp", 2, 0),
+    // --- F2 (v0.2 roadmap, second wave) NEW-GEOMETRY BASELINES. P5 is
+    // clean on all four; F5 is not. Ratchet DOWN.
+    //
+    // Two series parts drawn VERTICAL (CIN and COUT, the input and
+    // output coupling caps) — the same `COUT`-drawn-vertical defect
+    // `rc_phase_shift` and `two_stage_amp` carry, and the defect
+    // Milestone D targets.
+    ("cascode_amp", 2, 0),
+    // THREE series parts drawn vertical (L1, L2, L3) — the worst F5 in
+    // the suite. Every inductor in a ladder is a series element on the
+    // main signal path, so a placer that draws series parts vertical has
+    // nowhere to hide here. This is the F5 headroom F2 exists to expose.
+    ("lc_ladder_lpf", 3, 0),
+    ("sallen_key_lpf", 0, 0),
+    ("wien_bridge_osc", 0, 0),
 ];
 
 #[test]
@@ -1056,6 +1080,14 @@ const STUB_RUN_RATCHET: &[(&str, u32)] = &[
     // (`rc_phase_shift` reaches 23) but the most widespread sprawl in
     // the suite. Ratchet DOWN.
     ("two_stage_amp", 19),
+    // --- F2 (v0.2 roadmap, second wave) NEW-GEOMETRY BASELINES.
+    // Ratchet DOWN.
+    ("cascode_amp", 7),
+    // Nine cells: the shunt capacitors of the ladder drift sideways of
+    // the nodes they terminate, the length of the chain.
+    ("lc_ladder_lpf", 9),
+    ("sallen_key_lpf", 0),
+    ("wien_bridge_osc", 4),
 ];
 
 /// F6 ratchet. A rail stub should hang straight off the node it

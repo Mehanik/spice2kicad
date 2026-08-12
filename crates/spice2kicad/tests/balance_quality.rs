@@ -288,6 +288,12 @@ const Q6_REFERENCE: &[(&str, f64)] = &[
     ("rc_phase_shift", 0.8938),
     // F0 (v0.2 roadmap) — informational master reference, not a gate.
     ("two_stage_amp", 0.9592),
+    // --- F2 (v0.2 roadmap, second wave) — informational master
+    // references, not gates. All four sit far below the 3.5 ceiling.
+    ("cascode_amp", 1.4287),
+    ("lc_ladder_lpf", 1.3711),
+    ("sallen_key_lpf", 1.3924),
+    ("wien_bridge_osc", 1.3924),
 ];
 
 #[test]

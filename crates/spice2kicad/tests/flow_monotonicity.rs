@@ -308,6 +308,23 @@ const Q3_FLOW_MONOTONICITY_BUDGET: &[(&str, u32)] = &[
     // both stages read right-to-left locally. Deliberately POOR: this is
     // the flow headroom F0 exists to expose. Ratchet DOWN.
     ("two_stage_amp", 8),
+    // --- F2 (v0.2 roadmap, second benchmark wave) NEW-GEOMETRY
+    // BASELINES, zero slack, ratchet DOWN only.
+    //
+    // Three inversions: the cascode's bias chain (RB1/RB2/RB3) is drawn
+    // right-to-left against the layer order, which is what a placer with
+    // no vertical-stack model does to a circuit that IS a stack.
+    ("cascode_amp", 3),
+    // Two inversions on a chain that is otherwise the suite's most
+    // strictly left-to-right circuit — worth watching, because this is
+    // the FIRST fixture whose signal graph has a real root (its source
+    // is drawn, not `;@ ignore`d), so it is the only place the rooted
+    // layering path is actually measured.
+    ("lc_ladder_lpf", 2),
+    ("sallen_key_lpf", 2),
+    // Zero — an oscillator has no forward direction to violate, which
+    // is the control arm the other three are read against.
+    ("wien_bridge_osc", 0),
 ];
 
 #[test]

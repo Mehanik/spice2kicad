@@ -79,6 +79,10 @@ const SHEETS: &[&str] = &[
     "named_rails",
     "rc_phase_shift",
     "two_stage_amp",
+    "cascode_amp",
+    "lc_ladder_lpf",
+    "sallen_key_lpf",
+    "wien_bridge_osc",
 ];
 
 #[test]
@@ -115,6 +119,10 @@ fn v4_global_labels_reserved_for_interface_one_pin_nets() {
         ("opamp_inverting_real", &["in"]),
         ("rc_phase_shift", &["in", "out"]),
         ("two_stage_amp", &["in", "out"]),
+        ("cascode_amp", &["in", "out"]),
+        ("lc_ladder_lpf", &["out"]),
+        ("sallen_key_lpf", &["in", "out"]),
+        ("wien_bridge_osc", &["out"]),
     ];
     for (name, allowed) in allowed_per_fixture {
         let src = fixtures_dir().join(format!("{name}.cir"));

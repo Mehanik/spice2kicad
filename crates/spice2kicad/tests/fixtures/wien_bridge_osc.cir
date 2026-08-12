@@ -1,0 +1,34 @@
+* Wien-bridge oscillator: an op-amp with a frequency-selective positive
+* feedback network (RS/CS series, RP/CP parallel) and a resistive
+* negative feedback divider (RF/RG) setting the gain to 3.
+*
+* Chosen for one property no other fixture has: it has NO input at all.
+* The signal graph is a pure cycle — out -> RS -> np -> back into the
+* op-amp, and out -> RF -> inv -> back in — so there is no root to layer
+* from and two feedback arcs to break. Every other fixture is a rooted
+* chain (or an unrooted one whose root was `;@ ignore`d).
+*@symbol Device:R_US for=R*
+*@symbol Device:C    for=C*
+*@port out=output
+
+.subckt OPAMP inp inn out vcc vee ;@ symbol=Amplifier_Operational:OPAMP ;@ pinmap=inp:3,inn:2,out:1,vcc:8,vee:4
+E1 out 0 inp inn 1e5
+.ends
+
+VCC vcc 0   DC  15   ;@ power=+15V
+VEE vee 0   DC -15   ;@ power=-15V
+
+* --- positive feedback: the Wien bridge itself ---
+CS  out ns  10n
+RS  ns  np  16k
+RP  np  0   16k
+CP  np  0   10n
+
+* --- negative feedback: gain = 1 + RF/RG = 3 ---
+RF  out inv 20k
+RG  inv 0   10k
+
+X1  np inv out vcc vee OPAMP
+
+.tran 10u 20m
+.end

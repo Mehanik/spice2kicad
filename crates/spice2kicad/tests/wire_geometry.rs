@@ -468,6 +468,10 @@ const FIXTURES: &[&str] = &[
     "named_rails",
     "rc_phase_shift",
     "two_stage_amp",
+    "cascode_amp",
+    "lc_ladder_lpf",
+    "sallen_key_lpf",
+    "wien_bridge_osc",
 ];
 
 /// Per-fixture `(name, B, J)` high-water marks — **zero slack**, each
@@ -524,6 +528,26 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     // V16 headroom F0 exists to expose, and promoting the fixture moved
     // no other fixture's (B, J) by a single count. Ratchet DOWN.
     ("two_stage_amp", 33, 9),
+    // --- F2 (v0.2 roadmap, second benchmark wave) NEW-GEOMETRY
+    // BASELINES, zero slack, ratchet DOWN only. Adding them moved no
+    // existing fixture's (B, J) by a single count.
+    //
+    // B = 12 on eleven graded elements. The cascode's structure is a
+    // COLUMN (Q2's emitter on Q1's collector, a three-resistor bias
+    // ladder) and the placer has no stack model, so every vertical
+    // relationship is drawn as a detour.
+    ("cascode_amp", 12, 3),
+    // B = 16 on ten graded elements — the worst bends-per-element
+    // density in the suite (1.6 vs `two_stage_amp`'s 1.9 on 17, and
+    // `rc_phase_shift`'s 1.1 on 17). A doubly-terminated ladder is the
+    // one circuit whose ideal drawing is a straight line, so 16 bends is
+    // the long-chain / no-fold headroom F2 exists to expose.
+    ("lc_ladder_lpf", 16, 2),
+    ("sallen_key_lpf", 6, 3),
+    // B = 10 on eight graded elements: an oscillator is a pure cycle,
+    // and the placer lays it out as if it were a chain, so the loop
+    // closes with a long return path.
+    ("wien_bridge_osc", 10, 3),
     // B 10 → 4. Phase 4.5's acceptance objective gained the V16
     // ink-graph bend count as its FINAL lexicographic key, after
     // (V13, V12, V5), so the refiner now separates orientations that tie

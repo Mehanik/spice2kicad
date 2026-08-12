@@ -334,6 +334,19 @@ const Q5_NEAR_MISS_BUDGET: &[(&str, u32)] = &[
     // the worst in the suite, roughly double `rc_phase_shift`'s 3. Each
     // is a candidate straight drop the router currently jogs.
     ("two_stage_amp", 7),
+    // --- F2 (v0.2 roadmap, second benchmark wave) NEW-GEOMETRY BASELINES.
+    // Recorded at their measured values with zero slack; they ratchet
+    // DOWN only. No existing fixture's literal moved.
+    //
+    // Q1/RB3, Q2/RB2 and RC/RB1 each miss a shared axis by a hair — the
+    // bias chain is a column the placer does not keep in one column.
+    ("cascode_amp", 3),
+    // Five near-misses. A doubly-terminated ladder is nothing BUT
+    // shared axes, and the placer snaps none of them: worst in the suite
+    // after `two_stage_amp`.
+    ("lc_ladder_lpf", 5),
+    ("sallen_key_lpf", 2),
+    ("wien_bridge_osc", 2),
 ];
 
 #[test]

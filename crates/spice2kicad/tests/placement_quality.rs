@@ -551,6 +551,10 @@ const FIXTURES_FOR_QUALITY: &[(&str, &str)] = &[
     ("named_rails", "named_rails.cir"),
     ("rc_phase_shift", "rc_phase_shift.cir"),
     ("two_stage_amp", "two_stage_amp.cir"),
+    ("cascode_amp", "cascode_amp.cir"),
+    ("lc_ladder_lpf", "lc_ladder_lpf.cir"),
+    ("sallen_key_lpf", "sallen_key_lpf.cir"),
+    ("wien_bridge_osc", "wien_bridge_osc.cir"),
 ];
 
 fn fixtures() -> Vec<(&'static str, PathBuf)> {
@@ -1502,6 +1506,13 @@ fn wire_detour_within_budget_across_fixtures() {
         // column, not the last row added to it). This is the Tier-2
         // compaction headroom F0 exists to expose. Ratchet DOWN.
         ("two_stage_amp", 1.8566),
+        // --- F2 (v0.2 roadmap, second wave) NEW-GEOMETRY BASELINES.
+        // Zero slack at 4 dp (the convention every literal here uses),
+        // ratchet DOWN. No existing fixture's literal moved.
+        ("cascode_amp", 1.0843),
+        ("lc_ladder_lpf", 1.1506),
+        ("sallen_key_lpf", 1.0407),
+        ("wien_bridge_osc", 1.0899),
     ];
     // Collect-then-assert: an in-loop `assert!` truncates the report at
     // the first offending fixture, which is the ADR-19 M4 "gate-set
@@ -1625,6 +1636,15 @@ fn crossing_count_within_budget_across_fixtures() {
         // 2.5x the previous suite worst (`multivibrator`, 4) and 5x
         // `rc_phase_shift`'s 2. Ratchet DOWN.
         ("two_stage_amp", 10),
+        // --- F2 (v0.2 roadmap, second wave) NEW-GEOMETRY BASELINES.
+        // Ratchet DOWN.
+        ("cascode_amp", 2),
+        // Zero crossings — the ladder is the one new fixture the placer
+        // draws without crossing itself, which is what makes its 16
+        // bends a pure detour result rather than a tangle.
+        ("lc_ladder_lpf", 0),
+        ("sallen_key_lpf", 2),
+        ("wien_bridge_osc", 2),
     ];
     // Collect-then-assert: see `wire_detour_within_budget_across_fixtures`.
     let mut failures: Vec<String> = Vec::new();

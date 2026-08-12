@@ -61,6 +61,10 @@ const FIXTURES: &[&str] = &[
     "named_rails",
     "rc_phase_shift",
     "two_stage_amp",
+    "cascode_amp",
+    "lc_ladder_lpf",
+    "sallen_key_lpf",
+    "wien_bridge_osc",
 ];
 
 fn fixtures_dir() -> PathBuf {

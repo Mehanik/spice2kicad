@@ -256,6 +256,10 @@ const SHEETS: &[&str] = &[
     "named_rails",
     "rc_phase_shift",
     "two_stage_amp",
+    "cascode_amp",
+    "lc_ladder_lpf",
+    "sallen_key_lpf",
+    "wien_bridge_osc",
 ];
 
 /// Per-fixture crossing budget. After the V11/V12 cascade + Steiner-
@@ -1634,7 +1638,14 @@ fn v13_labels_clear_pin_text() {
     // Also previously unverified; the renderer-measured audit found the
     // `1` pin number under the `out` label on opamp_inverting_real.
     // Budget 0.
-    let mut failures: Vec<String> = Vec::new();
+    //
+    // Collect-then-assert through the xfail guard: the budget stays a
+    // hard 0 for every fixture, and a NEW fixture that re-exposes a
+    // *deferred* decoration-nudge defect is registered in
+    // `tests/common/xfail.rs` — a tripwire that FAILS the day the defect
+    // is fixed — rather than given headroom here, which would be
+    // indistinguishable from a regression forever after.
+    let mut xf = common::xfail::Guard::new("v13_labels_clear_pin_text");
     for name in SHEETS {
         let src = fixtures_dir().join(format!("{name}.cir"));
         let tmp = tempdir(name);
@@ -1653,15 +1664,12 @@ fn v13_labels_clear_pin_text() {
             }
         }
         common::scoreboard::record_count("v13.7_label_pintext", name, hits);
-        if hits > 0 {
-            failures.push(format!("{name}: {hits} label↔pin-text overlaps > budget 0"));
-        }
+        xf.record(
+            name,
+            (hits > 0).then(|| format!("{name}: {hits} label↔pin-text overlaps > budget 0")),
+        );
     }
-    assert!(
-        failures.is_empty(),
-        "V13(7) regressions:\n  {}",
-        failures.join("\n  "),
-    );
+    xf.finish();
 }
 
 #[test]
@@ -2060,7 +2068,27 @@ fn v5_violation_budget(name: &str) -> usize {
         // loosened budget on an existing one — no other fixture's count
         // moved. Ratchet DOWN.
         "two_stage_amp" => 5,
-        // diff_pair, port_shapes, opamp_inverting_real: zero violations.
+        // --- F2 (v0.2 roadmap, second benchmark wave) NEW-GEOMETRY
+        // BASELINES. Same class as every arm above — a shared-net wire
+        // leaving a pin sideways instead of outward. Zero slack; these
+        // ratchet DOWN only, and no existing fixture's count moved.
+        //
+        // `sallen_key_lpf` ties `rc_phase_shift`/`two_stage_amp` for the
+        // suite worst at 5, on only nine graded elements: the highest V5
+        // density in the benchmark. It is also the fixture with two
+        // visible top-level feedback arcs, which is the coincidence F2
+        // was looking for — the feedback trunks are where the pins face
+        // wrong.
+        "sallen_key_lpf" => 5,
+        "cascode_amp" => 4,
+        "wien_bridge_osc" => 2,
+        // `lc_ladder_lpf` is CLEAN, and deliberately kept as the control
+        // arm: it is the other new fixture with a drawn source and the
+        // only one of the four with zero V5 residue, so "drawn stimulus"
+        // is demonstrably not what drives the metric.
+        //
+        // diff_pair, port_shapes, opamp_inverting_real, lc_ladder_lpf:
+        // zero violations.
         _ => 0,
     }
 }
@@ -2466,6 +2494,10 @@ const PHASE1_ERC_FIXTURES: &[&str] = &[
     "named_rails",
     "rc_phase_shift",
     "two_stage_amp",
+    "cascode_amp",
+    "lc_ladder_lpf",
+    "sallen_key_lpf",
+    "wien_bridge_osc",
 ];
 
 #[test]
@@ -3018,6 +3050,10 @@ const ALL_FIXTURES_FOR_CROSS_NET: &[&str] = &[
     "named_rails",
     "rc_phase_shift",
     "two_stage_amp",
+    "cascode_amp",
+    "lc_ladder_lpf",
+    "sallen_key_lpf",
+    "wien_bridge_osc",
 ];
 
 /// Symmetric fixtures whose two mirror-image sub-circuits force two
