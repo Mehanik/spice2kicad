@@ -10,6 +10,10 @@
 * their feedback resistor behind a `.subckt` instance the flow model
 * treats as directionless, which is precisely why B2/B3 measured no lever
 * on them. Here the feedback is on the sheet.
+*
+* Control-arm twin: `sallen_key_driven.cir` is this file with the
+* stimulus DRAWN instead of `;@ ignore`d, and it fails Tier 0 — see
+* `tests/f0_defects.rs`.
 *@symbol Device:R_US for=R*
 *@symbol Device:C    for=C*
 *@port in=input

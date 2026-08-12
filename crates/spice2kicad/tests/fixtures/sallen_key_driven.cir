@@ -1,0 +1,44 @@
+* Sallen-Key 2nd-order low-pass with a DRAWN stimulus.
+*
+* `sallen_key_lpf.cir` with the source drawn instead of hidden. Two lines
+* differ, and both follow from that one decision: VIN gains a
+* `Simulation_SPICE:VDC` body and loses its `;@ ignore`, and `in` loses
+* its `*@port in=input` (with the source on the sheet, `in` is an
+* internal node between VIN and R1, not an external terminal).
+*
+* That flips the conversion from Tier-0 clean to Tier-0 BROKEN. The
+* passing twin is its control arm, and `lc_ladder_lpf.cir` is a second
+* one — also drawn, also rooted, and clean — so "drawn source" alone is
+* not the trigger; it is a drawn source on THIS topology.
+*
+* Held as a defect lock in `tests/f0_defects.rs`, not registered in the
+* graded suite. See that file for the measured characterisation,
+* including the third control arm: putting `*@port in=input` back — a
+* purely cosmetic label directive — MASKS the fault.
+*@symbol Device:R_US           for=R*
+*@symbol Device:C              for=C*
+*@symbol Simulation_SPICE:VDC  for=VIN
+*@port out=output
+
+.subckt OPAMP inp inn out vcc vee ;@ symbol=Amplifier_Operational:OPAMP ;@ pinmap=inp:3,inn:2,out:1,vcc:8,vee:4
+E1 out 0 inp inn 1e5
+.ends
+
+VCC vcc 0   DC  15   ;@ power=+15V
+VEE vee 0   DC -15   ;@ power=-15V
+VIN in  0   DC 0 AC 1
+
+* --- the RC section; C1 is the feedback capacitor ---
+R1  in  n1  10k
+R2  n1  np  10k
+C2  np  0   10n
+C1  n1  out 10n
+
+* --- the gain-setting feedback divider ---
+RA  out inv 5k9
+RB  inv 0   10k
+
+X1  np inv out vcc vee OPAMP
+
+.ac dec 20 10 100k
+.end

@@ -1,5 +1,5 @@
-//! F0 defect lock — the one benchmark fixture the current converter
-//! cannot grade, and why.
+//! Benchmark defect locks — the fixtures the current converter cannot
+//! grade, and why.
 //!
 //! F0 (see `docs/v0.2-roadmap.md` § "Findings / status log") added three
 //! harder fixtures so the placer work has circuits with real headroom.
@@ -36,6 +36,17 @@
 //! tripwire, the same contract as `tests/common/xfail.rs`. When the
 //! underlying defect is fixed, the test fails and tells you to promote
 //! the fixture into the graded suite and delete the lock.
+//!
+//! # F2 (the second benchmark wave)
+//!
+//! F2 added four fixtures the placer draws badly but correctly — they
+//! are registered across the graded suite — and one it cannot draw at
+//! all:
+//!
+//!  * **`sallen_key_driven` — Tier-0.** The Sallen-Key filter with its
+//!    stimulus DRAWN instead of `;@ ignore`d. Its passing twin
+//!    `sallen_key_lpf` is in the graded suite, so the defect is
+//!    attributable to a single input difference. See the lock below.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -314,5 +325,136 @@ fn v11_residue_is_refused_without_kicad_cli() {
         "the converter refused (exit 1) but still wrote {}. A refusal must not \
          leave a schematic on disk that a later step could pick up.",
         emitted.display(),
+    );
+}
+
+// --- sallen_key_driven: Tier-0 net merge on a DRAWN stimulus --------------
+
+/// **Defect lock (Tier-0, V11 / ADR-22 partition).** `sallen_key_driven`
+/// is `sallen_key_lpf` with the stimulus drawn rather than hidden. The
+/// converter refuses it: the emitted geometry puts the op-amp's
+/// non-inverting input net `np` and its output net `out` in ONE
+/// geometric component, which KiCad would import as a single net —
+/// i.e. the filter's feedback loop shorted.
+///
+/// ```text
+/// ERROR: net partition: MERGE: source nets ["np", "out"] share one
+///        geometric component (KiCad imports them as ONE net); …
+/// ```
+///
+/// # Why this fixture exists, and what makes it different
+///
+/// The roadmap's B2/B3 post-mortem established that **every** fixture in
+/// the suite `;@ ignore`s its stimulus, so `layers.rs::assign_x_layers`
+/// finds `sources` empty and returns `no_source_fallback` on 100% of
+/// real input — the rooted-DAG layering path, and everything downstream
+/// of it (`break_cycles` included), had never executed on a real
+/// circuit. F2 added two fixtures that do reach it. One,
+/// `lc_ladder_lpf`, converts cleanly and is graded. The other is this.
+///
+/// **Three control arms, so the attribution is not a guess:**
+///
+/// 1. `sallen_key_lpf` — the same circuit with `;@ ignore` on VIN —
+///    converts cleanly and is fully graded. So the topology alone is
+///    fine.
+/// 2. `lc_ladder_lpf` — a different topology, also with a drawn source,
+///    also rooted — converts cleanly and is fully graded. So a drawn
+///    source alone is fine.
+/// 3. Adding `*@port in=input` back to THIS file — a purely cosmetic
+///    label directive that changes no topology — makes it convert
+///    cleanly. That is the finding worth recording: a decoration-level
+///    annotation flips a Tier-0 correctness outcome, which is the
+///    "global, unattributable consequences" property ADR-17 diagnosed,
+///    reached from a new direction.
+///
+/// # Characterisation (measured on this tree, deterministic)
+///
+/// Three `--no-layout-cache` runs produce byte-identical output and the
+/// same non-zero exit. A `--refine-iterations` sweep:
+///
+/// | setting | result |
+/// | --- | --- |
+/// | `--no-refine` | **SPLIT**: `np` reconstructs as 2 islands |
+/// | 0, 1, 10, 50, 100, 150 | clean |
+/// | 199, 200 (the default) | **MERGE**: `np` + `out` in one component |
+/// | 201, 400 | clean |
+///
+/// The `--no-refine` row is the one that is genuinely new. `--no-refine`
+/// ablates *both* the SA and phase 4.5, so what it leaves is the bare
+/// deterministic seed — and the bare seed is **already Tier-0 broken
+/// here**, severing `np` into two islands before any annealer runs.
+/// `shunt_feedback_amp`, the project's other Tier-0 lock, is clean at
+/// `--no-refine`; its defect is an SA end-state. This one is not. It is
+/// therefore direct evidence against reading the SA as the sole source
+/// of Tier-0 placement failures, and a second acceptance test for any
+/// replacement placer — one that a purely deterministic constructive
+/// seed would have to pass on its own merits.
+///
+/// Not `#[ignore]`d: the failing conversion is cheap (it refuses before
+/// decoration), and an ignored lock would never notice the day the
+/// defect is fixed.
+#[test]
+fn sallen_key_driven_conversion_is_a_tier0_net_merge() {
+    let tmp = tempdir("sallen_key_driven");
+    let out = convert("sallen_key_driven", &tmp, &[]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    common::scoreboard::record_count(
+        "t0.convert_fail",
+        "sallen_key_driven",
+        usize::from(!out.status.success()),
+    );
+    common::scoreboard::record_count(
+        "t0.partition",
+        "sallen_key_driven",
+        usize::from(stderr.contains("net partition: MERGE:")),
+    );
+
+    assert!(
+        !out.status.success(),
+        "UNEXPECTED PASS: `sallen_key_driven` now converts cleanly (exit {:?}). The \
+         Tier-0 np/out merge this lock records is FIXED. Promote the fixture into \
+         the graded suite — register it across the fixture-enumerating tables in \
+         crates/spice2kicad/tests/ with zero-slack baselines — and DELETE this \
+         test. See docs/v0.2-roadmap.md § F2.\nstderr:\n{stderr}",
+        out.status.code(),
+    );
+    // The net pair pins *which* short this lock records. A different
+    // failure is a new regression to diagnose, not this one.
+    assert!(
+        stderr.contains(r#"MERGE: source nets ["np", "out"]"#),
+        "`sallen_key_driven` failed to convert, but NOT with the recorded Tier-0 \
+         merge of the op-amp's non-inverting input into its output.\nstderr:\n{stderr}",
+    );
+}
+
+/// The control arm, kept as a test so it cannot silently rot: the
+/// **bare deterministic seed** — `--no-refine`, i.e. no SA and no phase
+/// 4.5 — is Tier-0 broken on this fixture too, and with a *different*
+/// finding (a SPLIT, not a MERGE).
+///
+/// This is the half of the characterisation that matters most for the
+/// v0.2 placer direction, and it is the half a single default-settings
+/// lock would lose. ADR-17's retirement records that the bare seed has
+/// the same blast radius as the SA; this says something sharper — the
+/// bare seed can be *wrong*, not merely different. Any replacement that
+/// is "the deterministic seed, without the annealer" must clear this.
+#[test]
+fn sallen_key_driven_bare_seed_is_also_tier0_broken() {
+    let tmp = tempdir("sallen_key_driven-seed");
+    let out = convert("sallen_key_driven", &tmp, &["--no-refine", "--no-verify"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert!(
+        !out.status.success(),
+        "UNEXPECTED PASS: the bare seed (`--no-refine`) now converts `sallen_key_driven` \
+         cleanly (exit {:?}). Re-measure the whole lock above — its diagnosis rests on \
+         the seed being broken independently of the SA.\nstderr:\n{stderr}",
+        out.status.code(),
+    );
+    assert!(
+        stderr.contains(r#"SPLIT: source net "np""#),
+        "the bare seed refused, but not with the recorded SPLIT of `np` into two \
+         islands.\nstderr:\n{stderr}",
     );
 }
