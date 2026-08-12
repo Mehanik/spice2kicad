@@ -537,11 +537,16 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     // ladder) and the placer has no stack model, so every vertical
     // relationship is drawn as a detour.
     ("cascode_amp", 12, 3),
-    // B = 16 on ten graded elements — the worst bends-per-element
-    // density in the suite (1.6 vs `two_stage_amp`'s 1.9 on 17, and
-    // `rc_phase_shift`'s 1.1 on 17). A doubly-terminated ladder is the
-    // one circuit whose ideal drawing is a straight line, so 16 bends is
-    // the long-chain / no-fold headroom F2 exists to expose.
+    // B = 16 on ten graded elements. CORRECTION to the claim in this
+    // commit's message and in `docs/v0.2-roadmap.md` § F2 as first
+    // written: 1.6 bends/element is the SECOND-worst density in the
+    // suite, not the worst — `two_stage_amp` is 33/17 = 1.9. (Recorded
+    // rather than quietly dropped, per MEMORY "verify what a number
+    // measures".) What is true, and is why the fixture earns its place:
+    // a doubly-terminated ladder is the one circuit in the benchmark
+    // whose ideal drawing is a single straight line, and the placer
+    // spends 16 bends on it. That is the long-chain / no-fold headroom
+    // F2 exists to expose.
     ("lc_ladder_lpf", 16, 2),
     ("sallen_key_lpf", 6, 3),
     // B = 10 on eight graded elements: an oscillator is a pure cycle,
