@@ -1030,6 +1030,41 @@ invariant here.
   respected in the permitted direction: Tier 2 pays for Tier 0 and
   Tier 1, never the reverse.
 
+  **An ABSOLUTE reference for B (informational, not a ratchet).** Every
+  literal in the table above was measured on the incumbent placer's own
+  output, so it records what the placer achieves, not what is achievable:
+  `rc_phase_shift`'s B = 19 is not judged as bad, it is *protected* at 19.
+  `crates/spice2kicad/tests/bend_bound.rs` adds the reference the table
+  lacks — a **provable lower bound** on the bends any rectilinear ink
+  could have, computed from terminal geometry alone (no obstacles, no pin
+  directions, no router). It prints `fixture / measured B / bound / gap`
+  and records `v16.bend_bound`, `v16.bend_gap` and
+  `v16.bend_excess_exact` to the ADR-23 scoreboard as **informational**
+  metrics.
+
+  It is deliberately NOT a ratchet, for this section's own reason: a
+  bound that were subtly *inadmissible* would, as a gate, block all work
+  while being wrong. What it does assert is its own soundness — that
+  Σ per-component bends equals the whole-sheet B this ratchet asserts on,
+  and that `bound <= measured` on every graded component.
+
+  The bound rests on one extremal lemma (the topmost-then-leftmost point
+  of any ink can only ray east or south, so it is a bend or a leaf; and
+  every leaf must be an anchor, which is verified per component rather
+  than inherited from the whisker gate). It refutes `B = 0`, so it yields
+  at most **1 per ink component** — and that ceiling is close to a fact
+  about the metric rather than a weakness of the proof: a trunk with taps
+  realises `B <= 2` for *any* terminal set, since taps meet the trunk as
+  3-ray Ts, which V16 scores as J and not B. Read the gap as an *upper
+  bound on reducible bends*; the tight column is the two-anchor class,
+  where the obstacle-free optimum is exactly 0 or 1. First measurement,
+  all twelve fixtures, 38/38 components and 86/86 bends covered:
+  **B = 86, bound = 15**, and on the two-anchor class alone **14 bends
+  drawn where 5 is optimal**. The V16-vs-V5 conflict recorded above is
+  exactly why the unconditional bound stays low: a V5-conditional column
+  is where realistic floors (like `rc_lowpass`'s documented 2) live, and
+  it must never be summed into the admissible one.
+
   **Cross-check against the crossing ratchet.** The verifier's
   `inter_net_crossings` (4-ray vertices with no dot — excluded from both
   B and J) was compared against

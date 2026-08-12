@@ -248,6 +248,32 @@ const METRICS: &[Metric] = &[
     ),
     // --- informational ----------------------------------------------
     m("q6.cov", Tier::Info, 0.0, "Q6 balance CoV (informational)"),
+    // V16 against an ABSOLUTE reference (`bend_bound.rs`). Informational
+    // by design, for the reason `docs/invariants.md` V16 gives for not
+    // admitting speculative metrics: the bound is provably admissible but
+    // deliberately loose (0 or 1 per ink component), so as a gate it
+    // would grade noise. It answers the question the ratchets structurally
+    // cannot — "how many of these bends were ever avoidable?" — and it
+    // must not acquire a vote in the promotion rule on the strength of
+    // that.
+    m(
+        "v16.bend_bound",
+        Tier::Info,
+        0.0,
+        "V16 provable bend lower bound (informational)",
+    ),
+    m(
+        "v16.bend_gap",
+        Tier::Info,
+        0.0,
+        "V16 bends above the provable bound (informational)",
+    ),
+    m(
+        "v16.bend_excess_exact",
+        Tier::Info,
+        0.0,
+        "V16 bends above the EXACT optimum on 2-terminal ink (informational)",
+    ),
 ];
 
 /// Weight applied to the Tier-1 total in the single-scalar aggregate.
