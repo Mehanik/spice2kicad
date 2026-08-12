@@ -160,6 +160,43 @@ const XFAIL: &[(&str, &str, &str)] = &[
         "deferred V14 issue-[3]: two power-glyph bodies clip foreign bodies (ADR-14 known scope \
          limit — the same defect `rc_phase_shift` carries, here twice over)",
     ),
+    // --- F3: the two fixtures promoted out of `tests/f0_defects.rs` by
+    // the ADR-24 Tier-0 router fix — `sallen_key_driven` and
+    // `shunt_feedback_amp`.
+    //
+    // Both are now Tier-0 CLEAN: ADR-22 partition certificate, V11 pin
+    // coincidence, V11 wire/label-on-foreign-pin, symbol overlap,
+    // cross-net collinear overlap and ERC all measure 0 on both. The
+    // three entries below are Tier-1 *decoration / placer* defects that
+    // were deferred long before this work — each is the SAME defect an
+    // existing fixture already carries an entry for, not a new one.
+    (
+        "v13_property_text_no_mutual_overlap",
+        "sallen_key_driven",
+        "deferred V13(4) decoration nudge: RA.Reference clips #PWR5's rail text and #PWR2's \
+         value text clips #PWR3's — the same defect `two_stage_amp` and `lc_ladder_lpf` carry",
+    ),
+    (
+        "rendered_text_does_not_overlap_across_fixtures",
+        "sallen_key_driven",
+        "deferred V13 text-nudge defect: the rendered \"VEE\" rail text overlaps \"RA\" by \
+         (0.88, 0.39) mm — the same defect `rc_phase_shift` carries",
+    ),
+    // R-5, and the fixture ADR-20 named it on. ADR-20 concluded that R-5
+    // was what made `shunt_feedback_amp` UNCONVERTIBLE, escalating it
+    // from Tier-1 aesthetics to Tier-0 correctness. ADR-24 shows that
+    // conclusion was wrong: the fixture converts with R-5 untouched,
+    // because the Tier-0 failure was the router fragmenting a Steiner
+    // tree, not the glyph hanging into the channel. R-5 itself is
+    // unchanged, still owner-gated, and still exactly this: a Tier-1
+    // aesthetic defect, recorded here as a tripwire that expires the day
+    // it is fixed.
+    (
+        "v14_rail_pin_faces_rail",
+        "shunt_feedback_amp",
+        "deferred V14/R-5 rail-pin defect: #PWR3 (+12V) sits below its host RB's body centre \
+         — the same defect `rc_phase_shift` carries, and the one ADR-20 diagnosed here",
+    ),
 ];
 
 /// True when `(test, fixture)` is a registered expected failure.

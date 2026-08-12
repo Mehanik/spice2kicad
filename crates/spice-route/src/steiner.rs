@@ -512,6 +512,214 @@ pub(crate) fn route_signal_without_collinear_stub(
     route_signal_inner(net, foreign_pins, false)
 }
 
+/// True for a segment of no length: it carries no connectivity and is
+/// dropped rather than emitted.
+fn zero_len(s: &Segment) -> bool {
+    (s.x1 - s.x2).abs() < EPS && (s.y1 - s.y2).abs() < EPS
+}
+
+/// Quantised endpoint key, matching the router-wide 1 µm convention.
+#[allow(clippy::cast_possible_truncation)]
+fn qk(x: f64, y: f64) -> (i64, i64) {
+    ((x * 1000.0).round() as i64, (y * 1000.0).round() as i64)
+}
+
+/// Move any **tree vertex** — a coordinate where two or more of this
+/// net's own segments meet — off a foreign net's pin.
+///
+/// # Why this belongs at construction time and nowhere else (ADR-24)
+///
+/// The module header records the standing decision that V11 enforcement
+/// is *not* done at construction: Stage 3c's
+/// [`crate::conflict::avoid_foreign_pins`] and the endpoint-conflict
+/// jog in [`crate::conflict::resolve_conflicts`] handle it per-segment,
+/// so a detour that would overlap a sibling net can be rolled back.
+/// That reasoning holds for a **degree-1** endpoint and fails for a
+/// vertex, because the downstream machinery is *per-segment* by
+/// construction and a vertex is a shared property of several:
+///
+/// * `jog_endpoint_at` rewrites ONE incident segment per pass, and its
+///   destination depends on that segment's axis — a horizontal leg goes
+///   to `y + g`, a vertical leg to `x + g`. Applied to a vertex it
+///   therefore sends the legs to *different* coordinates over successive
+///   passes, and nothing rejoins them.
+/// * `cleanup::trim_whiskers` then deletes the fragment that no longer
+///   reaches the trunk — including, at the far end, the segment sitting
+///   on one of the net's OWN pins, because it only checks the endpoint
+///   it is trimming.
+///
+/// Measured on `sallen_key_driven`: net `np`'s exact Hwang Steiner point
+/// is the coordinate-wise median of its three pins, and that median
+/// landed precisely on `RA`'s foreign `inv` pin. All three legs were
+/// jogged apart, the branch to `R2`'s `np` pin was trimmed away, and the
+/// router shipped a **severed net with no warning at all** — a Tier-0
+/// SPLIT reachable from the bare deterministic seed, with no annealer
+/// involved.
+///
+/// Relocating the vertex is topology-preserving by construction: the
+/// vertex keeps its degree and its legs, it just sits one cell away, so
+/// no combination of downstream passes can be required to re-stitch it.
+/// The scope is deliberately the narrowest thing that is *correct*: only
+/// a vertex, only when it is on a foreign pin. A degree-1 endpoint on a
+/// foreign pin is left exactly as before — the jog handles it, and every
+/// currently-graded fixture depends on it doing so.
+///
+/// Returns `true` when it changed anything.
+// One repair round: find the offender, score the four quadrants, rebuild
+// every incident leg. Splitting it would hand the pieces the same three
+// locals (`offender`, `incident`, the vertex) and hide that they are one
+// operation on one vertex — which is the whole point of the function.
+#[allow(clippy::too_many_lines)]
+fn move_vertices_off_foreign_pins(
+    segs: &mut Vec<Segment>,
+    foreign_pins: &std::collections::HashSet<(i64, i64)>,
+) -> bool {
+    if foreign_pins.is_empty() {
+        return false;
+    }
+    let mut changed = false;
+    // Bounded: each round strictly removes one offending vertex and the
+    // replacement legs are built on lines that do not contain it, so a
+    // coordinate cannot be re-offered. The cap is defensive only.
+    for _ in 0..segs.len().saturating_add(2) {
+        let mut degree: std::collections::HashMap<(i64, i64), usize> =
+            std::collections::HashMap::new();
+        for s in segs.iter() {
+            if zero_len(s) {
+                continue;
+            }
+            *degree.entry(qk(s.x1, s.y1)).or_default() += 1;
+            *degree.entry(qk(s.x2, s.y2)).or_default() += 1;
+        }
+        // Deterministic pick: lowest key among the offenders.
+        let Some(&offender) = degree
+            .iter()
+            .filter(|&(k, &d)| d >= 3 && foreign_pins.contains(k))
+            .map(|(k, _)| k)
+            .min()
+        else {
+            break;
+        };
+        let incident: Vec<usize> = segs
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| {
+                !zero_len(s) && (qk(s.x1, s.y1) == offender || qk(s.x2, s.y2) == offender)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        let (ox, oy) = {
+            let s = segs[incident[0]];
+            if qk(s.x1, s.y1) == offender {
+                (s.x1, s.y1)
+            } else {
+                (s.x2, s.y2)
+            }
+        };
+        // Peers of the vertex, in the frame the legs already use.
+        let peers: Vec<(f64, f64)> = incident
+            .iter()
+            .map(|&i| {
+                let s = segs[i];
+                if qk(s.x1, s.y1) == offender {
+                    (s.x2, s.y2)
+                } else {
+                    (s.x1, s.y1)
+                }
+            })
+            .collect();
+        // The displacement is DIAGONAL, so no rewritten leg has to
+        // travel back along the line it came from — see the L
+        // construction below. Which of the four quadrants is not
+        // arbitrary: pick the one that adds the least wire.
+        //
+        // A vertex whose legs all run left-and-up costs *nothing* to
+        // move up-left (each leg loses a cell on its own axis and gains
+        // one on the other), and costs two cells per leg to move
+        // down-right. Always taking `(+g, +g)` therefore inflated every
+        // relocation it performed — measured on `opamp_inverting`, whose
+        // single degree-2 offender picked up an extra wire, a junction
+        // and a crossing purely from the quadrant choice, on a fixture
+        // whose Tier-2 budgets are all at zero. Scoring the four
+        // candidates by added Manhattan length removes that: the same
+        // repair, in the cheapest direction, deterministic on ties by
+        // candidate order.
+        let added = |dx: f64, dy: f64| -> f64 {
+            peers
+                .iter()
+                .map(|&(qx, qy)| {
+                    if (qy - oy).abs() < EPS {
+                        // Horizontal leg: V → (qx, oy+dy) → (qx, qy).
+                        (qx - ox - dx).abs() + dy.abs() - (qx - ox).abs()
+                    } else {
+                        // Vertical leg: V → (ox+dx, qy) → (qx, qy).
+                        (oy + dy - qy).abs() + dx.abs() - (oy - qy).abs()
+                    }
+                })
+                .sum()
+        };
+        let Some((vx, vy)) = [
+            (GRID_MM, GRID_MM),
+            (GRID_MM, -GRID_MM),
+            (-GRID_MM, GRID_MM),
+            (-GRID_MM, -GRID_MM),
+        ]
+        .into_iter()
+        .filter(|&(dx, dy)| !foreign_pins.contains(&qk(ox + dx, oy + dy)))
+        .min_by(|&(ax, ay), &(bx, by)| {
+            added(ax, ay)
+                .partial_cmp(&added(bx, by))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(dx, dy)| (ox + dx, oy + dy)) else {
+            break;
+        };
+        let mut extra: Vec<Segment> = Vec::new();
+        for &i in &incident {
+            let s = segs[i];
+            let at_start = qk(s.x1, s.y1) == offender;
+            let (py, qx, qy) = if at_start {
+                (s.y1, s.x2, s.y2)
+            } else {
+                (s.y2, s.x1, s.y1)
+            };
+            // A horizontal leg travels out along `y = vy` and drops onto
+            // its peer; a vertical leg travels along `x = vx` and runs
+            // across. Neither line contains the offending coordinate, so
+            // the rewritten leg cannot touch it again.
+            let (ex, ey) = if (py - qy).abs() < EPS {
+                (qx, vy)
+            } else {
+                (vx, qy)
+            };
+            let first = Segment {
+                x1: vx,
+                y1: vy,
+                x2: ex,
+                y2: ey,
+            };
+            let second = Segment {
+                x1: ex,
+                y1: ey,
+                x2: qx,
+                y2: qy,
+            };
+            if zero_len(&first) {
+                segs[i] = second;
+            } else {
+                segs[i] = first;
+                if !zero_len(&second) {
+                    extra.push(second);
+                }
+            }
+        }
+        segs.extend(extra);
+        segs.retain(|s| !zero_len(s));
+        changed = true;
+    }
+    changed
+}
+
 fn route_signal_inner(
     net: &crate::NetSpec,
     foreign_pins: &std::collections::HashSet<(i64, i64)>,
@@ -546,14 +754,16 @@ fn route_signal_inner(
                 out_of(&net.pins[1]),
                 out_of(&net.pins[2]),
             ];
-            let segs = route_three_pin_inner(pts, outs, collinear_stub);
+            let mut segs = route_three_pin_inner(pts, outs, collinear_stub);
+            move_vertices_off_foreign_pins(&mut segs, foreign_pins);
             let junctions = steiner_junctions(&pts, &segs);
             (segs, junctions)
         }
         _ => {
             let pins: Vec<(f64, f64)> = net.pins.iter().map(pin_xy).collect();
             let outs: Vec<Option<Direction>> = net.pins.iter().map(out_of).collect();
-            let segs = route_n_pin_inner(&pins, &outs, collinear_stub);
+            let mut segs = route_n_pin_inner(&pins, &outs, collinear_stub);
+            move_vertices_off_foreign_pins(&mut segs, foreign_pins);
             let junctions = compute_junctions(&segs, &pins);
             (segs, junctions)
         }

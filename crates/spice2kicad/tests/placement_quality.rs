@@ -555,6 +555,8 @@ const FIXTURES_FOR_QUALITY: &[(&str, &str)] = &[
     ("lc_ladder_lpf", "lc_ladder_lpf.cir"),
     ("sallen_key_lpf", "sallen_key_lpf.cir"),
     ("wien_bridge_osc", "wien_bridge_osc.cir"),
+    ("sallen_key_driven", "sallen_key_driven.cir"),
+    ("shunt_feedback_amp", "shunt_feedback_amp.cir"),
 ];
 
 fn fixtures() -> Vec<(&'static str, PathBuf)> {
@@ -1513,6 +1515,12 @@ fn wire_detour_within_budget_across_fixtures() {
         ("lc_ladder_lpf", 1.1506),
         ("sallen_key_lpf", 1.0407),
         ("wien_bridge_osc", 1.0899),
+        // --- F3 (Tier-0 router fix, ADR-24): promoted out of
+        // `tests/f0_defects.rs` once the Steiner-vertex-on-foreign-pin
+        // defect was fixed. NEW-GEOMETRY BASELINES, zero slack, ratchet
+        // DOWN only. Adding them moved no existing fixture's literal.
+        ("sallen_key_driven", 1.0764),
+        ("shunt_feedback_amp", 1.2034),
     ];
     // Collect-then-assert: an in-loop `assert!` truncates the report at
     // the first offending fixture, which is the ADR-19 M4 "gate-set
@@ -1645,6 +1653,12 @@ fn crossing_count_within_budget_across_fixtures() {
         ("lc_ladder_lpf", 0),
         ("sallen_key_lpf", 2),
         ("wien_bridge_osc", 2),
+        // --- F3 (Tier-0 router fix, ADR-24): promoted out of
+        // `tests/f0_defects.rs` once the Steiner-vertex-on-foreign-pin
+        // defect was fixed. NEW-GEOMETRY BASELINES, zero slack, ratchet
+        // DOWN only. Adding them moved no existing fixture's literal.
+        ("sallen_key_driven", 3),
+        ("shunt_feedback_amp", 0),
     ];
     // Collect-then-assert: see `wire_detour_within_budget_across_fixtures`.
     let mut failures: Vec<String> = Vec::new();

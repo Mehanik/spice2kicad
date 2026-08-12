@@ -364,6 +364,14 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
     // `cascode_amp`: a CE stage under a common-base stage, i.e. a
     // circuit whose structure is a COLUMN. The placer has no stack
     // model, so this is new geometry recorded at its measured values.
+    // Extended (NOT regenerated) for the ADR-24 Tier-0 router fix: the
+    // two fixtures promoted out of `tests/f0_defects.rs` — `sallen_key_driven`
+    // (19 rows) and `shunt_feedback_amp` (16 rows) — are APPENDED in
+    // alphabetical position. Every one of the 247 pre-existing rows is
+    // byte-identical: the fix is confined to `spice-route`, and ADR-16's
+    // protocol demands exactly that of a router change. Verified by set
+    // comparison of the dump against the previous table (0 removed,
+    // 35 added, all on the two new fixtures), not by eye.
     (
         "cascode_amp",
         "#FLG1",
@@ -568,9 +576,6 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
     ("diff_pair", "RC1", "Device:R_US", 38.1, 35.56, 0.0, ""),
     ("diff_pair", "RC2", "Device:R_US", 48.26, 35.56, 0.0, "y"),
     ("diff_pair", "RTAIL", "Device:R_US", 43.18, 60.96, 0.0, ""),
-    // `lc_ladder_lpf`: fifth-order LC ladder, the suite's first
-    // inductors and its first DRAWN (un-`ignore`d) stimulus — so the
-    // first fixture whose signal graph has a real root.
     (
         "lc_ladder_lpf",
         "#FLG1",
@@ -1124,15 +1129,6 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
     ("port_shapes", "R2", "Device:R_US", 35.56, 44.45, 0.0, ""),
     ("port_shapes", "R3", "Device:R_US", 82.55, 41.91, 0.0, ""),
     ("port_shapes", "R4", "Device:R_US", 82.55, 50.8, 0.0, ""),
-    // `rc_lowpass` now converges byte-identically onto `rc_lowpass_ports`:
-    // the series-horizontal flow construction (`idioms::apply_series_horizontal`)
-    // fires on the un-ported fixture too, because `idioms::signal_net_depth`
-    // falls back on the leaf-input-net NAME (`in`) to root the flow graph when
-    // no `*@port` input is declared. R1 rot 270 → 90 (horizontal, upstream
-    // `in` pin at the lower X), C1 re-columned to (39.37,44.45) beneath `out`,
-    // #PWR1/#PWR2/#FLG1 following the moved geometry. V16 B 3 → 0, J 0 → 0
-    // (non-increasing per ADR-16). Only this fixture moved; the other nine
-    // are byte-identical.
     (
         "rc_lowpass",
         "#FLG1",
@@ -1146,14 +1142,6 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
     ("rc_lowpass", "#PWR2", "power:GND", 52.07, 50.8, 0.0, ""),
     ("rc_lowpass", "C1", "Device:C", 39.37, 44.45, 0.0, ""),
     ("rc_lowpass", "R1", "Device:R_US", 35.56, 35.56, 90.0, ""),
-    // `rc_lowpass_ports` was re-laid-out by the series-horizontal flow
-    // construction (`idioms::apply_series_horizontal`): R1 rot 180 → 90
-    // (the series element between `in` and `out` is now drawn HORIZONTAL,
-    // upstream `in` pin at the lower X so the signal reads left→right), and
-    // its downstream shunt C1 (35.56,35.56,"y") re-columned to (39.37,44.45)
-    // to drop straight beneath the `out` node. #PWR1/#PWR2/#FLG1 follow the
-    // moved geometry. Only this fixture moved; the other nine are
-    // byte-identical.
     (
         "rc_lowpass_ports",
         "#FLG1",
@@ -1191,11 +1179,6 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         90.0,
         "",
     ),
-    // --- F0 (v0.2 roadmap): `rc_phase_shift` APPENDED, nothing above
-    // moved. This fixture is new geometry, so its rows are additive; the
-    // ten v0.1 fixtures' rows above are byte-identical to what they were
-    // before F0 (verified: the S2K_BASELINE_DUMP output for those rows
-    // was unchanged, and no ratchet moved on any of them).
     (
         "rc_phase_shift",
         "#FLG1",
@@ -1332,14 +1315,177 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
     ),
     ("rc_phase_shift", "RC", "Device:R_US", 49.53, 35.56, 0.0, ""),
     ("rc_phase_shift", "RE", "Device:R_US", 40.64, 76.2, 0.0, ""),
-    // --- F0 (v0.2 roadmap): `two_stage_amp` APPENDED, nothing above
-    // it touched. Promoted out of `tests/f0_defects.rs` when its runtime
-    // defect was fixed (112 s unoptimised -> ~1.0 s); these are NEW
-    // geometry that did not exist in the graded suite before, recorded
-    // at their measured values. `two_stage_amp` sorts after
-    // `rc_phase_shift`, so every row above is byte-identical.
-    // `sallen_key_lpf`: the textbook active filter, with TWO visible
-    // top-level feedback arcs and a flat (definition-level) op-amp.
+    (
+        "sallen_key_driven",
+        "#FLG1",
+        "power:PWR_FLAG",
+        106.68,
+        71.12,
+        0.0,
+        "",
+    ),
+    (
+        "sallen_key_driven",
+        "#FLG2",
+        "power:PWR_FLAG",
+        106.68,
+        83.82,
+        180.0,
+        "",
+    ),
+    (
+        "sallen_key_driven",
+        "#FLG3",
+        "power:PWR_FLAG",
+        106.68,
+        96.52,
+        0.0,
+        "",
+    ),
+    (
+        "sallen_key_driven",
+        "#PWR1",
+        "power:GND",
+        43.18,
+        68.58,
+        0.0,
+        "",
+    ),
+    (
+        "sallen_key_driven",
+        "#PWR2",
+        "power:GND",
+        87.63,
+        68.58,
+        0.0,
+        "",
+    ),
+    (
+        "sallen_key_driven",
+        "#PWR3",
+        "power:GND",
+        91.44,
+        68.58,
+        0.0,
+        "",
+    ),
+    (
+        "sallen_key_driven",
+        "#PWR4",
+        "power:VCC",
+        91.44,
+        29.21,
+        0.0,
+        "",
+    ),
+    (
+        "sallen_key_driven",
+        "#PWR5",
+        "power:VEE",
+        91.44,
+        44.45,
+        180.0,
+        "",
+    ),
+    (
+        "sallen_key_driven",
+        "#PWR6",
+        "power:GND",
+        106.68,
+        71.12,
+        0.0,
+        "",
+    ),
+    (
+        "sallen_key_driven",
+        "#PWR7",
+        "power:VCC",
+        106.68,
+        83.82,
+        0.0,
+        "",
+    ),
+    (
+        "sallen_key_driven",
+        "#PWR8",
+        "power:VEE",
+        106.68,
+        96.52,
+        180.0,
+        "",
+    ),
+    (
+        "sallen_key_driven",
+        "C1",
+        "Device:C",
+        72.39,
+        46.99,
+        180.0,
+        "",
+    ),
+    (
+        "sallen_key_driven",
+        "C2",
+        "Device:C",
+        87.63,
+        64.77,
+        0.0,
+        "y",
+    ),
+    (
+        "sallen_key_driven",
+        "R1",
+        "Device:R_US",
+        35.56,
+        48.26,
+        0.0,
+        "",
+    ),
+    (
+        "sallen_key_driven",
+        "R2",
+        "Device:R_US",
+        59.69,
+        46.99,
+        0.0,
+        "",
+    ),
+    (
+        "sallen_key_driven",
+        "RA",
+        "Device:R_US",
+        83.82,
+        49.53,
+        90.0,
+        "",
+    ),
+    (
+        "sallen_key_driven",
+        "RB",
+        "Device:R_US",
+        91.44,
+        64.77,
+        0.0,
+        "",
+    ),
+    (
+        "sallen_key_driven",
+        "VIN",
+        "Simulation_SPICE:VDC",
+        43.18,
+        63.5,
+        0.0,
+        "y",
+    ),
+    (
+        "sallen_key_driven",
+        "X1",
+        "Amplifier_Operational:OPAMP",
+        88.9,
+        36.83,
+        0.0,
+        "y",
+    ),
     (
         "sallen_key_lpf",
         "#FLG1",
@@ -1467,6 +1613,150 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         90.17,
         36.83,
         0.0,
+        "",
+    ),
+    (
+        "shunt_feedback_amp",
+        "#FLG1",
+        "power:PWR_FLAG",
+        83.82,
+        60.96,
+        0.0,
+        "",
+    ),
+    (
+        "shunt_feedback_amp",
+        "#FLG2",
+        "power:PWR_FLAG",
+        83.82,
+        73.66,
+        180.0,
+        "",
+    ),
+    (
+        "shunt_feedback_amp",
+        "#PWR1",
+        "power:GND",
+        46.99,
+        58.42,
+        0.0,
+        "",
+    ),
+    (
+        "shunt_feedback_amp",
+        "#PWR2",
+        "power:GND",
+        58.42,
+        58.42,
+        0.0,
+        "",
+    ),
+    (
+        "shunt_feedback_amp",
+        "#PWR3",
+        "power:+12V",
+        39.37,
+        57.15,
+        0.0,
+        "",
+    ),
+    (
+        "shunt_feedback_amp",
+        "#PWR4",
+        "power:+12V",
+        53.34,
+        49.53,
+        0.0,
+        "",
+    ),
+    (
+        "shunt_feedback_amp",
+        "#PWR5",
+        "power:GND",
+        83.82,
+        60.96,
+        0.0,
+        "",
+    ),
+    (
+        "shunt_feedback_amp",
+        "#PWR6",
+        "power:+12V",
+        83.82,
+        73.66,
+        0.0,
+        "",
+    ),
+    (
+        "shunt_feedback_amp",
+        "CE",
+        "Device:C",
+        58.42,
+        54.61,
+        0.0,
+        "",
+    ),
+    (
+        "shunt_feedback_amp",
+        "CIN",
+        "Device:C",
+        35.56,
+        41.91,
+        90.0,
+        "",
+    ),
+    (
+        "shunt_feedback_amp",
+        "COUT",
+        "Device:C",
+        69.85,
+        49.53,
+        270.0,
+        "",
+    ),
+    (
+        "shunt_feedback_amp",
+        "Q1",
+        "Device:Q_NPN_BCE",
+        46.99,
+        45.72,
+        270.0,
+        "",
+    ),
+    (
+        "shunt_feedback_amp",
+        "RB",
+        "Device:R_US",
+        39.37,
+        52.07,
+        180.0,
+        "",
+    ),
+    (
+        "shunt_feedback_amp",
+        "RC",
+        "Device:R_US",
+        53.34,
+        44.45,
+        180.0,
+        "",
+    ),
+    (
+        "shunt_feedback_amp",
+        "RE",
+        "Device:R_US",
+        46.99,
+        54.61,
+        0.0,
+        "",
+    ),
+    (
+        "shunt_feedback_amp",
+        "RF",
+        "Device:R_US",
+        49.53,
+        35.56,
+        270.0,
         "",
     ),
     (
@@ -1618,8 +1908,6 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         0.0,
         "",
     ),
-    // `wien_bridge_osc`: an oscillator, so the signal graph is a pure
-    // CYCLE with no input at all — the only such fixture in the suite.
     (
         "wien_bridge_osc",
         "#FLG1",
@@ -1797,7 +2085,9 @@ fn baseline_lock_all_fixtures() {
         "rc_lowpass",
         "rc_lowpass_ports",
         "rc_phase_shift",
+        "sallen_key_driven",
         "sallen_key_lpf",
+        "shunt_feedback_amp",
         "two_stage_amp",
         "wien_bridge_osc",
     ];

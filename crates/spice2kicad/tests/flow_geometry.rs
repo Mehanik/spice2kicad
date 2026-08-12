@@ -787,6 +787,12 @@ const FLOW_RATCHET: &[(&str, usize, usize)] = &[
     // top-level feedback arc the F3 metric has ever had to grade.
     ("sallen_key_lpf", 1, 0),
     ("wien_bridge_osc", 0, 0),
+    // --- F3 (Tier-0 router fix, ADR-24): the two fixtures promoted out of
+    // `tests/f0_defects.rs` once the Steiner-vertex-on-foreign-pin defect was
+    // fixed. NEW-GEOMETRY BASELINES, zero slack, ratchet DOWN only. Adding
+    // them moved no existing fixture's literal.
+    ("sallen_key_driven", 0, 0),
+    ("shunt_feedback_amp", 0, 0),
 ];
 
 #[test]
@@ -925,6 +931,12 @@ const FLOW_POSE_RATCHET: &[(&str, usize, usize)] = &[
     ("lc_ladder_lpf", 3, 0),
     ("sallen_key_lpf", 0, 0),
     ("wien_bridge_osc", 0, 0),
+    // --- F3 (Tier-0 router fix, ADR-24): the two fixtures promoted out of
+    // `tests/f0_defects.rs` once the Steiner-vertex-on-foreign-pin defect was
+    // fixed. NEW-GEOMETRY BASELINES, zero slack, ratchet DOWN only. Adding
+    // them moved no existing fixture's literal.
+    ("sallen_key_driven", 3, 0),
+    ("shunt_feedback_amp", 1, 0),
 ];
 
 #[test]
@@ -1088,6 +1100,12 @@ const STUB_RUN_RATCHET: &[(&str, u32)] = &[
     ("lc_ladder_lpf", 9),
     ("sallen_key_lpf", 0),
     ("wien_bridge_osc", 4),
+    // --- F3 (Tier-0 router fix, ADR-24): the two fixtures promoted out of
+    // `tests/f0_defects.rs` once the Steiner-vertex-on-foreign-pin defect was
+    // fixed. NEW-GEOMETRY BASELINES, zero slack, ratchet DOWN only. Adding
+    // them moved no existing fixture's literal.
+    ("sallen_key_driven", 7),
+    ("shunt_feedback_amp", 9),
 ];
 
 /// F6 ratchet. A rail stub should hang straight off the node it

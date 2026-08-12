@@ -4862,3 +4862,270 @@ Two smaller results fell out of building it, both worth keeping:
    instrument that reproduces a known answer it was not told about is an
    instrument (D5's own test, applied here).
 
+
+## ADR-24 — A Steiner vertex is not an endpoint: the router's own Tier-0 severance
+
+**Status:** landed. Scope is confined to `crates/spice-route/`. **Every
+one of `baseline_lock`'s 247 pre-existing rows is byte-identical** — no
+element of any previously-graded fixture moved — and eleven of the
+thirteen previously-emitted `.kicad_sch` files are byte-identical too.
+Two Tier-0 defect locks are discharged and their fixtures promoted.
+
+### The report
+
+`sallen_key_driven` — the Sallen-Key low-pass of `sallen_key_lpf` with
+its stimulus **drawn** rather than `;@ ignore`d — converted into an
+electrically wrong schematic. A `--refine-iterations` sweep:
+
+| setting | result |
+| --- | --- |
+| `--no-refine` (bare seed) | **SPLIT**: `np` reconstructs as 2 islands |
+| 0 … 150, 201, 400 | clean |
+| 199, 200 (the default) | **MERGE**: `np` + `out` in one component |
+
+The `--no-refine` row is what made this different from ADR-20's
+`shunt_feedback_amp`, which is clean at `--no-refine`. `--no-refine`
+ablates both the SA and phase 4.5, so what remains is the bare
+deterministic seed — and it was **already Tier-0 broken**. That looked
+like evidence about the *placer*. It was not.
+
+### Mechanism — one cause, two faces
+
+Both faces are the same property: **the conflict/detour passes are
+per-segment, and a Steiner vertex is not a segment property.**
+
+**Face 1, the seed SPLIT.** Net `np` has three pins. Its exact Hwang
+tree puts the single Steiner point at the coordinate-wise *median* of
+them — provably optimal, and here that median is `(64.77, 44.45)`, which
+is **`RA`'s `inv` pin**. `resolve_conflicts` correctly wants the tree off
+a foreign net's endpoint, and calls `jog_endpoint_at`, which rewrites
+**one** incident segment per pass into an L. Its destination depends on
+that segment's axis — a horizontal leg goes to `y + g`, a vertical leg to
+`x + g`. Applied three times to one vertex it therefore sent the three
+legs to *different* coordinates:
+
+```
+steiner            resolve_conflicts (3 passes)
+(34.29,44.45)─┐    (34.29,45.72)──────(64.77,45.72)   ← orphan
+              │
+(64.77,58.42)─┼─   (66.04,44.45)──(66.04,58.42)
+              │    (66.04,44.45)──(66.04,22.86)       ← trunk, without the orphan
+(64.77,22.86)─┘
+```
+
+`cleanup::trim_whiskers` then deleted the orphan — **including the
+segment sitting on `R2`'s own `np` pin**, because it only tests the
+endpoint it is trimming, not the far end of the chain. The router
+finished with a net whose third pin had no wire at all and printed
+**no warning**: its retry loop detects `any_broken`, but its only lever
+is outward-stub suppression, which has no bearing on this, and after
+`max_attempts` it keeps the geometry and breaks. ADR-22's partition
+certificate caught it — which is the only reason this was a refusal and
+not a silently shipped short.
+
+**Face 2, the default MERGE.** At 200 iterations the placement is
+different and `np`'s tree is clean, but `avoid_obstacles` detours the
+branch to `X1`'s `inp` pin around a body and parks a corner on
+`(59.69, 44.45)` — where net `out`'s trunk already turns. A shared wire
+endpoint is a merge. Nothing saw it: `avoid_foreign_pins` keys on foreign
+*pins*, `avoid_obstacles` on symbol *bodies*, `deconflict_cross_net_overlaps`
+on *collinear* overlap, and `resolve_conflicts` — the one pass that does
+key on shared endpoints — ran **once, at the top of the attempt, over the
+pristine Steiner trees**, before any detour existed.
+
+### D1. A vertex on a foreign pin is moved at construction time
+
+`steiner::move_vertices_off_foreign_pins` relocates any point where
+**three or more** of a net's own segments meet, when that point is a
+foreign pin. It runs inside `route_signal_inner`, on the tree, before any
+conflict pass sees it. Relocation is topology-preserving by construction:
+the vertex keeps its degree and its legs; each leg is rebuilt as an L
+whose two lines (`y = vy`, `x = vx`) do not contain the vacated
+coordinate, so no downstream pass is *required* to re-stitch anything.
+
+The module header records a standing decision that V11 enforcement is
+deliberately not done at construction, so that a detour which would
+overlap a sibling net can be rolled back. That reasoning is sound for a
+degree-1 endpoint and fails for a vertex, because the rollback machinery
+is per-segment and a vertex is shared.
+
+**Degree ≥ 3 is not a tuning threshold; it is the codebase's own line.**
+`conflict::corner_degree`'s doc says it: *"A shared corner with degree 2
+is a simple L bend; degree ≥ 3 marks a Steiner T-junction whose tree
+topology must be preserved."* Both L-pair repairs (`try_alt_l_corner`,
+`try_u_detour_l_pair`) already **decline** at `corner_degree > 2`, with
+the comment *"replacing the L pair would orphan that leg from the rest of
+the tree"* — i.e. the existing V11 machinery is complete for degree ≤ 2
+and explicitly abstains at degree ≥ 3, leaving those to the per-segment
+jog that fragments them. This fills exactly that gap and nothing else.
+
+Measured, not assumed: extending it to degree ≥ 2 also works and fixes
+the same two fixtures, but it re-routes `opamp_inverting`'s `inv` net,
+whose deliberate V4 **name-jump label pair** exists precisely so a
+split-by-detour tree still connects by name. That cost `opamp_inverting`
+crossings 0 → 1, V16 J 0 → 1 and wire-detour 1.111 → 1.122 — three Tier-2
+ratchets on a fixture that was not broken. Rejected.
+
+**The quadrant is chosen, not fixed.** The displacement is diagonal (so
+no leg travels back along the line it came from), and which of the four
+diagonals is picked by *least added Manhattan length*. Always taking
+`(+g, +g)` costs two cells per leg on a vertex whose legs all run
+up-and-left, where the up-left quadrant costs zero.
+
+### D2. Conflict resolution re-runs after the detour passes
+
+`resolve_conflicts` now also runs at the end of each iteration of the
+V11/V12 convergence loop, so a cross-net endpoint the detours *create* is
+seen and jogged, and the next iteration re-judges whatever it moved.
+
+Inert by construction on clean geometry: `find_conflicts` returns empty
+and the pass returns immediately. Measured: with D2 alone, all thirteen
+fixtures emit byte-identical output and `sallen_key_driven` converts at
+the default iteration count.
+
+### D3. What this corrects in ADR-20
+
+ADR-20 diagnosed `shunt_feedback_amp`'s residual as the owner-gated R-5
+rail-pin defect, on the strength of phase 4.5's oracle reporting the
+incoming placement as `severed = 2` — "nothing after the placer can move
+an element, so this is a *placer* defect".
+
+The premise is right and the inference was wrong, for a reason ADR-16
+already named in a different context: **phase 4.5's oracle is the real
+router.** `severed = 2` was measuring the router fragmenting its own
+trees, not the placer producing an unroutable placement. With D1 in place
+the same placement, unchanged to the millimetre, measures `severed = 0`
+and the fixture converts. `baseline_lock` proves the placement did not
+move: 247 of 247 rows byte-identical.
+
+R-5 is untouched and still owner-gated. It is real — `shunt_feedback_amp`
+still trips `v14_rail_pin_faces_rail`, now as a registered XFAIL — but it
+is a Tier-1 aesthetic defect, not what made the fixture unconvertible.
+
+The generalisable form: **a metric taken through a stage is a joint
+measurement of the input and that stage.** ADR-20 attributed all of it to
+the input. This is the same failure MEMORY "verify what a number
+measures" records, reached from a new direction, and the control arm that
+would have caught it is exactly the one this ADR ran — re-measure the
+metric after changing only the *stage*.
+
+### D4. The `*@port` masking finding, which is a second defect
+
+The `sallen_key_driven` lock recorded, as its strangest control arm, that
+adding `*@port in=input` — "a purely cosmetic label directive that
+changes no topology" — made the fault disappear, and read that as
+evidence of ADR-17's "global, unattributable consequences".
+
+It is simpler and worse than that: **`*@port` is not cosmetic.** It is
+read by the placer in two places, and the fixture's own comment, the
+lock's text and the annotation spec's framing all describe it as a
+labelling directive:
+
+* `layers::no_source_fallback` extends its input/output root sets with
+  every element on a declared port net ("reinforce the same left/right
+  bias by POSITION only");
+* `idioms::signal_net_depth` seeds its BFS **only** from
+  `*@port …=input` nets, falling back to a *leaf-net name* heuristic that
+  requires the net to touch exactly one element.
+
+That second one is why the twin fixtures diverge, and it is the defect.
+In `sallen_key_lpf` the source is `;@ ignore`d, so `in` touches one
+element, the name fallback fires, and every series element gets a flow
+direction. In `sallen_key_driven` the source is drawn, so `in` touches
+two elements, the fallback does **not** fire, and — with no `*@port`
+either — `signal_net_depth` returns an **empty map**: every series
+element is directionless. Adding `*@port in=input` restores the roots,
+which changes placement, which reshuffles the router into a
+non-pathological configuration. It never fixed anything; it moved the
+dice.
+
+So the masking is not evidence of unattributable coupling. It is a
+**latent-input defect**: `signal_net_depth`'s fallback is keyed on
+`net_members == 1`, which is a *proxy* for "boundary of the signal
+chain" that fails on exactly the case the fallback exists for — a
+circuit whose input net is boundary-ish but has a drawn source on it. The
+same is true of `layers::no_source_fallback`'s leaf test. Both are
+untouched here (they are placement quality, not Tier 0, and changing them
+moves every fixture), and both are recorded as the open item.
+
+**Two things follow for the spec.** `*@port` is currently documented as a
+terminal *declaration* whose effect is a directional `(global_label …)`;
+it is in fact also a placement input, and design principle 3 ("users
+describe intent, the converter owns geometry") is satisfied but
+under-documented. And a directive that changes placement must never be
+described in a fixture comment as "purely cosmetic" — that framing is
+what made a straightforward missing-root bug look like evidence for
+retiring the placer architecture.
+
+### Blast radius
+
+* `baseline_lock`: **0 rows removed, 35 added**, all on the two promoted
+  fixtures. Verified by set comparison of the regeneration dump against
+  the previous table, not by eye. ADR-16 requires a `spice-route`-only
+  change to leave placement alone; it did.
+* Emitted `.kicad_sch`, all pre-existing fixtures: byte-identical except
+  `two_stage_amp`, which loses **one** wire segment (56 → 55) with
+  identical total wire length, identical junction count and identical
+  symbol poses — a collinear pair merged. Its V16 `(B, J)` is unchanged
+  at `(33, 9)`.
+* `opamp_inverting`: byte-identical (see D1 for the variant that was
+  rejected because it was not).
+* No budget rose anywhere. The only new literals are the two promoted
+  fixtures' own, recorded at their measured values with zero slack.
+
+### The two fixtures, promoted
+
+`tests/f0_defects.rs` now holds **no locks**. Both tripwires fired and
+were followed:
+
+| | `sallen_key_driven` | `shunt_feedback_amp` |
+| --- | --- | --- |
+| V16 (B, J) | 13, 4 | 12, 2 |
+| crossings | 3 | 0 |
+| wire detour | 1.0764 | 1.2034 |
+| V5 | 3 | 5 |
+| Q5 near-miss | 5 | 2 |
+| Q3 flow inversions | 3 | 2 |
+| F5 series pose | 3 | 1 |
+| stub lateral run | 7 | 9 |
+| Tier-0 (partition, V11, coincidence, ERC) | 0 | 0 |
+
+Three XFAIL entries were added, each naming a Tier-1 defect an existing
+fixture already carries an entry for (two V13 decoration nudges, and R-5
+on `shunt_feedback_amp`). None is new.
+
+The file keeps one test, re-pointed rather than deleted. ADR-21's
+unconditional-refusal regression used to ride on `shunt_feedback_amp`
+being broken; with no broken fixture left it would have been lost
+*because the converter improved*. It now **installs** its fault instead
+of finding one: the ADR-4 layout sidecar stacks `rc_lowpass`'s `R1` and
+`C1` so `C1`'s ground pin lands on `R1`'s input pin, and the CLI must
+exit 1 under `--no-verify` and write nothing. A control arm asserts the
+same invocation converts cleanly without the sabotaged sidecar, so the
+test cannot rot into "the CLI fails at everything".
+
+One incidental finding from building it, worth knowing: **`legalize`
+separates overlapping bodies even for elements pinned by the ADR-4 cache,
+but nothing separates coincident pins.** Pinning both parts to one origin
+does not reproduce the fault; stacking them six cells apart does.
+
+### Open items this leaves
+
+1. **`signal_net_depth` and `no_source_fallback` root detection** (D4).
+   Both use "the net touches exactly one element" as a proxy for "this is
+   the boundary of the signal chain", and both fail on a drawn source.
+   The fix — root at the source element when one exists, as
+   `assign_x_layers` already does — moves placement on every rooted
+   fixture and is a separate change with its own baseline regeneration.
+2. **The router's give-up path is silent.** When the retry loop exhausts
+   `max_attempts` with a net still severed, it keeps the geometry and
+   emits no warning at all. ADR-22's certificate turns that into a
+   refusal, so it is not a correctness hole — but it is a diagnosis hole,
+   and it is why this defect presented as "the converter refuses and says
+   nothing about why".
+3. **`trim_whiskers` can delete a chain that reaches an own pin.** It
+   tests only the endpoint being trimmed, so a severed branch is removed
+   from the far end inward until the segment on the net's own pin goes
+   too. It did not *cause* this defect (the branch was already severed
+   when it ran) but it erased the evidence, and a whisker chain incident
+   on an own pin should be kept, not trimmed.

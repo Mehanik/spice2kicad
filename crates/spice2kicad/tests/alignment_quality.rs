@@ -347,6 +347,12 @@ const Q5_NEAR_MISS_BUDGET: &[(&str, u32)] = &[
     ("lc_ladder_lpf", 5),
     ("sallen_key_lpf", 2),
     ("wien_bridge_osc", 2),
+    // --- F3 (Tier-0 router fix, ADR-24): the two fixtures promoted out of
+    // `tests/f0_defects.rs` once the Steiner-vertex-on-foreign-pin defect was
+    // fixed. NEW-GEOMETRY BASELINES, zero slack, ratchet DOWN only. Adding
+    // them moved no existing fixture's literal.
+    ("sallen_key_driven", 5),
+    ("shunt_feedback_amp", 2),
 ];
 
 #[test]

@@ -184,6 +184,8 @@ const FIXTURES: &[&str] = &[
     "lc_ladder_lpf",
     "sallen_key_lpf",
     "wien_bridge_osc",
+    "sallen_key_driven",
+    "shunt_feedback_amp",
 ];
 
 /// Per-fixture `(name, B, J)` high-water marks — **zero slack**, each
@@ -265,6 +267,12 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     // and the placer lays it out as if it were a chain, so the loop
     // closes with a long return path.
     ("wien_bridge_osc", 10, 3),
+    // --- F3 (Tier-0 router fix, ADR-24): the two fixtures promoted out of
+    // `tests/f0_defects.rs` once the Steiner-vertex-on-foreign-pin defect was
+    // fixed. NEW-GEOMETRY BASELINES, zero slack, ratchet DOWN only. Adding
+    // them moved no existing fixture's literal.
+    ("sallen_key_driven", 13, 4),
+    ("shunt_feedback_amp", 12, 2),
     // B 10 → 4. Phase 4.5's acceptance objective gained the V16
     // ink-graph bend count as its FINAL lexicographic key, after
     // (V13, V12, V5), so the refiner now separates orientations that tie

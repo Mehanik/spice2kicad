@@ -260,6 +260,8 @@ const SHEETS: &[&str] = &[
     "lc_ladder_lpf",
     "sallen_key_lpf",
     "wien_bridge_osc",
+    "sallen_key_driven",
+    "shunt_feedback_amp",
 ];
 
 /// Per-fixture crossing budget. After the V11/V12 cascade + Steiner-
@@ -2082,6 +2084,18 @@ fn v5_violation_budget(name: &str) -> usize {
         "sallen_key_lpf" => 5,
         "cascode_amp" => 4,
         "wien_bridge_osc" => 2,
+        // --- F3 (Tier-0 router fix, ADR-24) NEW-GEOMETRY BASELINES for
+        // the two fixtures promoted out of `tests/f0_defects.rs`. Same
+        // class as every arm above — a shared-net wire leaving a pin
+        // sideways instead of outward. Zero slack; ratchet DOWN only,
+        // and no existing fixture's count moved.
+        "sallen_key_driven" => 3,
+        // Five, tying `rc_phase_shift` / `two_stage_amp` / `sallen_key_lpf`
+        // for the suite worst. Four of them are the owner-gated R-5
+        // rail-pin defect showing up as V5: `RC` and `RB` are placed with
+        // their rail pin facing into the circuit, so the trunks that have
+        // to reach them leave their pins sideways.
+        "shunt_feedback_amp" => 5,
         // `lc_ladder_lpf` is CLEAN, and deliberately kept as the control
         // arm: it is the other new fixture with a drawn source and the
         // only one of the four with zero V5 residue, so "drawn stimulus"
@@ -2498,6 +2512,8 @@ const PHASE1_ERC_FIXTURES: &[&str] = &[
     "lc_ladder_lpf",
     "sallen_key_lpf",
     "wien_bridge_osc",
+    "sallen_key_driven",
+    "shunt_feedback_amp",
 ];
 
 #[test]
@@ -3054,6 +3070,8 @@ const ALL_FIXTURES_FOR_CROSS_NET: &[&str] = &[
     "lc_ladder_lpf",
     "sallen_key_lpf",
     "wien_bridge_osc",
+    "sallen_key_driven",
+    "shunt_feedback_amp",
 ];
 
 /// Symmetric fixtures whose two mirror-image sub-circuits force two

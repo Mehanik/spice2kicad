@@ -265,6 +265,8 @@ fn erc_clean_on_port_annotated_fixtures() {
         "lc_ladder_lpf",
         "sallen_key_lpf",
         "wien_bridge_osc",
+        "sallen_key_driven",
+        "shunt_feedback_amp",
     ] {
         let src = fixtures_dir().join(format!("{name}.cir"));
         let tmp = tempdir(name);

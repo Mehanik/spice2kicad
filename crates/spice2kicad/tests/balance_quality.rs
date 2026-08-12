@@ -294,6 +294,12 @@ const Q6_REFERENCE: &[(&str, f64)] = &[
     ("lc_ladder_lpf", 1.3711),
     ("sallen_key_lpf", 1.3924),
     ("wien_bridge_osc", 1.3924),
+    // --- F3 (Tier-0 router fix, ADR-24): the two fixtures promoted out of
+    // `tests/f0_defects.rs` once the Steiner-vertex-on-foreign-pin defect was
+    // fixed. NEW-GEOMETRY BASELINES, zero slack, ratchet DOWN only. Adding
+    // them moved no existing fixture's literal.
+    ("sallen_key_driven", 1.2247),
+    ("shunt_feedback_amp", 1.0000),
 ];
 
 #[test]

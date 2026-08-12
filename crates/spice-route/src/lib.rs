@@ -483,6 +483,33 @@ pub fn route(req: RouteRequest<'_>) -> RouteResult {
                 );
                 accumulated_warnings.extend(w12);
             }
+            // Stage 3e — re-resolve cross-net endpoint conflicts the
+            // detours above just created (ADR-24).
+            //
+            // `resolve_conflicts` ran once, at the top of the attempt,
+            // over the *pristine* Steiner trees. The V11 and V12 detour
+            // passes then rewrite whole legs, and neither has any term
+            // for "this new corner lands on a coordinate a SIBLING net
+            // already terminates on" — `avoid_foreign_pins` keys on
+            // foreign *pins*, `avoid_obstacles` on symbol *bodies*, and
+            // `deconflict_cross_net_overlaps` only on *collinear*
+            // overlap. A shared endpoint is none of those, and it is
+            // exactly what KiCad joins.
+            //
+            // Measured on `sallen_key_driven` at the default iteration
+            // count: `avoid_obstacles` detoured net `np` around a body
+            // and parked a corner on `(59.69, 44.45)`, which is where
+            // net `out`'s trunk already turned — a Tier-0 MERGE of the
+            // op-amp's non-inverting input into its own output, shipped
+            // with no warning, because the attempt loop's exit test asks
+            // only about severance and collinear overlap.
+            //
+            // This is inert on geometry that has no such conflict:
+            // `find_conflicts` returns empty and the pass returns
+            // immediately. It sits inside the convergence loop so the
+            // V11/V12 passes get to see (and re-judge) whatever it jogs.
+            let wconf = conflict::resolve_conflicts(&mut routed, &net_pin_coords);
+            accumulated_warnings.extend(wconf);
             let changed = pre_signatures
                 .iter()
                 .zip(routed.iter())

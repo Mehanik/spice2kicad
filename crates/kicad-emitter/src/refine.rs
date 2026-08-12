@@ -1598,62 +1598,55 @@ mod severed_guard_tests {
         }
     }
 
-    /// The Tier-0 case this reordering was built for, end to end.
+    /// The Tier-0 case this reordering was built for, end to end —
+    /// **re-pointed** now that the underlying defect is fixed (ADR-24).
     ///
-    /// `shunt_feedback_amp` is the one fixture whose SA end-state (at the
-    /// default 200 iterations) hands phase 4.5 a placement that is
-    /// **already Tier-0 broken** — two signal nets severed. It is still a
-    /// defect lock (`spice2kicad/tests/f0_defects.rs`), because the
-    /// placement is not repairable by orientation alone; what this test
-    /// pins down is that phase 4.5 does not make it *worse*, which is
-    /// exactly what it used to do.
+    /// It used to open by asserting that the placement *entering* phase
+    /// 4.5 was already severed (`before.severed > 0`), with an explicit
+    /// note: "If the placer is ever fixed so the seed arrives clean,
+    /// this fires and tells you to retire the test instead of letting it
+    /// rot into a tautology." It fired.
     ///
-    /// Three assertions, each load-bearing:
+    /// What changed is not the placer. ADR-20 read the `severed = 2`
+    /// entering phase 4.5 as an SA end-state defect, but phase 4.5's
+    /// oracle *is* the real router, so the count was measuring the
+    /// router's Steiner-vertex-on-foreign-pin fragmentation, not the
+    /// placement. With that fixed the same placement measures clean, and
+    /// `shunt_feedback_amp` converts. The correct successor assertion is
+    /// therefore the positive one: this placement reaches decoration
+    /// Tier-0 clean.
     ///
-    ///  * the incoming placement really is severed, so this exercises the
-    ///    repair path rather than a clean no-op. If the placer is ever
-    ///    fixed so the seed arrives clean, this fires and tells you to
-    ///    retire the test instead of letting it rot into a tautology;
-    ///  * phase 4.5 reconnects the severed nets. Under the old objective
-    ///    — Tier-1/2 tuple scored, `severed` held as a floor it could
-    ///    never *seek* — it had no reason to;
-    ///  * it does **not** reconnect them by shorting. The repair the old
-    ///    objective stumbled into was rotating `Q1` until its base pin sat
-    ///    exactly on `RE`'s pin 1, merging base into emitter: a Tier-0
-    ///    short bought with a Tier-0 severance.
-    ///
-    /// A `v11` residue remains (the `c` trunk terminating on `RC`'s `vcc`
-    /// pin), and the final assertion is its unexpected-pass tripwire: the
-    /// day it reaches zero the fixture is convertible and belongs in the
-    /// graded suite.
+    /// The *incoming* check is deliberately `(severed, v11)` and not
+    /// `coincident`. `coincident` is a routing PROXY, not the partition
+    /// truth: `tier0_short_count` charges a rail-glyph anchor
+    /// `ends.saturating_sub(1)`, so two same-net wire ends meeting at a
+    /// rail pin score 1 without being a short. It measures 3 here before
+    /// refinement and **0 after**, and the emitted file carries no
+    /// glyph-anchor hazard at all (verified directly against the
+    /// `.kicad_sch`). Asserting the proxy at zero on the *input* would
+    /// pin a number that does not mean what it says; asserting the whole
+    /// tuple at zero on the *output* pins the property that matters.
     #[test]
-    fn shunt_feedback_amp_tier0_repair_does_not_short() {
+    fn shunt_feedback_amp_reaches_decoration_tier0_clean() {
         let (mut placement, library, meta) = fixture("shunt_feedback_amp");
         let before = measure(&placement, &library);
-        assert!(
-            before.severed > 0,
-            "the placement entering phase 4.5 is no longer severed — the SA-side \
-             defect this test exercises is gone, so retire the test (or re-point \
-             it) instead of leaving a tautology behind"
-        );
         assert_eq!(
-            before.coincident, 0,
-            "the placer must not hand phase 4.5 a pin-on-pin short"
+            (before.severed, before.v11),
+            (0, 0),
+            "the placement entering phase 4.5 is severed again: \
+             (severed, v11) = {:?}",
+            (before.severed, before.v11),
         );
 
         refine_orientations(&mut placement, &library, &meta);
 
         let after = measure(&placement, &library);
-        assert_eq!(after.severed, 0, "phase 4.5 must repair the severed nets");
         assert_eq!(
-            after.coincident, 0,
-            "…and must not repair them by shorting two pins together"
-        );
-        assert!(
-            after.v11 > 0,
-            "UNEXPECTED PASS: no V11 residue is left on `shunt_feedback_amp`. The \
-             remaining Tier-0 defect is FIXED — promote the fixture out of \
-             tests/f0_defects.rs into the graded suite and re-point this test."
+            (after.severed, after.coincident, after.v11),
+            (0, 0, 0),
+            "phase 4.5 accepted an orientation that breaks Tier 0: \
+             (severed, coincident, v11) = {:?}",
+            (after.severed, after.coincident, after.v11),
         );
     }
 }

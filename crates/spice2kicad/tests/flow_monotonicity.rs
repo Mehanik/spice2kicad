@@ -325,6 +325,12 @@ const Q3_FLOW_MONOTONICITY_BUDGET: &[(&str, u32)] = &[
     // Zero — an oscillator has no forward direction to violate, which
     // is the control arm the other three are read against.
     ("wien_bridge_osc", 0),
+    // --- F3 (Tier-0 router fix, ADR-24): the two fixtures promoted out of
+    // `tests/f0_defects.rs` once the Steiner-vertex-on-foreign-pin defect was
+    // fixed. NEW-GEOMETRY BASELINES, zero slack, ratchet DOWN only. Adding
+    // them moved no existing fixture's literal.
+    ("sallen_key_driven", 3),
+    ("shunt_feedback_amp", 2),
 ];
 
 #[test]

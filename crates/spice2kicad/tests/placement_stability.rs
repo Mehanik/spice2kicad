@@ -150,6 +150,8 @@ fn conversion_is_byte_deterministic_across_fixtures() {
         "lc_ladder_lpf",
         "sallen_key_lpf",
         "wien_bridge_osc",
+        "sallen_key_driven",
+        "shunt_feedback_amp",
     ];
     let mut failures = Vec::new();
     for name in FIXTURES {
