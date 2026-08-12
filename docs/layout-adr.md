@@ -4791,3 +4791,74 @@ state stays visible and is not quietly traded away.
 V11 short) is registered as a Tier-0 metric in the same pass; it was
 being measured by `electrical_safety` and reported to nobody.
 
+### D8. The other half of the finding: metrics with an ABSOLUTE reference
+
+This ADR opens by observing that **every one of the ~165 literals was
+obtained by measuring the incumbent placer's own output**, so against
+that reference "regression" and "difference" are the same measurement.
+The scoreboard answers half of what that implies — it lets placer B be
+compared to placer A. It does *not* answer the other half: *how good is
+either of them?* Both instruments are still anchored to the incumbent.
+`rc_phase_shift`'s B = 19 is not judged as bad; it is **protected** at
+19.
+
+The fix for that half is a metric with a reference that does not come
+from the placer. One already existed and was not recognised as a
+different *kind* of number: `wire_detour` grades emitted wire length
+against the half-perimeter lower bound, so 1.0 means "could not be
+shorter" and the ratio reads directly as headroom. **That shape
+generalises**, and `crates/spice2kicad/tests/bend_bound.rs` applies it to
+V16: a *provable* lower bound on the bends any rectilinear ink could
+have, computed from terminal geometry alone — no obstacles, no pin
+directions, no router. It reports `measured / bound / gap` per fixture
+and registers `v16.bend_bound`, `v16.bend_gap` and
+`v16.bend_excess_exact` here as **`Tier::Info`**, zero aggregate weight,
+on the Q6 precedent.
+
+Informational is not timidity, it is the same discipline D4 applies to
+promotion: a bound that were subtly *inadmissible* — ever above the true
+optimum — would, as a gate, block all work while being wrong. It asserts
+only its own soundness (Σ per-component bends == whole-sheet B; and
+`bound <= measured` on every graded component), never the placer's
+quality. Full lemma, proof and limits: that file's module docs and
+`docs/invariants.md` V16.
+
+**First measurement, and what it says about the roadmap.** Twelve
+fixtures, 38/38 components and 86/86 bends covered: **B = 86 against a
+bound of 15**. Read carefully, because the naive reading is wrong. The
+lemma refutes `B = 0` only, so the bound is at most 1 per component —
+and that ceiling is close to a fact about the metric rather than a weakness of
+the proof: a trunk with taps realises `B <= 2` for *any* terminal set,
+because taps meet the trunk as 3-ray Ts, which V16 scores as J and not
+B. In an obstacle-free, direction-free world almost nothing forces a
+bend. So `86 − 15` is an **upper** bound on reducible bends, not an
+estimate of them, and most of that gap is congestion and V5 adherence
+rather than slack.
+
+The one number in the report that is *tight* is the two-anchor class,
+where the obstacle-free optimum is known exactly (1 off-axis, 0
+collinear): **14 bends drawn where 5 suffice, i.e. 9 provably wasted on
+two-terminal ink alone**. That is the honest headroom figure this
+benchmark work was trying to expose, and it is small — which is itself
+the finding. The instrument that would raise it is the *V5-conditional*
+column (deliberately not built, and never to be summed into the
+admissible one): the realistic floors — like `rc_lowpass`'s documented
+2-bend U — are conditional on the project's own conventions, not on
+geometry.
+
+Two smaller results fell out of building it, both worth keeping:
+
+1. **Component connectivity must be read before the ink graph merges
+   runs.** Segments join iff they share an *endpoint* — KiCad's rule,
+   and the one `cleanup.rs::split_at_interior_attachments` exists to
+   serve. A run-level "they touch, so they join" rule collapses
+   `two_stage_amp` into 4 components, one carrying the `b2`, `c2` *and*
+   `e2` labels, because ten wire ends land on the interior of a foreign
+   net's wire.
+2. **The instrument independently rediscovered a registered defect.**
+   From geometry alone it flags exactly two collinear wire overlaps on
+   `two_stage_amp`, at `x = 57.15` and `y = 87.63` — the same two the
+   `no_cross_net_collinear_wire_overlap` xfail entry names. An
+   instrument that reproduces a known answer it was not told about is an
+   instrument (D5's own test, applied here).
+
