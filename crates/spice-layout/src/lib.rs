@@ -1475,9 +1475,11 @@ fn pack_rows(
     // ADR-19 M3 / M5' challengers, which touch the SA, not the Y frame)
     // keeps the champion's re-centre.
     let recentre = match variant {
-        Placer::Champion | Placer::M3SignedGate | Placer::M3SignedFull | Placer::M5Streams => {
-            shift.last().copied().unwrap_or(0) / 2
-        }
+        Placer::Champion
+        | Placer::M3SignedGate
+        | Placer::M3SignedFull
+        | Placer::M5Streams
+        | Placer::FlowSeed => shift.last().copied().unwrap_or(0) / 2,
         Placer::M4YDatum => 0,
     };
     for (i, pe) in placed.iter_mut().enumerate() {
@@ -1501,7 +1503,7 @@ fn place_seed(
     variant: Placer,
 ) -> Result<(Placement, Vec<bool>), Vec<Diagnostic>> {
     use crate::bands::{Band, assign_y_bands};
-    use crate::layers::assign_x_layers;
+    use crate::layers::assign_x_layers_with;
     use crate::net_class::classify_nets;
 
     // Geometry constants in grid cells (1.27 mm each).
@@ -1527,7 +1529,7 @@ fn place_seed(
     let n = checked.elements.len();
     let classes = classify_nets(checked);
     let band_asg = assign_y_bands(checked, &classes);
-    let layer_asg = assign_x_layers(checked, &classes);
+    let layer_asg = assign_x_layers_with(checked, &classes, variant);
     // Independent sub-circuits (a dual opamp, a stereo pair) get one
     // horizontal row each. `Rows::is_trivial()` on a single-component
     // circuit, which is every fixture but `opamp_definition_level`.
@@ -1628,7 +1630,11 @@ fn place_seed(
     // Bot upward), M4 stacks both *away from Mid* so band growth is
     // append-only and never shifts a sibling row.
     let (y_top, mid_up_y, mid_ctr_y, mid_lo_y, y_bot, top_dir, bot_dir) = match variant {
-        Placer::Champion | Placer::M3SignedGate | Placer::M3SignedFull | Placer::M5Streams => {
+        Placer::Champion
+        | Placer::M3SignedGate
+        | Placer::M3SignedFull
+        | Placer::M5Streams
+        | Placer::FlowSeed => {
             let n_i32 = i32::try_from(n).unwrap_or(i32::MAX);
             let y_top: i32 = 0;
             let y_bot: i32 = (n_i32 + 4) * Y_RANK_STRIDE;
@@ -1705,20 +1711,38 @@ fn place_seed(
         }
     };
 
-    // Per-(layer, slot, row) running rank. Rows rank independently:
-    // stacking channel 2 under channel 1 inside one bucket is exactly
-    // the diagonal sprawl the row split exists to remove.
-    let mut bucket_rank: HashMap<(u32, Slot, usize), i32> = HashMap::new();
+    // Per-(layer, slot, row) rank. Rows rank independently: stacking
+    // channel 2 under channel 1 inside one bucket is exactly the diagonal
+    // sprawl the row split exists to remove.
+    //
+    // The rank is the member's position in the bucket sorted by
+    // `layer_asg.order_key`. For every placer but `flow-seed` that key is
+    // the element index, so this reproduces the running counter this loop
+    // used to carry, bit-for-bit.
+    let bucket_key = |i: usize| -> (u32, Slot, usize) {
+        (
+            layer_asg.layers[i],
+            element_slot[i],
+            rows.row[i].unwrap_or(rows.count),
+        )
+    };
+    let mut buckets: HashMap<(u32, Slot, usize), Vec<usize>> = HashMap::new();
+    for i in 0..n {
+        buckets.entry(bucket_key(i)).or_default().push(i);
+    }
+    let mut bucket_rank: Vec<i32> = vec![0; n];
+    for members in buckets.values_mut() {
+        members.sort_by_key(|&i| (layer_asg.order_key[i], i));
+        for (k, &i) in members.iter().enumerate() {
+            bucket_rank[i] = i32::try_from(k).unwrap_or(i32::MAX);
+        }
+    }
     let mut placed: Vec<PlacedElement> = Vec::with_capacity(n);
     for (i, e) in checked.elements.iter().enumerate() {
         let layer = layer_asg.layers[i] as usize;
         let slot = element_slot[i];
         let row = rows.row[i];
-        let rank = bucket_rank
-            .entry((layer_asg.layers[i], slot, row.unwrap_or(rows.count)))
-            .and_modify(|r| *r += 1)
-            .or_insert(0);
-        let rank = *rank;
+        let rank = bucket_rank[i];
         // Within a (layer, slot) bucket, alternate elements left/
         // right of the layer column so multiple elements at the
         // same Y target don't pile on the same X. The jitter is

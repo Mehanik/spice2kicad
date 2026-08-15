@@ -11,6 +11,7 @@ use spice_policy::CheckedNetlist;
 use spice_resolve::{ElementKind, ElementRole, PortDir};
 
 use crate::net_class::{NetClass, NetClassMap};
+use crate::placer::Placer;
 
 /// Result of X-layer assignment for the full netlist.
 #[derive(Debug, Clone)]
@@ -21,6 +22,17 @@ pub struct LayerAssignment {
     /// Rank within each layer, used to compute initial Y stacking.
     /// Elements in the same layer are stacked vertically in this order.
     pub rank_in_layer: Vec<u32>,
+    /// Within-layer **ordering key**, consumed by `place_seed` when it
+    /// ranks the members of a `(layer, slot, row)` bucket for Y
+    /// stacking. For every placer but `flow-seed` this is the element
+    /// index, i.e. exactly the netlist order the running bucket counter
+    /// used before this field existed — so the champion path is
+    /// byte-identical by construction.
+    ///
+    /// Under `flow-seed` it is a neighbour-barycenter order (the
+    /// Sugiyama phase the placer skips), so two same-layer stubs
+    /// belonging to different stages do not interleave.
+    pub order_key: Vec<u32>,
     /// Edges that were reversed during cycle break (src, dst) by element index.
     pub feedback_edges: Vec<(usize, usize)>,
     /// `true` when the graph has no signal sources and we fell back to
@@ -40,7 +52,21 @@ pub struct LayerAssignment {
 /// 3. Run iterative Tarjan SCC + edge reversal to break cycles.
 /// 4. Longest-path layering (topological sort, sources at layer 0).
 /// 5. Barycentric Y rank within each layer (element index order for v0.1).
+#[must_use]
 pub fn assign_x_layers(checked: &CheckedNetlist, classes: &NetClassMap) -> LayerAssignment {
+    assign_x_layers_with(checked, classes, Placer::Champion)
+}
+
+/// [`assign_x_layers`] for a named placer (ADR-23 seam).
+///
+/// Only [`Placer::FlowSeed`] reads `variant`; every other placer takes
+/// the champion path bit-for-bit.
+#[must_use]
+pub fn assign_x_layers_with(
+    checked: &CheckedNetlist,
+    classes: &NetClassMap,
+    variant: Placer,
+) -> LayerAssignment {
     let n = checked.elements.len();
 
     // --- Step 1: build adjacency via Signal nets ---------------------------
@@ -92,7 +118,7 @@ pub fn assign_x_layers(checked: &CheckedNetlist, classes: &NetClassMap) -> Layer
     // fallback path; the layer term in cost is computed from the
     // resulting structure normally.
     if sources.is_empty() {
-        return no_source_fallback(checked, classes, &net_to_elements, n);
+        return no_source_fallback(checked, classes, &net_to_elements, n, variant);
     }
     // Step 3-5: directed DAG, longest-path layering.
     let (dag, feedback_edges) = break_cycles(adj);
@@ -101,9 +127,17 @@ pub fn assign_x_layers(checked: &CheckedNetlist, classes: &NetClassMap) -> Layer
     LayerAssignment {
         layers,
         rank_in_layer,
+        order_key: identity_order(n),
         feedback_edges,
         no_source_fallback: false,
     }
+}
+
+/// The default within-bucket ordering key: element index, i.e. netlist
+/// order. Reproduces the running bucket counter `place_seed` used before
+/// `order_key` existed.
+fn identity_order(n: usize) -> Vec<u32> {
+    (0..u32::try_from(n).unwrap_or(u32::MAX)).collect()
 }
 
 #[allow(clippy::too_many_lines)] // BFS + leaf-net heuristic are conceptually one phase.
@@ -112,6 +146,7 @@ fn no_source_fallback(
     classes: &NetClassMap,
     net_to_elements: &BTreeMap<&str, Vec<usize>>,
     n: usize,
+    variant: Placer,
 ) -> LayerAssignment {
     // Identify "leaf signal nets" — Signal-class nets touched by
     // exactly one element in the netlist. These are external
@@ -204,6 +239,49 @@ fn no_source_fallback(
     // A rail stub does not pass a signal along; a series input element does.
     let input_root =
         |i: usize| -> bool { leaf_input_elements.contains(&i) && signal_degree(i) <= 2 };
+    // A *rail stub*: the rail IS its connection, and it terminates a
+    // single signal node (a bias resistor, a collector load, an emitter
+    // bypass cap, a shunt capacitor). Under `flow-seed` these are
+    // followers, not roots.
+    //
+    // Note this reads **Power ∪ Ground**, where the champion's
+    // `touches_power` reads Power alone. That asymmetry is invisible to
+    // the champion (it only ever *adds* roots), but it is load-bearing
+    // here: a ladder's shunt capacitor `C1 n1 0` and an emitter bypass
+    // `CE e 0` are stubs in exactly the sense that matters — they hang
+    // off one signal node and belong in its column — and leaving them
+    // out pushes every one of them a column to the right of the element
+    // it decorates.
+    let touches_rail = |i: usize| -> bool {
+        checked.elements[i].nodes.iter().any(|net| {
+            matches!(
+                classes.get(net.as_str()).copied(),
+                Some(NetClass::Power | NetClass::Ground)
+            )
+        })
+    };
+    let rail_stub = |i: usize| -> bool { touches_rail(i) && signal_degree(i) <= 1 };
+    // --- flow-seed roots (ADR-23 challenger) ------------------------------
+    //
+    // The champion roots at `input_root(i) || touches_power(i)`, so every
+    // rail-touching stub is a layer-0 root and the X coordinate measures
+    // *hops from the nearest power rail*. That functional saturates at ~2
+    // in any biased amplifier no matter how many stages it has. Rooting
+    // at signal-flow sources only makes the layer measure depth along the
+    // signal path; the stubs get their column back in the follower pass
+    // below. ADR-18's "boundary, not interior" filter is retained
+    // verbatim (`input_root` still carries the `signal_degree <= 2`
+    // pass-through test), so a diff-pair transistor is never a root.
+    let flow_roots: HashSet<usize> = if variant.flow_seed_layering() {
+        (0..n).filter(|&i| input_root(i)).collect()
+    } else {
+        HashSet::new()
+    };
+    // A root set that reaches no Signal net cannot layer anything. When
+    // the circuit has no signal-flow root at all — `wien_bridge_osc` is a
+    // pure cycle with no input — fall through to the champion's
+    // rail-rooted policy rather than collapsing to a single column.
+    let use_flow_roots = flow_roots.iter().any(|&i| signal_degree(i) >= 1);
     let coarse_roots: HashSet<usize> = (0..n)
         .filter(|&i| input_root(i) || touches_power(i))
         .collect();
@@ -233,7 +311,9 @@ fn no_source_fallback(
     // available), it always spans when `coarse_roots` did, and on a
     // netlist where every power-toucher really is degree-3 it degrades
     // to the coarse behaviour rather than to a collapse.
-    let roots = if refined_roots.iter().any(|&i| signal_degree(i) >= 1) {
+    let roots = if use_flow_roots {
+        flow_roots
+    } else if refined_roots.iter().any(|&i| signal_degree(i) >= 1) {
         refined_roots
     } else {
         let min_degree = coarse_roots
@@ -255,7 +335,8 @@ fn no_source_fallback(
     if roots.is_empty() {
         return LayerAssignment {
             layers: vec![0; n],
-            rank_in_layer: (0..u32::try_from(n).unwrap_or(u32::MAX)).collect(),
+            rank_in_layer: identity_order(n),
+            order_key: identity_order(n),
             feedback_edges: Vec::new(),
             no_source_fallback: true,
         };
@@ -299,6 +380,59 @@ fn no_source_fallback(
             *layer = 0;
         }
     }
+    // --- flow-seed: rail stubs are FOLLOWERS, not seeds ------------------
+    //
+    // A rail stub touches exactly one Signal net, so it can never carry
+    // BFS depth between two nets — it is a leaf of the signal graph, and
+    // its BFS layer is simply "one past whatever reached its net first".
+    // That is a column of its own for something a human draws *in* its
+    // neighbour's column (a collector load above its transistor, an
+    // emitter resistor below it). Assign it the shallowest layer among
+    // the non-stub elements sharing its signal net instead.
+    if use_flow_roots {
+        let followers: Vec<usize> = (0..n)
+            .filter(|&i| rail_stub(i) && !roots.contains(&i))
+            .collect();
+        let mut fixed: Vec<Option<u32>> = vec![None; n];
+        for &i in &followers {
+            let mut company: Vec<usize> = Vec::new();
+            for net in &checked.elements[i].nodes {
+                let Some(members) = net_to_elements.get(net.as_str()) else {
+                    continue;
+                };
+                for &j in members {
+                    if j != i && !rail_stub(j) && !company.contains(&j) {
+                        company.push(j);
+                    }
+                }
+            }
+            // A stub belongs in its neighbour's column when its node is
+            // an *interior* node of the flow — either two or more non-stub
+            // elements meet there (a driver on the left and a load on the
+            // right, e.g. a base-bias divider on `b1`), or the single
+            // element there is a multi-terminal device for which this is a
+            // side terminal (an emitter resistor on a transistor's `e`).
+            //
+            // Otherwise the node is the OUTPUT of a two-terminal
+            // pass-through and the stub genuinely terminates the chain —
+            // an RC low-pass's shunt capacitor, `named_rails`' three
+            // loads on `out`. Those keep their BFS column, one to the
+            // right of the element that drives them, which is where a
+            // human draws them. Demoting them too collapses a two-element
+            // filter into a single column.
+            let interior = company.len() >= 2 || company.iter().any(|&j| signal_degree(j) >= 3);
+            fixed[i] = if interior {
+                company.iter().map(|&j| layers_bfs[j]).min()
+            } else {
+                None
+            };
+        }
+        for (i, f) in fixed.into_iter().enumerate() {
+            if let Some(l) = f {
+                layers_bfs[i] = l;
+            }
+        }
+    }
     // Push leaf-output elements one layer past their current
     // assignment, so they sit to the right of the rest of their
     // signal chain. (CE: COUT touches `c` and `out`. `out` is
@@ -309,13 +443,132 @@ fn no_source_fallback(
             layers_bfs[i] = layers_bfs[i].max(max_layer) + 1;
         }
     }
+    // Flow-seed only: a layer index that no element occupies still costs
+    // a full X stride in `place_seed`'s prefix sum, and the leaf-output
+    // push above manufactures one whenever the output element was already
+    // in the deepest layer. Renumbering to consecutive indices is a
+    // layering act (it changes no stride, no datum, no clearance).
+    if use_flow_roots {
+        compact_layers(&mut layers_bfs);
+    }
     let rank_in_layer = rank_by_layer(&layers_bfs, n);
+    let order_key = if use_flow_roots {
+        barycenter_order(&sig_adj, &layers_bfs, n)
+    } else {
+        identity_order(n)
+    };
     LayerAssignment {
         layers: layers_bfs,
         rank_in_layer,
+        order_key,
         feedback_edges: Vec::new(),
         no_source_fallback: true,
     }
+}
+
+/// Renumber layer indices to be consecutive from 0, preserving order.
+fn compact_layers(layers: &mut [u32]) {
+    let mut used: Vec<u32> = layers.to_vec();
+    used.sort_unstable();
+    used.dedup();
+    let remap: HashMap<u32, u32> = used
+        .iter()
+        .enumerate()
+        .map(|(new, &old)| (old, u32::try_from(new).unwrap_or(u32::MAX)))
+        .collect();
+    for l in layers.iter_mut() {
+        *l = remap[l];
+    }
+}
+
+/// Neighbour-barycenter ordering within each layer (Sugiyama phase 3).
+///
+/// Returns a per-element key whose *relative* order inside a layer is
+/// the ordering; `place_seed` sorts each `(layer, slot, row)` bucket by
+/// it. The classic alternating sweep: a node's position becomes the mean
+/// position of its neighbours in the adjacent layer, then the layer is
+/// re-sorted on that value. Ties fall back to the previous position, so
+/// the result is stable and deterministic.
+fn barycenter_order(sig_adj: &[Vec<usize>], layers: &[u32], n: usize) -> Vec<u32> {
+    const SWEEPS: usize = 4;
+    let mut by_layer: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
+    for (i, &l) in layers.iter().enumerate() {
+        by_layer.entry(l).or_default().push(i);
+    }
+    // Position within layer; starts at netlist order.
+    let mut pos = vec![0.0_f64; n];
+    for members in by_layer.values() {
+        for (k, &i) in members.iter().enumerate() {
+            #[allow(clippy::cast_precision_loss)]
+            {
+                pos[i] = k as f64;
+            }
+        }
+    }
+    let mut order: Vec<u32> = by_layer.keys().copied().collect();
+    let resort = |members: &mut Vec<usize>, pos: &mut Vec<f64>, bary: &HashMap<usize, f64>| {
+        members.sort_by(|&a, &b| {
+            let ka = bary.get(&a).copied().unwrap_or(pos[a]);
+            let kb = bary.get(&b).copied().unwrap_or(pos[b]);
+            ka.total_cmp(&kb)
+                .then(pos[a].total_cmp(&pos[b]))
+                .then(a.cmp(&b))
+        });
+        for (k, &i) in members.iter().enumerate() {
+            #[allow(clippy::cast_precision_loss)]
+            {
+                pos[i] = k as f64;
+            }
+        }
+    };
+    for sweep in 0..SWEEPS {
+        // Alternate the sweep direction: forward reads the layer to the
+        // left, backward the layer to the right.
+        if sweep % 2 == 1 {
+            order.reverse();
+        }
+        let keys: Vec<u32> = order.clone();
+        for &l in &keys {
+            let neighbour_layer = if sweep % 2 == 0 {
+                l.checked_sub(1)
+            } else {
+                Some(l + 1)
+            };
+            let Some(nl) = neighbour_layer else { continue };
+            let Some(members) = by_layer.get(&l).cloned() else {
+                continue;
+            };
+            let mut bary: HashMap<usize, f64> = HashMap::new();
+            for &i in &members {
+                let mut sum = 0.0_f64;
+                let mut cnt = 0_u32;
+                let mut seen: HashSet<usize> = HashSet::new();
+                for &j in &sig_adj[i] {
+                    if layers[j] == nl && seen.insert(j) {
+                        sum += pos[j];
+                        cnt += 1;
+                    }
+                }
+                if cnt > 0 {
+                    bary.insert(i, sum / f64::from(cnt));
+                }
+            }
+            if let Some(m) = by_layer.get_mut(&l) {
+                resort(m, &mut pos, &bary);
+            }
+        }
+        if sweep % 2 == 1 {
+            order.reverse();
+        }
+    }
+    let mut out = vec![0_u32; n];
+    for (i, p) in pos.iter().enumerate() {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        {
+            out[i] = *p as u32;
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------

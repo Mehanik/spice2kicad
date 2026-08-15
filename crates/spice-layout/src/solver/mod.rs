@@ -88,6 +88,6 @@ pub(crate) fn refine(
     // structure-aware moves (e.g. swapping two same-layer elements'
     // Y rank). Cheap relative to the SA loop itself.
     let classes = crate::net_class::classify_nets(checked);
-    let layers = crate::layers::assign_x_layers(checked, &classes);
+    let layers = crate::layers::assign_x_layers_with(checked, &classes, opts.placer);
     anneal::refine(after_fr, pinned, checked, library, opts, &layers, allowed)
 }

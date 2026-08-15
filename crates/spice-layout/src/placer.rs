@@ -68,6 +68,37 @@ pub enum Placer {
     /// and destroyed the SA's bend-finding. Registered here as a graded
     /// challenger only.
     M5Streams,
+    /// **Flow-faithful skeleton** — the X "layer" measures depth along
+    /// the *signal path*, not hops from the nearest power rail.
+    ///
+    /// `layers::no_source_fallback` is the path every realistic fixture
+    /// takes (a stimulus tagged `;@ ignore` leaves `sources` empty), and
+    /// its root set is `input_root(i) || touches_power(i)` — so **every
+    /// rail-touching stub is a layer-0 root**. That functional saturates
+    /// at ~2 layers in any biased amplifier regardless of stage count:
+    /// on `two_stage_amp` the chain `in→b1→c1→b2→c2→out` needs five
+    /// columns and gets `{0,1,1,1,3}`, dropping Q1, the coupling cap and
+    /// Q2 into one column that row-packing then stacks vertically.
+    /// `common_emitter` draws well only because for a *single* stage
+    /// rail-hop depth and signal depth coincide by accident.
+    ///
+    /// This variant changes three things, all inside the fallback, all
+    /// layering-only (no spacing constant, band datum or SA weight moves):
+    ///
+    /// 1. **Roots are signal-flow sources only** — declared `*@port`
+    ///    inputs and leaf-input nets, still filtered by ADR-18's
+    ///    "boundary not interior" pass-through test. Never a rail stub.
+    /// 2. **Rail stubs are followers**: after the BFS, a stub takes the
+    ///    layer of the shallowest non-stub element on its signal net, so
+    ///    a collector load lands in its transistor's column instead of
+    ///    seeding column 0.
+    /// 3. **Within-bucket ordering by neighbour barycenter** (the one
+    ///    Sugiyama phase the placer skips) instead of element index.
+    ///
+    /// A circuit with no signal-flow root at all — `wien_bridge_osc` is
+    /// a pure cycle with no input — falls back to the champion's
+    /// rail-rooted policy verbatim and is byte-identical on both sides.
+    FlowSeed,
 }
 
 impl Placer {
@@ -78,6 +109,7 @@ impl Placer {
         Self::M3SignedGate,
         Self::M3SignedFull,
         Self::M5Streams,
+        Self::FlowSeed,
     ];
 
     /// The name accepted by `--placer` and printed by the scoreboard.
@@ -89,6 +121,7 @@ impl Placer {
             Self::M3SignedGate => "m3-signed-gate",
             Self::M3SignedFull => "m3-signed-full",
             Self::M5Streams => "m5-streams",
+            Self::FlowSeed => "flow-seed",
         }
     }
 
@@ -103,6 +136,9 @@ impl Placer {
                 "ADR-19 M3 full wiring: signed gate + property text + signed legalize"
             }
             Self::M5Streams => "ADR-19 M5': per-refdes SA proposal streams, deterministic sweep",
+            Self::FlowSeed => {
+                "flow-faithful skeleton: signal-flow roots, stub followers, barycenter order"
+            }
         }
     }
 
@@ -132,6 +168,14 @@ impl Placer {
     #[must_use]
     pub fn m5_element_streams(self) -> bool {
         matches!(self, Self::M5Streams)
+    }
+
+    /// Flow-seed: does the no-source X-layering root at signal-flow
+    /// sources (and demote rail stubs to followers) instead of rooting
+    /// at every rail-touching element?
+    #[must_use]
+    pub fn flow_seed_layering(self) -> bool {
+        matches!(self, Self::FlowSeed)
     }
 
     /// Look a placer up by the name `--placer` accepts.
