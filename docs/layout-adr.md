@@ -4862,6 +4862,121 @@ Two smaller results fell out of building it, both worth keeping:
    instrument that reproduces a known answer it was not told about is an
    instrument (D5's own test, applied here).
 
+### D9. `flow-seed` — the flow-faithful skeleton, graded and NOT promotable
+
+**Status:** registered as `--placer=flow-seed`, dead on the default path.
+Measured against the champion, whole suite each side, `--no-fail-fast`.
+**Verdict: NOT promotable** — one Tier-0 cell regresses. The rest of the
+table is the largest aggregate improvement the instrument has recorded.
+
+**The diagnosis it acts on.** `layers::no_source_fallback` is the path 16
+of 18 fixtures take: every fixture but `lc_ladder_lpf` and
+`sallen_key_driven` tags its stimulus `;@ ignore`, so `sources` is empty.
+Its root set is `input_root(i) || touches_power(i)` — **every
+rail-touching stub is a layer-0 root** — so the X "layer" measures hops
+from the nearest power rail, not depth along the signal path, and that
+functional saturates at ~2 in any biased amplifier regardless of stage
+count. On `two_stage_amp` the chain `in→b1→c1→b2→c2→out` needs five
+columns and gets `{0,1,1,1,3}`, dropping Q1, the coupling cap and Q2 into
+one column that row-packing then stacks vertically. `common_emitter`
+draws well only because for a *single* stage rail-hop depth and signal
+depth coincide by accident.
+
+`flow-seed` roots at signal-flow sources only (declared `*@port` inputs
+and leaf-input nets, still behind ADR-18's `signal_degree <= 2`
+"boundary not interior" filter), demotes rail stubs — Power **or**
+Ground, signal degree ≤ 1 — to *followers* assigned after the BFS, and
+orders each bucket by neighbour barycenter. It touches no spacing
+constant, band datum or SA weight. A circuit with no signal-flow root at
+all (`diff_pair`, `multivibrator`, `wien_bridge_osc`) falls through to
+the champion's rail-rooted policy verbatim.
+
+`crates/spice-layout/tests/layer_flow_dump.rs` is the instrument for the
+layering itself: an `#[ignore]`d dump of every fixture under both root
+policies, plus a **torn-signal-net** count (a Signal net whose members
+span more than one column is precisely what a wire then crosses the
+sheet to rejoin). On the thirteen fixtures the challenger is active on,
+torn nets fall 8 → 3.
+
+**The result, by tier.**
+
+| tier | Δ points (challenger − champion) |
+| --- | ---: |
+| Tier 0 | `t0.sym_overlap` / `sallen_key_lpf` **0 → 2** (regression); `t0.cross_net_overlap` / `two_stage_amp` **2 → 0** |
+| Tier 1 | **−5.00** |
+| Tier 2 | **−180.33** |
+
+`two_stage_amp`, the fixture the diagnosis was built on, against the
+hand-`*@place`d control arm:
+
+| metric | champion | flow-seed | hand-placed |
+| --- | ---: | ---: | ---: |
+| wire crossings | 10 | **0** | 0 |
+| V16 bends (B) | 33 | **17** | 14 |
+| V16 branches (J) | 9 | **5** | — |
+| wire detour | 1.8565 | **1.0794** | — |
+| Q3 flow-monotonicity | 8 | **4** | — |
+| F6 worst rail-stub lateral run | 19 | **6** | — |
+| V5 | 5 | **2** | — |
+| Tier-0 collinear overlaps | 2 | **0** | — |
+
+**Eight registered XFAIL entries discharge**, reported by the tripwires
+themselves as `UNEXPECTED PASS`. All four on `two_stage_amp` — the
+`no_cross_net_collinear_wire_overlap` Tier-0 entry (both runs, at
+`x = 57.15` and `y = 87.63`) and the three V13 decoration entries
+(`v13.2` 1→0, `v13.4` 2→0, `v13.6a` 3→0) — plus three on
+`rc_phase_shift` (`no_power_glyph_foreign_body_overlap`, the real-ink
+`rendered_text_does_not_overlap`, `v13.6a`) and one on `cascode_amp`
+(`v13_labels_clear_pin_text`).
+
+Every one of them was registered as a **decoration** or **channel-router**
+defect. They are a *layering* defect. That is the finding worth keeping
+even though the challenger is not promotable: **a defect attributed to a
+downstream stage can be a symptom of the skeleton**, and a deferral
+written against the wrong stage will never expire on its own.
+
+`rc_phase_shift` moves nearly as far (bends 19 → 6, F6 23 → 7, detour
+1.2313 → 1.0278, crossings 2 → 0), and `shunt_feedback_amp` and
+`cascode_amp` improve on most Tier-2 axes.
+
+**What blocks it, and why it is not tuned away here.** `sallen_key_lpf`
+gains two symbol/symbol overlaps: `C1` clips both `X1`'s opamp triangle
+and `RA`. It is Tier 0, per-fixture hard, and never traded — the
+promotion rule stops there.
+
+Two ablations were run before reporting, because attribution matters
+more than the verdict:
+
+1. **It is not the barycenter ordering.** With the ordering ablated to
+   the netlist order (the champion's key), the two overlaps are
+   *byte-identical*, same coordinates. The third ingredient is not the
+   cause.
+2. **It is not a seed infeasibility that `--no-refine` could show.**
+   Both placers refuse `sallen_key_lpf` under `--no-refine` on the same
+   ADR-22 net-partition certificate, so the seed-only arm carries no
+   information here.
+
+What remains is the mechanism ADR-17's retirement already named:
+`sallen_key_lpf`'s tail column moves one X stride left (its layer count
+drops 4 → 3 when `C2` follows `R2` into its column), the whole
+downstream chain re-bases, and phase 4.5 then picks `C1` at rot0 instead
+of rot90 — an orientation whose 7.6 mm vertical extent no longer clears
+`X1` above and `RA` below. **Global re-basing is intrinsic to any
+spacing-derived placement** (ADR-17 RETIRED), and the repair is in the
+geometry-derived stride / clearance layer — ADR-18 root cause 4, "a hard
+constraint cannot repair an infeasible start" — which this challenger
+deliberately does not touch. Fixing it *inside* the root policy would be
+tuning the aggregate against the fixture that blocks it, which is the
+overfitting this ADR exists to prevent.
+
+**Recorded, not landed.** No budget literal moved, no `baseline_lock`
+row was regenerated, and the default path is byte-identical (verified:
+full suite green; all 18 fixtures convert under both placers; the three
+rootless fixtures, the two principled-path fixtures and `rc_lowpass` are
+byte-identical between the two). Promotion — or a decision to pay the
+`sallen_key_lpf` Tier-0 cell down in the spacing layer first — is an
+owner call on the table above.
+
 
 ## ADR-24 — A Steiner vertex is not an endpoint: the router's own Tier-0 severance
 
