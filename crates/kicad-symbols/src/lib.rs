@@ -473,38 +473,77 @@ impl Symbol {
     }
 
     /// Axis-aligned bboxes of every *visible* pin-name and pin-number
-    /// text, in the symbol-local frame (millimetres). The caller
-    /// transforms each into world coordinates with the same
-    /// orientation + eeschema y-flip used for [`Symbol::body_bbox`], so
-    /// the emitter's text-nudge pass and the V13 verifier agree on
-    /// where pin text sits.
+    /// text for an instance placed at `origin` with `orient`, in the
+    /// **page frame** (file coordinates, millimetres, Y down) — the same
+    /// frame `body_bbox_to_world` produces and the emitter's text-nudge
+    /// pass and the V13 verifiers grade in.
     ///
-    /// Model (deliberately the same approximate grade as the project's
-    /// other `text_bbox` boxes — size 1.27 mm, width ≈ 0.6·n·size,
-    /// height ≈ 1.4·size): pin text rides the pin *shaft* (the segment
-    /// from the connection point inward to the body root). For
-    /// `pin_names (offset 0)` and pin numbers the text is drawn over
-    /// the shaft, centred near its midpoint; for `pin_names (offset >
-    /// 0)` the name is drawn just inside the body root. Either way the
-    /// box is centred on the shaft midpoint and inflated by half the
-    /// text extent in each axis — a single conservative box per visible
-    /// label that covers both the over-shaft and just-inside-root
-    /// placements KiCad uses.
+    /// It has to be the page frame, not the symbol-local one: KiCad's
+    /// side rule for outside pin text is stated in *drawn* coordinates
+    /// (`pin_layout_cache.cpp` `GetPinNumberInfo` / `GetPinNameInfo` —
+    /// "place it to the left of the pin", "above means negative Y"), and
+    /// a rule of that shape is not rotation-covariant. A local box on
+    /// the local −x side rotates onto the world +x side under a 180°
+    /// pose, so a local model can only be correct by being *symmetric* —
+    /// which is exactly the model this replaces, and which under-reserved
+    /// the side KiCad actually draws on by ~0.8 mm while over-reserving
+    /// the empty side. Measured against `kicad-cli sch export svg`, that
+    /// gap let `common_emitter`'s `RE` Reference render on top of `CE`'s
+    /// pin-number "1" while every model-side V13 budget still read zero.
+    ///
+    /// Model, calibrated against real ink (KiCad 9.0.2) rather than
+    /// assumed:
+    ///
+    /// * **Outside text** (every pin number, plus names with
+    ///   `pin_names (offset 0)`) rides *beside* the shaft, centred on
+    ///   the shaft midpoint along the pin and offset
+    ///   `PERP_CENTRE_EM · size` perpendicular to it. Perpendicular side:
+    ///   left of a vertical pin / above a horizontal one, in page
+    ///   coordinates and independent of which way the pin points. When
+    ///   name AND number are both drawn (`show_pin_names`, offset 0, a
+    ///   non-empty name) KiCad splits them — the name keeps that side,
+    ///   the number takes the opposite one.
+    /// * **Inside names** (`pin_names (offset > 0)`) start at the body
+    ///   root plus the offset, read *inward*, and stay centred on the
+    ///   pin axis.
+    ///
+    /// Widths come from the Newstroke advance table, so a box is a
+    /// superset of the rendered ink by the glyph side bearings; the
+    /// perpendicular extent is `1.4 · size` against a measured cap
+    /// height of `1.0 · size`.
     ///
     /// Hidden classes (`pin_names (hide yes)` / `pin_numbers (hide
     /// yes)`) contribute nothing. General by construction: drives off
     /// the parsed header flags and pin geometry, no per-symbol
     /// constants.
     #[must_use]
-    pub fn pin_text_local_bboxes(&self) -> Vec<LocalBbox> {
+    pub fn pin_text_page_bboxes(
+        &self,
+        origin: (f64, f64),
+        orient: Orientation,
+    ) -> Vec<crate::text_geom::TextBox> {
         const SIZE: f64 = 1.27;
         const HEIGHT: f64 = 1.4 * SIZE;
+        /// Distance from the pin axis to the centre of an outside
+        /// pin-text run, in multiples of the text size. KiCad computes
+        /// it as a text margin plus half the text size plus the pen
+        /// width; measured from rendered ink it is 1.052 mm for a name /
+        /// lone number and 0.941 mm for a number drawn beside a name, at
+        /// `size = 1.27`. One conservative value covers both: the band
+        /// it reserves, `[0.127, 1.905]` mm off-axis, contains the two
+        /// measured ink bands `[0.417, 1.687]` and `[0.306, 1.576]`.
+        const PERP_CENTRE_EM: f64 = 0.8;
+
+        let (ox, oy) = origin;
         let mut out = Vec::new();
         for p in &self.pins {
-            // Shaft unit vector, connection point → body root. KiCad
-            // pin `(at x y angle)`: the shaft extends from the
-            // connection point in the `angle` direction (0→+x, 90→+y,
-            // 180→−x, 270→−y) for length `p.length`.
+            if p.length <= 0.0 {
+                continue;
+            }
+            // Shaft unit vector, connection point → body root, in the
+            // symbol frame. KiCad pin `(at x y angle)`: the shaft
+            // extends from the connection point in the `angle`
+            // direction (0→+x, 90→+y, 180→−x, 270→−y).
             let (ux, uy) = match p.angle % 360 {
                 0 => (1.0, 0.0),
                 90 => (0.0, 1.0),
@@ -512,47 +551,76 @@ impl Symbol {
                 270 => (0.0, -1.0),
                 _ => continue,
             };
-            // Number rides over the shaft midpoint; the name rides the
-            // midpoint too when `offset == 0` (over the pin) or sits
-            // just inside the body root when `offset > 0`.
-            let mid = p.length / 2.0;
-            for (show, text, along) in [
-                (
-                    self.show_pin_names,
-                    &p.name,
-                    if self.pin_name_offset > 0.0 {
-                        p.length + self.pin_name_offset
-                    } else {
-                        mid
-                    },
-                ),
-                (self.show_pin_numbers, &p.number, mid),
-            ] {
-                // KiCad's `GetShownName()` renders `~` (and the empty
-                // string) as no text at all — such a pin draws no name
-                // glyph, so it reserves no bbox.
-                if !show || text.is_empty() || text == "~" {
-                    continue;
-                }
-                let twidth = crate::text_metrics::text_width(text, SIZE);
-                let cx = p.x + ux * along;
-                let cy = p.y + uy * along;
-                // Long axis of the text lies along the shaft (KiCad
-                // rotates names/numbers to read along vertical pins),
-                // short axis perpendicular. Build the AABB accordingly.
-                let half_long = twidth / 2.0;
-                let half_short = HEIGHT / 2.0;
-                let (hx, hy) = if ux.abs() > 0.5 {
-                    (half_long, half_short)
+            // Transform tip and root through the pose, then into the
+            // page frame (Y flip). Deriving the drawn shaft direction
+            // from two transformed points avoids reasoning about what a
+            // rotated-and-mirrored pin angle means under the flip.
+            let tip = orient.apply_point(p.x, p.y);
+            let root = orient.apply_point(p.x + ux * p.length, p.y + uy * p.length);
+            let tip = (ox + tip.0, oy - tip.1);
+            let root = (ox + root.0, oy - root.1);
+            let inward = ((root.0 - tip.0) / p.length, (root.1 - tip.1) / p.length);
+            let vertical = inward.0.abs() < 0.5;
+            let mid = (f64::midpoint(tip.0, root.0), f64::midpoint(tip.1, root.1));
+
+            let name_shown = self.show_pin_names && !p.name.is_empty() && p.name != "~";
+            let name_inside = self.pin_name_offset > 0.0;
+            // KiCad's `showBothNameAndNumber`: a drawn name with
+            // `pin_names (offset 0)` shares the shaft with the number,
+            // so the two take opposite sides.
+            let split_sides = name_shown && !name_inside;
+
+            // Outside text: a band alongside the shaft. `side` is +1
+            // for the far side (right of a vertical pin / below a
+            // horizontal one), −1 for the near side KiCad prefers.
+            let outside = |text: &str, side: f64| {
+                let w = crate::text_metrics::text_width(text, SIZE);
+                let off = side * PERP_CENTRE_EM * SIZE;
+                let (cx, cy) = if vertical {
+                    (mid.0 + off, mid.1)
                 } else {
-                    (half_short, half_long)
+                    (mid.0, mid.1 + off)
                 };
-                out.push(LocalBbox {
+                let (hx, hy) = if vertical {
+                    (HEIGHT / 2.0, w / 2.0)
+                } else {
+                    (w / 2.0, HEIGHT / 2.0)
+                };
+                crate::text_geom::TextBox {
                     x0: cx - hx,
                     y0: cy - hy,
                     x1: cx + hx,
                     y1: cy + hy,
-                });
+                }
+            };
+
+            if name_shown {
+                if name_inside {
+                    // Starts `pin_name_offset` past the body root and
+                    // reads further inward, centred on the pin axis.
+                    let w = crate::text_metrics::text_width(&p.name, SIZE);
+                    let start = (
+                        root.0 + inward.0 * self.pin_name_offset,
+                        root.1 + inward.1 * self.pin_name_offset,
+                    );
+                    let end = (start.0 + inward.0 * w, start.1 + inward.1 * w);
+                    let (hx, hy) = if vertical {
+                        (HEIGHT / 2.0, 0.0)
+                    } else {
+                        (0.0, HEIGHT / 2.0)
+                    };
+                    out.push(crate::text_geom::TextBox {
+                        x0: start.0.min(end.0) - hx,
+                        y0: start.1.min(end.1) - hy,
+                        x1: start.0.max(end.0) + hx,
+                        y1: start.1.max(end.1) + hy,
+                    });
+                } else {
+                    out.push(outside(&p.name, -1.0));
+                }
+            }
+            if self.show_pin_numbers && !p.number.is_empty() && p.number != "~" {
+                out.push(outside(&p.number, if split_sides { 1.0 } else { -1.0 }));
             }
         }
         out

@@ -98,28 +98,56 @@ fn pin_text_headers_parsed() {
 }
 
 #[test]
-fn pin_text_local_bboxes_skip_tilde_names_and_hidden_classes() {
+fn pin_text_page_bboxes_skip_tilde_names_and_hidden_classes() {
     let lib = dev_library();
+    let at_origin = |sym: &kicad_symbols::Symbol| {
+        sym.pin_text_page_bboxes((0.0, 0.0), kicad_symbols::Orientation::IDENTITY)
+    };
 
     // C: names are `~` (no glyph) but numbers "1"/"2" are shown → two
     // boxes (one per pin number), none for the tilde names.
     let c = lib.lookup("Device:C").expect("C");
-    assert_eq!(c.pin_text_local_bboxes().len(), 2);
+    assert_eq!(at_origin(c).len(), 2);
 
     // R_US: numbers hidden, names `~` (no glyph) → zero boxes.
     let r = lib.lookup("Device:R_US").expect("R_US");
-    assert_eq!(r.pin_text_local_bboxes().len(), 0);
+    assert_eq!(at_origin(r).len(), 0);
 
     // Q_NPN_BCE: 3 pins, names {B,C,E} + numbers {1,2,3} all visible →
     // six boxes. The base pin (tip -5.08, angle 0, length 5.715) puts
     // its name/number near the shaft midpoint (x ≈ -2.22), well clear
     // of the connection tip.
     let q = lib.lookup("Device:Q_NPN_BCE").expect("Q_NPN_BCE");
-    let boxes = q.pin_text_local_bboxes();
+    let boxes = at_origin(q);
     assert_eq!(boxes.len(), 6);
     // At least one box should straddle x ≈ -2.22 (base pin shaft mid).
     assert!(
         boxes.iter().any(|b| b.x0 < -2.0 && b.x1 > -2.4),
         "expected a base-pin text box near shaft midpoint x≈-2.22: {boxes:?}",
     );
+}
+
+/// The side rule is stated in *drawn* coordinates, so it is not
+/// rotation-covariant: `Device:C`'s pin numbers are drawn to the left of
+/// the pin whether the capacitor sits at rot 0 or rot 180. A model in
+/// the symbol-local frame — the one this API replaced — necessarily
+/// flips them onto the right under the 180° pose.
+#[test]
+fn pin_number_side_is_page_frame_not_symbol_frame() {
+    let lib = dev_library();
+    let c = lib.lookup("Device:C").expect("C");
+    for rot in [kicad_symbols::Rotation::R0, kicad_symbols::Rotation::R180] {
+        let orient = kicad_symbols::Orientation {
+            rotation: rot,
+            mirror_y: false,
+        };
+        for b in c.pin_text_page_bboxes((0.0, 0.0), orient) {
+            // Both pins lie on the x = 0 axis in either pose; the
+            // number must sit entirely to its left.
+            assert!(
+                b.x1 <= 0.0,
+                "pin number drawn right of the pin axis at {rot:?}: {b:?}",
+            );
+        }
+    }
 }

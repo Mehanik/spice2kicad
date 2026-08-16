@@ -1464,11 +1464,12 @@ fn visible_text_bboxes(root: &Value) -> Vec<(String, Bbox)> {
 
 /// World-frame bboxes of every VISIBLE symbol-internal pin-name and
 /// pin-number text, tagged `refdes.pin#`. Power glyphs (`#PWR…`) draw
-/// no pin labels and are skipped. Each local pin-text bbox (from
-/// [`kicad_symbols::Symbol::pin_text_local_bboxes`]) is transformed
-/// through the placed pose with the same orientation + eeschema y-flip
-/// used for symbol bodies, so the box agrees with the emitter's nudge
-/// pass.
+/// no pin labels and are skipped. The boxes come straight from
+/// [`kicad_symbols::Symbol::pin_text_page_bboxes`] — the ONE definition,
+/// shared with the emitter's nudge pass — which takes the placed pose
+/// because KiCad's side rule for outside pin text ("left of a vertical
+/// pin, above a horizontal one") is stated in drawn coordinates and is
+/// not rotation-covariant.
 fn pin_text_bboxes(root: &Value) -> Vec<(String, Bbox)> {
     let library = load_test_library();
     let mut out = Vec::new();
@@ -1485,11 +1486,20 @@ fn pin_text_bboxes(root: &Value) -> Vec<(String, Bbox)> {
         let Some(lib_sym) = library.lookup(&lib_id) else {
             continue;
         };
-        #[allow(clippy::cast_lossless)]
-        let rot_deg = f64::from(orient.rotation.degrees());
-        for (i, local) in lib_sym.pin_text_local_bboxes().into_iter().enumerate() {
-            let bbox = body_bbox_to_world(local, ox, oy, rot_deg, orient.mirror_y);
-            out.push((format!("{refdes}.pintext{i}"), bbox));
+        for (i, b) in lib_sym
+            .pin_text_page_bboxes((ox, oy), orient)
+            .into_iter()
+            .enumerate()
+        {
+            out.push((
+                format!("{refdes}.pintext{i}"),
+                Bbox {
+                    x0: b.x0,
+                    y0: b.y0,
+                    x1: b.x1,
+                    y1: b.y1,
+                },
+            ));
         }
     }
     out
@@ -1784,11 +1794,19 @@ fn pwr_flag_graphic_bboxes(root: &Value) -> Vec<(String, Bbox)> {
 }
 
 /// World-frame `(tag, bbox)` of every hierarchical-sheet port-NAME text.
-/// KiCad draws the port label at the pin coordinate, justified away from
-/// the sheet body (a left-edge pin, `(at … 180)`, draws its name to the
-/// left). We model it as left-anchored text growing in the pin's outward
-/// direction, matching the renderer's placement closely enough for a
-/// collision check.
+///
+/// KiCad draws the port label **inside** the sheet body, reading away
+/// from the edge the pin sits on: a left-edge pin (`(at … 180)`, i.e.
+/// pointing outward to the left) has its name drawn rightward, into the
+/// sheet. This modelled the opposite — a box in the empty strip outside
+/// the sheet — so the verifier could not see a glyph's net name landing
+/// on a port label at all. Measured against `kicad-cli sch export svg`
+/// on `opamp_inverting`: the `vcc` port name renders at x 50.0–52.7 for
+/// a pin anchored at x 48.26, while the old model claimed 45.1–48.3.
+///
+/// The rendering is a hierarchical label's — tag glyph at the anchor,
+/// string one `hier_label` lead further along the reading direction —
+/// hence [`TextKind::hier_label`] at the *reversed* pin rotation.
 fn sheet_port_name_bboxes(root: &Value) -> Vec<(String, Bbox)> {
     let mut out = Vec::new();
     for sheet in children(root, "sheet") {
@@ -1799,11 +1817,13 @@ fn sheet_port_name_bboxes(root: &Value) -> Vec<(String, Bbox)> {
             let Some((px, py, prot)) = at_xy_rot(pin) else {
                 continue;
             };
-            // The port text is anchored at the pin and reads outward
-            // (away from the sheet body). A `(at … 180)` pin reads to
-            // the left, so its text occupies x < px; model that by
-            // rotating the left-anchored box 180° about the pin.
-            let bbox = text_bbox(name, (px, py), 1.27, prot, TextKind::PlainLabel);
+            let bbox = text_bbox(
+                name,
+                (px, py),
+                1.27,
+                (prot + 180) % 360,
+                TextKind::hier_label(),
+            );
             out.push((format!("port.{name}"), bbox));
         }
     }

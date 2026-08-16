@@ -3159,11 +3159,10 @@ fn host_pin_text_bboxes(placement: &Placement, library: &Library) -> Vec<TextBbo
             let orient = el.orientation;
             library
                 .lookup(&el.lib_id)
-                .map(Symbol::pin_text_local_bboxes)
+                .map(|sym| sym.pin_text_page_bboxes((ox, oy), orient))
                 .unwrap_or_default()
                 .into_iter()
-                .map(move |local| {
-                    let b = bbox_as_text(body_bbox_to_world(local, ox, oy, orient));
+                .map(move |b| {
                     // Inflate by a hairline clearance. Our pin-text box
                     // is derived from font metrics; KiCad's renderer
                     // puts slightly more ink on the page than the model
@@ -3351,10 +3350,22 @@ fn centered_text_bbox(text: &str, anchor: (f64, f64)) -> TextBbox {
 
 /// World-frame bboxes of every hierarchical-sheet port-NAME text already
 /// serialised into `items` (a `(sheet … (pin "name" … (at x y rot)))`).
-/// KiCad draws the port label reading outward from the pin; we model it
-/// with the same left-anchored [`text_bbox`] used elsewhere (a
-/// conservative over-estimate of its reach). Used as an obstacle class
-/// the power-glyph value-text nudge must clear (V13 — issue [4]).
+///
+/// KiCad draws the port label **inside** the sheet body, reading away
+/// from the edge the pin sits on — a left-edge pin (`(at … 180)`, i.e.
+/// pointing outward to the left) has its name drawn rightward, into the
+/// sheet. This modelled it the other way round for as long as it has
+/// existed, putting the box in the empty strip *outside* the sheet, so
+/// the obstacle set was a mirror image of the real ink: measured on
+/// `opamp_inverting`, the `vcc` port name renders at x 50.0–52.7 while
+/// the model claimed 45.1–48.3. The glyph-value nudge consequently
+/// relocated `#PWR2`'s "VCC" straight onto it.
+///
+/// The rendering is a hierarchical label's: the pin's own tag glyph sits
+/// at the anchor and the string starts one `hier_label` lead further
+/// along the reading direction — hence [`TextKind::hier_label`] at the
+/// *reversed* pin rotation. Used as an obstacle class the power-glyph
+/// value-text nudge must clear (V13 — issue [4]).
 fn sheet_port_name_bboxes(items: &[Sexpr]) -> Vec<TextBbox> {
     let mut out = Vec::new();
     for item in items {
@@ -3372,7 +3383,12 @@ fn sheet_port_name_bboxes(items: &[Sexpr]) -> Vec<TextBbox> {
                 _ => continue,
             };
             if let Some((x, y, rot)) = sexpr_at(p) {
-                out.push(text_bbox(name, (x, y), rot));
+                out.push(text_geom_bbox(
+                    name,
+                    (x, y),
+                    (rot + 180) % 360,
+                    kicad_symbols::text_geom::TextKind::hier_label(),
+                ));
             }
         }
     }
@@ -3459,23 +3475,48 @@ fn host_property_text_bboxes(items: &[Sexpr]) -> Vec<TextBbox> {
     out
 }
 
-fn nudge_power_glyph_value_text(items: &mut [Sexpr], placement: &Placement, library: &Library) {
-    // Candidate offsets from the glyph anchor (default first → byte
-    // identical when clean). The default keeps the value at whatever
-    // outward offset the router chose; fallbacks sweep the four cardinal
-    // directions at one and two glyph-clearing distances. All centred
-    // horizontally on the offset point.
-    const OFFSETS: &[(f64, f64)] = &[
-        (0.0, 3.81),
-        (0.0, -3.81),
-        (-3.81, 0.0),
-        (3.81, 0.0),
-        (-5.08, 0.0),
-        (5.08, 0.0),
-        (0.0, 5.08),
-        (0.0, -5.08),
-    ];
+// Candidate offsets from the glyph anchor (default first → byte
+// identical when clean). The default keeps the value at whatever
+// outward offset the router chose; fallbacks sweep the four cardinal
+// directions at one and two glyph-clearing distances. All centred
+// horizontally on the offset point.
+//
+// The diagonals are APPENDED, never interleaved: a glyph that
+// already finds a clear cardinal keeps exactly the anchor it had, so
+// adding them cannot move text on a layout that was already clean.
+// They are reached only by a glyph for which every cardinal collides
+// — which today settles for the least-bad *colliding* anchor, i.e.
+// ships a rendered overlap. Measured on `sallen_key_lpf` under
+// `--placer=flow-seed`, where a tighter packing left `#PWR4`'s "VEE"
+// no clear cardinal and it landed on `C1`'s Reference.
+const OFFSETS: &[(f64, f64)] = &[
+    (0.0, 3.81),
+    (0.0, -3.81),
+    (-3.81, 0.0),
+    (3.81, 0.0),
+    (-5.08, 0.0),
+    (5.08, 0.0),
+    (0.0, 5.08),
+    (0.0, -5.08),
+    (-3.81, 3.81),
+    (3.81, 3.81),
+    (-3.81, -3.81),
+    (3.81, -3.81),
+    (-5.08, 3.81),
+    (5.08, 3.81),
+    (-5.08, -3.81),
+    (5.08, -3.81),
+    (-3.81, 6.35),
+    (3.81, 6.35),
+    (-3.81, -6.35),
+    (3.81, -6.35),
+    (0.0, 7.62),
+    (0.0, -7.62),
+    (-7.62, 0.0),
+    (7.62, 0.0),
+];
 
+fn nudge_power_glyph_value_text(items: &mut [Sexpr], placement: &Placement, library: &Library) {
     // Obstacle sets (fixed for the whole pass): host bodies, host
     // pin-text, sheet-port names. Power-glyph bodies are NOT obstacles
     // for each other's text (they sit on their own pins by design).

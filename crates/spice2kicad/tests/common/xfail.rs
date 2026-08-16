@@ -55,11 +55,6 @@ const XFAIL: &[(&str, &str, &str)] = &[
     // before F0. They are recorded here, not hidden: each entry names
     // the defect and expires automatically when it is fixed.
     (
-        "v13_power_glyph_value_text_clear_of_bodies_and_pintext",
-        "rc_phase_shift",
-        "deferred V13(6a) decoration nudge: #PWR2's GND value text clips the RB body",
-    ),
-    (
         "no_power_glyph_foreign_body_overlap_across_fixtures",
         "rc_phase_shift",
         "deferred V14 issue-[3]: a GND glyph body clips the foreign RB body (ADR-14 known scope limit)",
@@ -68,11 +63,6 @@ const XFAIL: &[(&str, &str, &str)] = &[
         "v14_rail_pin_faces_rail",
         "rc_phase_shift",
         "deferred V14/R-5 rail-pin defect: #PWR6 (+12V) sits below its host RB's body centre",
-    ),
-    (
-        "rendered_text_does_not_overlap_across_fixtures",
-        "rc_phase_shift",
-        "deferred V13 text-nudge defect: pin number \"1\" overlaps the \"b\" net label in the rendered ink",
     ),
     (
         "rails_correctly_ordered_across_fixtures",
@@ -115,14 +105,11 @@ const XFAIL: &[(&str, &str, &str)] = &[
         "deferred V13(2) decoration nudge: the `b1` net label clips Q2's Value text",
     ),
     (
-        "v13_property_text_no_mutual_overlap",
-        "two_stage_amp",
-        "deferred V13(4) decoration nudge: RC2.Reference clips #PWR10's rail text, CE2.Value clips #PWR6's",
-    ),
-    (
         "v13_power_glyph_value_text_clear_of_bodies_and_pintext",
         "two_stage_amp",
-        "deferred V13(6a) decoration nudge: #PWR2's and #PWR4's GND value text clip the CE1/RE1 bodies",
+        "deferred V13(6a) decoration nudge: #PWR4's GND value text clips the RE1 body (#PWR2's, and \
+         `rc_phase_shift`'s companion case, cleared once the pin-text model stopped mirroring the \
+         side KiCad draws on)",
     ),
     // --- F2: the second benchmark wave (v0.2 roadmap) -----------------
     // Four new fixtures — `cascode_amp`, `lc_ladder_lpf`,
@@ -135,25 +122,16 @@ const XFAIL: &[(&str, &str, &str)] = &[
     // Every one of them is Tier-0 CLEAN — ADR-22 partition certificate,
     // V11 pin coincidence, V11 wire/label-on-foreign-pin, symbol overlap,
     // cross-net collinear overlap and ERC all measure 0 on all four. The
-    // three entries below are all Tier-1 *decoration/placer* defects that
-    // were deferred long before F2; not one of them is a new regression,
-    // and not one is a budget. `sallen_key_lpf` needs no entry at all.
-    (
-        "v13_labels_clear_pin_text",
-        "cascode_amp",
-        "deferred V13(7) decoration nudge: the `e1` net label clips CB2's pin text",
-    ),
-    (
-        "v13_property_text_no_mutual_overlap",
-        "lc_ladder_lpf",
-        "deferred V13(4) decoration nudge: #PWR1's and #PWR2's GND value text collide — the two \
-         ground glyphs under the source and C1 land one grid step apart",
-    ),
-    (
-        "v13_property_text_no_mutual_overlap",
-        "wien_bridge_osc",
-        "deferred V13(4) decoration nudge: #PWR1's and #PWR3's GND value text collide",
-    ),
+    // entries below are all Tier-1 *decoration/placer* defects that were
+    // deferred long before F2; not one of them is a new regression, and
+    // not one is a budget. `sallen_key_lpf` needs no entry at all.
+    //
+    // Three of them expired together — `v13_labels_clear_pin_text`
+    // [cascode_amp] and `v13_property_text_no_mutual_overlap`
+    // [lc_ladder_lpf, wien_bridge_osc] — when the pin-text and
+    // sheet-port-name models were corrected to the side KiCad actually
+    // draws on, giving the decoration nudge passes a true picture of
+    // what they were dodging.
     (
         "no_power_glyph_foreign_body_overlap_across_fixtures",
         "wien_bridge_osc",
@@ -167,20 +145,18 @@ const XFAIL: &[(&str, &str, &str)] = &[
     // Both are now Tier-0 CLEAN: ADR-22 partition certificate, V11 pin
     // coincidence, V11 wire/label-on-foreign-pin, symbol overlap,
     // cross-net collinear overlap and ERC all measure 0 on both. The
-    // three entries below are Tier-1 *decoration / placer* defects that
-    // were deferred long before this work — each is the SAME defect an
+    // entries below are Tier-1 *decoration / placer* defects that were
+    // deferred long before this work — each is the SAME defect an
     // existing fixture already carries an entry for, not a new one.
+    // `sallen_key_driven`'s rendered-ink entry expired with the pin-text
+    // / sheet-port-name model correction; only its model-side half is
+    // still owed.
     (
         "v13_property_text_no_mutual_overlap",
         "sallen_key_driven",
-        "deferred V13(4) decoration nudge: RA.Reference clips #PWR5's rail text and #PWR2's \
-         value text clips #PWR3's — the same defect `two_stage_amp` and `lc_ladder_lpf` carry",
-    ),
-    (
-        "rendered_text_does_not_overlap_across_fixtures",
-        "sallen_key_driven",
-        "deferred V13 text-nudge defect: the rendered \"VEE\" rail text overlaps \"RA\" by \
-         (0.88, 0.39) mm — the same defect `rc_phase_shift` carries",
+        "deferred V13(4) decoration nudge: RA's Reference and Value both clip #PWR5's rail text — \
+         the model-side residue of the defect whose rendered-ink half `rendered_text` no longer \
+         sees; RA is boxed in on every candidate anchor, so the nudge keeps its least-bad one",
     ),
     // R-5, and the fixture ADR-20 named it on. ADR-20 concluded that R-5
     // was what made `shunt_feedback_amp` UNCONVERTIBLE, escalating it
