@@ -198,10 +198,11 @@ fn summarise(m: &Measure) -> String {
 /// `coincident` also closes a hole neither `v11` nor `overlap` covered:
 /// `v11` counts *wire*-touches-foreign-pin warnings, and the router
 /// emits none when two **pins** coincide (there is no wire it could
-/// detour); `overlap` uses strict body-bbox interiors, so two bodies
+/// detour); `overlap` compares strict extent *interiors*, so two symbols
 /// that merely kiss — exactly what abutting pin tips look like — are not
-/// an overlap. A reorientation that shorted two nets therefore scored as
-/// a clean improvement.
+/// an overlap, whether the extent is the body alone or the body ∪ pin
+/// reach it measures today. A reorientation that shorted two nets
+/// therefore scored as a clean improvement.
 ///
 /// Demonstrated hazard the `severed` term closes: on `common_emitter`,
 /// rotating `COUT` to 180 boxes its `c` pin between a foreign pin (V11
@@ -645,7 +646,7 @@ struct Probe {
     /// host pins and rail-glyph anchors alike). Hazard 2 — a wire through
     /// a glyph anchor — needs the routed segments and can only add to it.
     coincident_floor: usize,
-    /// Exactly `Measure::overlap` (body bboxes only).
+    /// Exactly `Measure::overlap` (resolved extents: body ∪ pin reach).
     overlap: usize,
     /// Exactly `Measure::v13` ([`v13_overlap_count`] takes no segments).
     v13: usize,
@@ -1044,10 +1045,36 @@ fn pin_probes(placement: &Placement, library: &Library) -> Vec<PinProbe> {
     out
 }
 
-/// Count pairs of placed elements whose world-frame body bboxes overlap.
-/// Mirrors the no-symbol-symbol-overlap verifier's intent (body extent,
-/// orientation-aware) so the gate can only ever decline an orientation
-/// that introduces a body collision the SA gate would also reject.
+/// Count pairs of placed elements whose world-frame **resolved extents**
+/// — body bbox ∪ pin reach, orientation-transformed — overlap.
+///
+/// # The extent must be body ∪ pins, not body alone
+///
+/// This is the *only* guard standing between phase 4.5 and the emitted
+/// file on symbol/symbol overlap. `spice_layout::legalize` owns that
+/// postcondition at the placement stage and re-checks it after the SA —
+/// but phase 4.5 runs **after** the legalizer's last look and changes
+/// element orientation, which changes body extent. Nothing downstream
+/// re-checks. A guard here that measures *less* geometry than the
+/// postcondition it protects is therefore unsound, not merely
+/// conservative.
+///
+/// It used to measure body bboxes only, while both
+/// `spice_layout::legalize` (via `footprint::body_and_pins`) and the
+/// `no_symbol_symbol_overlap_across_fixtures` verifier measure
+/// body ∪ pin reach. Measured consequence: on `sallen_key_lpf` under
+/// `--placer=flow-seed` the phase rotated `C1` from R90 to R0, which
+/// stretches its extent from 4.06 mm to 7.62 mm along Y purely in *pin
+/// stem*, and the emitted sheet carried two extent overlaps (`C1`×`RA`,
+/// `C1`×`X1`) that this count reported as zero. The rotation was not a
+/// Tier-0 repair, so ADR-20's guard exemption never applied — the guard
+/// simply could not see what it was guarding. Only orientations already
+/// in the V14-allowed set are trialled, so widening the extent can only
+/// ever *decline* a pose; it can never invent one.
+///
+/// MEMORY "verify what a number measures": the previous doc comment
+/// claimed this "mirrors the no-symbol-symbol-overlap verifier's intent"
+/// while measuring a strict subset of its geometry.
 fn symbol_overlap_count(placement: &Placement, library: &Library) -> usize {
     let boxes: Vec<Option<spice_route::Bbox>> = placement
         .elements
@@ -1059,8 +1086,7 @@ fn symbol_overlap_count(placement: &Placement, library: &Library) -> usize {
             let (ox, oy) = el.origin.to_mm();
             library
                 .lookup(&el.lib_id)
-                .and_then(Symbol::body_bbox)
-                .map(|b| body_bbox_world(b, ox, oy, el.orientation))
+                .and_then(|sym| resolved_extent_world(sym, ox, oy, el.orientation))
         })
         .collect();
     let mut count = 0;
@@ -1138,6 +1164,51 @@ fn body_bbox_world(
         x1: max_x,
         y1: max_y,
     }
+}
+
+/// World-frame **resolved extent** of a placed symbol: its body bbox ∪
+/// every pin's connection point, orientation-transformed.
+///
+/// The one definition the placer's legalizer
+/// (`spice_layout::footprint::body_and_pins`) and the
+/// `no_symbol_symbol_overlap_across_fixtures` verifier both use, restated
+/// here in the emitter's page frame because `kicad-emitter` cannot depend
+/// on `spice-layout`. `None` only when the symbol has neither body
+/// geometry nor pins — exactly the verifier's `None`.
+fn resolved_extent_world(
+    sym: &Symbol,
+    ox: f64,
+    oy: f64,
+    orient: Orientation,
+) -> Option<spice_route::Bbox> {
+    let mut min_x = f64::INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+    let mut grow = |wx: f64, wy: f64| {
+        min_x = min_x.min(wx);
+        max_x = max_x.max(wx);
+        min_y = min_y.min(wy);
+        max_y = max_y.max(wy);
+    };
+    if let Some(b) = sym.body_bbox() {
+        let w = body_bbox_world(b, ox, oy, orient);
+        grow(w.x0, w.y0);
+        grow(w.x1, w.y1);
+    }
+    // Pin reach: each pin's connection point extends the extent. This is
+    // what the body-only model missed — see [`symbol_overlap_count`].
+    for p in sym.pins_in(orient) {
+        grow(ox + p.x, oy - p.y);
+    }
+    (min_x.is_finite() && min_y.is_finite() && max_x.is_finite() && max_y.is_finite()).then_some(
+        spice_route::Bbox {
+            x0: min_x,
+            y0: min_y,
+            x1: max_x,
+            y1: max_y,
+        },
+    )
 }
 
 /// Strict (interior) overlap of two world-frame bboxes. A shared edge
@@ -1439,9 +1510,9 @@ mod severed_guard_tests {
     /// A pin-on-pin short is invisible to every OTHER field of
     /// [`Measure`], which is why it needed its own term: `v11` counts
     /// router `v11:` *wire* warnings (none are emitted for coincident
-    /// pins — there is no wire to detour) and `overlap` uses strict body
-    /// interiors (abutting pin tips do not overlap). Without
-    /// `coincident` the shorting candidate below is a clean win.
+    /// pins — there is no wire to detour) and `overlap` compares strict
+    /// extent interiors (abutting pin tips touch; they do not overlap).
+    /// Without `coincident` the shorting candidate below is a clean win.
     #[test]
     fn a_pin_on_pin_short_is_invisible_without_the_coincident_term() {
         let baseline = m(1, 1, 3, 9, 0);
@@ -1576,6 +1647,137 @@ mod severed_guard_tests {
              reject the COUT rot-180 candidate; without it phase 4.5 ships a \
              broken netlist"
         );
+    }
+
+    /// The symbol/symbol overlap the `overlap` guard could not see, and
+    /// the hole it hid in — measured on a **champion** fixture, with the
+    /// **champion** placer.
+    ///
+    /// Phase 4.5 is the only stage that changes body extent after
+    /// `spice_layout::legalize`'s last overlap check, and nothing
+    /// downstream re-checks. Its `overlap` guard used to compare *body
+    /// bboxes only*, while both the legalizer and the
+    /// `no_symbol_symbol_overlap_across_fixtures` verifier compare
+    /// body ∪ pin reach. A pose whose extra extent is pure pin stem was
+    /// therefore free.
+    ///
+    /// `sallen_key_lpf` shows it with nothing but a rotation: `C1` sits
+    /// at R90 (a 4.06 mm tall extent) directly above `RA`; at R0 its two
+    /// 3.81 mm pin stems stretch it to 7.62 mm and it swallows `RA`'s
+    /// row, while the two drawn plates never come near `RA`'s body. That
+    /// is exactly the pose phase 4.5 picked on `--placer=flow-seed`,
+    /// where the objective tuple happened to favour it, and it shipped
+    /// two Tier-0 extent overlaps. Nothing about the mechanism is
+    /// challenger-specific: the pose is in `C1`'s allowed set on the
+    /// champion too, and only the tuple's preference kept it unchosen.
+    ///
+    /// The control arm is the point (MEMORY "verify what a number
+    /// measures"): [`body_only_overlap_count`] is the retired model, and
+    /// it reads **0** on the very placement the live count refuses.
+    #[test]
+    fn a_pin_reach_only_overlap_is_invisible_to_a_body_only_extent() {
+        let (mut placement, library, meta) = fixture("sallen_key_lpf");
+        refine_orientations(&mut placement, &library, &meta);
+        let i = placement
+            .elements
+            .iter()
+            .position(|e| e.refdes == "C1")
+            .expect("sallen_key_lpf has C1");
+
+        let base = measure(&placement, &library);
+        assert_eq!(base.overlap, 0, "the settled champion placement is legal");
+
+        let settled = placement.elements[i].orientation;
+        assert_eq!(
+            settled.rotation,
+            Rotation::R90,
+            "the champion settles C1 horizontal; if that changes, re-derive \
+             the offending pose rather than trusting this one"
+        );
+        placement.elements[i].orientation = Orientation {
+            rotation: Rotation::R0,
+            mirror_y: false,
+        };
+        let rotated = measure(&placement, &library);
+
+        assert!(
+            rotated.overlap > base.overlap,
+            "rotating C1 to R0 must register as an extent overlap (got {})",
+            rotated.overlap
+        );
+        assert_eq!(
+            body_only_overlap_count(&placement, &library),
+            0,
+            "THE HOLE: the retired body-bbox-only model reports this placement \
+             clean, which is why phase 4.5 shipped it"
+        );
+        placement.elements[i].orientation = settled;
+
+        // …and it must be the `overlap` GUARD that refuses, not the
+        // Tier-1/2 tail happening to disagree as well — the same
+        // discipline the `severed` case above uses.
+        // …and it must be the `overlap` GUARD that refuses. On the
+        // champion's own placement this pose is independently bad — it
+        // measures `v11 = 1`, `v12 = 3` — so the objective tuple would
+        // reject it anyway, and that coincidence is precisely the mask
+        // the defect hid behind (`flow-seed` found a placement where the
+        // tuple *favoured* the same rotation). So isolate the guard: the
+        // baseline's own tuple, one V5 and one bend better, carrying
+        // nothing from the rotated pose but its extent overlap.
+        let tempting = Measure {
+            v5: base.v5.saturating_sub(1),
+            bends: base.bends.saturating_sub(1),
+            overlap: rotated.overlap,
+            ..base.clone()
+        };
+        assert!(
+            accepts(
+                &base,
+                &Measure {
+                    overlap: base.overlap,
+                    ..tempting.clone()
+                }
+            ),
+            "control: with the extents legal this tuple is strictly better and \
+             would be accepted"
+        );
+        assert!(
+            !accepts(&base, &tempting),
+            "the `overlap` guard must refuse a pose whose extra extent is pure \
+             pin reach, however much V13/V12/V5/bends improve"
+        );
+    }
+
+    /// The retired body-bbox-only extent model, kept as a **control
+    /// arm** for the test above and nowhere else. It is deliberately a
+    /// copy rather than a parameter of the live function: a control that
+    /// shares code with the thing under test proves nothing.
+    fn body_only_overlap_count(placement: &Placement, library: &Library) -> usize {
+        let boxes: Vec<Option<spice_route::Bbox>> = placement
+            .elements
+            .iter()
+            .map(|el| {
+                if el.is_power_source || el.lib_id.starts_with("power:") {
+                    return None;
+                }
+                let (ox, oy) = el.origin.to_mm();
+                library
+                    .lookup(&el.lib_id)
+                    .and_then(kicad_symbols::Symbol::body_bbox)
+                    .map(|b| super::body_bbox_world(b, ox, oy, el.orientation))
+            })
+            .collect();
+        let mut count = 0;
+        for i in 0..boxes.len() {
+            for j in (i + 1)..boxes.len() {
+                if let (Some(a), Some(b)) = (&boxes[i], &boxes[j])
+                    && super::bboxes_overlap(a, b)
+                {
+                    count += 1;
+                }
+            }
+        }
+        count
     }
 
     /// Whatever the search picks, phase 4.5 never hands decoration a
