@@ -4869,6 +4869,18 @@ Measured against the champion, whole suite each side, `--no-fail-fast`.
 **Verdict: NOT promotable** — one Tier-0 cell regresses. The rest of the
 table is the largest aggregate improvement the instrument has recorded.
 
+> **SUPERSEDED IN PART BY ADR-25.** The blocking Tier-0 cell was
+> *diagnosed wrong here*. It is not global re-basing and not the
+> geometry-derived stride: phase 4.5's `overlap` guard was measuring body
+> bboxes while the invariant it protects is stated over body ∪ pin reach,
+> so the phase rotated `C1` R90 → R0 and shipped two pin-reach overlaps
+> its own guard reported as zero. The hole is on the **champion** path.
+> With ADR-25's one-function fix the cell is 0 on all 18 fixtures and the
+> verdict is **PROMOTABLE** at Tier 1 −4.00 / Tier 2 −163.35 (the
+> aggregate shrinks because two thirds of the previously reported
+> `sallen_key_lpf` gain *was* the overlap). Read the "What blocks it"
+> paragraph below as the record of a mis-attribution, not as guidance.
+
 **The diagnosis it acts on.** `layers::no_source_fallback` is the path 16
 of 18 fixtures take: every fixture but `lc_ladder_lpf` and
 `sallen_key_driven` tags its stimulus `;@ ignore`, so `sources` is empty.
@@ -5244,3 +5256,161 @@ does not reproduce the fault; stacking them six cells apart does.
    too. It did not *cause* this defect (the branch was already severed
    when it ran) but it erased the evidence, and a whisker chain incident
    on an own pin should be kept, not trimmed.
+
+## ADR-25 — Phase 4.5's guards must measure what the invariant measures: the pin-reach hole
+
+**Status:** landed. Scope is one function in
+`crates/kicad-emitter/src/refine.rs`. The default path is
+**byte-identical** — all 18 fixtures (19 emitted sheets) diff clean
+against the pre-fix binary, `baseline_lock` is untouched, no budget
+literal moved, full workspace suite green.
+
+### The report
+
+ADR-23 D9 graded `--placer=flow-seed` as the largest aggregate
+improvement the scoreboard has recorded and **not promotable**, blocked
+by exactly one Tier-0 cell: `t0.sym_overlap` on `sallen_key_lpf`,
+**0 → 2**. `C1` clipped both `X1`'s opamp triangle and `RA`.
+
+D9 attributed the residual to global re-basing — the tail column moving
+one X stride left — and located the repair in "the geometry-derived
+stride / clearance layer (ADR-18 root cause 4)". **That attribution is
+wrong, and the correction matters more than the cell**: the defect is on
+the champion path, in a stage the challenger does not touch.
+
+### Mechanism, named to the stage and the decision
+
+A symbol overlap reaching the emitted file is odd on its face, because
+`spice_layout::legalize` exists to separate overlapping bodies. It ran,
+and it succeeded:
+
+1. `spice_layout::place` ends with `legalize_if_needed`, which measures
+   `legalize::overlap_count` — footprints from
+   `footprint::body_and_pins`, i.e. **body bbox ∪ pin reach**. On
+   `sallen_key_lpf` under `flow-seed` it measures **0**: it does not even
+   log, let alone shove. The placement leaving the placer is legal.
+2. **Layout phase 4.5 then changes orientation, which changes body
+   extent, and nothing downstream re-checks.** Measured with a pose probe
+   either side of `refine_orientations`: `C1` enters at **R90** (the
+   champion's pose, a 4.06 mm tall extent) and leaves at **R0**, whose two
+   3.81 mm pin stems stretch it to **7.62 mm** — no longer clearing `X1`
+   above or `RA` below. The emitted sheet carries two extent overlaps.
+3. Phase 4.5 *does* carry an `overlap` non-regression guard for exactly
+   this. It reported `overlap=0` at baseline **and** at final. It was
+   measuring **body bboxes only**, while the postcondition it is the last
+   defence for — `legalize`'s, and
+   `placement_quality::no_symbol_symbol_overlap_across_fixtures`'s — is
+   stated over **body ∪ pin reach**. Both overlaps are pure pin-stem
+   geometry, so the guard could not see what it was guarding.
+
+**ADR-20's guard exemption is not involved.** The debug line reads
+`baseline severed=0 coincident=0 v11=0`, so `tier0(m) < tier0(baseline)`
+is unreachable and the `overlap`/`v12` guards were fully armed. The
+challenger did not buy an overlap to repair Tier 0; the guard simply
+returned the wrong number.
+
+This is MEMORY "verify what a number measures" in its purest form: the
+function's own doc comment claimed it "mirrors the
+no-symbol-symbol-overlap verifier's intent (body extent,
+orientation-aware)" while measuring a strict *subset* of that verifier's
+geometry. The claim and the code disagreed, and only the claim was ever
+read.
+
+### D1. The guard measures the resolved extent
+
+`symbol_overlap_count` now takes body bbox ∪ pin reach — the one
+definition `footprint::body_and_pins` and `resolved_world_extent` both
+already use, restated in the emitter's page frame because
+`kicad-emitter` cannot depend on `spice-layout` (the same crate-cycle
+constraint that puts phase 4.5 in `kicad-emitter` at all). `Probe::overlap`
+is the same function, so `pruned`'s soundness proof — arm 1, "fails the
+surviving guard directly" — is unchanged.
+
+Widening a guard can only ever *decline* a candidate. Phase 4.5 selects
+from the V14-allowed orientation set and never proposes a pose the seed
+chooser could not, so a larger extent cannot invent a layout; it can only
+refuse one. Confirmed by measurement: the champion's emitted output is
+byte-identical on all 18 fixtures, and `flow-seed`'s changes on exactly
+one — `sallen_key_lpf`, the blocked cell.
+
+### The champion is latently affected — this is not a challenger patch
+
+The hole lives in `kicad-emitter`, on the default path, and is
+placer-independent. The offending pose is in `C1`'s allowed set on the
+**champion's own** `sallen_key_lpf` placement: rotate the settled `C1`
+from R90 to R0 and the resolved-extent count goes 0 → 2 while the retired
+body-only model still reads 0.
+
+What keeps the champion from shipping it today is not the guard but a
+coincidence: on the champion's geometry that same pose also measures
+`v11 = 1` and `v12 = 3`, so the objective tuple rejects it on its own.
+`flow-seed` found a placement where the tuple *favoured* it. That is the
+same mask ADR-20's `severed` case describes ("master's SA is what makes
+it disagree here — that coincidence is precisely the mask this defect was
+hiding behind, and any future placer change can remove it"), and the same
+remedy: `severed_guard_tests::a_pin_reach_only_overlap_is_invisible_to_a_body_only_extent`
+pins it on the champion fixture with the champion placer, isolates the
+guard from the tuple, and carries the **retired body-only model as a
+control arm** — deliberately a copy, not a parameter of the live
+function, because a control that shares code with the thing under test
+proves nothing.
+
+### The general rule this instance is an instance of
+
+CLAUDE.md's "consistency requirement" says a property enforced as a hard
+constraint at one stage must be hard at *every* stage that can move the
+element. This adds the measurement half of it:
+
+> **A guard that protects a postcondition must be evaluated over the
+> same geometry the postcondition is stated in.** A guard measuring a
+> strict subset of it is not conservative — it is unsound, and it is
+> silent about the difference.
+
+Phase 4.5 is where this bites hardest, because it is the only stage that
+changes body extent after the placement stage's last legality check.
+Its `v13` model was already aligned this way (ADR-19 M3 notes phase 4.5's
+V13 model "is the *more* faithful model, so M3 aligned this one to it, not
+the reverse"). `overlap` was the outlier.
+
+### Consequences for ADR-23 D9
+
+The blocking cell is closed: `t0.sym_overlap` is **0 on all 18 fixtures
+under both placers**. Re-graded whole-suite (champion records unchanged —
+its output is byte-identical, so its measurements are):
+
+| | before this ADR | after |
+| --- | --- | --- |
+| Tier 0 | `t0.sym_overlap`/`sallen_key_lpf` 0 → 2 (**regression**) | **challenger clean; no cell worse than champion** |
+| Tier 1 total Δ | −5.00 | **−4.00** |
+| Tier 2 total Δ | −180.33 | **−163.35** |
+| verdict | NOT promotable | **PROMOTABLE** |
+
+The aggregate moved *toward zero* because the closed cell was being paid
+for: `flow-seed`'s `sallen_key_lpf` keeps `C1` at R90 now, and that costs
+V16 B 6 → 12, detour 1.0407 → 1.3019, and one cell each of
+`v13.4_text_mutual`, `v13.ink_overlap` and `v14.glyph_body` on that
+fixture. **Two thirds of the previously reported improvement on that one
+fixture was the overlap.** Every other fixture is unchanged from D9's
+table, including `two_stage_amp` (crossings 10 → 0, B 33 → 17, detour
+1.8565 → 1.0794) and `rc_phase_shift` (B 19 → 6, F6 23 → 7).
+
+Promotion remains an owner decision on the printed table (ADR-23 D4);
+this ADR removes the Tier-0 veto, it does not exercise the escape.
+
+### What was rejected
+
+* **Touching the seed stride / clearance layer** (D9's own proposed
+  repair, ADR-18 root cause 4). Not attempted: the diagnosis above shows
+  spacing is not the mechanism — the incoming placement is legal at the
+  spacing it has — and ADR-19's M3/M4 negatives wall spacing changes
+  behind an explicit argument this change would not have.
+* **Special-casing `sallen_key_lpf`, or tuning the root policy until the
+  aggregate looked right.** That is the overfitting ADR-23 exists to
+  prevent, and it would have left the champion-path hole open.
+* **Adding a post-phase-4.5 legalize pass.** It would repair the symptom
+  by *moving* an element after placement has finished — precisely the
+  decoration-contract violation CLAUDE.md forbids ("once decoration
+  starts, no symbol moves or rotates", and phase 4.5 itself "changes
+  element orientation only, never position"). The guard is the right
+  owner: refusing the pose costs nothing, since the pre-refinement pose
+  is always available and always legal.

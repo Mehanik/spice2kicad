@@ -423,6 +423,19 @@ seed-time + weight-0 soft cost at refine-time is a bug. (Detailed
 Attempt-A / Attempt-B post-mortem: see `docs/layout-adr.md`
 post-mortems.)
 
+**Measurement half of the same rule (ADR-25).** A guard that protects a
+postcondition MUST be evaluated over the **same geometry the
+postcondition is stated in**. A guard measuring a strict subset of it is
+not conservative, it is *unsound* — and silent about the difference.
+This bites hardest at phase 4.5, the only stage that changes body extent
+after `spice_layout::legalize`'s last legality check: its `overlap`
+guard measured body bboxes while `legalize` and
+`no_symbol_symbol_overlap_across_fixtures` both measure body ∪ pin
+reach, so a pose whose extra extent was pure pin stem was free, and one
+shipped. When you add or read a guard in `refine.rs`, check its geometry
+against the verifier it claims to mirror — the old one's doc comment
+claimed the mirror it did not implement.
+
 **V14 is a hard constraint (Tier 1, categorical), not a cost.** The
 orientation candidate set for any element bearing a power/ground pin is
 *filtered* to those placing VCC-pins up / GND-pins down; both
