@@ -5414,3 +5414,158 @@ this ADR removes the Tier-0 veto, it does not exercise the escape.
   element orientation only, never position"). The guard is the right
   owner: refusing the pose costs nothing, since the pre-refinement pose
   is always available and always legal.
+
+## ADR-26 — The two text models nothing calibrates were both drawn on the wrong side
+
+**Status:** landed. Scope is one function in `kicad-symbols`, two in
+`kicad-emitter`, and the two verifier-side copies. The default
+(champion) path **changes** — this is not a no-op — and every cell that
+moved improved. `baseline_lock`'s diff is EMPTY (no symbol moves or
+rotates), no budget literal moved, no verifier was weakened, skipped or
+`#[ignore]`d, and **seven** xfail registry entries expired and were
+deleted.
+
+### The report
+
+ADR-25 left `--placer=flow-seed` promotable but carrying one
+uncomfortable cell: `v13.ink_overlap` — the real `kicad-cli` SVG-ink
+measurement, the only instrument that can falsify the model-side V13
+family — went net **+2** (`common_emitter`, `opamp_inverting`,
+`sallen_key_lpf` each 0 → 1; `rc_phase_shift` 1 → 0), while every
+*model-side* V13 cell improved. Model and ground truth disagreed in
+direction. That is the shape of a model defect, not a placement one, and
+it was.
+
+Two hypotheses were on the table: (1) the tighter packing outruns the
+text-nudge candidate set, (2) a model-fidelity gap the nudge passes
+cannot see through. **Hypothesis 2 held on two of the three, hypothesis 1
+on the third**, and the two model defects turned out to sit on the
+champion path as well.
+
+| fixture | colliding pair (measured from ink) | model-side verifier saw it? |
+| --- | --- | --- |
+| `common_emitter` | `RE`'s Reference over `CE`'s pin-number "1" | **no** — V13(5) read 0 |
+| `opamp_inverting` | the sheet's `vcc` port name under `#PWR2`'s "VCC" | **no** — V13(6a) read 0 |
+| `sallen_key_lpf` | `C1`'s Reference under `#PWR4`'s "VEE" | yes — V13(4) = 1 |
+
+### D1. Pin text rides *beside* the shaft, and the side is a page-frame fact
+
+`Symbol::pin_text_local_bboxes` centred each visible pin label on the pin
+*shaft*. KiCad draws outside pin text alongside it. Measured from
+rendered ink at size 1.27: the band runs 0.42..1.69 mm off-axis for a
+name or a lone number, and 0.31..1.58 mm for a number sharing a shaft
+with a name (KiCad splits them onto opposite sides). The old box spanned
+±0.89 mm about the axis — under-reserving the drawn side by ~0.8 mm and
+reserving 0.89 mm of empty space on the other.
+
+The margin that produced the defect: on `common_emitter` the emitter
+scored `RE`'s Reference as clearing `CE`'s pin-number box by **0.002 mm**
+(58.299 vs 58.301, after the pass's own 0.5 mm pin-text clearance), and
+KiCad rendered the two overlapping by 0.17 mm.
+
+The repair could not be a wider local box. KiCad's rule is stated in
+*drawn* coordinates — "place it to the left of the pin", "above means
+negative Y" (`eeschema/pin_layout_cache.cpp`) — and a rule of that shape
+is **not rotation-covariant**: a box on the symbol-local −x side lands on
+the world +x side under a 180° pose. A symbol-local model can therefore
+only be correct by being symmetric, which is exactly the model that was
+wrong. `Symbol::pin_text_page_bboxes(origin, orient)` replaces it, taking
+the placed pose and returning page-frame boxes.
+`pin_number_side_is_page_frame_not_symbol_frame` pins the argument on
+`Device:C` at rot 0 and rot 180.
+
+Inside names (`pin_names (offset > 0)`) were also mis-modelled — centred
+on the body-root-plus-offset point rather than *starting* there and
+reading inward. Corrected in the same function; verified against the
+`OPAMP` symbol's `V+` / `V-` / `+` / `-` ink.
+
+### D2. A sheet's port names are drawn INSIDE the sheet
+
+`sheet_port_name_bboxes` — one copy in the emitter, one in the verifier,
+both carrying a comment asserting it — modelled a hierarchical sheet's
+port label as reading *outward*, into the empty strip beside the sheet.
+KiCad draws it inside the sheet body, reading away from the edge, exactly
+as a hierarchical label does: tag glyph at the anchor, string one
+`hier_label` lead further along. On `opamp_inverting` the `vcc` port name
+renders at x 50.0..52.7 for a pin anchored at x 48.26; the model claimed
+45.1..48.3 — a mirror image, not an approximation.
+
+So the obstacle set the power-glyph value-text nudge consults was empty
+exactly where the port labels are and occupied exactly where they are
+not. It relocated `#PWR2`'s "VCC" onto `vcc` while believing it had moved
+it *off* an obstacle.
+
+### D3. The candidate sweep, appended not reordered
+
+`sallen_key_lpf` is the case the model *did* see: V13(4) reported it, and
+`nudge_power_glyph_value_text` still shipped it, because all eight of its
+cardinal candidates collided and it took the least-bad colliding anchor.
+Sixteen offsets (diagonals, a third ring) are **appended** to that list —
+never interleaved — so a glyph that already finds a clear cardinal keeps
+the identical anchor and a layout that was already clean is byte-identical.
+Only a glyph with no clear candidate at all can move, and today such a
+glyph ships a rendered overlap. This is the same discipline
+`property_offset_candidates` already documents for the host-text pass.
+
+### What this cost the challenger's Tier-1 case, and why that is the honest number
+
+Re-graded whole-suite, both sides collected after the fix:
+
+| | ADR-25's table | after ADR-26 |
+| --- | --- | --- |
+| `v13.ink_overlap` | champion 2 (xfail'd), challenger 4; net **+2** | **0 on all 18 fixtures, both placers** |
+| Tier 1 total Δ | −4.00 | **−1.00** |
+| Tier 2 total Δ | −163.35 | −163.35 (unchanged) |
+| Tier 0 | challenger clean | challenger clean; **champion carries `t0.cross_net_overlap`/`two_stage_amp` = 2**, which the challenger clears |
+| verdict | PROMOTABLE | **PROMOTABLE** |
+
+Tier 1 fell from −4.00 to −1.00 because **most of `flow-seed`'s Tier-1
+advantage was these two model defects**, and the champion has now been
+repaired of them too. The surviving −1.00 is `v13.2_label_prop` on
+`two_stage_amp`; `v13.6a` and `v14.glyph_body` are each +1/−1 sideways
+within their tier. Tier 2 is untouched at −163.35 — no wire was
+re-routed, because both nudge passes rewrite a `(property … (at …))` and
+nothing else.
+
+Read the promotion case on Tier 2 and on the Tier-0 cell, then, not on
+Tier 1. That is a *better* case than ADR-25's, not a weaker one: the
+Tier-1 term it lost was never a placement property.
+
+### The general finding: what nothing calibrates, drifts
+
+`rendered_text.rs` exists because "a model cannot falsify itself". It
+calibrates six text classes — plain / global / hierarchical label,
+property Reference, property Value, power-glyph Value — against real ink,
+asserting the model is a tight superset.
+
+**Pin text and sheet-port names are the only two modelled text classes it
+does not cover. Both were wrong, and both were wrong by a mirror
+reflection, not by a tolerance.** The V13 budgets that consume them all
+read 0 throughout, because emitter and verifier shared the same wrong
+box; only the ink test could see it, and only indirectly, as an overlap
+between two *other* strings.
+
+> A text class that no ink calibration covers is not "modelled
+> approximately". It is unfalsified, and this project has now found a
+> mirror-image error in every such class it has looked at.
+
+Extending `text_bbox_model_covers_rendered_ink` to those two classes is
+the durable guard and is **not** done here — it needs the symbol library
+in that test binary and its own measured epsilons. Recorded as owed.
+
+### What was rejected
+
+* **Widening the pin-text box symmetrically** to cover both possible
+  sides. It is a strict superset and cannot be wrong, but it makes the
+  *verifier* over-reserve by ~1.7 mm on the side KiCad provably never
+  draws on — false positives on the champion, and a model that is
+  conservative rather than faithful. Faithfulness was available: the side
+  rule was measurable, and it was measured.
+* **Special-casing any of the three fixtures**, or tuning the nudge until
+  `v13.ink_overlap` read 0. The three defects have three different
+  mechanisms and each repair is general; two of them fired on fixtures
+  nobody was looking at (`rc_phase_shift`, `sallen_key_driven`,
+  `cascode_amp`, `lc_ladder_lpf`, `wien_bridge_osc`, `two_stage_amp`).
+* **Registering an xfail for the new ink overlaps.** That is deferral
+  against the wrong stage: the overlaps were a model defect on the
+  shipping path, not a challenger's cost.

@@ -653,14 +653,20 @@ invariant here.
      overlaps a symbol's VISIBLE internal pin-name / pin-number text
      (its own symbol's or a neighbour's) — e.g. the transistor
      `QGENERIC` Value must not sit on the `B`/`C`/`E` pin names or
-     the `1`/`2`/`3` pin numbers (R-4). Pin-text world bboxes are
-     computed from the lib-symbol definition:
-     `Symbol::pin_text_local_bboxes` returns one local box per
-     *visible* label (skipping `(pin_names (hide yes))`,
-     `(pin_numbers (hide yes))`, and `~`/empty names KiCad draws as
-     nothing), riding the pin shaft; the caller transforms each
-     through the placed pose with the same orientation + eeschema
-     y-flip used for body bboxes. The same `nudge_property_text`
+     the `1`/`2`/`3` pin numbers (R-4). Pin-text bboxes are computed
+     from the lib-symbol definition: `Symbol::pin_text_page_bboxes`
+     returns one **page-frame** box per *visible* label (skipping
+     `(pin_names (hide yes))`, `(pin_numbers (hide yes))`, and
+     `~`/empty names KiCad draws as nothing). It takes the placed
+     pose rather than returning symbol-local boxes because KiCad's
+     placement rule for outside pin text — *beside* the shaft, left
+     of a vertical pin / above a horizontal one, name and number on
+     opposite sides when both are drawn — is stated in drawn
+     coordinates and is not rotation-covariant: a symbol-local box
+     on the local −x side lands on the world +x side under a 180°
+     pose. The predecessor centred the box on the shaft and so
+     under-reserved the drawn side by ~0.8 mm; see ADR-26. The same
+     `nudge_property_text`
      pass enforces it by adding those pin-text bboxes as one more
      obstacle class alongside bodies, labels, wires, and other
      visible text; when no candidate anchor clears every obstacle
@@ -693,6 +699,22 @@ invariant here.
   Verifiers: `power_glyph_not_on_sheet_port_pin` and
   `no_symbol_sheet_overlap_across_fixtures`
   (`crates/spice2kicad/tests/placement_quality.rs`), budget 0.
+
+  The glyph's own *net-name text* is a separate obstacle problem, and
+  the port label it must clear is drawn **inside** the sheet body,
+  reading away from the edge — a left-edge pin `(at … 180)` draws its
+  name rightward, into the sheet, exactly as a hierarchical label
+  does (tag glyph at the anchor, string one `hier_label` lead
+  further along). `sheet_port_name_bboxes` — the emitter's copy and
+  the verifier's — modelled it on the *outside* until ADR-26, so the
+  obstacle set was a mirror image of the real ink and
+  `nudge_power_glyph_value_text` could relocate a rail name straight
+  onto a port label while believing it had moved it clear.
+
+  **Neither of these two classes — pin text, sheet-port names — is
+  covered by `rendered_text.rs`'s ink calibration**, which is how both
+  stayed mirror-reflected while every V13 budget read 0. Extending the
+  calibration to them is owed; see ADR-26.
 
 - **V14 — Power glyph orientation: GND down, VCC up.** Every
   `power:GND` instance emits with the rotation that draws the
