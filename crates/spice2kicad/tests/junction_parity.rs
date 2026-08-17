@@ -592,8 +592,10 @@ fn junction_dots_match_kicads_own_rule_across_fixtures() {
     for name in FIXTURES {
         let src = fixtures_dir().join(format!("{name}.cir"));
         let tmp = tempdir(name);
-        let sch = spice_to_kicad(&src, &tmp).expect("spice2kicad");
-        let _ = &sch;
+        // The conversion writes every sheet into `tmp`; the root path it
+        // returns is not needed, `emitted_sheets` walks the directory so
+        // child sheets are graded too.
+        spice_to_kicad(&src, &tmp).expect("spice2kicad");
 
         let mut fixture_missing = 0usize;
         let mut fixture_spurious = 0usize;
