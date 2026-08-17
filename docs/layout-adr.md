@@ -5569,3 +5569,286 @@ in that test binary and its own measured epsilons. Recorded as owed.
 * **Registering an xfail for the new ink overlaps.** That is deferral
   against the wrong stage: the overlaps were a model defect on the
   shipping path, not a challenger's cost.
+
+## ADR-27 — A connected pin is an exit angle: junction-dot parity with KiCad's own rule
+
+**Status:** landed for the *dot* half; the V16 `J` doctrine question is
+**analysed and left open for the owner**, deliberately not decided here.
+Scope of the code change is two functions in
+`crates/spice-route/src/cleanup.rs` and their one call site. Placement is
+untouched: `baseline_lock`'s diff is EMPTY, no wire is re-routed, and no
+budget literal moved in any direction. One new verifier
+(`crates/spice2kicad/tests/junction_parity.rs`); nothing weakened,
+skipped or `#[ignore]`d, and no xfail added.
+
+### The report
+
+The project owner, reviewing rendered output:
+
+> I also don't like the way the convertion avoid placing junction by
+> connecting the componen to line going through directly. It much more
+> clear to use T junction with the dot, even the current approach pass
+> ERC and minimize the length and number of junctions.
+
+Read as a style note this is arguable. It is not a style note. **We were
+off-spec against KiCad's own junction rule**, and the file KiCad would
+write differs from the file we wrote.
+
+### KiCad's rule, from the source
+
+`eeschema/junction_helpers.cpp::AnalyzePoint( items, p )` decides the
+question, and `SCH_SCREEN::IsExplicitJunctionNeeded` /
+`SCH_SCREEN::GetConnectionPoints` act on the answer. In order:
+
+1. Collect every connectable item overlapping `p`. A `SCH_JUNCTION_T`
+   hitting `p` sets `hasExplicitJunctionDot`.
+2. **Merge collinear wires before counting** (`SCH_LINE::MergeOverlap`),
+   so two abutting collinear segments become one line whose *interior*
+   contains `p`. Skipped when a dot is already there.
+3. Accumulate **exit angles** on the WIRES layer:
+   * a wire `IsConnected(p)` — `p` is one of its endpoints — sets
+     `breakLines` and contributes **one** angle;
+   * a wire that merely hit-tests `p` is deferred to `midPointLines` and
+     contributes **two** (forward + reverse) iff `breakLines` ended true;
+   * `SCH_SYMBOL_T` / `SCH_SHEET_T` connected at `p` — i.e. **a pin lands
+     there** — sets `breakLines` and contributes **one** angle, drawn
+     from a separate counter (`uniqueAngle++`) so a pin at 90° can never
+     alias a wire at 90°;
+   * a label connected at `p` sets `breakLines` and contributes nothing.
+4. `isJunction = exitAngles[WIRES].size() >= 3`.
+
+`SCH_SCREEN::IsJunction`'s header states the same rule as five criteria,
+and two of them are about pins:
+
+> - One wire midpoint **and a symbol pin**.
+> - Two or more wire endpoints **and a symbol pin**.
+
+### Where we diverged
+
+`cleanup.rs::rays_at` iterated `segments` only. A pin contributed
+nothing. So a trunk running *through* a pin scored 2 rays where KiCad
+scores 3 (pass-through 2 + pin 1), and every such node shipped undotted.
+The symptom is exactly what the owner saw: a component tapped off a line
+that runs straight past it, with no dot to mark the tap — and open the
+sheet in eeschema, nudge any wire, and KiCad inserts the dots the file
+omitted.
+
+The fix passes the per-net own-pin set (which `trim_whiskers` and the
+coalesce barrier already receive) into `add_connection_junctions`, and
+counts `+1` exit angle per own-net pin at the point. `prune_stale_junctions`
+takes the same set and applies the *same* predicate — it runs immediately
+before the add pass, so a narrower rule there would prune a dot the next
+pass is about to re-add.
+
+**Why a raw per-segment count equals KiCad's merge-then-count.** KiCad
+merges collinear wires and then scores a merged interior as two angles;
+we score two collinear segments meeting end-to-end as 1 + 1. Every
+configuration agrees: a merged interior is 2, an unmerged abutting pair
+is 2, an L-corner is 2 either way (perpendicular lines never merge), and
+a 4-ray cross is 4 either way. There is no point at which merging changes
+the count, so the cheaper formulation is not an approximation.
+
+### The verifier, and why it is not a re-implementation of the fix
+
+`tests/junction_parity.rs` reconstructs KiCad's predicate over the
+**emitted file** — ink read back off disk, pin coordinates re-derived
+from the library through the emitted pose, in the shape
+`roundtrip_connectivity.rs` established — and asserts the emitted
+`(junction …)` set matches **exactly**, in both directions. It is not the
+production rule's twin: production counts rays over the router's own
+`Segment` list with the router's own pin set, while the verifier merges
+collinear lines the way `AnalyzePoint` does, over geometry that has been
+through page translation and serialisation, with pins derived
+independently of `collect_net_pins`. Its mutation guard injects three
+defects per fixture (erase every dot, dot in empty space, inject a T) and
+requires each to be caught.
+
+The predicate is evaluated on the file **as written, dots included**,
+which is the self-consistent question: step 2 above makes the merge
+itself conditional on the dot being present. A same-net perpendicular
+crossing is exactly that case — its four split arms merge back into two
+crossing lines *unless* the dot is there, so the dot is what makes the
+point a junction, and that is precisely what eeschema writes when a user
+dots a crossing by hand. Measured: zero spurious dots anywhere, so the
+existing geometry was already self-consistent under this reading.
+
+### Dots added, per fixture
+
+Nineteen, on eight of the eighteen fixtures. Every one is a node where a
+trunk passed through a pin; every one is a dot KiCad would have inserted.
+
+| fixture                  | before | after | added |
+| ------------------------ | -----: | ----: | ----: |
+| `rc_phase_shift`         |      3 |     7 |    +4 |
+| `two_stage_amp`          |      5 |     9 |    +4 |
+| `cascode_amp`            |      3 |     6 |    +3 |
+| `shunt_feedback_amp`     |      2 |     5 |    +3 |
+| `lc_ladder_lpf`          |      2 |     4 |    +2 |
+| `common_emitter`         |      3 |     4 |    +1 |
+| `sallen_key_lpf`         |      3 |     4 |    +1 |
+| `wien_bridge_osc`        |      3 |     4 |    +1 |
+| `diff_pair`              |      1 |     1 |     0 |
+| `multivibrator`          |      4 |     4 |     0 |
+| `named_rails`            |      2 |     2 |     0 |
+| `opamp_definition_level` |      2 |     2 |     0 |
+| `opamp_inverting_real`   |      1 |     1 |     0 |
+| `sallen_key_driven`      |      4 |     4 |     0 |
+| `opamp_inverting`        |      0 |     0 |     0 |
+| `port_shapes`            |      0 |     0 |     0 |
+| `rc_lowpass`             |      0 |     0 |     0 |
+| `rc_lowpass_ports`       |      0 |     0 |     0 |
+
+V16 `(B, J)` is **unchanged on every fixture**. That is not luck: a dot
+added at a trunk-through-pin point sits on a **2-ray** ink vertex whose
+two rays are collinear, which V16 counts as neither a bend (that needs
+one H + one V) nor a branch (that needs 3 rays, or 4 with a dot). No
+ratchet moved anywhere in the suite.
+
+### The one carve-out: KiCad's rule is net-blind, and we are not
+
+Four points remain where `AnalyzePoint` fires and we deliberately emit no
+dot, all on `two_stage_amp`: `(52.07, 87.63)`, `(57.15, 48.26)`,
+`(57.15, 57.15)`, `(57.15, 87.63)`. They are the fixture's registered
+`no_cross_net_collinear_wire_overlap` defect — the `b2`/`c2` trunks
+sharing the collinear run at `x = 57.15` and `c2`/`e2` the one at
+`y = 87.63` — rediscovered from geometry by a second instrument. **None of
+them involves a pin**; each is one net's trunk passing through a point
+where another net's trunk ends.
+
+Dotting them is the wrong output, not the right one: KiCad breaks
+segments at a junction, so the dot is what would convert the documented
+*latent* short into a real one. The verifier therefore identifies them
+structurally — points whose contributing wires span more than one ink
+component under KiCad's endpoint-sharing rule — and holds them under a
+zero-slack per-fixture ratchet (`CROSS_NET_CONTACT_POINTS`), which can
+shrink but never grow. In a schematic without cross-net overlap the
+carve-out is empty by construction: one net is one ink component, so
+every junction point has exactly one. Duplicating the cross-net gate's
+*assertion* here is the failure ADR-23 D2 warns about; recording the
+count so it cannot grow silently is not.
+
+### The V16 `J` doctrine question — measured, NOT decided
+
+The architect's observation: V16 counts `J` = branch vertices, lower is
+better, and that prices the *readable* form of a three-way node (trunk
+ends at the node, stub taps it — a 3-ray T, `J+1`) **above** the implicit
+one (trunk runs through the pin — 2 rays, `J`-free). The project has
+conceded the point once already, in
+`idioms.rs::apply_shared_centers`, which pays `+1 J` on `diff_pair` for a
+proper T because "a T is the readable form of a three-way node".
+
+The proposal: **redefine `J` to count only branch vertices NOT coincident
+with a pin of the net.** Mid-air Steiner branching stays expensive
+(genuinely confusing ink); pin-anchored Ts become free.
+
+Measured on all eighteen fixtures, decomposing each fixture's `J` by
+distance from the nearest pin **on the same ink component** (one net is
+one ink component, and V11 forbids a foreign pin on our ink, so
+"on this component" is "of this net"):
+
+| fixture                  |  B |  J | J at pin | J 1 cell from own pin | J mid-air |
+| ------------------------ | -: | -: | -------: | --------------------: | --------: |
+| `rc_lowpass`             |  0 |  0 |        0 |                     0 |         0 |
+| `common_emitter`         |  4 |  3 |        0 |                     0 |         3 |
+| `multivibrator`          |  8 |  4 |        0 |                     0 |         4 |
+| `diff_pair`              |  2 |  1 |        0 |                     1 |         0 |
+| `opamp_inverting_real`   |  5 |  1 |        0 |                     0 |         1 |
+| `opamp_inverting`        |  3 |  0 |        0 |                     0 |         0 |
+| `port_shapes`            |  4 |  0 |        0 |                     0 |         0 |
+| `rc_lowpass_ports`       |  0 |  0 |        0 |                     0 |         0 |
+| `opamp_definition_level` |  6 |  2 |        0 |                     2 |         0 |
+| `named_rails`            |  2 |  2 |        0 |                     2 |         0 |
+| `rc_phase_shift`         | 19 |  3 |        0 |                     0 |         3 |
+| `two_stage_amp`          | 33 |  9 |        0 |                     1 |         8 |
+| `cascode_amp`            | 12 |  3 |        0 |                     3 |         0 |
+| `lc_ladder_lpf`          | 16 |  2 |        0 |                     0 |         2 |
+| `sallen_key_lpf`         |  6 |  3 |        0 |                     1 |         2 |
+| `wien_bridge_osc`        | 10 |  3 |        0 |                     1 |         2 |
+| `sallen_key_driven`      | 13 |  4 |        0 |                     0 |         4 |
+| `shunt_feedback_amp`     | 12 |  2 |        0 |                     1 |         1 |
+| **total**                |    | **42** |    **0** |                **12** |    **30** |
+
+(The three right-hand columns are recorded by
+`junction_parity.rs::report_pin_anchored_branch_share`, informational and
+never asserted. The one-cell column is restricted to pins on the branch's
+own ink component: without that restriction `two_stage_amp` scores 2, one
+of which is a coincidentally-adjacent foreign pin — measure what you mean
+to measure.)
+
+**Three findings, and the first two change the shape of the proposal.**
+
+1. **`J at pin` is 0 on every fixture.** Adopting the redefinition *as
+   literally worded* — "not coincident with a pin" — would move no `J`
+   literal anywhere. It is a **no-op on the current corpus**. There is
+   nothing to sign off in terms of budget movement, and no fixture would
+   get cheaper.
+
+2. **The reason is V5, and it is structural.** Every pin-anchored branch
+   in the suite sits *one grid cell off* the pin, never on it, because
+   V5's outward rule says a wire leaves a pin along the pin's axis before
+   it turns. That is not an accident of the current router: it is the
+   documented precedent. `diff_pair`'s owner-approved `J 0 → 1` is
+   recorded as `apply_shared_centers` "reserving a grid cell of vertical
+   stub under the tail trunk, so the three-way node is a proper Steiner T
+   instead of the trunk stopping sideways on RTAIL's pin". The readable T
+   the project already paid for is exactly the case the proposed wording
+   does not reach.
+
+3. **Reworded to "within one outward stub of a pin of the net", the rule
+   bites — on 12 of 42 branch vertices, across 8 of 18 fixtures.**
+   `J` would fall `diff_pair` 1→0, `opamp_definition_level` 2→0,
+   `named_rails` 2→0, `cascode_amp` 3→0, `two_stage_amp` 9→8,
+   `sallen_key_lpf` 3→2, `wien_bridge_osc` 3→2, `shunt_feedback_amp` 2→1.
+   The remaining 30 are genuinely mid-air Steiner branching — the ink the
+   redefinition means to keep charging for — so the metric survives the
+   change with two thirds of its mass intact. This is a real, measurable
+   proposal, unlike the literal one.
+
+**Recommendation** (the decision is the owner's; nothing is adopted in
+code, and `docs/invariants.md` V16's definition is unchanged):
+
+* **Adopt the intent; reword the predicate.** "Not coincident with a pin"
+  should read "not anchored on the net's own terminal geometry" —
+  operationally, within one grid cell of a pin **on the branch's own ink**.
+  Coincidence alone is the wrong test because V5 owns the first grid step
+  out of every pin, and the project has already ratified the one-cell
+  shape once.
+* **Land it as a definition change with an explicit re-measurement, not
+  as eight ratchet improvements.** Those eight literals would drop
+  because the metric changed, not because the drawing did; recording them
+  as ordinary ratchet wins would corrupt the one instrument that tells
+  drift from progress. If it is taken, the `BEND_BRANCH_BUDGETS` table
+  should be re-measured in one commit that says so.
+* **The trigger to take it is a change it unblocks.** The pressure the
+  architect diagnosed is real but currently latent: no router or placer
+  change is presently blocked by a `J` ratchet on a node it wants to draw
+  as a proper T. Waiting for the first one costs nothing now that the
+  measurement exists, and it buys the amendment a concrete before/after
+  instead of an argument from anticipation. In the meantime the 30
+  mid-air branches are the fixtures' real `J` mass and the ratchet keeps
+  working on them.
+
+### What this change explicitly did NOT do
+
+**Reshape routes.** With dots present, a trunk passing through a pin is
+legitimate KiCad idiom and reads correctly. Converting those nodes into
+stub-and-T shapes is a router change under ADR-16's full baseline-diff
+protocol, for uncertain gain, and it is the change the `J` question above
+would have to be settled *before* attempting. Ship the dots, re-ask.
+
+### What was rejected
+
+* **Making the parity verifier net-aware in order to assert on the
+  cross-net points.** KiCad's predicate is net-blind by construction — it
+  derives nets *from* geometry — so a net-aware "parity" check would not
+  be parity with anything. The structural component test says the same
+  thing without inventing an authority.
+* **Registering an xfail for the four cross-net points.** They are not a
+  new defect and not a challenger's cost: they are one already-registered
+  defect seen through a second instrument, and a ratchet that reads 4
+  today and must read 0 the day the channel router lands is a stronger
+  statement than an expiring exclusion.
+* **Emitting a dot at every own pin on a wire.** That is the rule KiCad
+  does *not* implement, and it would dot every ordinary two-terminal
+  connection. The count matters: a pin where a wire merely *ends* is two
+  exit angles, not three.

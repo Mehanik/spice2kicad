@@ -6,6 +6,11 @@ use spice_route::cleanup::{
 };
 use spice_route::types::{RoutedNet, Segment};
 
+/// No own pins — for the cases below that exercise wire geometry alone.
+/// The pin-bearing cases live in `crates/spice-route/src/cleanup.rs`'s
+/// unit tests, next to the rule they check.
+const NO_PINS: &[std::collections::HashSet<(i64, i64)>] = &[];
+
 #[test]
 fn collinear_chain_coalesces_to_single_segment() {
     let mut routed = vec![RoutedNet {
@@ -346,7 +351,7 @@ fn same_net_crossing_gets_a_junction_dot() {
         junctions: vec![],
     }];
     split_at_interior_attachments(&mut routed);
-    add_connection_junctions(&mut routed);
+    add_connection_junctions(&mut routed, NO_PINS);
     let j = dedup_junctions(&routed);
     assert_eq!(
         j.len(),

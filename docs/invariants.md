@@ -518,6 +518,33 @@ invariant here.
   `Simulation_SPICE:V…` instances carry any of them. Ratchet floor:
   0 drawn power-source symbols, across all fixtures.
 
+  **Junction dots are KiCad's call, not ours.** The `(junction …)` set
+  the router emits must be exactly the set
+  `SCH_SCREEN::IsExplicitJunctionNeeded` would compute on the emitted
+  file — no more, no fewer. KiCad's predicate
+  (`eeschema/junction_helpers.cpp::AnalyzePoint`) merges collinear wires
+  first and then counts **exit angles**: a wire endpoint contributes one,
+  a wire passing through contributes two, and — the clause we missed
+  until 2026-08 — **a connected symbol or sheet PIN contributes one**
+  (`SCH_SYMBOL_T` / `SCH_SHEET_T` → `breakLines`, `exitAngles.insert(
+  uniqueAngle++ )`). Three or more is a junction. So a trunk running
+  *through* a pin is 2 + 1 = 3 and must be dotted; a wire merely *ending*
+  on a pin is 1 + 1 = 2 and must not be. `cleanup.rs::rays_at` counted
+  segments only, so every trunk-through-pin node shipped under-dotted —
+  visible as eeschema inserting the missing dots the moment a reader
+  nudged a wire. Nineteen dots across eight fixtures were added when the
+  pin term was restored; V16's `(B, J)` did not move on any fixture,
+  because such a point is a 2-ray collinear ink vertex and V16 counts it
+  as neither a bend nor a branch.
+  Verifier: `crates/spice2kicad/tests/junction_parity.rs` recomputes the
+  predicate over the emitted ink plus independently-derived pin
+  coordinates and requires an exact match in both directions, on every
+  sheet of every fixture. Budget 0. Its one carve-out — points where
+  KiCad's *net-blind* rule fires across two nets' ink, where dotting
+  would realise a latent short — is a zero-slack ratchet holding the
+  registered `no_cross_net_collinear_wire_overlap` defect, not an
+  exemption. See ADR-27.
+
 - **V11 — Wire/label–pin coincidence is electrical.** KiCad's
   connectivity engine treats geometric coincidence as electrical
   connection, with no `(junction …)` marker required. Concretely:
@@ -862,6 +889,27 @@ invariant here.
   k-pin Steiner tree topologically needs ≥ k−2 branch points, so a
   combined number would penalise trunk-and-taps — often the most readable
   form.
+
+  **Open question (measured, not decided): should `J` charge for a
+  pin-anchored T?** Lower-is-better `J` prices the *readable* form of a
+  three-way node — trunk ends at the node, stub taps it, a 3-ray T — above
+  the implicit one, a trunk running through a pin, which scores 2 rays and
+  no `J` at all. `idioms.rs::apply_shared_centers` already pays `+1 J` on
+  `diff_pair` for exactly that reason. The proposal on the table is to
+  count only branch vertices *not* anchored on the net's own terminal
+  geometry. **This is an owner-signed doctrine change and V16's definition
+  above is UNCHANGED pending it.** The measurement that would inform it is
+  recorded in ADR-27: across all eighteen fixtures, of 42 branch vertices,
+  **0** are coincident with a pin, **12** sit one grid cell from a pin on
+  their own ink, and **30** are genuinely mid-air. So the proposal *as
+  worded* is a no-op — V5 owns the first grid step out of every pin, so a
+  pin-anchored T always lands one cell off, exactly as `diff_pair`'s
+  owner-approved `J 0 → 1` is documented to. Reworded to "within one
+  outward stub of a pin of the net" it bites on 12 of 42, across 8 of 18
+  fixtures, leaving the mid-air mass charged. See ADR-27 for the
+  per-fixture table and for why the recommendation is to reword it, treat
+  the resulting literal moves as a re-measurement rather than as ratchet
+  wins, and wait for the first change it actually blocks.
 
   Any **diagonal** wire segment is an outright failure, not a budgeted
   count. Axis-alignment is what makes ray-counting sound, and nothing in

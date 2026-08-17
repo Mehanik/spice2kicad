@@ -373,14 +373,38 @@ pub fn collapse_collinear_overlaps(routed: &mut [RoutedNet]) {
     }
 }
 
-/// Add a junction dot at every point where three or more same-net wire
-/// *rays* meet — KiCad's own junction rule. A ray is one direction a
-/// wire leaves the point: a segment with an **endpoint** at `p`
-/// contributes one ray; a segment whose **strict interior** contains
-/// `p` contributes two (it passes through). Two rays (a straight
-/// pass-through, an L-corner, or two collinear segments meeting
-/// end-to-end) need no dot; three (a T, whether the trunk is split at
-/// `p` or passes through it) or four (a cross) do.
+/// Add a junction dot at every point where three or more same-net
+/// *exit angles* meet — KiCad's own junction rule. An exit angle is one
+/// direction connectivity leaves the point: a segment with an
+/// **endpoint** at `p` contributes one; a segment whose **strict
+/// interior** contains `p` contributes two (it passes through); and a
+/// **pin** of the net sitting at `p` contributes one more. Two angles (a
+/// straight pass-through with no pin, an L-corner, or two collinear
+/// segments meeting end-to-end) need no dot; three (a T — whether the
+/// trunk is split at `p`, passes through it, or is *terminated by a pin*
+/// there) or four (a cross) do.
+///
+/// **Pins count, and that is the whole point of `pins`.** KiCad's
+/// `junction_helpers.cpp::AnalyzePoint` handles `SCH_SYMBOL_T` /
+/// `SCH_SHEET_T` exactly like a wire end — `item->IsConnected( aPosition
+/// )` sets `breakLines` and inserts an exit angle (a deliberately unique
+/// one, so a pin at 90° cannot alias a wire at 90°) — and
+/// `SCH_SCREEN::IsJunction`'s own header states two of its five criteria
+/// in those terms: "one wire midpoint **and a symbol pin**", "two or more
+/// wire endpoints **and a symbol pin**". This pass iterated `segments`
+/// alone until 2026-08, so every node where a trunk ran *through* a pin
+/// scored 2 instead of 3 and shipped undotted. The visible symptom was
+/// that opening such a sheet in eeschema and nudging any wire made KiCad
+/// insert the dots the file had omitted. Parity is now a standing
+/// invariant — `crates/spice2kicad/tests/junction_parity.rs` recomputes
+/// KiCad's predicate over the emitted ink plus the emitted pins and
+/// requires an exact match, in both directions.
+///
+/// Counting a merged run's interior as two angles is what makes a raw
+/// per-segment count equal to KiCad's, which merges collinear wires
+/// *before* counting: two collinear segments meeting end-to-end at `p`
+/// score 1 + 1 here and one merged interior (= 2) there. The two
+/// formulations agree at every point.
 ///
 /// These dots are **decoration on top of already-connected geometry**,
 /// never a connectivity mechanism. KiCad wires connect only at their
@@ -397,12 +421,21 @@ pub fn collapse_collinear_overlaps(routed: &mut [RoutedNet]) {
 /// Idempotent against pre-existing junctions (e.g. own-pin anchors from
 /// `conflict::anchor_own_pin_endpoints`): a point already recorded is
 /// not duplicated. [`dedup_junctions`] flattens the rest.
-pub fn add_connection_junctions(routed: &mut [RoutedNet]) {
+pub fn add_connection_junctions<S: ::std::hash::BuildHasher>(
+    routed: &mut [RoutedNet],
+    pins_per_net: &[std::collections::HashSet<(i64, i64), S>],
+) {
     use std::collections::HashSet;
-    for net in routed.iter_mut() {
-        // Candidate points: every distinct segment endpoint (a junction
-        // can only occur where at least one wire ends or a branch
-        // attaches — both are endpoints of some segment).
+    let empty: std::collections::HashSet<(i64, i64)> = std::collections::HashSet::new();
+    for (i, net) in routed.iter_mut().enumerate() {
+        let pins = pins_per_net
+            .get(i)
+            .map_or(&empty as &dyn BarrierSet, |s| s as &dyn BarrierSet);
+        // Candidate points: every distinct segment endpoint, plus every
+        // own pin. Endpoints alone were enough while only wires could
+        // contribute an exit angle; a pin sitting on the *interior* of
+        // an unbroken trunk is a junction with no segment endpoint at
+        // it, so it has to be offered as a candidate in its own right.
         let mut candidates: Vec<(f64, f64)> = Vec::new();
         {
             let mut seen: HashSet<(i64, i64)> = HashSet::new();
@@ -410,6 +443,13 @@ pub fn add_connection_junctions(routed: &mut [RoutedNet]) {
                 for (x, y) in [(s.x1, s.y1), (s.x2, s.y2)] {
                     if seen.insert((qk1(x), qk1(y))) {
                         candidates.push((x, y));
+                    }
+                }
+            }
+            for s in &net.segments {
+                for p in pin_coords_on(s, pins) {
+                    if seen.insert((qk1(p.0), qk1(p.1))) {
+                        candidates.push(p);
                     }
                 }
             }
@@ -421,7 +461,7 @@ pub fn add_connection_junctions(routed: &mut [RoutedNet]) {
             .collect();
         let mut add: Vec<(f64, f64)> = Vec::new();
         for &(px, py) in &candidates {
-            if rays_at(&net.segments, px, py) >= 3 {
+            if rays_at(&net.segments, pins, px, py) >= 3 {
                 let k = (qk1(px), qk1(py));
                 if existing.insert(k) {
                     add.push((px, py));
@@ -432,11 +472,49 @@ pub fn add_connection_junctions(routed: &mut [RoutedNet]) {
     }
 }
 
-/// Number of *rays* meeting at `(px, py)` — KiCad's junction rule.
+/// Every own-pin coordinate lying on `seg` (endpoints included), walking
+/// the 1.27 mm grid. Pin coords are grid-aligned by construction (the
+/// placer snaps every origin and every pin onto it), so a grid walk sees
+/// all of them.
+#[allow(clippy::cast_possible_truncation, clippy::similar_names)]
+fn pin_coords_on(seg: &Segment, pins: &dyn BarrierSet) -> Vec<(f64, f64)> {
+    const GRID_UM: i64 = 1270;
+    let mut out = Vec::new();
+    let (qx1, qy1) = (qk1(seg.x1), qk1(seg.y1));
+    let (qx2, qy2) = (qk1(seg.x2), qk1(seg.y2));
+    let mut push = |x: i64, y: i64| {
+        if pins.contains_qkey((x, y)) {
+            #[allow(clippy::cast_precision_loss)]
+            out.push((x as f64 / 1000.0, y as f64 / 1000.0));
+        }
+    };
+    if qx1 == qx2 {
+        let (lo, hi) = (qy1.min(qy2), qy1.max(qy2));
+        let mut y = lo;
+        while y <= hi {
+            push(qx1, y);
+            y += GRID_UM;
+        }
+    } else if qy1 == qy2 {
+        let (lo, hi) = (qx1.min(qx2), qx1.max(qx2));
+        let mut x = lo;
+        while x <= hi {
+            push(x, qy1);
+            x += GRID_UM;
+        }
+    }
+    out
+}
+
+/// Number of *exit angles* meeting at `(px, py)` — KiCad's junction rule.
 ///
 /// A segment ending there contributes one; a segment whose strict
-/// interior contains it contributes two, since it passes through.
-fn rays_at(segments: &[Segment], px: f64, py: f64) -> usize {
+/// interior contains it contributes two, since it passes through; and an
+/// own pin of the net at that coordinate contributes one more, exactly
+/// as `AnalyzePoint`'s `SCH_SYMBOL_T` / `SCH_SHEET_T` arm does. See
+/// [`add_connection_junctions`] for the source citation and for why the
+/// per-segment count agrees with KiCad's merge-then-count formulation.
+fn rays_at(segments: &[Segment], pins: &dyn BarrierSet, px: f64, py: f64) -> usize {
     let mut rays = 0usize;
     for s in segments {
         let at_a = (s.x1 - px).abs() < EPS && (s.y1 - py).abs() < EPS;
@@ -446,6 +524,9 @@ fn rays_at(segments: &[Segment], px: f64, py: f64) -> usize {
         } else if point_strictly_interior(s, px, py) {
             rays += 2;
         }
+    }
+    if is_barrier((px, py), pins) {
+        rays += 1;
     }
     rays
 }
@@ -654,8 +735,8 @@ fn split_attachments_once(net: &mut RoutedNet) -> bool {
 /// with slack — see CLAUDE.md § "Budgets are ratchets, not knobs".
 const MAX_SPLIT_PASSES: usize = 2;
 
-/// Drop recorded junctions that no longer sit where three or more rays
-/// meet.
+/// Drop recorded junctions that no longer sit where three or more exit
+/// angles meet.
 ///
 /// The conflict passes rewrite segments without maintaining
 /// `RoutedNet::junctions` (they touch it only to anchor own pins), so a
@@ -664,11 +745,24 @@ const MAX_SPLIT_PASSES: usize = 2;
 /// Recomputing validity at the end of the pipeline is robust against
 /// every earlier pass, where fixing each rewrite site individually would
 /// not be.
-pub fn prune_stale_junctions(routed: &mut [RoutedNet]) {
-    for net in routed.iter_mut() {
+///
+/// Takes the same pin set as [`add_connection_junctions`] and applies the
+/// same predicate. Sharing the predicate is load-bearing: this pass runs
+/// first, so a *narrower* rule here would prune a dot the very next pass
+/// is about to re-add, and the two would fight over the own-pin anchors
+/// `conflict::anchor_own_pin_endpoints` records.
+pub fn prune_stale_junctions<S: ::std::hash::BuildHasher>(
+    routed: &mut [RoutedNet],
+    pins_per_net: &[std::collections::HashSet<(i64, i64), S>],
+) {
+    let empty: std::collections::HashSet<(i64, i64)> = std::collections::HashSet::new();
+    for (i, net) in routed.iter_mut().enumerate() {
+        let pins = pins_per_net
+            .get(i)
+            .map_or(&empty as &dyn BarrierSet, |s| s as &dyn BarrierSet);
         let segments = net.segments.clone();
         net.junctions
-            .retain(|&(px, py)| rays_at(&segments, px, py) >= 3);
+            .retain(|&(px, py)| rays_at(&segments, pins, px, py) >= 3);
     }
 }
 
@@ -834,6 +928,107 @@ mod tests {
         }];
         coalesce_collinear(&mut routed);
         assert_eq!(routed[0].segments.len(), 2);
+    }
+
+    /// A helper matching the shape `run_cleanup` passes.
+    fn pins(coords: &[(f64, f64)]) -> Vec<std::collections::HashSet<(i64, i64)>> {
+        vec![coords.iter().map(|&(x, y)| (qk1(x), qk1(y))).collect()]
+    }
+
+    fn h(x1: f64, x2: f64, y: f64) -> Segment {
+        Segment {
+            x1,
+            y1: y,
+            x2,
+            y2: y,
+        }
+    }
+
+    fn v(x: f64, y1: f64, y2: f64) -> Segment {
+        Segment {
+            x1: x,
+            y1,
+            x2: x,
+            y2,
+        }
+    }
+
+    /// KiCad's `IsJunction` criterion "one wire midpoint and a symbol
+    /// pin". The trunk runs straight through the pin with nothing else
+    /// there: 2 wire angles + 1 pin angle = 3.
+    #[test]
+    fn trunk_through_a_pin_is_dotted() {
+        let mut routed = vec![RoutedNet {
+            segments: vec![h(0.0, 3.81, 0.0)],
+            junctions: vec![],
+        }];
+        add_connection_junctions(&mut routed, &pins(&[(1.27, 0.0)]));
+        assert_eq!(routed[0].junctions.len(), 1, "{routed:?}");
+        assert!((routed[0].junctions[0].0 - 1.27).abs() < EPS);
+    }
+
+    /// The same node after `split_at_interior_attachments` has broken
+    /// the trunk at the pin: KiCad merges the collinear pair back before
+    /// counting, so the answer must not change with the segmentation.
+    #[test]
+    fn trunk_split_at_a_pin_is_dotted_identically() {
+        let mut routed = vec![RoutedNet {
+            segments: vec![h(0.0, 1.27, 0.0), h(1.27, 3.81, 0.0)],
+            junctions: vec![],
+        }];
+        add_connection_junctions(&mut routed, &pins(&[(1.27, 0.0)]));
+        assert_eq!(routed[0].junctions.len(), 1, "{routed:?}");
+    }
+
+    /// A wire simply ENDING on a pin is the ordinary two-terminal case:
+    /// 1 wire angle + 1 pin angle = 2. No dot.
+    #[test]
+    fn wire_ending_on_a_pin_is_not_dotted() {
+        let mut routed = vec![RoutedNet {
+            segments: vec![h(0.0, 3.81, 0.0)],
+            junctions: vec![],
+        }];
+        add_connection_junctions(&mut routed, &pins(&[(3.81, 0.0)]));
+        assert!(routed[0].junctions.is_empty(), "{routed:?}");
+    }
+
+    /// A pass-through with no pin stays undotted — the pin is what makes
+    /// the difference, not the pass-through.
+    #[test]
+    fn trunk_through_empty_space_is_not_dotted() {
+        let mut routed = vec![RoutedNet {
+            segments: vec![h(0.0, 1.27, 0.0), h(1.27, 3.81, 0.0)],
+            junctions: vec![],
+        }];
+        add_connection_junctions(&mut routed, &pins(&[]));
+        assert!(routed[0].junctions.is_empty(), "{routed:?}");
+    }
+
+    /// "Two or more wire endpoints and a symbol pin" — a wire that bends
+    /// exactly ON a pin is a three-way node too.
+    #[test]
+    fn l_corner_on_a_pin_is_dotted() {
+        let mut routed = vec![RoutedNet {
+            segments: vec![h(0.0, 1.27, 0.0), v(1.27, 0.0, 2.54)],
+            junctions: vec![],
+        }];
+        add_connection_junctions(&mut routed, &pins(&[(1.27, 0.0)]));
+        assert_eq!(routed[0].junctions.len(), 1, "{routed:?}");
+    }
+
+    /// `prune_stale_junctions` shares the predicate: a dot the pin rule
+    /// justifies must survive the prune that runs immediately before the
+    /// add pass.
+    #[test]
+    fn prune_keeps_a_pin_justified_dot() {
+        let mut routed = vec![RoutedNet {
+            segments: vec![h(0.0, 1.27, 0.0), h(1.27, 3.81, 0.0)],
+            junctions: vec![(1.27, 0.0)],
+        }];
+        prune_stale_junctions(&mut routed, &pins(&[(1.27, 0.0)]));
+        assert_eq!(routed[0].junctions.len(), 1, "{routed:?}");
+        prune_stale_junctions(&mut routed, &pins(&[]));
+        assert!(routed[0].junctions.is_empty(), "{routed:?}");
     }
 
     #[test]

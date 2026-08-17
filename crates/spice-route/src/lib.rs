@@ -140,8 +140,8 @@ fn run_cleanup<S: ::std::hash::BuildHasher>(
     cleanup::drop_zero_length(routed);
     cleanup::split_at_interior_attachments(routed);
     cleanup::trim_whiskers(routed, own_pin_coords);
-    cleanup::prune_stale_junctions(routed);
-    cleanup::add_connection_junctions(routed);
+    cleanup::prune_stale_junctions(routed, own_pin_coords);
+    cleanup::add_connection_junctions(routed, own_pin_coords);
 }
 
 /// Union-find root of `k`, with path compression. Keys are quantised
