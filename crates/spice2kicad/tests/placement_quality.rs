@@ -1520,7 +1520,9 @@ fn wire_detour_within_budget_across_fixtures() {
         // defect was fixed. NEW-GEOMETRY BASELINES, zero slack, ratchet
         // DOWN only. Adding them moved no existing fixture's literal.
         ("sallen_key_driven", 1.0764),
-        ("shunt_feedback_amp", 1.2034),
+        // RISE 1.2034 -> 1.2410, rail-stub SIDE fix (Tier 2,
+        // global-improvement escape, AWAITING OWNER SIGN-OFF).
+        ("shunt_feedback_amp", 1.2410),
     ];
     // Collect-then-assert: an in-loop `assert!` truncates the report at
     // the first offending fixture, which is the ADR-19 M4 "gate-set
@@ -1639,7 +1641,10 @@ fn crossing_count_within_budget_across_fixtures() {
         ("named_rails", 0),
         // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE, owner-approved: the
         // long ladder + gain stage crosses twice. Ratchet DOWN.
-        ("rc_phase_shift", 2),
+        // RISE 2 -> 5, rail-stub SIDE fix (Tier 2, global-improvement
+        // escape, AWAITING OWNER SIGN-OFF): RB moving above `b` re-bases
+        // the whole sheet and the ladder trunks now cross the CE stage's.
+        ("rc_phase_shift", 5),
         // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE: ten wire crossings,
         // 2.5x the previous suite worst (`multivibrator`, 4) and 5x
         // `rc_phase_shift`'s 2. Ratchet DOWN.

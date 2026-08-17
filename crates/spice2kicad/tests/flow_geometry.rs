@@ -773,7 +773,9 @@ const FLOW_RATCHET: &[(&str, usize, usize)] = &[
     ("named_rails", 0, 0),
     // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE, owner-approved:
     // two F3 flow inversions (CIN→Q1, R3→CIN); F4 clean. Ratchet DOWN.
-    ("rc_phase_shift", 2, 0),
+    // F3 2 -> 1: the rail-stub SIDE fix removed the CIN->Q1 inversion
+    // (RB no longer sits between them). Ratchet DOWN.
+    ("rc_phase_shift", 1, 0),
     // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE: one F3 flow inversion
     // (the CC interstage coupling cap drawn downstream of the Q2 it
     // feeds); F4 terminal lanes clean. Ratchet DOWN.
@@ -936,7 +938,9 @@ const FLOW_POSE_RATCHET: &[(&str, usize, usize)] = &[
     // fixed. NEW-GEOMETRY BASELINES, zero slack, ratchet DOWN only. Adding
     // them moved no existing fixture's literal.
     ("sallen_key_driven", 3, 0),
-    ("shunt_feedback_amp", 1, 0),
+    // F5 1 -> 0: with RB above `b`, every series part on this fixture is
+    // drawn horizontal. Ratchet DOWN.
+    ("shunt_feedback_amp", 0, 0),
 ];
 
 #[test]
@@ -1085,7 +1089,10 @@ const STUB_RUN_RATCHET: &[(&str, u32)] = &[
     // 23 cells (29.21 mm) sideways of its node — nearly 4x the previous
     // suite worst (named_rails, 6). This sprawl is the compaction
     // headroom F0 exists to expose. Ratchet DOWN.
-    ("rc_phase_shift", 23),
+    // RISE 23 -> 24, rail-stub SIDE fix (Tier 2, global-improvement
+    // escape, AWAITING OWNER SIGN-OFF): RC's lateral run grows by one
+    // cell as the CE stage re-bases around RB's new column.
+    ("rc_phase_shift", 24),
     // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE: RC2 hangs 19 cells
     // (24.13 mm) sideways of its node, with RE2/CE2 at 8 and RC1 at 6 —
     // every one of the ten rail stubs drifts. Not the suite worst
@@ -1105,7 +1112,9 @@ const STUB_RUN_RATCHET: &[(&str, u32)] = &[
     // fixed. NEW-GEOMETRY BASELINES, zero slack, ratchet DOWN only. Adding
     // them moved no existing fixture's literal.
     ("sallen_key_driven", 7),
-    ("shunt_feedback_amp", 9),
+    // F6 9 -> 5: RB's column is no longer dragged sideways by the
+    // below-the-node re-column. Ratchet DOWN.
+    ("shunt_feedback_amp", 5),
 ];
 
 /// F6 ratchet. A rail stub should hang straight off the node it

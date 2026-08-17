@@ -158,6 +158,68 @@ pub fn allowed_orientations(checked: &CheckedNetlist) -> Vec<Vec<Orientation>> {
         .collect()
 }
 
+/// Audit the V14 **consistency requirement** over the seed idioms.
+///
+/// CLAUDE.md: *"A property enforced as a hard constraint at the
+/// seeding/placement stage MUST be hard at every stage that can move the
+/// element."* Three stages filter orientations against
+/// [`allowed_orientations`] — [`crate::pick_orientations`], the SA rotate
+/// move, and phase 4.5 — and **all three skip pinned elements**. So a seed
+/// pass that pins an element also freezes its orientation past every V14
+/// enforcer: whatever it chose is what gets emitted.
+///
+/// This asserts the closing half of that contract: every element a *seed
+/// pass* pinned must already hold a V14-allowed orientation. It caught a
+/// real defect — `apply_series_horizontal` re-columning a positive-supply
+/// bias resistor below its node with the rail pin facing down, pinning a
+/// pose `allowed_orientations` would have excluded.
+///
+/// `externally_pinned` is the mask *before* the seed idioms ran: user
+/// `*@place` / `*@align` and cache-hint pins are exempt, since their
+/// orientation is caller data rather than a seed pass's choice.
+///
+/// Debug-only. In release this is a no-op; the passes themselves carry the
+/// always-on filter.
+pub(crate) fn debug_assert_seed_pins_satisfy_v14(
+    placement: &crate::Placement,
+    pinned: &[bool],
+    externally_pinned: &[bool],
+    allowed: &[Vec<Orientation>],
+    checked: &CheckedNetlist,
+) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let offenders: Vec<String> = placement
+        .elements
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| pinned.get(*i) == Some(&true) && externally_pinned.get(*i) != Some(&true))
+        .filter(|(i, el)| {
+            allowed
+                .get(*i)
+                .is_some_and(|set| !set.is_empty() && !set.contains(&el.orientation))
+        })
+        .map(|(i, el)| {
+            let refdes = checked
+                .elements
+                .get(i)
+                .map_or_else(|| format!("#{i}"), |e| e.refdes.clone());
+            format!(
+                "{refdes} pinned at {:?} (allowed: {:?})",
+                el.orientation, allowed[i]
+            )
+        })
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "seed idioms pinned a V14-forbidden orientation, which no later \
+         stage can repair (pinned elements are skipped by \
+         `pick_orientations`, the SA rotate move and phase 4.5): {}",
+        offenders.join("; ")
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

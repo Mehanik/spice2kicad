@@ -574,6 +574,18 @@ pub fn place_with_hint(
     // treated as immovable when legalizing.
     let user_pinned = pinned.clone();
     apply_hint(&mut placement, &mut pinned, hint);
+    // V14: per-element allowed-orientation set (power pin up / ground
+    // pin down). A *hard* candidate-space filter, threaded into the V5
+    // seed chooser and the SA refiner below — and, because the seed
+    // idioms *pin* what they orient, into those too, so the constraint
+    // is hard at *every* stage that can move an element (CLAUDE.md
+    // "consistency requirement"). Computed here, before the idioms, for
+    // exactly that reason.
+    let allowed = orient::allowed_orientations(&checked);
+    // Pins owed to a user directive or a cache hint — the audit below
+    // exempts them, because their orientation is the caller's data, not
+    // a choice any seed pass made.
+    let externally_pinned = pinned.clone();
     // V7: detect structural symmetry in the netlist and mirror paired
     // elements about a common vertical axis. Runs after V6 archetype
     // seeding so the axis is computed from a topology-aware base
@@ -628,13 +640,14 @@ pub fn place_with_hint(
     // column, and before `pick_orientations` (which skips pinned
     // elements). Pins what it places so the SA and phase 4.5 cannot revert
     // it. `refinement_meta` recomputes the identical pins.
-    idioms::apply_series_horizontal(&mut placement, &mut pinned, &checked);
-    // V14: per-element allowed-orientation set (power pin up / ground
-    // pin down). A *hard* candidate-space filter, threaded into both
-    // the V5 seed chooser below and the SA refiner so the constraint is
-    // hard at *every* stage that can move an element (CLAUDE.md
-    // "consistency requirement").
-    let allowed = orient::allowed_orientations(&checked);
+    idioms::apply_series_horizontal(&mut placement, &mut pinned, &checked, &allowed);
+    orient::debug_assert_seed_pins_satisfy_v14(
+        &placement,
+        &pinned,
+        &externally_pinned,
+        &allowed,
+        &checked,
+    );
     pick_orientations(&mut placement, &pinned, &checked, &allowed);
 
     // Uncoupled repeated channels (a dual opamp, a stereo pair) are
@@ -994,6 +1007,8 @@ pub fn refinement_meta(
 ) -> Result<RefinementMeta, Vec<Diagnostic>> {
     let (mut placement, mut pinned) = place_seed(checked, placer)?;
     apply_hint(&mut placement, &mut pinned, hint);
+    let allowed = orient::allowed_orientations(checked);
+    let externally_pinned = pinned.clone();
     if let Some(plan) = symmetry::detect_pairs(checked) {
         symmetry::apply(&mut placement, &mut pinned, &plan);
     }
@@ -1007,7 +1022,14 @@ pub fn refinement_meta(
     // so phase 4.5 sees the same pins and keeps each series element at its
     // constructed horizontal facing (it never re-orients a pinned
     // element).
-    idioms::apply_series_horizontal(&mut placement, &mut pinned, checked);
+    idioms::apply_series_horizontal(&mut placement, &mut pinned, checked, &allowed);
+    orient::debug_assert_seed_pins_satisfy_v14(
+        &placement,
+        &pinned,
+        &externally_pinned,
+        &allowed,
+        checked,
+    );
     // Mirror the channel-row pins `place_with_hint` adds for the SA
     // (Option B, owner sign-off 2026-07-20). Freezing the channel
     // members here as well means phase 4.5 keeps each channel at the
@@ -1035,7 +1057,6 @@ pub fn refinement_meta(
             }
         }
     }
-    let allowed = orient::allowed_orientations(checked);
     Ok(RefinementMeta { pinned, allowed })
 }
 

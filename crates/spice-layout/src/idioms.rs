@@ -975,9 +975,19 @@ pub(crate) fn apply_rail_stub_columns(
 }
 
 /// Draw series signal elements horizontally on the flow lane, upstream
-/// pin left, with their downstream shunts dropping straight beneath the
-/// output node (MEMORY "flow-orientation wall"; ADR-15 Stage-5 post-mortem;
-/// the ADR-15 §1.3 joint position+orientation hypothesis).
+/// pin left, with their downstream shunts re-columned onto the output node
+/// — dropping **beneath** it for a ground / negative-rail stub and rising
+/// **above** it for a positive-supply stub (MEMORY "flow-orientation wall";
+/// ADR-15 Stage-5 post-mortem; the ADR-15 §1.3 joint position+orientation
+/// hypothesis).
+///
+/// The stub *side* ([`RailStub::side`]) governs both halves of the
+/// re-column — the direction of the Y step and the shunt's rail-pin facing
+/// ([`rail_facing_orientation`]). They must agree: a `+12V` bias resistor
+/// dropped below its node with its rail pin facing down draws the supply
+/// glyph *under* the body, which is both wrong-looking and a V14 violation
+/// this pass then **pins** past every stage that enforces V14 (see
+/// [`v14_permits`]).
 ///
 /// A **series signal element** is the ADR-15 role-model "series" role,
 /// derived structurally (pin count + net class, principle 9): 2-terminal,
@@ -1011,14 +1021,29 @@ pub(crate) fn apply_series_horizontal(
     placement: &mut Placement,
     pinned: &mut [bool],
     checked: &CheckedNetlist,
+    allowed: &[Vec<Orientation>],
 ) {
     // Extra cells beyond a body-clean vertical stride, so a downstream
-    // shunt's top pin sits far enough below the series pin that the
-    // shared-node port label prefers the series pin (V13 pin-text).
-    // Measured on `rc_lowpass_ports`: the body-clean stride alone leaves a
+    // shunt's pin sits far enough from the series pin that the shared-node
+    // port label prefers the series pin (V13 pin-text).
+    //
+    // Down side (a ground / negative-rail shunt dropping below the node):
+    // measured on `rc_lowpass_ports` — the body-clean stride alone leaves a
     // 1-cell pin gap (label lands on the shunt, colliding with its pin
     // number); +2 cells clears it.
-    const SHUNT_LABEL_MARGIN_CELLS: i32 = 2;
+    const SHUNT_LABEL_MARGIN_DOWN_CELLS: i32 = 2;
+    // Up side (a positive-supply shunt rising above the node): measured
+    // separately, on `rc_phase_shift` / `shunt_feedback_amp` — the two
+    // fixtures with an Up-side re-column. Carrying the Down figure over
+    // untested would have been an assumption, and the Down figure was
+    // itself a measurement, not a principle. It is NOT the same number:
+    // swept over 0..=5 with the whole verifier suite, +2 (the Down value)
+    // is the ONE value that collides the shared-node label with a
+    // neighbouring pin's number text — V13 pin-text AND rendered ink, both
+    // Tier 1. +3 clears both and is also the only V16-non-increasing
+    // choice besides +4 (ADR-16 protocol), with fewer Tier-2 rises than
+    // +4. The sweep table is in the commit message.
+    const SHUNT_LABEL_MARGIN_UP_CELLS: i32 = 3;
     let classes = classify_nets(checked);
     let depth = signal_net_depth(checked, &classes);
     let stubs = detect_rail_stubs(checked);
@@ -1083,11 +1108,15 @@ pub(crate) fn apply_series_horizontal(
             continue;
         }
         // Series elements are pure-signal 2-pin passives → V14 allows all
-        // eight orientations, so any horizontal one is V14-legal.
+        // eight orientations, so any horizontal one is V14-legal. Checked,
+        // not assumed: see `v14_permits`.
         let Some(orient) = horizontal_flow_orientation(&placement.elements[i], &e.symbol, up, down)
         else {
             continue;
         };
+        if !v14_permits(allowed, i, orient, &e.refdes) {
+            continue;
+        }
         placement.elements[i].orientation = orient;
         pinned[i] = true;
 
@@ -1113,20 +1142,69 @@ pub(crate) fn apply_series_horizontal(
                 continue;
             }
             let se = &checked.elements[s.element];
-            // Orient the shunt V14-correct: its rail pin faces screen-down
-            // (so a ground glyph hangs below). Pinning skips
-            // `pick_orientations`, which would otherwise choose this, so we
-            // must set it here.
-            let s_orient = rail_down_orientation(se, down)
+            // Orient the shunt V14-correct: its rail pin faces the band its
+            // rail lives in — screen-down for ground / a negative rail (the
+            // glyph hangs below), screen-**up** for a positive supply (the
+            // glyph sits above). Pinning skips `pick_orientations`, which
+            // would otherwise choose this, so we must set it here.
+            let s_orient = rail_facing_orientation(se, down, s.side)
                 .unwrap_or(placement.elements[s.element].orientation);
+            if !v14_permits(allowed, s.element, s_orient, &se.refdes) {
+                continue;
+            }
             placement.elements[s.element].orientation = s_orient;
             let shunt_ext = world_extent(&se.symbol, s_orient, None);
-            let stride = vertical_stride_cells(&series_ext, &shunt_ext) + SHUNT_LABEL_MARGIN_CELLS;
-            let new_y = placement.elements[i].origin.y + stride;
+            // World Y grows *downward* (`world_extent` applies the eeschema
+            // y-flip; `vertical_stride_cells(upper, lower)` takes the
+            // smaller-world-Y element first). A Down-side stub drops BELOW
+            // the series element — series is the upper, `+stride`. An
+            // Up-side stub rises ABOVE it — the stub is the upper, so the
+            // stride is measured the other way round and applied as
+            // `-stride`. Getting the argument order wrong here would silently
+            // under-space the pair whenever the two extents differ.
+            let (stride, sign) = match s.side {
+                VertPref::Down => (
+                    vertical_stride_cells(&series_ext, &shunt_ext) + SHUNT_LABEL_MARGIN_DOWN_CELLS,
+                    1,
+                ),
+                VertPref::Up => (
+                    vertical_stride_cells(&shunt_ext, &series_ext) + SHUNT_LABEL_MARGIN_UP_CELLS,
+                    -1,
+                ),
+            };
+            let new_y = placement.elements[i].origin.y + sign * stride;
             placement.elements[s.element].origin = GridPoint::new(down_x, new_y);
             pinned[s.element] = true;
         }
     }
+}
+
+/// The V14 consistency gate for a pass that **pins** what it orients.
+///
+/// CLAUDE.md's *consistency requirement*: a property enforced as a hard
+/// constraint at one stage must be hard at **every** stage that can move
+/// the element. [`apply_series_horizontal`] pins, so its poses survive
+/// `pick_orientations`, the SA rotate move and phase 4.5 untouched — the
+/// three stages that would otherwise filter on
+/// [`crate::orient::allowed_orientations`]. Pinning an orientation outside
+/// that set therefore freezes a V14 violation past every enforcer, which
+/// is exactly how a `+12V` bias resistor once shipped upside-down.
+///
+/// So the same filter binds here: `false` means the caller declines to
+/// pin and leaves the element to the general chooser (which *will* apply
+/// V14) rather than freezing a forbidden pose. The `debug_assert!` makes
+/// the same condition loud in tests and CI, where a decline is a defect in
+/// this pass's own reasoning, not a legitimate outcome.
+fn v14_permits(allowed: &[Vec<Orientation>], i: usize, orient: Orientation, refdes: &str) -> bool {
+    let ok = allowed.get(i).is_some_and(|set| set.contains(&orient));
+    debug_assert!(
+        ok,
+        "apply_series_horizontal would pin {refdes} at {orient:?}, which V14 \
+         forbids (allowed: {:?}). A pinned pose bypasses every stage that \
+         enforces V14 — see CLAUDE.md 'consistency requirement'.",
+        allowed.get(i)
+    );
+    ok
 }
 
 /// Pick the horizontal orientation of a vertical-native 2-pin passive that
@@ -1158,25 +1236,42 @@ fn horizontal_flow_orientation(
 }
 
 /// Vertical orientation (R0 / R180, no mirror preferred) of a 2-pin shunt
-/// that puts its **rail** pin (the pin on the non-signal node) facing
-/// screen-down, so a ground/negative-rail glyph hangs beneath it — the
-/// V14-correct facing [`crate::pick_orientations`] would otherwise choose
-/// (it is skipped here because the shunt is pinned). `None` if no vertical
-/// orientation faces the rail pin down.
-fn rail_down_orientation(se: &ResolvedElement, signal_net: &str) -> Option<Orientation> {
+/// that puts its **rail** pin (the pin on the non-signal node) facing the
+/// screen direction its rail band lives in — the V14-correct facing
+/// [`crate::pick_orientations`] would otherwise choose (it is skipped here
+/// because the shunt is pinned).
+///
+/// `side` is the stub's [`RailStub::side`]: [`VertPref::Down`] (ground or
+/// a negative rail) faces the rail pin screen-**down** so the glyph hangs
+/// beneath the body; [`VertPref::Up`] (a positive supply) faces it
+/// screen-**up** so the glyph sits above it. Parameterising this is
+/// load-bearing — an earlier revision hard-coded the ground case, which
+/// pinned a `+12V` bias resistor upside-down (glyph below the body) past
+/// every stage that enforces V14. `None` if no vertical orientation faces
+/// the rail pin the wanted way.
+fn rail_facing_orientation(
+    se: &ResolvedElement,
+    signal_net: &str,
+    side: VertPref,
+) -> Option<Orientation> {
     let rail_ti = se.nodes.iter().position(|n| n != signal_net)?;
     let rail_pin = se.pin_mapping.get(rail_ti)?;
+    // `pins_in` yields transformed (screen-frame) angles: 90 = down,
+    // 270 = up (see `crate::orient::screen_facing`).
+    let want_angle = match side {
+        VertPref::Up => 270,
+        VertPref::Down => 90,
+    };
     for &o in &Orientation::ALL {
         if !matches!(o.rotation, Rotation::R0 | Rotation::R180) {
             continue;
         }
-        // `pins_in` yields transformed (screen-frame) angles: 90 = down.
         if se
             .symbol
             .pins_in(o)
             .iter()
             .find(|p| &p.number == rail_pin)
-            .is_some_and(|p| p.angle % 360 == 90)
+            .is_some_and(|p| p.angle % 360 == want_angle)
         {
             return Some(o);
         }
@@ -1699,6 +1794,113 @@ CE e 0 100u
             hits.is_empty(),
             "a node with only one transistor must not be a shared-tail center, got {:?}",
             shared_refdes(&checked, &hits)
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Rail-stub SIDE: the shunt re-column is not "always down"
+    // -----------------------------------------------------------------
+
+    /// `rail_facing_orientation` must face the rail pin the way the
+    /// stub's own `side` says, not the way ground alone would want.
+    ///
+    /// The pre-fix helper hard-coded screen-down ("so a ground glyph
+    /// hangs below"), which pinned a positive-supply bias resistor
+    /// upside-down — with its `+12V` glyph *under* the body.
+    #[test]
+    fn rail_facing_orientation_follows_stub_side() {
+        let src = "\
+up and down stubs
+*@symbol Device:R for=R*
+VCC vcc 0 DC 12 ;@ power=+12V
+RUP vcc n 100k
+RDN n 0 10k
+.end
+";
+        let checked = checked_of(src);
+        let by = |r: &str| {
+            checked
+                .elements
+                .iter()
+                .find(|e| e.refdes == r)
+                .expect("element present")
+        };
+        let up = rail_facing_orientation(by("RUP"), "n", VertPref::Up).expect("up orientation");
+        let dn = rail_facing_orientation(by("RDN"), "n", VertPref::Down).expect("down orientation");
+        // The parameterisation itself: asking the SAME element for the
+        // two sides must give two different poses. (Comparing RUP to RDN
+        // instead proves nothing — their rail pins are opposite terminals,
+        // so both legitimately resolve to R0.)
+        let up_flipped = rail_facing_orientation(by("RUP"), "n", VertPref::Down)
+            .expect("down orientation of the up-stub");
+        assert_ne!(
+            up, up_flipped,
+            "`side` must change the chosen pose; the pre-fix helper ignored it"
+        );
+        // Screen-frame angles from `pins_in`: 270 = up, 90 = down.
+        let facing = |e: &ResolvedElement, o: Orientation, signal: &str| {
+            let ti = e.nodes.iter().position(|n| n != signal).expect("rail term");
+            let pin = e.pin_mapping.get(ti).expect("rail pin");
+            e.symbol
+                .pins_in(o)
+                .iter()
+                .find(|p| &p.number == pin)
+                .expect("pin present")
+                .angle
+                % 360
+        };
+        assert_eq!(
+            facing(by("RUP"), up, "n"),
+            270,
+            "positive-rail pin must face screen-up"
+        );
+        assert_eq!(
+            facing(by("RDN"), dn, "n"),
+            90,
+            "ground pin must face screen-down"
+        );
+    }
+
+    /// End to end through the seed placer: a series element whose
+    /// downstream node carries a **positive-supply** stub re-columns that
+    /// stub ABOVE the node (smaller world Y — world Y grows downward),
+    /// with a V14-allowed orientation. The pre-fix pass dropped it below
+    /// and pinned the forbidden pose past every V14 enforcer.
+    #[test]
+    fn up_side_shunt_re_columns_above_the_series_element() {
+        let src = "\
+up-side shunt re-column
+*@symbol Device:R for=R*
+*@symbol Device:C for=C*
+*@port in=input
+VCC vcc 0 DC 12 ;@ power=+12V
+R1 in mid 10k
+CIN mid out 1u
+RB vcc out 100k
+.end
+";
+        let checked = checked_of(src);
+        let allowed = crate::orient::allowed_orientations(&checked);
+        let idx = |r: &str| {
+            checked
+                .elements
+                .iter()
+                .position(|e| e.refdes == r)
+                .expect("element present")
+        };
+        let (rb, cin) = (idx("RB"), idx("CIN"));
+        let placement = crate::place(checked.clone(), fixture_library()).expect("place");
+        assert!(
+            placement.elements[rb].origin.y < placement.elements[cin].origin.y,
+            "the +12V stub RB must sit ABOVE its node (RB.y={}, CIN.y={})",
+            placement.elements[rb].origin.y,
+            placement.elements[cin].origin.y
+        );
+        assert!(
+            allowed[rb].contains(&placement.elements[rb].orientation),
+            "RB was placed at a V14-forbidden orientation {:?} (allowed {:?})",
+            placement.elements[rb].orientation,
+            allowed[rb]
         );
     }
 }

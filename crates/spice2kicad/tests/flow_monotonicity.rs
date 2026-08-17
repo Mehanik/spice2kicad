@@ -300,7 +300,9 @@ const Q3_FLOW_MONOTONICITY_BUDGET: &[(&str, u32)] = &[
     // Four inversions (Q1→RE, RB→CIN, RB→Q1, RC→Q1) against a suite
     // whose previous worst was 1. Deliberately POOR: this is precisely
     // the flow-monotonicity headroom F0 exists to expose. Ratchet DOWN.
-    ("rc_phase_shift", 4),
+    // 4 -> 2: the rail-stub SIDE fix put RB above its node, so the CE
+    // stage no longer folds back under the ladder. Ratchet DOWN.
+    ("rc_phase_shift", 2),
     // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE. Eight Q3 inversions —
     // twice `rc_phase_shift`'s 4 and the worst in the suite. The two
     // stages' bias dividers and collector loads (RB1/RB3, RC1/RC2) are
@@ -330,7 +332,9 @@ const Q3_FLOW_MONOTONICITY_BUDGET: &[(&str, u32)] = &[
     // fixed. NEW-GEOMETRY BASELINES, zero slack, ratchet DOWN only. Adding
     // them moved no existing fixture's literal.
     ("sallen_key_driven", 3),
-    ("shunt_feedback_amp", 2),
+    // RISE 2 -> 3, rail-stub SIDE fix (Tier 2, global-improvement escape,
+    // AWAITING OWNER SIGN-OFF). Same re-basing as the Q5 entry.
+    ("shunt_feedback_amp", 3),
 ];
 
 #[test]

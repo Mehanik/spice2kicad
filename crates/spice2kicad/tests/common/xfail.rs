@@ -49,26 +49,23 @@
 /// Keep it greppable: the test name is the exact `fn` name of the
 /// verifier, the fixture name the `.cir` stem.
 const XFAIL: &[(&str, &str, &str)] = &[
+    // EXPIRED 2026-08 by the rail-stub SIDE fix in
+    // `idioms::apply_series_horizontal` (four entries deleted, not
+    // relaxed): the pass re-columned every downstream shunt BELOW its
+    // node with the rail pin forced screen-down — a helper written for
+    // ground and never parameterised on `RailStub::side` — so a
+    // positive-supply bias resistor was pinned upside-down with its
+    // `+12V` glyph under the body. That accounted for
+    // `v14_rail_pin_faces_rail` on BOTH `rc_phase_shift` and
+    // `shunt_feedback_amp` (the R-5 residual ADR-20 diagnosed), the
+    // V14 [3] glyph/foreign-body overlap on `rc_phase_shift`, and its
+    // rail-band ordering defect. All four now grade normally.
+    //
     // --- F0 benchmark expansion (v0.2 roadmap) ------------------------
     // `rc_phase_shift` is denser than any v0.1 fixture and re-exposes
     // Tier-1 placer / decoration defects that were already deferred
     // before F0. They are recorded here, not hidden: each entry names
     // the defect and expires automatically when it is fixed.
-    (
-        "no_power_glyph_foreign_body_overlap_across_fixtures",
-        "rc_phase_shift",
-        "deferred V14 issue-[3]: a GND glyph body clips the foreign RB body (ADR-14 known scope limit)",
-    ),
-    (
-        "v14_rail_pin_faces_rail",
-        "rc_phase_shift",
-        "deferred V14/R-5 rail-pin defect: #PWR6 (+12V) sits below its host RB's body centre",
-    ),
-    (
-        "rails_correctly_ordered_across_fixtures",
-        "rc_phase_shift",
-        "deferred rail-band ordering defect: RB (+12V-only) lands below a ground-only element",
-    ),
     // --- F0, second fixture: `two_stage_amp` --------------------------
     // Promoted out of `tests/f0_defects.rs` once the phase-4.5 runtime
     // defect that held it there was fixed (112 s unoptimised -> ~1.0 s).
@@ -167,12 +164,6 @@ const XFAIL: &[(&str, &str, &str)] = &[
     // unchanged, still owner-gated, and still exactly this: a Tier-1
     // aesthetic defect, recorded here as a tripwire that expires the day
     // it is fixed.
-    (
-        "v14_rail_pin_faces_rail",
-        "shunt_feedback_amp",
-        "deferred V14/R-5 rail-pin defect: #PWR3 (+12V) sits below its host RB's body centre \
-         — the same defect `rc_phase_shift` carries, and the one ADR-20 diagnosed here",
-    ),
 ];
 
 /// True when `(test, fixture)` is a registered expected failure.

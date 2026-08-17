@@ -352,7 +352,12 @@ const Q5_NEAR_MISS_BUDGET: &[(&str, u32)] = &[
     // fixed. NEW-GEOMETRY BASELINES, zero slack, ratchet DOWN only. Adding
     // them moved no existing fixture's literal.
     ("sallen_key_driven", 5),
-    ("shunt_feedback_amp", 2),
+    // RISE 2 -> 4, rail-stub SIDE fix (Tier 2, global-improvement escape,
+    // AWAITING OWNER SIGN-OFF): moving RB above its node re-bases the CE
+    // stage, leaving Q1 a near-miss against CE/COUT/RE/RF. Paid for four
+    // Tier-1 xfail expiries (V14 rail-pin on this fixture and
+    // `rc_phase_shift`, plus that fixture's V14 [3] and rail ordering).
+    ("shunt_feedback_amp", 4),
 ];
 
 #[test]
