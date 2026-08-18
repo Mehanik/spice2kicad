@@ -2078,7 +2078,10 @@ fn v5_violation_budget(name: &str) -> usize {
         // recorded high-water mark on a fixture that did not exist before,
         // NOT a loosened budget on an existing one — no v0.1 fixture's
         // count moved. Ratchet DOWN.
-        "rc_phase_shift" => 5,
+        // 5 -> 2, rail-stub SIDE fix: with RB above `b` and the CE stage
+        // no longer folded under the ladder, `R1.2` / `R3.2` / `CIN.2`
+        // reach their nets outward. Ratchet DOWN.
+        "rc_phase_shift" => 2,
         // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE. `two_stage_amp` is the
         // second F0 benchmark fixture, promoted out of `tests/f0_defects.rs`
         // once its runtime defect was fixed. Its five residuals are the same
@@ -2115,7 +2118,10 @@ fn v5_violation_budget(name: &str) -> usize {
         // rail-pin defect showing up as V5: `RC` and `RB` are placed with
         // their rail pin facing into the circuit, so the trunks that have
         // to reach them leave their pins sideways.
-        "shunt_feedback_amp" => 5,
+        // 5 -> 1, rail-stub SIDE fix: four of the five were the R-5
+        // rail-pin defect showing up as V5 (RB/RC placed with their rail
+        // pin facing into the circuit). Ratchet DOWN.
+        "shunt_feedback_amp" => 1,
         // `lc_ladder_lpf` is CLEAN, and deliberately kept as the control
         // arm: it is the other new fixture with a drawn source and the
         // only one of the four with zero V5 residue, so "drawn stimulus"

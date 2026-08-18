@@ -232,7 +232,9 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     // segments over 28 maximal runs. Deliberately POOR;
     // this IS the Tier-2 V16 headroom F0 exists to expose. Adding it
     // moved no v0.1 fixture's (B, J). Ratchet DOWN.
-    ("rc_phase_shift", 19, 3),
+    // B 19 -> 10, rail-stub SIDE fix: RB above `b` removes the fold-back
+    // the ladder trunks used to jog around. Ratchet DOWN.
+    ("rc_phase_shift", 10, 3),
     // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE. `two_stage_amp` — two
     // cascaded CE stages sharing one rail — is the new worst fixture in
     // the suite on both counts: B = 33 (from 56 raw segments over 45
@@ -272,7 +274,8 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     // fixed. NEW-GEOMETRY BASELINES, zero slack, ratchet DOWN only. Adding
     // them moved no existing fixture's literal.
     ("sallen_key_driven", 13, 4),
-    ("shunt_feedback_amp", 12, 2),
+    // B 12 -> 11, rail-stub SIDE fix. Ratchet DOWN.
+    ("shunt_feedback_amp", 11, 2),
     // B 10 → 4. Phase 4.5's acceptance objective gained the V16
     // ink-graph bend count as its FINAL lexicographic key, after
     // (V13, V12, V5), so the refiner now separates orientations that tie

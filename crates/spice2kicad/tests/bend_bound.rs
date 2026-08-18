@@ -6,8 +6,10 @@
 //! project's ~165 quality budgets was obtained by measuring the incumbent
 //! placer's own output. A budget therefore records what the current
 //! placer happens to achieve, and against that reference "regression" and
-//! "difference" are the same measurement. `rc_phase_shift`'s B = 19 is
-//! not judged as bad — it is **protected at 19**.
+//! "difference" are the same measurement. `rc_phase_shift`'s B (10 as of
+//! the rail-stub SIDE fix, 19 when this file was written) is not judged
+//! as bad — it is **protected at whatever the incumbent happens to
+//! reach**.
 //!
 //! This file gives B a reference that does not come from the placer: a
 //! **provable lower bound on the number of bends any rectilinear ink

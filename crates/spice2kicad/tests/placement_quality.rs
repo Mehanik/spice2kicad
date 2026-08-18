@@ -1499,7 +1499,8 @@ fn wire_detour_within_budget_across_fixtures() {
         // Deliberately high wander — 1.23 is the worst in the suite by a
         // wide margin (next worst: named_rails at 1.125), and it is the
         // Tier-2 headroom F0 exists to expose. Ratchet DOWN.
-        ("rc_phase_shift", 1.2314),
+        // 1.2314 -> 1.0438, rail-stub SIDE fix. Ratchet DOWN.
+        ("rc_phase_shift", 1.0438),
         // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE. 1.85654 is the worst
         // wire detour in the suite by a wide margin — the emitted ink is
         // 86% longer than its rectilinear ideal (558.80 mm vs 300.99 mm),
