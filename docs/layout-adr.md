@@ -5035,7 +5035,7 @@ the instrument working: two intervening fixes each removed part of the
 challenger's advantage, and re-grading is what exposed it. Promoting on
 D9's table would have over-claimed by 2×.
 
-The two "fresh" columns differ only by the four metric ids registered in
+The two "fresh" columns differ only by the five metric ids registered in
 this commit (see "two blind cells" below): the graded table read Tier 1
 −1.00, the final one −4.00, because `junction.cross_net` on
 `two_stage_amp` (4 → 0) and `v13.9_foreign_over_glyph` on `named_rails`
