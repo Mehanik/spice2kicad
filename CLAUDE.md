@@ -876,6 +876,55 @@ deterministic compactor) and `archive/adr14-directional-plus-label`
 `footprint.rs`'s "Known residual" and `anneal.rs`'s "once `label_geom`
 lands"). Do not delete a tag without checking what only it contains.
 
+## Reclaim the worktree, the branch and the target dir on merge
+
+**Every merge is followed by a cleanup, in the same turn.** Not eventually,
+not at end of session — the moment a branch's commits are in `master`:
+
+```sh
+git merge --ff-only <branch>
+git worktree remove <scratchpad>/wt-<name> --force   # or: git worktree prune
+git branch -d <branch>                               # -d, so it refuses if unmerged
+rm -rf <scratchpad>/<name>-target                    # the agent's CARGO_TARGET_DIR
+```
+
+**Why this is a rule and not tidiness.** `/tmp` is a **32 GB tmpfs**, and each
+agent needs its **own** `CARGO_TARGET_DIR` — sharing one across worktrees bakes
+`CARGO_MANIFEST_DIR` into test binaries and yields fake `NotFound` failures and
+fake-clean control arms (see the stale-target-dir trap in the testing notes).
+A populated target dir is **~3.5 GB**, so four concurrent agents is the
+practical ceiling and an unreaped one is a third of an agent's headroom.
+
+This has broken real work four times: two agents hit `ENOSPC` mid-run, one lost
+a commit to a disk-full `git commit`, and one session filled the tmpfs to 100%
+and had to stop and reap ~25 GB before it could continue. The failure mode is
+nasty because ENOSPC surfaces as tool output truncation, not as an obvious
+disk error.
+
+**Also reap the test temp dirs.** `crates/spice2kicad/tests/common`'s `TempDir`
+guard cleans up on `Drop`, but a killed or panicking run leaves its directory
+behind, and `crates/kicad-symbols/tests/error_paths.rs` still writes a few
+stray `kicad-symbols-test-*` files per run with no guard at all:
+
+```sh
+find /tmp -maxdepth 1 -name 'spice2kicad-*' -type d -exec rm -rf {} +
+find /tmp -maxdepth 1 -name 'kicad-symbols-test-*' -delete
+```
+
+**Before deleting build state, check the work is actually safe** — this is the
+one gate that matters, and it is three commands:
+
+```sh
+git rev-list --count origin/master..master   # unpushed commits
+git status --porcelain                       # uncommitted changes
+git branch --no-merged master                # branches holding unique work
+```
+
+Target dirs are rebuildable and cost only a recompile. **Worktrees and
+unmerged branches are not** — `git worktree remove --force` on a worktree with
+uncommitted changes discards them silently. Reap the target dir freely; reap a
+worktree only after its branch is merged.
+
 ## Committing during multi-agent / parallel work
 
 **Commit each green milestone before launching another agent (or
