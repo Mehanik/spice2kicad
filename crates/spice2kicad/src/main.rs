@@ -58,13 +58,16 @@ struct Cli {
 
     /// Which registered placement engine to run (ADR-23).
     ///
-    /// `champion` (the default) is the shipping placer, bit-for-bit —
-    /// omitting the flag changes nothing. Other names are *challengers*:
-    /// alternative placers registered so the champion/challenger
-    /// scoreboard can grade them end-to-end against the same verifiers.
-    /// A challenger is not a supported output mode and is not a licence
-    /// to bypass a ratchet; see `docs/layout-adr.md` ADR-23.
-    #[arg(long, default_value = "champion", value_parser = parse_placer)]
+    /// `flow-seed` (the default since the ADR-23 promotion) is the
+    /// shipping placer — omitting the flag changes nothing. `champion`
+    /// is the retained **control arm**, the placer that shipped before
+    /// the promotion, kept runnable for A/B. Every other name is a
+    /// *challenger*: an alternative registered so the champion/
+    /// challenger scoreboard can grade it end-to-end against the same
+    /// verifiers. A non-default placer is not a supported output mode
+    /// and is not a licence to bypass a ratchet; see
+    /// `docs/layout-adr.md` ADR-23.
+    #[arg(long, default_value = "flow-seed", value_parser = parse_placer)]
     placer: spice_layout::Placer,
 
     /// Disable the position-stability layout cache (ADR-4). By default
@@ -250,7 +253,7 @@ fn emit_schematic_target(
     };
     if cli.placer != spice_layout::Placer::default() {
         eprintln!(
-            "spice2kicad: placer `{}` — {} (NOT the shipping placer; ADR-23 challenger)",
+            "spice2kicad: placer `{}` — {} (NOT the shipping placer; ADR-23 non-default)",
             cli.placer.name(),
             cli.placer.description()
         );

@@ -12,9 +12,14 @@
 //!
 //! Question 2 needs the ability to run a *named* placer end-to-end and
 //! measure the emitted geometry with the same verifiers. This module is
-//! that name registry; `--placer=<name>` on the CLI selects one, and
-//! [`Placer::Champion`] — today's placer, bit-for-bit — is the default,
-//! so the flagless path is unchanged.
+//! that name registry; `--placer=<name>` on the CLI selects one.
+//!
+//! **[`Placer::FlowSeed`] is the default since the ADR-23 promotion**
+//! (2026-08-18): it was graded PROMOTABLE against the incumbent and the
+//! ratchets plus `baseline_lock` were regenerated at its geometry.
+//! [`Placer::Champion`] stays registered as the **control arm** — it
+//! must remain runnable, because every future challenger is graded
+//! against the new default and the old default stays available for A/B.
 //!
 //! **A challenger is not a licence to bypass a ratchet.** An ordinary
 //! change still has to satisfy every per-fixture budget. The scoreboard
@@ -25,14 +30,22 @@
 ///
 /// Variants are *registered alternatives*, not tuning knobs: each one is
 /// a whole seed strategy that the scoreboard can grade end-to-end.
-/// [`Placer::Champion`] is the incumbent and the default; every other
+/// [`Placer::FlowSeed`] is the default since the ADR-23 promotion;
+/// [`Placer::Champion`] is the retained control arm and every other
 /// variant is dead on the default path.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Placer {
-    /// The incumbent placer: `n`-scaled Y frame, Mid sub-rows as
-    /// fractions of the Top↔Bot span, `pack_rows` re-centring the row
-    /// stack on its total growth.
-    #[default]
+    /// The former default, retained as the scoreboard's **control
+    /// arm**: `n`-scaled Y frame, Mid sub-rows as fractions of the
+    /// Top↔Bot span, `pack_rows` re-centring the row stack on its total
+    /// growth, and an X layering that roots at every rail-touching
+    /// element (so X measures hops from the nearest power rail).
+    ///
+    /// Superseded as the default by [`Placer::FlowSeed`] (ADR-23
+    /// promotion, 2026-08-18). It is deliberately kept runnable: A/B
+    /// against the previous architecture is the only way to attribute a
+    /// future regression to the promotion rather than to the change
+    /// under test.
     Champion,
     /// ADR-19 Milestone 4 — the content-derived, `n`-independent Y
     /// datum. Band datums chain downward by *measured* content depth
@@ -97,19 +110,27 @@ pub enum Placer {
     ///
     /// A circuit with no signal-flow root at all — `wien_bridge_osc` is
     /// a pure cycle with no input — falls back to the champion's
-    /// rail-rooted policy verbatim and is byte-identical on both sides.
+    /// rail-rooted policy **verbatim** and is byte-identical on both
+    /// sides. That fallback is not a leftover: it is the defined
+    /// behaviour for rootless circuits, and the promotion's cheapest
+    /// integrity check is that `diff_pair`, `multivibrator` and
+    /// `wien_bridge_osc` emit byte-identically across the swap.
+    ///
+    /// **The default placer since the ADR-23 promotion (2026-08-18).**
+    #[default]
     FlowSeed,
 }
 
 impl Placer {
-    /// Every registered placer, champion first.
+    /// Every registered placer, the default first and the retained
+    /// control arm second.
     pub const ALL: &'static [Self] = &[
+        Self::FlowSeed,
         Self::Champion,
         Self::M4YDatum,
         Self::M3SignedGate,
         Self::M3SignedFull,
         Self::M5Streams,
-        Self::FlowSeed,
     ];
 
     /// The name accepted by `--placer` and printed by the scoreboard.
@@ -129,7 +150,10 @@ impl Placer {
     #[must_use]
     pub fn description(self) -> &'static str {
         match self {
-            Self::Champion => "incumbent placer (default; n-scaled Y frame)",
+            Self::Champion => {
+                "the pre-promotion placer, retained as the scoreboard control arm \
+                 (n-scaled Y frame; X = hops from the nearest power rail)"
+            }
             Self::M4YDatum => "ADR-19 M4: content-derived, n-independent Y datum",
             Self::M3SignedGate => "ADR-19 M3 ablation B: signed footprint in the SA overlap gate",
             Self::M3SignedFull => {
@@ -137,7 +161,8 @@ impl Placer {
             }
             Self::M5Streams => "ADR-19 M5': per-refdes SA proposal streams, deterministic sweep",
             Self::FlowSeed => {
-                "flow-faithful skeleton: signal-flow roots, stub followers, barycenter order"
+                "default: flow-faithful skeleton \
+                 (signal-flow roots, stub followers, barycenter order)"
             }
         }
     }
@@ -200,9 +225,20 @@ mod tests {
     use super::Placer;
 
     #[test]
-    fn default_is_the_champion() {
-        assert_eq!(Placer::default(), Placer::Champion);
-        assert_eq!(Placer::default().name(), "champion");
+    fn default_is_the_flow_seed_placer() {
+        assert_eq!(Placer::default(), Placer::FlowSeed);
+        assert_eq!(Placer::default().name(), "flow-seed");
+    }
+
+    /// The promoted default did not retire the control arm. ADR-23's
+    /// promotion rule grades every future challenger against the new
+    /// default, and the old default has to stay runnable for the A/B
+    /// that attributes a regression to the promotion or to the change
+    /// under test.
+    #[test]
+    fn the_champion_control_arm_stays_registered() {
+        assert_eq!(Placer::from_name("champion"), Some(Placer::Champion));
+        assert!(Placer::ALL.contains(&Placer::Champion));
     }
 
     #[test]

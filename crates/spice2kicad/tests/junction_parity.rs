@@ -570,11 +570,21 @@ fn mm(v: i64) -> String {
 /// disappears. A rise means a NEW pair of nets was laid on one track —
 /// diagnose it, never bump the number.
 const CROSS_NET_CONTACT_POINTS: &[(&str, usize)] = &[
-    // `two_stage_amp`'s `b2`/`c2` trunks share the collinear run at
-    // x = 57.15 and its `c2`/`e2` trunks the one at y = 87.63 — the exact
-    // two lines named in that fixture's `xfail.rs` entry. Four points:
-    // (52.07, 87.63) (57.15, 48.26) (57.15, 57.15) (57.15, 87.63).
-    ("two_stage_amp", 4),
+    // EMPTY, as this table's own doc predicted: "the day the channel
+    // router separates those trunks, every literal becomes 0 and this
+    // table disappears".
+    //
+    // It was not the channel router that separated them. The ADR-23
+    // promotion of `--placer=flow-seed` to the default (owner-approved,
+    // 2026-08-18) did it from the skeleton: `two_stage_amp`'s only entry
+    // (4 contact points, the `b2`/`c2` run at x = 57.15 and the `c2`/`e2`
+    // run at y = 87.63) is gone because those trunks no longer share a
+    // column. Rail-hop layering collapsed `in->b1->c1->b2->c2->out` into
+    // three columns; signal-depth layering gives it five.
+    //
+    // Zero slack, and the ratchet now reads 0 for every fixture through
+    // `cross_net_ratchet`'s `map_or(0, ..)`. A rise means a NEW pair of
+    // nets was laid on one track — diagnose it, never bump the number.
 ];
 
 fn cross_net_ratchet(name: &str) -> usize {

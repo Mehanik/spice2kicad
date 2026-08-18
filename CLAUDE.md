@@ -97,7 +97,9 @@ crates/
   spice-resolve/     AST → resolved netlist; symbol / pinmap / ignore /
                      power / subckt decisions
   spice-layout/      placement: net-class → bands → layers → SA refine →
-                     symmetry → hierarchical sheets
+                     symmetry → hierarchical sheets; `placer.rs` is the
+                     ADR-23 name registry (default `flow-seed`, control
+                     arm `champion`)
   spice-route/       Steiner routing, power glyphs, PWR_FLAG, conflict /
                      obstacle resolution
   kicad-emitter/     placed model → KiCad S-expressions; phase-4.5
@@ -290,7 +292,39 @@ For full grammar, examples, and diagnostics, see
   hierarchical-sheet placement — with the routing-aware orientation
   refinement (phase 4.5) living in `kicad-emitter` (the one crate that
   can see both the placer and the real router). The constraint resolver
-  from spec §5 sits between the parser and the emitter. The placer's
+  from spec §5 sits between the parser and the emitter.
+
+  **What X means, and the two policies that assign it.** The shipping
+  placer is `--placer=flow-seed`, promoted to the default on 2026-08-18
+  (ADR-23 § "The promotion", owner-approved on the scoreboard's table).
+  Under it **X measures depth along the DC signal path**: the X layering
+  roots at *signal-flow sources only* (declared `*@port` inputs and leaf
+  input nets, behind ADR-18's `signal_degree <= 2` "boundary not
+  interior" filter), demotes rail stubs (Power **or** Ground, signal
+  degree ≤ 1) to **followers** assigned after the BFS, and orders each
+  bucket by neighbour barycenter.
+
+  The **old policy is now the fallback, not the default**: rooting at
+  `input_root(i) || touches_power(i)`, i.e. every rail-touching stub is
+  a layer-0 root, so X measured *hops from the nearest power rail* — a
+  functional that saturates at ~2 layers in any biased amplifier however
+  many stages it has. A circuit with **no signal-flow root at all**
+  (`diff_pair`, `multivibrator`, `wien_bridge_osc` — a pure cycle with
+  no input) still takes that rail-rooted policy **verbatim**, and those
+  three fixtures are byte-identical across the promotion. So is
+  `lc_ladder_lpf` / `sallen_key_driven`, which have real drawn sources
+  and never entered the fallback at all. If you change the fallback,
+  those five are the cheapest check that you did not disturb it.
+
+  `Placer::Champion` — the pre-promotion placer — stays **registered**
+  as the scoreboard's control arm and must remain runnable
+  (`--placer champion`): every future challenger is graded against the
+  new default, and A/B against the old one is what attributes a
+  regression to the promotion rather than to the change under test.
+  `spice_layout::layers::assign_x_layers` (the variant-free entry point)
+  is deliberately still pinned to the champion policy — it is a fixed
+  *reference* layering for `cost::layer_order` and the Q3 verifier, not
+  a placer selection; see its doc comment. The placer's
   *direction of travel* is ADR-15 (readability-first: constructive
   role/anchor placement — anchor / rail stub / series / terminal-net —
   with the SA demoted to a polisher that may not undo it). Read ADR-15

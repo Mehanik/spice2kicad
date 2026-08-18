@@ -4221,12 +4221,17 @@ what the test must keep deriving independently.
 
 ## ADR-23 — Two instruments: the ratchets detect drift, the scoreboard selects an architecture
 
-**Status:** landed (the seam, the sink, the aggregator, the promotion
-rule, and one registered challenger). Additive by construction: with no
-`--placer` flag and no scoreboard invocation, emitted output is
-**byte-identical** on all thirteen fixtures and `baseline_lock`'s diff is
-EMPTY. No verifier was weakened, skipped or `#[ignore]`d; no budget
-literal moved.
+**Status:** landed, and **exercised**. The seam, the sink, the
+aggregator and the promotion rule went in additively — with no
+`--placer` flag and no scoreboard invocation, emitted output was
+byte-identical on all thirteen fixtures and `baseline_lock`'s diff was
+EMPTY. On **2026-08-18** the rule was used for the first time:
+`--placer=flow-seed` was graded PROMOTABLE on a fresh table and
+**promoted to the default** on owner approval, regenerating
+`baseline_lock` and every per-fixture literal at its geometry.
+`champion` remains registered as the control arm. See § "The promotion"
+below for the fresh table, the two Tier-1 regressions it carries, and
+the D2 gap it exposed.
 
 ### The report
 
@@ -4988,6 +4993,249 @@ rootless fixtures, the two principled-path fixtures and `rc_lowpass` are
 byte-identical between the two). Promotion — or a decision to pay the
 `sallen_key_lpf` Tier-0 cell down in the spacing layer first — is an
 owner call on the table above.
+
+> **SUPERSEDED BY "The promotion" below (2026-08-18).** `flow-seed` was
+> promoted to the default. Read D9's numbers as history: they were taken
+> before ADR-25 and before the `fix/rail-stub-side` commit, and both
+> moved them. The fresh table is in the promotion section.
+
+### The promotion — `flow-seed` becomes the default (2026-08-18)
+
+**Status:** landed, on **owner approval of the printed table**. This is
+the first exercise of D4, and the first time `baseline_lock` and the
+per-fixture literals have been regenerated wholesale for an
+architecture change rather than a decoration one.
+
+#### Re-graded first, because D9's numbers were stale
+
+Two changes landed between D9's grading and this promotion, and both
+moved the table, so the verdict was re-measured on the promotion tree
+rather than inherited:
+
+* **ADR-25** removed the Tier-0 cell (`t0.sym_overlap` /
+  `sallen_key_lpf`) that had blocked it, and in doing so gave back two
+  thirds of that fixture's reported gain — the gain *was* the overlap.
+* **`fix/rail-stub-side`** (`71e2483..90f8683`) corrected a re-column
+  helper that had been forcing every downstream shunt below its node.
+  `flow-seed`'s previously-low bend counts on `rc_phase_shift` and
+  `shunt_feedback_amp` were partly an artefact of that wrong layout.
+
+Fresh run, whole suite each side, `--no-fail-fast`, one machine, on the
+promotion tree:
+
+| | ADR-23 D9 (stale) | ADR-25 re-grade (stale) | fresh, as graded | **fresh, final** |
+| --- | ---: | ---: | ---: | ---: |
+| Tier 0 regressions | 1 (`t0.sym_overlap`) | none | none | **none** |
+| Tier 1 total Δ | −5.00 | −4.00 | −1.00 | **−4.00** |
+| Tier 2 total Δ | −180.33 | −163.35 | −113.87 | **−113.87** |
+| verdict | NOT promotable | PROMOTABLE | PROMOTABLE | **PROMOTABLE** |
+
+The Tier-2 improvement is roughly **half** what D9 advertised. That is
+the instrument working: two intervening fixes each removed part of the
+challenger's advantage, and re-grading is what exposed it. Promoting on
+D9's table would have over-claimed by 2×.
+
+The two "fresh" columns differ only by the four metric ids registered in
+this commit (see "two blind cells" below): the graded table read Tier 1
+−1.00, the final one −4.00, because `junction.cross_net` on
+`two_stage_amp` (4 → 0) and `v13.9_foreign_over_glyph` on `named_rails`
+(0 → 1) were being measured and thrown away. The verdict is unchanged
+either way, and it is the *stricter* of the two that was used to decide.
+
+Every cell that moved, fresh:
+
+| metric | tier | fixture | champion | flow-seed | Δ |
+| --- | --- | --- | ---: | ---: | ---: |
+| `t0.cross_net_overlap` | 0 | two_stage_amp | 2 | **0** | −2 |
+| `v13.2_label_prop` | 1 | two_stage_amp | 1 | **0** | −1 |
+| `v13.6a_glyphtext` | 1 | two_stage_amp | 1 | **0** | −1 |
+| `v14.glyph_body` | 1 | sallen_key_lpf | 0 | 1 | **+1** |
+| `v13.9_foreign_over_glyph` | 1 | named_rails | 0 | 1 | **+1** |
+| `junction.cross_net` | 1 | two_stage_amp | 4 | **0** | −4 |
+| `v5` | 2 | cascode_amp | 4 | **1** | −3 |
+| `v5` | 2 | two_stage_amp | 5 | **2** | −3 |
+| `v5` | 2 | sallen_key_lpf | 5 | **3** | −2 |
+| `v5` | 2 | common_emitter / opamp_inverting / named_rails / shunt_feedback_amp | 1/1/2/1 | **0/0/1/0** | −4 |
+| `v5` | 2 | opamp_inverting_real | 0 | 1 | +1 |
+| `v16.bends` | 2 | two_stage_amp | 33 | **17** | −16 |
+| `v16.bends` | 2 | sallen_key_lpf | 6 | 12 | +6 |
+| `v16.bends` | 2 | opamp_inverting | 3 | 6 | +3 |
+| `v16.bends` | 2 | cascode_amp / opamp_inverting_real / shunt_feedback_amp | 12/5/11 | 13/6/12 | +3 |
+| `v16.bends` | 2 | named_rails | 2 | **1** | −1 |
+| `v16.branches` | 2 | two_stage_amp | 9 | **5** | −4 |
+| `v16.branches` | 2 | sallen_key_lpf | 3 | **1** | −2 |
+| `v16.branches` | 2 | rc_phase_shift / named_rails | 3/2 | **2/1** | −2 |
+| `v16.branches` | 2 | cascode_amp / common_emitter / shunt_feedback_amp | 3/3/2 | 4/4/3 | +3 |
+| `crossings` | 2 | two_stage_amp | 10 | **0** | −10 |
+| `crossings` | 2 | rc_phase_shift | 5 | **0** | −5 |
+| `crossings` | 2 | cascode_amp | 2 | **0** | −2 |
+| `crossings` | 2 | sallen_key_lpf | 2 | **1** | −1 |
+| `detour` | 2 | two_stage_amp | 1.8565 | **1.0794** | −77.71 pp |
+| `detour` | 2 | sallen_key_lpf | 1.0407 | 1.3019 | +26.12 pp |
+| `detour` | 2 | cascode_amp | 1.0842 | 1.2195 | +13.53 pp |
+| `detour` | 2 | named_rails / opamp_inverting / shunt_feedback_amp | | | −10.91 pp |
+| `detour` | 2 | common_emitter / opamp_inverting_real / port_shapes / rc_phase_shift | | | +11.10 pp |
+| `q3` | 2 | two_stage_amp | 8 | **4** | −4 |
+| `q3` | 2 | cascode_amp / named_rails / shunt_feedback_amp | 3/1/3 | **2/0/2** | −3 |
+| `q3` | 2 | rc_phase_shift / common_emitter | 2/1 | 4/2 | +3 |
+| `q5` | 2 | two_stage_amp / rc_phase_shift | 7/3 | **5/2** | −3 |
+| `q5` | 2 | opamp_inverting_real | 0 | 3 | +3 |
+| `q5` | 2 | cascode_amp / common_emitter / sallen_key_lpf | 3/3/2 | 4/4/3 | +3 |
+| `f3` | 2 | rc_phase_shift / sallen_key_lpf / two_stage_amp | 1/1/1 | **0/0/0** | −3 |
+| `f5` | 2 | cascode_amp / opamp_inverting / rc_phase_shift | 2/2/1 | **1/1/0** | −3 |
+| `f5` | 2 | sallen_key_lpf | 0 | 2 | +2 |
+| `f6` | 2 | rc_phase_shift | 24 | **8** | −16 |
+| `f6` | 2 | two_stage_amp | 19 | **6** | −13 |
+| `f6` | 2 | cascode_amp / named_rails | 7/6 | **5/4** | −4 |
+| `f6` | 2 | common_emitter | 4 | 5 | +1 |
+
+**F3 is now zero on all eighteen fixtures.** That is the most direct
+confirmation available that the promotion did what it claims: F3 counts
+elements drawn upstream of something they are fed by, and every
+remaining one disappeared when X stopped meaning "hops from a rail".
+
+#### The two Tier-1 regressions, called out
+
+The owner approved a **promotion**, not a specific Tier-1 loss. Both are
+registered in `tests/common/xfail.rs` as tripwires that expire the day
+they are fixed — not given budget headroom, because a budget hides a
+count inside a number that only ratchets:
+
+1. **`v14.glyph_body` / `sallen_key_lpf`, 0 → 1.** `#PWR4`'s GND glyph
+   (host `X1`) clips `C1`'s body. This one **was** on the scoreboard: it
+   is the single `+1.00` Tier-1 cell, weighed against `−2.00`. Same
+   deferred issue-[3] class `wien_bridge_osc` already carries; ADR-14's
+   known scope limit (the SA reserves the glyph footprint hard only for
+   oversized-involving pairs, and `X1`'s opamp triangle is the oversized
+   body).
+2. **`no_foreign_label_or_wire_over_power_glyph_body` / `named_rails`,
+   0 → 1.** The `in` global label overlaps the `n5` (−5 V) rail glyph
+   body. Decoration-fixable exactly as that verifier's own budget doc
+   says — the label-nudge pass does not treat power-glyph bodies as
+   obstacles.
+
+#### The finding that outlives the promotion: two blind cells
+
+Regression 2 above **was not in the table that graded the promotion**,
+because its verifier reported nothing to the measurement sink. Nor did
+`junction_parity`'s three metrics, nor P11's cache-path check. D2's
+contract — "each verifier reports the number it *already computed*, on
+the line before the assertion that grades it" — was never enforced, so
+"comparison complete" (D4 rule 3) meant *complete over the registered
+metrics*, which is a weaker statement than it reads as.
+
+Five metric ids were added in this commit — `v13.9_foreign_over_glyph`
+(T1), `junction.missing` / `junction.spurious` / `junction.cross_net`
+(T1), `p11.cache_out_of_step` (T2) — and they moved the reported Tier-1
+aggregate from **−1.00 to −4.00**: `two_stage_amp`'s four cross-net
+collinear contact points fall **4 → 0** (an improvement the promotion
+could not previously claim), against the `named_rails` regression it
+could not previously see. Both directions were invisible, which is the
+point — a blind cell is not conservatively blind.
+
+**Rule going forward:** a fixture-enumerating verifier without a
+`scoreboard::record*` call on the line before its assertion is a cell no
+scoreboard can see move. Adding one is the whole contract.
+
+#### One verifier's measurement was corrected (not relaxed)
+
+`cache_path_keeps_pre_existing_symbols_in_place` (P11) failed under the
+new default, reporting "adding `CB b 0 10n` moved 8 pre-existing user
+symbols through the layout cache". Measured, it is **one uniform
+translation**: every one of the eight moves by exactly `(+8.89, 0)`, and
+nothing else changes. The new bypass cap lands 8.89 mm left of the
+previous leftmost symbol, so the **V15 page-fit pass** — which shifts
+each sheet's content bbox to the page margin — translates the sheet.
+That is true of every placer and `baseline_lock`'s own history already
+records it as a non-event ("the V15 offset moved by a single per-fixture
+delta … Symbol poses relative to one another are unchanged").
+
+The verifier now groups pre-existing user symbols by their `(dx, dy)`
+delta and requires **exactly one group**, with rotation/mirror/lib_id
+unchanged. This is not a new idea in that file: **P11b already does
+it** — `residual_movers` factors out "the single uniform page
+translation V15 may apply", taking the modal integer-grid delta, for
+exactly this reason. P11 was never updated to match its own sibling. This is MEMORY "verify what a number measures" again: the old
+comparison was a statement about the *page origin* presented as one
+about placement locality.
+
+It is deliberately **not** a budget and not a relaxation of the thing
+being graded:
+
+* two distinct deltas fail; one symbol out of step by a single grid cell
+  fails; any rotation fails;
+* `p11_delta_grouping_catches_one_symbol_out_of_step` is the control arm
+  — three synthetic sheets proving the grouping still catches a tear;
+* and the **champion control arm** measures a single delta of `(0, 0)`
+  on both cases, i.e. it still satisfies the strictly stronger old
+  property. Verified by running the suite with `S2K_PLACER=champion`.
+
+#### What was regenerated, and the five fixtures that were not
+
+`baseline_lock`: **157 of 282 rows** moved, across ten fixtures. Eight
+are byte-identical, five of them load-bearingly — `diff_pair`,
+`multivibrator`, `wien_bridge_osc` (rootless, so they take the old
+rail-rooted policy verbatim) and `lc_ladder_lpf`, `sallen_key_driven`
+(real drawn sources, never in the fallback). Verified with `cmp` on the
+emitted sheets under `--placer champion` vs the new default, not
+inferred. That is the cheapest available check that the fallback
+survived the swap.
+
+Every per-fixture literal was re-recorded at the new default's measured
+value, read from the **scoreboard sink**, not from test output — five of
+these budgets only fail on excess and print their "you may lower this to
+N" hint through `eprintln!`, which cargo swallows on a passing test. A
+previous agent reading test output reported "V16 unchanged" when B had
+improved 19 → 10.
+
+Two literals were also reclaimed that have nothing to do with the swap:
+`detour` on `rc_lowpass` (1.167 → 1.0) and `rc_lowpass_ports`
+(1.4001 → 1.0). Both fixtures are byte-identical across the promotion;
+their literals were simply stale. Ratchet DOWN, always permitted.
+
+#### Three XFAIL entries discharged
+
+All three on `two_stage_amp`, all announced by their own tripwires as
+`UNEXPECTED PASS`, and **all three had been filed against the wrong
+stage**:
+
+* `no_cross_net_collinear_wire_overlap` — the **Tier-0** entry, filed as
+  a "deferred v0.2 channel-router wall". It was not a router defect: the
+  `b2`/`c2` trunks shared a column because rail-hop layering collapsed
+  `in→b1→c1→b2→c2→out` into three columns.
+* `v13_labels_dont_overlap_property_text` and
+  `v13_power_glyph_value_text_clear_of_bodies_and_pintext` — both filed
+  as *decoration nudge* defects. Also layering.
+
+That is D9's finding landing for real: **a defect attributed to a
+downstream stage can be a symptom of the skeleton, and a deferral
+written against the wrong stage never expires on its own.** D9 predicted
+eight discharges; the other five had already expired to ADR-24 and
+ADR-26 before this promotion ran.
+
+#### `champion` stays registered
+
+`Placer::Champion` is not deleted and must not be. It is the scoreboard's
+**control arm**: every future challenger is graded against the new
+default, and A/B against the previous architecture is the only way to
+attribute a future regression to the promotion rather than to the change
+under test. `placer::tests::the_champion_control_arm_stays_registered`
+pins that. Two `kicad-emitter` unit tests (the ADR-17 `COUT` rot-180
+severance probe and ADR-25's pin-reach control arm) are likewise pinned
+to `Placer::Champion` explicitly — both state in their own doc comments
+that they measure a champion placement, and both cases evaporate on the
+new default's geometry.
+
+`spice_layout::layers::assign_x_layers` — the variant-free entry point —
+also stays pinned to the champion policy, deliberately. It is a fixed
+*reference* layering for `cost::layer_order` (inert either way: the
+variant only alters the no-source fallback, which `layer_order`
+short-circuits on) and for the Q3 flow-monotonicity verifier, whose
+budgets are stated against it. Re-pointing it would silently redefine a
+graded metric, so Q3 grades the new default against the *old* skeleton's
+idea of flow — the conservative choice, and the only one that keeps
+those literals comparable across the swap.
+
 
 
 ## ADR-24 — A Steiner vertex is not an endpoint: the router's own Tier-0 severance

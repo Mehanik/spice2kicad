@@ -43,8 +43,8 @@ pub struct LayoutOptions {
     /// surface has more local minima.
     pub refine_iterations: u32,
     /// Which registered placement engine runs the stage-1 seed
-    /// (ADR-23). Defaults to [`crate::Placer::Champion`] — the
-    /// incumbent, bit-for-bit — so the flagless path is unchanged.
+    /// (ADR-23). Follows [`crate::Placer::default`], which is
+    /// [`crate::Placer::FlowSeed`] since the promotion.
     pub placer: crate::Placer,
 }
 
@@ -60,7 +60,7 @@ impl Default for LayoutOptions {
             // available for callers who pass an unstructured seed.
             fr_iters: 0,
             refine_iterations: 2000,
-            placer: crate::Placer::Champion,
+            placer: crate::Placer::default(),
         }
     }
 }

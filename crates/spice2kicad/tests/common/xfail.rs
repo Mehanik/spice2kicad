@@ -66,48 +66,28 @@ const XFAIL: &[(&str, &str, &str)] = &[
     // Tier-1 placer / decoration defects that were already deferred
     // before F0. They are recorded here, not hidden: each entry names
     // the defect and expires automatically when it is fixed.
-    // --- F0, second fixture: `two_stage_amp` --------------------------
-    // Promoted out of `tests/f0_defects.rs` once the phase-4.5 runtime
-    // defect that held it there was fixed (112 s unoptimised -> ~1.0 s).
-    // It is denser than `rc_phase_shift` (17 graded elements, two
-    // cascaded stages on one rail) and re-exposes the SAME deferred
-    // decoration and channel-router defects, plus one it is the first
-    // fixture to reach. Every entry is a tripwire that expires the day
-    // its defect is fixed; none is a budget.
+    // EXPIRED 2026-08-18 by the ADR-23 PROMOTION of `--placer=flow-seed`
+    // to the default. THREE entries deleted, all on `two_stage_amp`, all
+    // reported by their own tripwires as UNEXPECTED PASS:
     //
-    // NOTE FOR THE OWNER: the first entry below is a **Tier-0-classified**
-    // metric and is the one judgement call in this promotion. The
-    // emitted schematic is electrically CORRECT today — the ADR-22
-    // partition certificate is clean, V11 pin coincidence is clean, ERC
-    // reports zero errors, and `kicad-cli sch export netlist` reproduces
-    // the source netlist exactly (8 distinct nets, no merge). What the
-    // verifier flags is the *latent* hazard its own doc comment
-    // describes: two different-net trunks sharing a collinear run, kept
-    // distinct only for want of a junction dot. It is the documented
-    // v0.2 channel-router wall — the same class `multivibrator` and
-    // `opamp_definition_level` once carried in
-    // `CROSS_NET_V02_ESCALATIONS`, both since resolved. Registered here
-    // rather than given budget headroom, because Tier 0 is never traded
-    // and a tripwire is the only exclusion that cannot rot.
-    (
-        "no_cross_net_collinear_wire_overlap",
-        "two_stage_amp",
-        "deferred v0.2 channel-router wall (Tier-0 LATENT short, needs owner review): the b2 and c2 \
-         trunks share a collinear run at x=57.15, and the c2/e2 trunks at y=87.63 — no junction \
-         merges them today (ERC clean, KiCad netlist exact), but the router cannot separate them",
-    ),
-    (
-        "v13_labels_dont_overlap_property_text",
-        "two_stage_amp",
-        "deferred V13(2) decoration nudge: the `b1` net label clips Q2's Value text",
-    ),
-    (
-        "v13_power_glyph_value_text_clear_of_bodies_and_pintext",
-        "two_stage_amp",
-        "deferred V13(6a) decoration nudge: #PWR4's GND value text clips the RE1 body (#PWR2's, and \
-         `rc_phase_shift`'s companion case, cleared once the pin-text model stopped mirroring the \
-         side KiCad draws on)",
-    ),
+    //   * `no_cross_net_collinear_wire_overlap` — the **Tier-0** entry,
+    //     the b2/c2 collinear run at x=57.15 and the c2/e2 run at
+    //     y=87.63. It was registered as a "v0.2 channel-router wall".
+    //     It was not a router defect at all: the two trunks shared a
+    //     column because the rail-hop layering collapsed
+    //     `in->b1->c1->b2->c2->out` into three columns. Give the chain
+    //     its five columns and the trunks have nothing to share.
+    //   * `v13_labels_dont_overlap_property_text` (the `b1` label over
+    //     Q2's Value) and
+    //   * `v13_power_glyph_value_text_clear_of_bodies_and_pintext`
+    //     (#PWR4's GND value text over RE1) — both registered as
+    //     *decoration nudge* defects. Also layering.
+    //
+    // That is the D9 finding landing for real: **a defect attributed to
+    // a downstream stage can be a symptom of the skeleton**, and a
+    // deferral written against the wrong stage never expires on its own.
+    // Three of the eight D9 predicted are here; the other five had
+    // already expired to ADR-24/ADR-26 before the promotion ran.
     // --- F2: the second benchmark wave (v0.2 roadmap) -----------------
     // Four new fixtures — `cascode_amp`, `lc_ladder_lpf`,
     // `sallen_key_lpf`, `wien_bridge_osc` — chosen because the current
@@ -154,6 +134,44 @@ const XFAIL: &[(&str, &str, &str)] = &[
         "deferred V13(4) decoration nudge: RA's Reference and Value both clip #PWR5's rail text — \
          the model-side residue of the defect whose rendered-ink half `rendered_text` no longer \
          sees; RA is boxed in on every candidate anchor, so the nudge keeps its least-bad one",
+    ),
+    // --- REGRESSIONS INTRODUCED BY THE ADR-23 PROMOTION of
+    // `--placer=flow-seed` to the default (owner-approved, 2026-08-18).
+    //
+    // Read this block as an owner-facing report, not as housekeeping.
+    // The registry's own rule above says "do not register a fixture to
+    // make a NEW regression go away", and these two ARE new. They are
+    // registered anyway, deliberately and visibly, because the
+    // alternative mechanisms are worse: a budget rise would hide the
+    // count inside a number that only ratchets, and `#[ignore]` would
+    // drop the whole verifier. A tripwire is the only exclusion that
+    // announces itself the day it is fixed. **The owner approved a
+    // whole-placer promotion, not these two specific losses** — both are
+    // listed in the promotion's commit message and in ADR-23's promotion
+    // section with fixture and magnitude, for exactly that reason.
+    //
+    // Both were INVISIBLE to the scoreboard that graded the promotion:
+    // neither verifier reported to the measurement sink. Both now do
+    // (`v13.9_foreign_over_glyph`, `p11.cache_out_of_step`), so no
+    // future placer comparison can be blind to them in the same way.
+    (
+        "no_power_glyph_foreign_body_overlap_across_fixtures",
+        "sallen_key_lpf",
+        "TIER-1 REGRESSION introduced by the ADR-23 flow-seed promotion: #PWR4's GND glyph (host \
+         X1) now clips C1's body (0 -> 1). This one WAS visible on the scoreboard — it is the \
+         single +1.00 Tier-1 cell in the promotion's table, weighed against -2.00 and accepted by \
+         the owner. Same deferred issue-[3] class `wien_bridge_osc` carries directly below (ADR-14 \
+         known scope limit: the SA reserves the glyph footprint hard only for oversized-involving \
+         pairs, and X1's opamp triangle is the oversized body here)",
+    ),
+    (
+        "no_foreign_label_or_wire_over_power_glyph_body",
+        "named_rails",
+        "TIER-1 REGRESSION introduced by the ADR-23 flow-seed promotion: the `in` global label now \
+         overlaps the `n5` (-5V) rail glyph body (0 -> 1). Decoration-fixable exactly as this \
+         verifier's own budget doc says — the label-nudge pass does not treat power-glyph bodies \
+         as obstacles — so it is one fixture, one label, and it expires the day that pass learns \
+         about glyphs",
     ),
     // R-5, and the fixture ADR-20 named it on. ADR-20 concluded that R-5
     // was what made `shunt_feedback_amp` UNCONVERTIBLE, escalating it

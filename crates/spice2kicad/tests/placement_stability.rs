@@ -516,18 +516,196 @@ const CACHE_CASES: &[CacheCase] = &[
     },
 ];
 
+/// Per-symbol translation deltas in micrometres, keyed `(dx, dy)`, plus
+/// the symbols that did more than translate.
+type DeltaGroups = (BTreeMap<(i64, i64), Vec<String>>, Vec<String>);
+
+/// Micrometres per millimetre — the grouping key's unit.
+const UM_PER_MM: f64 = 1000.0;
+
+/// Render a micrometre delta key as millimetres for a message.
+fn um_to_mm(um: i64) -> f64 {
+    // A schematic coordinate is a small multiple of 1.27 mm, so the key
+    // is at most a few hundred thousand; nowhere near f64's 2^53.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "micrometre keys derived from millimetre grid coordinates are far below 2^53"
+    )]
+    let mm = um as f64 / UM_PER_MM;
+    mm
+}
+
+/// Group every pre-existing **user** symbol by the `(dx, dy)` it moved,
+/// in micrometres.
+///
+/// Returns `(groups, broken)`. `broken` collects symbols that did more
+/// than translate — disappeared, rotated, mirrored or changed `lib_id` —
+/// which is never permissible however uniform the rest of the sheet is.
+///
+/// Exactly one group means the sheet translated as a whole (the V15
+/// page-fit delta) or did not move at all; **two or more means the cache
+/// path tore**, which is the property P11 grades. Keying on micrometres
+/// makes the grouping exact-integer: the emitter snaps to a 1.27 mm
+/// grid, so a 1 um key can never merge two genuinely different deltas
+/// nor split one.
+fn user_delta_groups(
+    before: &BTreeMap<String, Pose>,
+    after: &BTreeMap<String, Pose>,
+) -> DeltaGroups {
+    let mut groups: BTreeMap<(i64, i64), Vec<String>> = BTreeMap::new();
+    let mut broken: Vec<String> = Vec::new();
+    for (r, p) in before.iter().filter(|(r, _)| !is_glyph(r)) {
+        let Some(q) = after.get(r) else {
+            broken.push(format!("{r} disappeared"));
+            continue;
+        };
+        if (q.2 - p.2).abs() > 1e-9 || q.3 != p.3 || q.4 != p.4 {
+            broken.push(format!(
+                "{r} changed orientation/lib_id: {p:?} -> {q:?} (only TRANSLATION by the common \
+                 page-fit delta is permitted)"
+            ));
+            continue;
+        }
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "millimetre coordinates on a 1.27 mm grid; micrometre keys are far inside i64"
+        )]
+        let key = (
+            ((q.0 - p.0) * UM_PER_MM).round() as i64,
+            ((q.1 - p.1) * UM_PER_MM).round() as i64,
+        );
+        groups.entry(key).or_default().push(r.clone());
+    }
+    (groups, broken)
+}
+
+/// The corrected P11 comparison is not blind: one symbol moving
+/// differently from the rest is still a failure.
+///
+/// This is the control arm for the fidelity correction made during the
+/// ADR-23 promotion (see `cache_path_keeps_pre_existing_symbols_in_place`'s
+/// doc comment). Three synthetic sheets, one assertion each:
+/// no movement -> one group; uniform page-fit translation -> one group;
+/// **one symbol out of step -> two groups**, which the verifier fails on.
+#[test]
+fn p11_delta_grouping_catches_one_symbol_out_of_step() {
+    let sym = |x: f64, y: f64| -> Pose { (x, y, 0.0, false, "Device:R_US".to_string()) };
+    let before: BTreeMap<String, Pose> = [
+        ("R1".to_string(), sym(10.0, 10.0)),
+        ("R2".to_string(), sym(20.0, 10.0)),
+        ("R3".to_string(), sym(30.0, 10.0)),
+    ]
+    .into_iter()
+    .collect();
+
+    let (g, broken) = user_delta_groups(&before, &before);
+    assert!(broken.is_empty());
+    assert_eq!(g.len(), 1, "no movement must be a single delta group");
+    assert_eq!(g.keys().next(), Some(&(0, 0)));
+
+    let shifted: BTreeMap<String, Pose> = before
+        .iter()
+        .map(|(r, p)| (r.clone(), sym(p.0 + 8.89, p.1)))
+        .collect();
+    let (g, broken) = user_delta_groups(&before, &shifted);
+    assert!(broken.is_empty());
+    assert_eq!(
+        g.len(),
+        1,
+        "a uniform page-fit translation must be a single delta group"
+    );
+    assert_eq!(g.keys().next(), Some(&(8890, 0)));
+
+    let mut torn = shifted.clone();
+    torn.insert("R2".to_string(), sym(20.0 + 8.89 + 1.27, 10.0));
+    let (g, broken) = user_delta_groups(&before, &torn);
+    assert!(broken.is_empty());
+    assert_eq!(
+        g.len(),
+        2,
+        "ONE symbol out of step by a single grid cell must still be caught: {g:?}"
+    );
+
+    // …and a rotation is never absorbed by any translation.
+    let mut rotated = shifted.clone();
+    rotated.insert(
+        "R3".to_string(),
+        (30.0 + 8.89, 10.0, 90.0, false, "Device:R_US".to_string()),
+    );
+    let (_, broken) = user_delta_groups(&before, &rotated);
+    assert_eq!(broken.len(), 1, "a rotation must be reported as broken");
+}
+
+/// Check (3) of P11: no measured geometric defect count grows on the
+/// grown sheet. Factored out of the test body only to keep it readable.
+fn defect_regressions(name: &str, before: &Metrics, after: &Metrics) -> Vec<String> {
+    [
+        ("V12 wire↔body", before.v12_wire_body, after.v12_wire_body),
+        (
+            "V13 label↔body",
+            before.v13_label_body,
+            after.v13_label_body,
+        ),
+        (
+            "symbol body overlap",
+            before.body_overlap,
+            after.body_overlap,
+        ),
+    ]
+    .into_iter()
+    .filter(|(_, b, a)| a > b)
+    .map(|(label, b, a)| format!("{name}: {label} rose {b} → {a} on the grown sheet"))
+    .collect()
+}
+
 /// **P11 — cache-path stability.** See the module doc.
 ///
 /// Editing a netlist and re-converting into the same output directory
 /// (so the ADR-4 layout-cache sidecar is read) must leave every
-/// pre-existing user symbol at its exact pose, must still pass the CLI's
-/// post-emit connectivity check, and must not make any measured
-/// geometric defect count worse than the base sheet's.
+/// pre-existing user symbol at its pose **relative to every other**,
+/// must still pass the CLI's post-emit connectivity check, and must not
+/// make any measured geometric defect count worse than the base sheet's.
 ///
-/// **Measured: 0 of 2 user symbols move on `rc_lowpass`+R2/C2, and 0 of
-/// 8 on `common_emitter`+CB** — with both conversions passing the
-/// connectivity check. This is the attributability property ADR-17 set
-/// out to deliver; the cache already delivers it.
+/// # What "relative to every other" means, and why it is not a relaxation
+///
+/// The check groups the pre-existing user symbols by their `(dx, dy,
+/// drot, dmirror)` delta and requires **exactly one group**: every
+/// symbol moved by the same vector, or none moved at all. Any symbol
+/// that moves differently from the rest is a failure, listed by name.
+/// Rotation and mirror must be identical (a non-zero `drot` fails).
+///
+/// The single permitted common vector is the **V15 page-fit
+/// translation**, which is not a placement decision at all: the emitter
+/// shifts each sheet's content bounding box so its top-left corner lands
+/// at `PAGE_MARGIN_MM`, so *any* new element that extends the bbox
+/// leftward or upward translates the whole sheet by one uniform delta.
+/// That is true of every placer, and it is not a new idea in this file:
+/// **P11b already does it** — `residual_movers` factors out "the single
+/// uniform page translation V15 may apply", taking the modal
+/// integer-grid delta, precisely so the metric can grade locality
+/// instead of the page frame. P11 was simply never updated to match its
+/// own sibling. `baseline_lock`'s history records the same event as a
+/// non-event ("the V15 offset moved by a single per-fixture delta …
+/// Symbol poses relative to one another are unchanged").
+///
+/// This was corrected during the ADR-23 promotion of `flow-seed`, where
+/// it fired: `common_emitter`+CB puts the new bypass cap 8.89 mm left of
+/// the previous leftmost symbol, so all eight pre-existing symbols
+/// translate by exactly `(+8.89, 0)` and nothing else changes. The old
+/// absolute-pose comparison reported that as "8 symbols moved through
+/// the layout cache" — a conclusion about the *page origin* dressed up
+/// as one about placement locality, which is MEMORY "verify what a
+/// number measures" exactly. **The correction is not a budget and it is
+/// still zero-slack**: two distinct deltas fail, one symbol out of step
+/// fails, and the control arm proves it is not blind — under
+/// `S2K_PLACER=champion` both cases still measure a single delta of
+/// `(0, 0)`, i.e. the strictly stronger old property.
+///
+/// **Measured: one delta group on both cases** — `(0, 0)` on
+/// `rc_lowpass`+R2/C2 and `(+8.89, 0)` on `common_emitter`+CB — with
+/// both conversions passing the connectivity check. This is the
+/// attributability property ADR-17 set out to deliver; the cache
+/// delivers it, up to the page frame.
 #[test]
 fn cache_path_keeps_pre_existing_symbols_in_place() {
     let mut failures = Vec::new();
@@ -557,28 +735,76 @@ fn cache_path_keeps_pre_existing_symbols_in_place() {
         let after_glyphs = glyph_poses(&parse_sch(&out));
         let after_metrics = metrics(&out);
 
-        // (1) No pre-existing USER symbol changes pose.
-        let moved: Vec<&String> = before
-            .iter()
-            .filter(|(r, _)| !is_glyph(r))
-            .filter(|(r, p)| after.get(*r).is_none_or(|q| q != *p))
-            .map(|(r, _)| r)
-            .collect();
-        if !moved.is_empty() {
+        // (1) Every pre-existing USER symbol keeps its pose relative to
+        //     every other: exactly ONE delta group, drot = 0, mirror
+        //     unchanged. The one permitted common delta is the V15
+        //     page-fit translation — see this test's doc comment for why
+        //     that is a fidelity correction and not a budget.
+        let (groups, broken) = user_delta_groups(&before, &after);
+        if !broken.is_empty() {
             failures.push(format!(
-                "{}: adding `{}` moved {} pre-existing user symbol(s) through the layout \
-                 cache: {moved:?}",
+                "{}: adding `{}` changed more than position on {} pre-existing user symbol(s): \
+                 {broken:?}",
                 case.name,
                 case.added.trim().replace('\n', "; "),
-                moved.len(),
+                broken.len(),
             ));
         }
+        if groups.len() > 1 {
+            let detail: Vec<String> = groups
+                .iter()
+                .map(|((dx, dy), members)| {
+                    format!(
+                        "delta ({:.2}, {:.2}) mm on {members:?}",
+                        um_to_mm(*dx),
+                        um_to_mm(*dy)
+                    )
+                })
+                .collect();
+            failures.push(format!(
+                "{}: adding `{}` moved pre-existing user symbols by {} DIFFERENT deltas through \
+                 the layout cache (exactly one is permitted — the V15 page-fit translation): {}",
+                case.name,
+                case.added.trim().replace('\n', "; "),
+                groups.len(),
+                detail.join("; "),
+            ));
+        }
+        // Scoreboard (ADR-23): the graded quantity is how many symbols
+        // fall OUTSIDE the largest delta group — 0 when the sheet merely
+        // translated, non-zero the moment the cache path really tears.
+        // This verifier reported nothing to the sink before the
+        // promotion, so no scoreboard could see it move; see ADR-23
+        // § "the promotion" for the two blind cells that cost.
+        let largest = groups.values().map(Vec::len).max().unwrap_or(0);
+        let out_of_step = groups.values().map(Vec::len).sum::<usize>() - largest;
+        common::scoreboard::record_count("p11.cache_out_of_step", case.name, out_of_step);
+
+        // The single common delta (the page-fit translation), applied to
+        // the pre-existing glyph geometry before comparing it.
+        let (page_shift_x, page_shift_y) = groups
+            .iter()
+            .max_by_key(|(_, members)| members.len())
+            .map_or((0.0, 0.0), |((dx, dy), _)| (um_to_mm(*dx), um_to_mm(*dy)));
 
         // (2) Pre-existing glyph GEOMETRY survives, matched by pose and
-        //     lib_id rather than by refdes.
+        //     lib_id rather than by refdes, and translated by the same
+        //     page-fit delta as the user symbols.
+        // Compared with a tolerance, not by `==`: the shifted coordinate
+        // is a float SUM, so `40.64 + 8.89` is not bit-equal to the
+        // emitted `49.53`. A 1e-6 mm window is six orders of magnitude
+        // below the 1.27 mm grid, so it can never merge two grid poses.
         let lost = before_glyphs
             .iter()
-            .filter(|p| !after_glyphs.contains(p))
+            .filter(|p| {
+                !after_glyphs.iter().any(|q| {
+                    (q.0 - (p.0 + page_shift_x)).abs() < 1e-6
+                        && (q.1 - (p.1 + page_shift_y)).abs() < 1e-6
+                        && (q.2 - p.2).abs() < 1e-6
+                        && q.3 == p.3
+                        && q.4 == p.4
+                })
+            })
             .count();
         if lost > case.glyph_pose_budget {
             failures.push(format!(
@@ -589,30 +815,11 @@ fn cache_path_keeps_pre_existing_symbols_in_place() {
         }
 
         // (3) No geometric defect count grows on the extended sheet.
-        for (label, b, a) in [
-            (
-                "V12 wire↔body",
-                before_metrics.v12_wire_body,
-                after_metrics.v12_wire_body,
-            ),
-            (
-                "V13 label↔body",
-                before_metrics.v13_label_body,
-                after_metrics.v13_label_body,
-            ),
-            (
-                "symbol body overlap",
-                before_metrics.body_overlap,
-                after_metrics.body_overlap,
-            ),
-        ] {
-            if a > b {
-                failures.push(format!(
-                    "{}: {label} rose {b} → {a} on the grown sheet",
-                    case.name,
-                ));
-            }
-        }
+        failures.extend(defect_regressions(
+            case.name,
+            &before_metrics,
+            &after_metrics,
+        ));
     }
     assert!(
         failures.is_empty(),

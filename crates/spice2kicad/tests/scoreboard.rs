@@ -217,6 +217,19 @@ const METRICS: &[Metric] = &[
         1.0,
         "power glyph over a foreign body (issue [3])",
     ),
+    // Registered 2026-08-18, after the flow-seed promotion found the
+    // hard way that a verifier which reports nothing to the sink is a
+    // cell no scoreboard can see move. Both of these graded Tier-1/2
+    // properties silently; both moved under the promotion (one for the
+    // worse) and neither appeared in the table that graded it. If you
+    // add a fixture-enumerating verifier, give it a `record_count` on
+    // the line before its assertion — that is the whole contract (D2).
+    m(
+        "v13.9_foreign_over_glyph",
+        Tier::T1,
+        1.0,
+        "foreign label/wire over a power-glyph body",
+    ),
     // --- Tier 2 — aesthetic refinement ------------------------------
     m("v5", Tier::T2, 1.0, "pin outward-direction violations"),
     m("v16.bends", Tier::T2, 1.0, "V16 bends (B)"),
@@ -245,6 +258,36 @@ const METRICS: &[Metric] = &[
         Tier::T2,
         1.0,
         "P11b cache-less locality: pre-existing symbols moved",
+    ),
+    m(
+        "p11.cache_out_of_step",
+        Tier::T2,
+        1.0,
+        "P11 cache path: symbols outside the common page-fit delta",
+    ),
+    // Junction-dot parity (ADR-27). Recorded by `junction_parity.rs`
+    // since it landed, but never registered here, so the ADR-23 D9
+    // grading could not see `two_stage_amp`'s four cross-net contact
+    // points fall 4 -> 0 under `flow-seed`. Tier 1: a junction dot is a
+    // readability/ink-correctness property, and its own ratchet is
+    // zero-slack in both directions.
+    m(
+        "junction.missing",
+        Tier::T1,
+        1.0,
+        "junction dots KiCad's rule requires but the emitter omits",
+    ),
+    m(
+        "junction.spurious",
+        Tier::T1,
+        1.0,
+        "junction dots the emitter draws that KiCad's rule forbids",
+    ),
+    m(
+        "junction.cross_net",
+        Tier::T1,
+        1.0,
+        "cross-net collinear contact points (latent short, ADR-27)",
     ),
     // --- informational ----------------------------------------------
     m("q6.cov", Tier::Info, 0.0, "Q6 balance CoV (informational)"),

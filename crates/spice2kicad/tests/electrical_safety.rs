@@ -1975,6 +1975,15 @@ fn v13_pwr_flag_graphic_clear_of_power_glyphs() {
 #[allow(clippy::match_same_arms)]
 fn v5_violation_budget(name: &str) -> usize {
     match name {
+        // --- ADR-23 PROMOTION of `--placer=flow-seed` to the default
+        // (owner-approved, 2026-08-18) --------------------------------
+        //
+        // Every arm below is re-recorded at the NEW DEFAULT placer's
+        // measured count (ADR-23 D4). V5 falls 11 points across the
+        // suite; `opamp_inverting_real` is the only fixture that rises
+        // (0 -> 1) and needs an explicit arm because the catch-all is 0.
+        // A whole-placer swap is the ONLY sanctioned way one of these
+        // rises; an ordinary change still may not touch them.
         // Ratcheted high-water marks (current measured count on master).
         //
         // These were RE-BASELINED when the pin-angle inversion in
@@ -2005,7 +2014,11 @@ fn v5_violation_budget(name: &str) -> usize {
         // fixtures, putting RC1/RC2 on their collector columns so both
         // collector trunks leave the pin outward. Ratchet DOWN.
         "multivibrator" => 3,
-        "common_emitter" | "opamp_inverting" => 1,
+        // 1 -> 0 on BOTH under the promoted flow-seed default: the
+        // bases (`Q1.1`) and the feedback-trunk pin (`RF.1`) now sit in
+        // their own signal column, so the trunk leaves outward.
+        // Ratchet DOWN.
+        "common_emitter" | "opamp_inverting" => 0,
         // PRE-EXISTING, newly VISIBLE: `named_rails` was absent from
         // `SHEETS` until the fixture lists were unified, so nothing ever
         // graded it. Nothing moved — the fixture is simply now measured.
@@ -2016,7 +2029,9 @@ fn v5_violation_budget(name: &str) -> usize {
         // MEMORY "flow-orientation wall" records that a seed/SA
         // orientation tie-break is the wrong lever here. Ratchets down
         // when the v0.2 placer redesign lands.
-        "named_rails" => 2,
+        // 2 -> 1 with the promoted flow-seed default (`RIN.2` clears;
+        // `RPU.2` still runs along the shared column). Ratchet DOWN.
+        "named_rails" => 1,
         // V5 0 → 2. Channel-row banding (Option B, OWNER SIGN-OFF
         // 2026-07-20) pins each inverting-amp channel to its textbook
         // seed facing (input-left, output-right) so the deck reads
@@ -2092,7 +2107,11 @@ fn v5_violation_budget(name: &str) -> usize {
         // a fixture that did not exist in the graded suite before, NOT a
         // loosened budget on an existing one — no other fixture's count
         // moved. Ratchet DOWN.
-        "two_stage_amp" => 5,
+        // 5 -> 2 with the promoted flow-seed default: the chain
+        // `in->b1->c1->b2->c2->out` finally gets its five columns, so
+        // the rail stubs land in their stage's column instead of
+        // seeding column 0. Ratchet DOWN.
+        "two_stage_amp" => 2,
         // --- F2 (v0.2 roadmap, second benchmark wave) NEW-GEOMETRY
         // BASELINES. Same class as every arm above — a shared-net wire
         // leaving a pin sideways instead of outward. Zero slack; these
@@ -2104,8 +2123,11 @@ fn v5_violation_budget(name: &str) -> usize {
         // visible top-level feedback arcs, which is the coincidence F2
         // was looking for — the feedback trunks are where the pins face
         // wrong.
-        "sallen_key_lpf" => 5,
-        "cascode_amp" => 4,
+        // 5 -> 3 with the promoted flow-seed default. Ratchet DOWN.
+        "sallen_key_lpf" => 3,
+        // 4 -> 1 with the promoted flow-seed default — the largest
+        // single-fixture V5 improvement in the swap. Ratchet DOWN.
+        "cascode_amp" => 1,
         "wien_bridge_osc" => 2,
         // --- F3 (Tier-0 router fix, ADR-24) NEW-GEOMETRY BASELINES for
         // the two fixtures promoted out of `tests/f0_defects.rs`. Same
@@ -2121,14 +2143,19 @@ fn v5_violation_budget(name: &str) -> usize {
         // 5 -> 1, rail-stub SIDE fix: four of the five were the R-5
         // rail-pin defect showing up as V5 (RB/RC placed with their rail
         // pin facing into the circuit). Ratchet DOWN.
-        "shunt_feedback_amp" => 1,
+        // 1 -> 0 with the promoted flow-seed default. Ratchet DOWN.
+        "shunt_feedback_amp" => 0,
+        // 0 -> 1 with the promoted flow-seed default: `RIN.1`. This is
+        // the ONE V5 cell the promotion pays, against eleven it wins,
+        // and it is recorded here rather than hidden in the catch-all
+        // so the zero-slack ratchet still trips if it grows to 2.
+        "opamp_inverting_real" => 1,
         // `lc_ladder_lpf` is CLEAN, and deliberately kept as the control
         // arm: it is the other new fixture with a drawn source and the
         // only one of the four with zero V5 residue, so "drawn stimulus"
         // is demonstrably not what drives the metric.
         //
-        // diff_pair, port_shapes, opamp_inverting_real, lc_ladder_lpf:
-        // zero violations.
+        // diff_pair, port_shapes, lc_ladder_lpf: zero violations.
         _ => 0,
     }
 }
@@ -2909,7 +2936,7 @@ fn no_foreign_label_or_wire_over_power_glyph_body() {
     // to the router obstacle set (glyphs early-return None there). This
     // models the glyph body as an obstacle for foreign labels/wires ONLY
     // (a glyph is never an obstacle for its OWN net's stub). Budget 0.
-    let mut failures: Vec<String> = Vec::new();
+    let mut xf = common::xfail::Guard::new("no_foreign_label_or_wire_over_power_glyph_body");
     for name in SHEETS {
         let src = fixtures_dir().join(format!("{name}.cir"));
         let tmp = tempdir(name);
@@ -2954,18 +2981,21 @@ fn no_foreign_label_or_wire_over_power_glyph_body() {
                 }
             }
         }
+        // Scoreboard (ADR-23). This verifier reported NOTHING to the
+        // sink until the flow-seed promotion, so the scoreboard that
+        // graded that promotion was blind to it — and it is the cell
+        // that moved. Registered now so no future placer comparison
+        // repeats the omission.
+        common::scoreboard::record_count("v13.9_foreign_over_glyph", name, hits);
         let b = v13_foreign_over_glyph_budget(name);
-        if hits > b {
-            failures.push(format!(
-                "{name}: {hits} foreign label/wire over power-glyph body > budget {b}"
-            ));
-        }
+        xf.record(
+            name,
+            (hits > b).then(|| {
+                format!("{name}: {hits} foreign label/wire over power-glyph body > budget {b}")
+            }),
+        );
     }
-    assert!(
-        failures.is_empty(),
-        "item(2) foreign label/wire over power-glyph body:\n  {}",
-        failures.join("\n  "),
-    );
+    xf.finish();
 }
 
 #[test]

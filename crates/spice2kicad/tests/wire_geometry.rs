@@ -209,6 +209,20 @@ const FIXTURES: &[&str] = &[
 /// several `(wire …)` segments, which is exactly the re-segmentation
 /// sensitivity the ink graph is built to remove.
 const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
+    // --- ADR-23 PROMOTION of `--placer=flow-seed` (owner-approved,
+    // 2026-08-18) -------------------------------------------------------
+    //
+    // Every literal below is re-recorded at the NEW DEFAULT placer's
+    // measured value, per ADR-23 D4 ("on promotion, `baseline_lock` and
+    // every per-fixture literal are regenerated at the challenger's
+    // values and the zero-slack regime resumes"). This is the one
+    // sanctioned way a V16 literal rises, and it is NOT available to an
+    // ordinary change: a whole placer is a different global optimum.
+    // Aggregate across the suite: B −5, J −5 (V16 is Tier 2). The
+    // per-fixture direction is mixed and that is expected; the wins are
+    // `two_stage_amp` B 33 → 17 / J 9 → 5 and `named_rails` (2,2) → (1,1),
+    // the losses `sallen_key_lpf` B 6 → 12 and `opamp_inverting` B 3 → 6.
+
     // B 3 -> 0. The series-horizontal flow-root fallback
     // (`idioms::signal_net_depth`) now draws `rc_lowpass` identically to
     // `rc_lowpass_ports` — R1 horizontal, C1 dropped straight below `out` —
@@ -224,7 +238,7 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     // `multivibrator`; undoing it restores the pre-M4 measured value. This
     // is a restoration, not a budget bump — the literal is again exactly
     // what `master` measured before M4, and it ratchets DOWN only.
-    ("named_rails", 2, 2),
+    ("named_rails", 1, 1),
     // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE, owner-approved.
     // `rc_phase_shift` — a three-section RC ladder feeding a CE stage —
     // is the long-chain circuit the current placer sprawls: B = 19 is
@@ -234,7 +248,7 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     // moved no v0.1 fixture's (B, J). Ratchet DOWN.
     // B 19 -> 10, rail-stub SIDE fix: RB above `b` removes the fold-back
     // the ladder trunks used to jog around. Ratchet DOWN.
-    ("rc_phase_shift", 10, 3),
+    ("rc_phase_shift", 10, 2),
     // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE. `two_stage_amp` — two
     // cascaded CE stages sharing one rail — is the new worst fixture in
     // the suite on both counts: B = 33 (from 56 raw segments over 45
@@ -243,7 +257,7 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     // ride along with it. Deliberately POOR — this is exactly the Tier-2
     // V16 headroom F0 exists to expose, and promoting the fixture moved
     // no other fixture's (B, J) by a single count. Ratchet DOWN.
-    ("two_stage_amp", 33, 9),
+    ("two_stage_amp", 17, 5),
     // --- F2 (v0.2 roadmap, second benchmark wave) NEW-GEOMETRY
     // BASELINES, zero slack, ratchet DOWN only. Adding them moved no
     // existing fixture's (B, J) by a single count.
@@ -252,7 +266,7 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     // COLUMN (Q2's emitter on Q1's collector, a three-resistor bias
     // ladder) and the placer has no stack model, so every vertical
     // relationship is drawn as a detour.
-    ("cascode_amp", 12, 3),
+    ("cascode_amp", 13, 4),
     // B = 16 on ten graded elements. CORRECTION to the claim in this
     // commit's message and in `docs/v0.2-roadmap.md` § F2 as first
     // written: 1.6 bends/element is the SECOND-worst density in the
@@ -264,7 +278,7 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     // spends 16 bends on it. That is the long-chain / no-fold headroom
     // F2 exists to expose.
     ("lc_ladder_lpf", 16, 2),
-    ("sallen_key_lpf", 6, 3),
+    ("sallen_key_lpf", 12, 1),
     // B = 10 on eight graded elements: an oscillator is a pure cycle,
     // and the placer lays it out as if it were a chain, so the loop
     // closes with a long return path.
@@ -275,14 +289,14 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     // them moved no existing fixture's literal.
     ("sallen_key_driven", 13, 4),
     // B 12 -> 11, rail-stub SIDE fix. Ratchet DOWN.
-    ("shunt_feedback_amp", 11, 2),
+    ("shunt_feedback_amp", 12, 3),
     // B 10 → 4. Phase 4.5's acceptance objective gained the V16
     // ink-graph bend count as its FINAL lexicographic key, after
     // (V13, V12, V5), so the refiner now separates orientations that tie
     // on every higher-tier count by how straight the resulting ink is.
     // COUT lands at rot 0 instead of rot 180 and Q1 unmirrors. V5 is
     // unchanged at 1 and no Tier-0/Tier-1 count moved. Ratchet DOWN.
-    ("common_emitter", 4, 3),
+    ("common_emitter", 4, 4),
     // B 10 -> 8: `RC1`/`RC2` now sit on their transistors' collector
     // columns, so each collector trunk is one straight drop instead of a
     // dog-leg.
@@ -314,8 +328,8 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     // 3-pin net, so J >= k-2 = 1 is its topological floor; the previous
     // J = 0 came from a degenerate collinear layout. ESCAPE REQUEST for
     // the J rise, pending owner sign-off (see the commit message).
-    ("opamp_inverting_real", 5, 1),
-    ("opamp_inverting", 3, 0),
+    ("opamp_inverting_real", 6, 1),
+    ("opamp_inverting", 6, 0),
     ("port_shapes", 4, 0),
     // B 2 → 0 (stale-slack cleanup). The prior mark of 2 described the
     // best layout reachable *then* — R1 at rot 180 putting both `out` pins

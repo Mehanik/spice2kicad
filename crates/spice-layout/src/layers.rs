@@ -52,6 +52,17 @@ pub struct LayerAssignment {
 /// 3. Run iterative Tarjan SCC + edge reversal to break cycles.
 /// 4. Longest-path layering (topological sort, sources at layer 0).
 /// 5. Barycentric Y rank within each layer (element index order for v0.1).
+///
+/// **Pinned to [`Placer::Champion`], deliberately, and NOT to
+/// [`Placer::default`].** This entry point is not the placer's seed —
+/// it is a *fixed reference layering* for two consumers that must not
+/// move when the default placer changes: `cost::layer_order` (inert
+/// either way: the variant only alters the no-source fallback, which
+/// `layer_order` short-circuits on) and the Q3 flow-monotonicity
+/// verifier, whose recorded budgets are stated against this reference.
+/// Repointing it at the default would silently redefine a graded
+/// metric. The placer itself always goes through
+/// [`assign_x_layers_with`] with the selected variant.
 #[must_use]
 pub fn assign_x_layers(checked: &CheckedNetlist, classes: &NetClassMap) -> LayerAssignment {
     assign_x_layers_with(checked, classes, Placer::Champion)

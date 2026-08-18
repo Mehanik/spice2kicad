@@ -1557,9 +1557,22 @@ mod severed_guard_tests {
             spice_parser::parse(&src, spice_diagnostics::FileId(0)).expect("parse fixture");
         let resolved = spice_resolve::resolve(&outcome.netlist, &library).expect("resolve");
         let (checked, _) = spice_policy::check(resolved).expect("policy check");
+        // PINNED to the champion placer, not to `Placer::default()`.
+        // Both tests below state in their own doc comments that they
+        // measure a **champion** placement — the ADR-17 `COUT` rot-180
+        // candidate and the ADR-25 `C1` pin-reach pose are each a
+        // specific pose of a specific settled sheet. When `flow-seed`
+        // was promoted to the default (ADR-23, 2026-08-18) the default
+        // sheet changed and both cases evaporated: `COUT` rot-180 no
+        // longer severs (severed=0) and `C1` settles at R270 instead of
+        // R90. That is not the guards getting weaker — it is the
+        // fixtures moving out from under the probe. Keep the control
+        // arms on the geometry they were derived from; re-derive
+        // deliberately (and say so) if they are ever re-pointed.
         let opts = LayoutOptions {
             refine: true,
             refine_iterations: 200,
+            placer: spice_layout::Placer::Champion,
             ..LayoutOptions::default()
         };
         let meta =

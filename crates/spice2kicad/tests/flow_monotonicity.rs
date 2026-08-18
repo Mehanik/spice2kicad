@@ -277,12 +277,27 @@ fn q3_violations(elems: &[FlowElem]) -> Vec<(String, String)> {
 /// `master`. CLAUDE.md § "Budgets are ratchets, not knobs": these
 /// literals only ever go **down**.
 const Q3_FLOW_MONOTONICITY_BUDGET: &[(&str, u32)] = &[
+    // --- ADR-23 PROMOTION of `--placer=flow-seed` to the default
+    // (owner-approved, 2026-08-18): re-recorded at the new default's
+    // measured counts. Q3 nets -4 (two_stage_amp 8 -> 4, cascode_amp
+    // 3 -> 2, shunt_feedback_amp 3 -> 2, named_rails 1 -> 0; RISES on
+    // rc_phase_shift 2 -> 4 and common_emitter 1 -> 2).
+    //
+    // Read the rises against what Q3's reference model IS: the intended
+    // flow comes from `spice_layout::layers::assign_x_layers`, which is
+    // deliberately still PINNED to the champion's rail-hop layering
+    // (see its doc comment) so that this metric's definition did not
+    // move underneath the promotion. Q3 therefore grades the new
+    // default against the OLD skeleton's idea of flow, which is the
+    // conservative choice and the only one that keeps these literals
+    // comparable across the swap. Re-pointing it is a separate,
+    // separately-graded change.
     ("rc_lowpass", 0),
     ("rc_lowpass_ports", 0),
     // R1 (layer < R2) is drawn right of R2 on the emitted sheet: the
     // rail-stub column idiom re-columns the parts against the placer's
     // own layer order. A Wall-1/Wall-2 flow fix should drive this to 0.
-    ("common_emitter", 1),
+    ("common_emitter", 2),
     // RB2/RC1 (bias + collector loads) land right of the transistors /
     // cross-coupling caps their layer places upstream. Systemic on the
     // symmetric multivibrator; the flow work targets it.
@@ -295,28 +310,28 @@ const Q3_FLOW_MONOTONICITY_BUDGET: &[(&str, u32)] = &[
     ("port_shapes", 0),
     ("opamp_definition_level", 0),
     // RPU (pull-up rail stub) drawn right of the CL it shares `out` with.
-    ("named_rails", 1),
+    ("named_rails", 0),
     // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE, owner-approved.
     // Four inversions (Q1→RE, RB→CIN, RB→Q1, RC→Q1) against a suite
     // whose previous worst was 1. Deliberately POOR: this is precisely
     // the flow-monotonicity headroom F0 exists to expose. Ratchet DOWN.
     // 4 -> 2: the rail-stub SIDE fix put RB above its node, so the CE
     // stage no longer folds back under the ladder. Ratchet DOWN.
-    ("rc_phase_shift", 2),
+    ("rc_phase_shift", 4),
     // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE. Eight Q3 inversions —
     // twice `rc_phase_shift`'s 4 and the worst in the suite. The two
     // stages' bias dividers and collector loads (RB1/RB3, RC1/RC2) are
     // each drawn right of the parts their layer places downstream, so
     // both stages read right-to-left locally. Deliberately POOR: this is
     // the flow headroom F0 exists to expose. Ratchet DOWN.
-    ("two_stage_amp", 8),
+    ("two_stage_amp", 4),
     // --- F2 (v0.2 roadmap, second benchmark wave) NEW-GEOMETRY
     // BASELINES, zero slack, ratchet DOWN only.
     //
     // Three inversions: the cascode's bias chain (RB1/RB2/RB3) is drawn
     // right-to-left against the layer order, which is what a placer with
     // no vertical-stack model does to a circuit that IS a stack.
-    ("cascode_amp", 3),
+    ("cascode_amp", 2),
     // Two inversions on a chain that is otherwise the suite's most
     // strictly left-to-right circuit — worth watching, because this is
     // the FIRST fixture whose signal graph has a real root (its source
@@ -334,7 +349,7 @@ const Q3_FLOW_MONOTONICITY_BUDGET: &[(&str, u32)] = &[
     ("sallen_key_driven", 3),
     // RISE 2 -> 3, rail-stub SIDE fix (Tier 2, global-improvement escape,
     // AWAITING OWNER SIGN-OFF). Same re-basing as the Q5 entry.
-    ("shunt_feedback_amp", 3),
+    ("shunt_feedback_amp", 2),
 ];
 
 #[test]

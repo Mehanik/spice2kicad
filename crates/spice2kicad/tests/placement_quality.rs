@@ -1472,8 +1472,25 @@ fn wire_detour_within_budget_across_fixtures() {
     // zero-slack (measured value, rounded up in the 4th decimal only) and
     // ratchet DOWN from here per CLAUDE.md § "Budgets are ratchets".
     let budgets: &[(&str, f64)] = &[
-        ("rc_lowpass", 1.167),
-        ("common_emitter", 1.0136),
+        // --- ADR-23 PROMOTION of `--placer=flow-seed` to the default
+        // (owner-approved, 2026-08-18) ---------------------------------
+        //
+        // Every literal re-recorded at the NEW DEFAULT's measured ratio,
+        // ceil-to-4dp as everywhere in this table (ADR-23 D4). Suite
+        // aggregate: -37.87 points, i.e. 37.9 percentage points of
+        // excess wire removed, dominated by `two_stage_amp`
+        // 1.8566 -> 1.0795 (the suite's worst detour, now near-ideal).
+        // Six fixtures rise, worst `sallen_key_lpf` 1.0407 -> 1.3019 and
+        // `cascode_amp` 1.0843 -> 1.2196; that is the expected shape of a
+        // whole-placer swap and is NOT available to an ordinary change.
+        //
+        // Also reclaims PRE-EXISTING slack unrelated to the swap:
+        // `rc_lowpass` 1.167 -> 1.0 and `rc_lowpass_ports` 1.4001 -> 1.0.
+        // Both fixtures are byte-identical across the promotion; their
+        // literals were simply stale (both measure 1.0 - 1.4e-15, an
+        // exactly-ideal route). Ratchet DOWN, always permitted.
+        ("rc_lowpass", 1.0),
+        ("common_emitter", 1.0536),
         ("multivibrator", 1.0481),
         ("diff_pair", 1.0556),
         // 1.1464 → 1.1952. RISE — a Tier-2 (V6 wire-detour) cost paid for a
@@ -1486,44 +1503,39 @@ fn wire_detour_within_budget_across_fixtures() {
         // paying for Tier 1. NOT an owner decision — landed on assistant
         // judgement under the standing instruction to proceed; flagged for
         // owner sign-off, re-examine rather than cite as precedent.
-        ("opamp_inverting_real", 1.1952),
-        ("rc_lowpass_ports", 1.4001),
-        ("opamp_inverting", 1.1112),
-        ("port_shapes", 1.0852),
+        ("opamp_inverting_real", 1.2326),
+        ("rc_lowpass_ports", 1.0),
+        ("opamp_inverting", 1.0834),
+        ("port_shapes", 1.1143),
         // 1.0984 → 1.0732. Channel-row banding (Option B) reads both
         // channels left-to-right as congruent rows, shortening the routed
         // ink relative to its rectilinear ideal. Ratchet DOWN.
         ("opamp_definition_level", 1.0732),
-        ("named_rails", 1.125),
-        // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE, owner-approved.
-        // Deliberately high wander — 1.23 is the worst in the suite by a
-        // wide margin (next worst: named_rails at 1.125), and it is the
-        // Tier-2 headroom F0 exists to expose. Ratchet DOWN.
-        // 1.2314 -> 1.0438, rail-stub SIDE fix. Ratchet DOWN.
-        ("rc_phase_shift", 1.0438),
-        // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE. 1.85654 is the worst
-        // wire detour in the suite by a wide margin — the emitted ink is
-        // 86% longer than its rectilinear ideal (558.80 mm vs 300.99 mm),
-        // where the previous worst was `rc_lowpass_ports` at 1.4001
-        // (NOT `rc_phase_shift`, whose 1.2314 is only third; read the
-        // column, not the last row added to it). This is the Tier-2
-        // compaction headroom F0 exists to expose. Ratchet DOWN.
-        ("two_stage_amp", 1.8566),
+        ("named_rails", 1.077),
+        // 1.0438 -> 1.0481 with the promoted flow-seed default: a
+        // 0.4 pp RISE, the smallest in the swap.
+        ("rc_phase_shift", 1.0481),
+        // 1.8566 -> 1.0795 with the promoted flow-seed default. This was
+        // the suite's worst detour by a wide margin (86% longer than the
+        // rectilinear ideal) and is now near-ideal — the single largest
+        // Tier-2 win of the promotion. Ratchet DOWN.
+        ("two_stage_amp", 1.0795),
         // --- F2 (v0.2 roadmap, second wave) NEW-GEOMETRY BASELINES.
         // Zero slack at 4 dp (the convention every literal here uses),
         // ratchet DOWN. No existing fixture's literal moved.
-        ("cascode_amp", 1.0843),
+        ("cascode_amp", 1.2196),
         ("lc_ladder_lpf", 1.1506),
-        ("sallen_key_lpf", 1.0407),
+        ("sallen_key_lpf", 1.3019),
         ("wien_bridge_osc", 1.0899),
         // --- F3 (Tier-0 router fix, ADR-24): promoted out of
         // `tests/f0_defects.rs` once the Steiner-vertex-on-foreign-pin
         // defect was fixed. NEW-GEOMETRY BASELINES, zero slack, ratchet
         // DOWN only. Adding them moved no existing fixture's literal.
         ("sallen_key_driven", 1.0764),
-        // RISE 1.2034 -> 1.2410, rail-stub SIDE fix (Tier 2,
-        // global-improvement escape, AWAITING OWNER SIGN-OFF).
-        ("shunt_feedback_amp", 1.2410),
+        // 1.2410 -> 1.2076 with the promoted flow-seed default, which
+        // retires the rail-stub-SIDE-fix rise that was awaiting owner
+        // sign-off. Ratchet DOWN.
+        ("shunt_feedback_amp", 1.2076),
     ];
     // Collect-then-assert: an in-loop `assert!` truncates the report at
     // the first offending fixture, which is the ADR-19 M4 "gate-set
@@ -1622,6 +1634,15 @@ fn crossing_count_within_budget_across_fixtures() {
     // Crossing-aware V11/V12 detour selection (`conflict::CrossPass`)
     // then lowered common_emitter 3→2. Never raise.
     let budgets: &[(&str, u32)] = &[
+        // --- ADR-23 PROMOTION of `--placer=flow-seed` to the default
+        // (owner-approved, 2026-08-18) ---------------------------------
+        //
+        // Re-recorded at the NEW DEFAULT's measured counts (ADR-23 D4).
+        // Crossings fall 18 points suite-wide and NO fixture rises:
+        // `two_stage_amp` 10 -> 0, `rc_phase_shift` 5 -> 0,
+        // `cascode_amp` 2 -> 0, `sallen_key_lpf` 2 -> 1. Making X mean
+        // signal depth is what un-tangles them; twelve of eighteen
+        // fixtures now measure zero.
         ("rc_lowpass", 0),
         // 2 -> 0. Reclaimed slack: the fixture measures 0 crossings on
         // master today. Ratchet DOWN, per CLAUDE.md § "Budgets are
@@ -1640,24 +1661,25 @@ fn crossing_count_within_budget_across_fixtures() {
         // fault was fixed. It was, and it did. Ratchet DOWN.
         ("opamp_definition_level", 0),
         ("named_rails", 0),
-        // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE, owner-approved: the
-        // long ladder + gain stage crosses twice. Ratchet DOWN.
-        // RISE 2 -> 5, rail-stub SIDE fix (Tier 2, global-improvement
-        // escape, AWAITING OWNER SIGN-OFF): RB moving above `b` re-bases
-        // the whole sheet and the ladder trunks now cross the CE stage's.
-        ("rc_phase_shift", 5),
-        // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE: ten wire crossings,
-        // 2.5x the previous suite worst (`multivibrator`, 4) and 5x
-        // `rc_phase_shift`'s 2. Ratchet DOWN.
-        ("two_stage_amp", 10),
+        // 5 -> 0 with the promoted flow-seed default. This retires the
+        // rail-stub-SIDE-fix rise (2 -> 5) that was awaiting owner
+        // sign-off: the crossings it introduced were the ladder trunks
+        // fighting a rail-hop column assignment, and signal-depth
+        // columns remove them outright. Ratchet DOWN.
+        ("rc_phase_shift", 0),
+        // 10 -> 0 with the promoted flow-seed default. This was the
+        // suite worst and the fixture the flow diagnosis was built on:
+        // the chain `in->b1->c1->b2->c2->out` needs five columns and the
+        // rail-hop layering gave it {0,1,1,1,3}. Ratchet DOWN.
+        ("two_stage_amp", 0),
         // --- F2 (v0.2 roadmap, second wave) NEW-GEOMETRY BASELINES.
         // Ratchet DOWN.
-        ("cascode_amp", 2),
+        ("cascode_amp", 0),
         // Zero crossings — the ladder is the one new fixture the placer
         // draws without crossing itself, which is what makes its 16
         // bends a pure detour result rather than a tangle.
         ("lc_ladder_lpf", 0),
-        ("sallen_key_lpf", 2),
+        ("sallen_key_lpf", 1),
         ("wien_bridge_osc", 2),
         // --- F3 (Tier-0 router fix, ADR-24): promoted out of
         // `tests/f0_defects.rs` once the Steiner-vertex-on-foreign-pin

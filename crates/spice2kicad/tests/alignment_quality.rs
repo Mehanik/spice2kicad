@@ -304,6 +304,14 @@ fn q5_near_misses(elems: &[AlignElem]) -> Vec<(String, String)> {
 /// `master`. CLAUDE.md § "Budgets are ratchets, not knobs": these literals
 /// only ever go **down**.
 const Q5_NEAR_MISS_BUDGET: &[(&str, u32)] = &[
+    // --- ADR-23 PROMOTION of `--placer=flow-seed` to the default
+    // (owner-approved, 2026-08-18): re-recorded at the new default's
+    // measured counts. Q5 is the ONE Tier-2 aggregate the promotion
+    // loses: +3 points (two_stage_amp 7 -> 5 and rc_phase_shift 3 -> 2
+    // against RISES on opamp_inverting_real 0 -> 3, cascode_amp and
+    // common_emitter 3 -> 4, sallen_key_lpf 2 -> 3). Recorded, not
+    // argued away; Q5 counts NEAR-misses, so a placer that packs
+    // columns tighter naturally produces more of them.
     ("rc_lowpass", 0),
     ("rc_lowpass_ports", 0),
     // R1/R2 (bias divider) and Q1/RC/RE/CIN sit a cell or two off their
@@ -313,14 +321,14 @@ const Q5_NEAR_MISS_BUDGET: &[(&str, u32)] = &[
     // "M4 reverted"). The literal was first measured on the M4 tree; the
     // pre-M4 Y datum this restores costs one fewer near-miss here. Ratchets
     // down only.
-    ("common_emitter", 3),
+    ("common_emitter", 4),
     // C1/RC1, C2/RC2 (cross-coupling caps vs collector loads) and the
     // Q/RC collector columns land just off-axis on this symmetric fixture.
     ("multivibrator", 4),
     // Q1/RC1, Q2/RC2 collector columns a hair off their shared axis.
     ("diff_pair", 2),
     ("opamp_inverting", 1),
-    ("opamp_inverting_real", 0),
+    ("opamp_inverting_real", 3),
     ("port_shapes", 1),
     // RF1/X1, RF2/X2 feedback resistors sit just off their opamp's axis.
     ("opamp_definition_level", 2),
@@ -328,24 +336,24 @@ const Q5_NEAR_MISS_BUDGET: &[(&str, u32)] = &[
     ("named_rails", 2),
     // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE, owner-approved:
     // C3/CIN, CIN/Q1 and Q1/RB each miss a shared axis by a hair.
-    ("rc_phase_shift", 3),
+    ("rc_phase_shift", 2),
     // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE: seven near-misses
     // (CC/RB3, CE1/RE1, CIN/Q1, CIN/RB1, CIN/RB2, RB1/RB2, RB3/RB4) —
     // the worst in the suite, roughly double `rc_phase_shift`'s 3. Each
     // is a candidate straight drop the router currently jogs.
-    ("two_stage_amp", 7),
+    ("two_stage_amp", 5),
     // --- F2 (v0.2 roadmap, second benchmark wave) NEW-GEOMETRY BASELINES.
     // Recorded at their measured values with zero slack; they ratchet
     // DOWN only. No existing fixture's literal moved.
     //
     // Q1/RB3, Q2/RB2 and RC/RB1 each miss a shared axis by a hair — the
     // bias chain is a column the placer does not keep in one column.
-    ("cascode_amp", 3),
+    ("cascode_amp", 4),
     // Five near-misses. A doubly-terminated ladder is nothing BUT
     // shared axes, and the placer snaps none of them: worst in the suite
     // after `two_stage_amp`.
     ("lc_ladder_lpf", 5),
-    ("sallen_key_lpf", 2),
+    ("sallen_key_lpf", 3),
     ("wien_bridge_osc", 2),
     // --- F3 (Tier-0 router fix, ADR-24): the two fixtures promoted out of
     // `tests/f0_defects.rs` once the Steiner-vertex-on-foreign-pin defect was
