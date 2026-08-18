@@ -285,7 +285,10 @@ const Q6_REFERENCE: &[(&str, f64)] = &[
     ("opamp_definition_level", 1.2910),
     ("named_rails", 1.7321),
     // F0 (v0.2 roadmap) — informational master reference, not a gate.
-    ("rc_phase_shift", 0.8938),
+    // 0.8938 -> 0.9941: the rail-stub SIDE fix moved RB from below its
+    // node to above it, spreading this fixture's content. Informational
+    // bookkeeping, not a ratchet; far below `Q6_DEGENERATE_CEILING`.
+    ("rc_phase_shift", 0.9941),
     // F0 (v0.2 roadmap) — informational master reference, not a gate.
     ("two_stage_amp", 0.9592),
     // --- F2 (v0.2 roadmap, second wave) — informational master
