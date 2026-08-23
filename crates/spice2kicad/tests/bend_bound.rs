@@ -670,6 +670,12 @@ fn print_report(rows: &[(String, FixtureReport)]) {
 fn bend_lower_bound_gap_across_fixtures() {
     let library = load_test_library();
     let mut rows: Vec<(String, FixtureReport)> = Vec::new();
+    // Collect-then-assert on the self-consistency check below: a panic
+    // inside this loop aborts the whole test function, so every later
+    // fixture goes unmeasured and reports nothing to the ADR-23
+    // measurement sink — where a truncated metric reads as a metric that
+    // had nothing to say ("a blind cell is not conservatively blind").
+    let mut unsound: Vec<String> = Vec::new();
 
     for name in FIXTURES {
         let src = fixtures_dir().join(format!("{name}.cir"));
@@ -683,13 +689,19 @@ fn bend_lower_bound_gap_across_fixtures() {
         // Instrument self-consistency: the per-component decomposition
         // must reproduce, exactly, the number the V16 ratchet asserts on.
         let whole = measure(&root).unwrap_or_else(|e| panic!("{name}: {e}"));
-        assert_eq!(
-            rep.measured, whole.bends,
-            "{name}: per-component bends ({}) != whole-sheet B ({}) — the component \
-             decomposition of the ink graph is not exact, so every per-component \
-             attribution below is unsound",
-            rep.measured, whole.bends
-        );
+        if rep.measured != whole.bends {
+            // Nothing is recorded for this fixture: the check that just
+            // failed is precisely the one that licenses the numbers
+            // below, so a cell here would be a WRONG cell, which is worse
+            // than an absent one (the aggregator flags absent cells).
+            unsound.push(format!(
+                "{name}: per-component bends ({}) != whole-sheet B ({}) — the component \
+                 decomposition of the ink graph is not exact, so every per-component \
+                 attribution below is unsound",
+                rep.measured, whole.bends
+            ));
+            continue;
+        }
 
         common::scoreboard::record_count("v16.bend_bound", name, rep.bound as usize);
         common::scoreboard::record_count("v16.bend_gap", name, (rep.measured - rep.bound) as usize);
@@ -705,6 +717,12 @@ fn bend_lower_bound_gap_across_fixtures() {
     // The report. Informational by design — nothing below can fail a
     // build; see the module docs for why this is not a ratchet.
     print_report(&rows);
+
+    assert!(
+        unsound.is_empty(),
+        "bend-bound instrument self-consistency:\n  {}",
+        unsound.join("\n  "),
+    );
 }
 
 // --- unit tests for the bound itself --------------------------------------

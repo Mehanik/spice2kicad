@@ -715,7 +715,14 @@ fn cache_path_keeps_pre_existing_symbols_in_place() {
         let base_src = fixtures_dir().join(format!("{}.cir", case.base));
         let text = std::fs::read_to_string(&base_src).expect("read base fixture");
         let grown = text.replace(".end", &format!("{}\n.end", case.added));
-        assert_ne!(grown, text, "{}: failed to splice element", case.name);
+        if grown == text {
+            // Collected, not asserted in place: an in-loop panic aborts
+            // the whole test function, so every later case goes
+            // unmeasured and reports nothing to the ADR-23 sink. This
+            // case measures nothing (its fixture was never built).
+            failures.push(format!("{}: failed to splice element", case.name));
+            continue;
+        }
 
         // ONE directory for both conversions: the sidecar written by the
         // first run is what the second run reads. A fresh directory per
@@ -942,7 +949,14 @@ fn cache_less_placement_perturbation_within_bound() {
         let base_src = fixtures_dir().join(format!("{}.cir", case.base));
         let text = std::fs::read_to_string(&base_src).expect("read base fixture");
         let grown = text.replace(".end", &format!("{}\n.end", case.added));
-        assert_ne!(grown, text, "{}: failed to splice element", case.name);
+        if grown == text {
+            // Collected, not asserted in place: an in-loop panic aborts
+            // the whole test function, so every later case goes
+            // unmeasured and reports nothing to the ADR-23 sink. This
+            // case measures nothing (its fixture was never built).
+            failures.push(format!("{}: failed to splice element", case.name));
+            continue;
+        }
 
         // Base and grown each convert CACHE-LESS into their own fresh
         // directory, so neither reads a sidecar. (Sharing a directory would

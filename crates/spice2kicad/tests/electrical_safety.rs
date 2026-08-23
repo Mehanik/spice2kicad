@@ -1118,6 +1118,13 @@ fn v13_labels_dont_overlap_symbol_body() {
     // grazes RF's body (ratcheted 1 → 0); common_emitter was already 0.
     // A regression here is a defect, not a budget to bump.
     let body_overlap_budget = |_name: &str| -> usize { 0 };
+    // Collect-then-assert. An in-loop `assert!` aborts the whole test
+    // function at the first offending fixture, so every later fixture is
+    // never measured and reports NOTHING to the ADR-23 measurement sink —
+    // and a truncated metric reads there as a metric that had nothing to
+    // say ("a blind cell is not conservatively blind", ADR-23 D6). This
+    // verifier truncated three fixtures out of a real challenger's row.
+    let mut hard_failures: Vec<String> = Vec::new();
     for name in SHEETS {
         let src = fixtures_dir().join(format!("{name}.cir"));
         let tmp = tempdir(name);
@@ -1137,11 +1144,17 @@ fn v13_labels_dont_overlap_symbol_body() {
         }
         common::scoreboard::record_count("v13.1_label_body", name, hits);
         let budget = body_overlap_budget(name);
-        assert!(
-            hits <= budget,
-            "{name}: {hits} label↔body overlaps > V13(1) budget {budget}",
-        );
+        if hits > budget {
+            hard_failures.push(format!(
+                "{name}: {hits} label↔body overlaps > V13(1) budget {budget}",
+            ));
+        }
     }
+    assert!(
+        hard_failures.is_empty(),
+        "V13(1) regressions:\n  {}",
+        hard_failures.join("\n  "),
+    );
 }
 
 #[test]
@@ -1377,6 +1390,9 @@ fn sheet_port_glyphs_clear_neighbour_text() {
         v.extend_from_slice(SHEETS);
         v
     };
+    // Collect-then-assert, so a violating fixture does not abort the loop
+    // and blind the ADR-23 sink to every fixture after it.
+    let mut hard_failures: Vec<String> = Vec::new();
     for name in with_sheets {
         let src = fixtures_dir().join(format!("{name}.cir"));
         let tmp = tempdir(name);
@@ -1401,11 +1417,17 @@ fn sheet_port_glyphs_clear_neighbour_text() {
         }
         common::scoreboard::record_count("v13.glyph_neighbour_value", name, hits);
         let b = budget(name);
-        assert!(
-            hits <= b,
-            "{name}: {hits} sheet-glyph↔neighbour-value-text overlaps > budget {b}",
-        );
+        if hits > b {
+            hard_failures.push(format!(
+                "{name}: {hits} sheet-glyph↔neighbour-value-text overlaps > budget {b}",
+            ));
+        }
     }
+    assert!(
+        hard_failures.is_empty(),
+        "V13 sheet-port-glyph regressions:\n  {}",
+        hard_failures.join("\n  "),
+    );
 }
 
 /// Collect every VISIBLE on-sheet text bbox that V13 part (4) governs:

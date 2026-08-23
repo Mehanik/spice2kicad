@@ -599,7 +599,7 @@ fn junction_dots_match_kicads_own_rule_across_fixtures() {
     let library = load_test_library();
     let mut failures: Vec<String> = Vec::new();
 
-    for name in FIXTURES {
+    'fixture: for name in FIXTURES {
         let src = fixtures_dir().join(format!("{name}.cir"));
         let tmp = tempdir(name);
         // The conversion writes every sheet into `tmp`; the root path it
@@ -621,14 +621,23 @@ fn junction_dots_match_kicads_own_rule_across_fixtures() {
 
             // Vacuity guard: a pose or lib_id that stopped resolving
             // would silently drop the pins this whole check is about.
-            assert!(
-                unresolved.is_empty(),
-                "{name}/{sheet_name}: {} symbol instance(s) whose lib_id did not \
-                 resolve in the test library ({:?}) — their pins are missing from \
-                 the analysis, which would make the parity check pass vacuously.",
-                unresolved.len(),
-                unresolved,
-            );
+            //
+            // Collected, not asserted in place: an in-loop panic aborts
+            // the whole test function, so every later fixture goes
+            // unmeasured and reports nothing to the ADR-23 sink. This
+            // fixture records nothing — its three counts would be
+            // undercounts, and a wrong cell is worse than an absent one
+            // (the aggregator flags absent cells as one-sided).
+            if !unresolved.is_empty() {
+                failures.push(format!(
+                    "{name}/{sheet_name}: {} symbol instance(s) whose lib_id did not \
+                     resolve in the test library ({:?}) — their pins are missing from \
+                     the analysis, which would make the parity check pass vacuously.",
+                    unresolved.len(),
+                    unresolved,
+                ));
+                continue 'fixture;
+            }
 
             let p = parity_for_sheet(&items);
             fixture_missing += p.missing.len();

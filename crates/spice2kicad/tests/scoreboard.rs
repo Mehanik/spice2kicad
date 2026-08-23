@@ -756,3 +756,488 @@ fn champion_challenger_report() {
     // not grant the exception.
     println!("\n(report complete; promotable = {promotable})");
 }
+
+// ---------------------------------------------------------------------------
+// Regression guard: no verifier may assert INSIDE a loop that reports a metric
+// ---------------------------------------------------------------------------
+//
+// # The defect this closes
+//
+// A verifier that calls `assert!` / `panic!` *inside* its per-fixture loop
+// aborts the whole test function at the first violating fixture. Every
+// fixture after it is then never measured, so it reports NOTHING to the
+// sink above — and a truncated metric is indistinguishable here from a
+// metric that had nothing to say. `--no-fail-fast` cannot help: the
+// truncation is *within* one test function, not across binaries.
+//
+// This is not hypothetical. ADR-23 D6 records `v13.1_label_body`
+// truncating the `m3-signed-gate` row at `named_rails`, and the same
+// verifier later truncated three fixtures out of a live challenger's row
+// by panicking on `sallen_key_lpf`. It is the same failure as D9's "a
+// blind cell is not conservatively blind", reached from a different
+// cause: there, the verifier never recorded; here, it stopped recording.
+//
+// D2's contract is "record on the line before the assertion that grades
+// it". The established fix is collect-then-assert: accumulate per-fixture
+// failures into a `Vec`, report every fixture's number, assert once after
+// the loop. This test is what makes the contract *enforced* rather than
+// merely documented.
+//
+// # What it does and does not catch
+//
+// Catches: any `assert!` / `assert_eq!` / `assert_ne!` / `unreachable!` /
+// bare `panic!` lexically inside a `for` loop body that also contains a
+// `common::scoreboard::record*` call, anywhere under `tests/`. That is
+// exactly the shape that truncates a metric mid-loop.
+//
+// Does NOT catch:
+//   * a panic raised inside a *helper function* the loop calls (the lint
+//     is lexical, not interprocedural);
+//   * `.expect(...)` / `.unwrap()` / `unwrap_or_else(|e| panic!(...))` —
+//     deliberately exempt. Those signal "this fixture could not be
+//     converted or parsed at all", a different failure from "this fixture
+//     violates the budget", and `common::spice_to_kicad` already records
+//     `t0.convert_fail` for that fixture before it fails. Making them
+//     non-aborting would change what a broken conversion *means*, not
+//     just when it is reported;
+//   * a `while` / `loop` / `.for_each()` fixture sweep (no verifier uses
+//     one today);
+//   * a verifier that enumerates fixtures and records NOTHING at all —
+//     that is D6's blind-cell rule, which this lint's premise (a
+//     `record` call in the loop) cannot see. It is a separate obligation.
+
+/// The macros that abort a test function where they stand.
+///
+/// `debug_assert*!` is covered too — `word_at` matches the `assert!`
+/// suffix only on an identifier boundary, so `debug_assert!` is caught by
+/// its own name below rather than by accident.
+const ASSERT_MACROS: &[&str] = &[
+    "assert!",
+    "assert_eq!",
+    "assert_ne!",
+    "debug_assert!",
+    "unreachable!",
+    "panic!",
+];
+
+/// Overwrite `text[from..to]` with spaces, keeping newlines so line
+/// numbers computed over the result still match the original source.
+fn blank_range(text: &mut [char], from: usize, to: usize) {
+    let to = to.min(text.len());
+    for c in text.iter_mut().take(to).skip(from) {
+        if *c != '\n' {
+            *c = ' ';
+        }
+    }
+}
+
+/// Index just past a `//` line comment starting at `at`.
+fn end_of_line_comment(src: &[char], at: usize) -> usize {
+    let mut end = at;
+    while end < src.len() && src[end] != '\n' {
+        end += 1;
+    }
+    end
+}
+
+/// Index just past a (nesting) `/* … */` comment starting at `at`.
+fn end_of_block_comment(src: &[char], at: usize) -> usize {
+    let mut end = at + 2;
+    let mut depth = 1_u32;
+    while end < src.len() && depth > 0 {
+        if src[end] == '/' && end + 1 < src.len() && src[end + 1] == '*' {
+            depth += 1;
+            end += 2;
+        } else if src[end] == '*' && end + 1 < src.len() && src[end + 1] == '/' {
+            depth -= 1;
+            end += 2;
+        } else {
+            end += 1;
+        }
+    }
+    end
+}
+
+/// Index just past an `r###"…"###` raw string starting at `at` (which
+/// must point at the `r`), or `None` if `at` does not start one.
+fn end_of_raw_string(src: &[char], at: usize) -> Option<usize> {
+    if at > 0 && (src[at - 1].is_alphanumeric() || src[at - 1] == '_') {
+        return None;
+    }
+    let mut hashes = 0_usize;
+    let mut end = at + 1;
+    while end < src.len() && src[end] == '#' {
+        hashes += 1;
+        end += 1;
+    }
+    if end >= src.len() || src[end] != '"' {
+        return None;
+    }
+    end += 1;
+    while end < src.len() {
+        if src[end] == '"' {
+            let mut probe = end + 1;
+            let mut seen = 0_usize;
+            while probe < src.len() && src[probe] == '#' && seen < hashes {
+                seen += 1;
+                probe += 1;
+            }
+            if seen == hashes {
+                return Some(probe);
+            }
+        }
+        end += 1;
+    }
+    Some(src.len())
+}
+
+/// Index just past a `"…"` string starting at `at`.
+fn end_of_string(src: &[char], at: usize) -> usize {
+    let mut end = at + 1;
+    while end < src.len() {
+        if src[end] == '\\' {
+            end += 2;
+        } else if src[end] == '"' {
+            return end + 1;
+        } else {
+            end += 1;
+        }
+    }
+    end
+}
+
+/// Index just past a `'x'` char literal starting at `at`, or `None` when
+/// the quote opens a lifetime or a loop label (`'fixture: for …`), which
+/// must stay visible to the walk.
+fn end_of_char_literal(src: &[char], at: usize) -> Option<usize> {
+    let escaped = at + 1 < src.len() && src[at + 1] == '\\';
+    let plain = at + 2 < src.len() && src[at + 2] == '\'' && src[at + 1] != '\'';
+    if !(escaped || plain) {
+        return None;
+    }
+    let mut end = at + 1;
+    while end < src.len() {
+        if src[end] == '\\' {
+            end += 2;
+        } else if src[end] == '\'' {
+            return Some(end + 1);
+        } else {
+            end += 1;
+        }
+    }
+    Some(end)
+}
+
+/// Replace every comment, string literal and char literal with spaces,
+/// preserving line structure, so the brace walk below cannot be fooled by
+/// a `{` inside a format string or a `//` inside a comment.
+fn blank_literals(src: &str) -> Vec<char> {
+    let source: Vec<char> = src.chars().collect();
+    let mut out = source.clone();
+    let len = source.len();
+    let mut at = 0;
+    while at < len {
+        let next = match source[at] {
+            '/' if at + 1 < len && source[at + 1] == '/' => end_of_line_comment(&source, at),
+            '/' if at + 1 < len && source[at + 1] == '*' => end_of_block_comment(&source, at),
+            'r' if at + 1 < len && (source[at + 1] == '"' || source[at + 1] == '#') => {
+                let Some(end) = end_of_raw_string(&source, at) else {
+                    at += 1;
+                    continue;
+                };
+                end
+            }
+            '"' => end_of_string(&source, at),
+            '\'' => {
+                let Some(end) = end_of_char_literal(&source, at) else {
+                    at += 1;
+                    continue;
+                };
+                end
+            }
+            _ => {
+                at += 1;
+                continue;
+            }
+        };
+        blank_range(&mut out, at, next);
+        at = next.max(at + 1);
+    }
+    out
+}
+
+/// Does `hay[at..]` start with `needle`, on identifier boundaries?
+fn word_at(hay: &[char], at: usize, needle: &str) -> bool {
+    let w: Vec<char> = needle.chars().collect();
+    if at + w.len() > hay.len() || hay[at..at + w.len()] != w[..] {
+        return false;
+    }
+    if at > 0 && (hay[at - 1].is_alphanumeric() || hay[at - 1] == '_') {
+        return false;
+    }
+    let after = at + w.len();
+    // A macro name ends in `!`, which is already part of `needle`; a
+    // keyword must not be followed by an identifier char.
+    if w.last() == Some(&'!') {
+        return true;
+    }
+    !(after < hay.len() && (hay[after].is_alphanumeric() || hay[after] == '_'))
+}
+
+/// One `assert`/`panic` found inside a metric-reporting loop.
+struct InLoopAssert {
+    assert_line: usize,
+    loop_line: usize,
+    snippet: String,
+}
+
+/// Index of the `{` that opens the body of the `for` at `at`, or `None`
+/// when this `for` is not a loop header (`impl Trait for Type {` carries
+/// no `in`, and its brace is not a loop body).
+fn loop_body_open(src: &[char], at: usize) -> Option<usize> {
+    let mut pos = at + 3;
+    let (mut paren, mut brack) = (0_i32, 0_i32);
+    let mut open = None;
+    while pos < src.len() {
+        match src[pos] {
+            '(' => paren += 1,
+            ')' => paren -= 1,
+            '[' => brack += 1,
+            ']' => brack -= 1,
+            '{' if paren == 0 && brack == 0 => {
+                open = Some(pos);
+                break;
+            }
+            ';' | '}' if paren == 0 && brack == 0 => break,
+            _ => {}
+        }
+        pos += 1;
+    }
+    let open = open?;
+    let header: String = src[at..open].iter().collect();
+    header.split_whitespace().any(|t| t == "in").then_some(open)
+}
+
+/// Index of the `}` matching the `{` at `open`.
+fn matching_brace(src: &[char], open: usize) -> usize {
+    let mut depth = 0_i32;
+    let mut pos = open;
+    while pos < src.len() {
+        match src[pos] {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return pos;
+                }
+            }
+            _ => {}
+        }
+        pos += 1;
+    }
+    src.len()
+}
+
+/// Result of scanning one file: the offences, and how many loop bodies
+/// containing a `scoreboard::record*` call were seen (the vacuity guard).
+fn scan_source(src: &str) -> (Vec<InLoopAssert>, usize) {
+    let ch = blank_literals(src);
+    let len = ch.len();
+    let line_of = |idx: usize| ch.iter().take(idx.min(len)).filter(|&&c| c == '\n').count() + 1;
+    let raw_lines: Vec<&str> = src.lines().collect();
+
+    // Innermost enclosing record-bearing loop, per offending line.
+    let mut found: BTreeMap<usize, InLoopAssert> = BTreeMap::new();
+    let mut recording_loops = 0_usize;
+
+    let mut at = 0;
+    while at < len {
+        if !word_at(&ch, at, "for") {
+            at += 1;
+            continue;
+        }
+        let Some(open) = loop_body_open(&ch, at) else {
+            at += 3;
+            continue;
+        };
+        let close = matching_brace(&ch, open);
+        let body: String = ch[open + 1..close.min(len)].iter().collect();
+        if body.contains("scoreboard::record") {
+            recording_loops += 1;
+            let loop_line = line_of(at);
+            for pos in (open + 1)..close {
+                if !ASSERT_MACROS.iter().any(|m| word_at(&ch, pos, m)) {
+                    continue;
+                }
+                let line = line_of(pos);
+                let raw = raw_lines.get(line - 1).unwrap_or(&"").trim();
+                // Exempt the "this fixture would not convert/parse"
+                // idiom — see the module note above.
+                if raw.contains("_or_else") {
+                    continue;
+                }
+                found
+                    .entry(line)
+                    .and_modify(|e| e.loop_line = e.loop_line.max(loop_line))
+                    .or_insert(InLoopAssert {
+                        assert_line: line,
+                        loop_line,
+                        snippet: raw.chars().take(90).collect(),
+                    });
+            }
+        }
+        at += 3;
+    }
+    (found.into_values().collect(), recording_loops)
+}
+
+#[test]
+fn no_verifier_asserts_inside_a_loop_that_reports_a_metric() {
+    let tests_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let mut sources: Vec<PathBuf> = Vec::new();
+    for dir in [tests_dir.clone(), tests_dir.join("common")] {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut v: Vec<PathBuf> = entries
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "rs"))
+            .collect();
+        v.sort();
+        sources.append(&mut v);
+    }
+
+    let mut offences: Vec<String> = Vec::new();
+    let mut recording_loops = 0_usize;
+    for path in &sources {
+        let Ok(src) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let (hits, loops) = scan_source(&src);
+        recording_loops += loops;
+        let name = path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        for h in hits {
+            offences.push(format!(
+                "{name}:{} `{}` — inside the loop opened at line {}, which reports a \
+                 metric to the ADR-23 sink. A violating fixture aborts the loop here, \
+                 so every LATER fixture is never measured and its cell reads as \
+                 \"nothing to say\". Use collect-then-assert: push the failure into a \
+                 Vec, keep recording, assert once after the loop.",
+                h.assert_line, h.snippet, h.loop_line,
+            ));
+        }
+    }
+
+    // Vacuity guard on the lint itself. If the sources stop being found
+    // (a moved directory, a renamed sink) this test would pass while
+    // checking nothing — which is the very failure mode it exists to
+    // prevent, one level up.
+    assert!(
+        sources.len() >= 20,
+        "scanned only {} test source(s) under {} — the lint is not seeing the suite",
+        sources.len(),
+        tests_dir.display(),
+    );
+    assert!(
+        recording_loops >= 25,
+        "found only {recording_loops} metric-reporting loop(s) — the lint's premise \
+         (a `scoreboard::record*` call inside a `for` body) stopped matching, so it \
+         would pass vacuously",
+    );
+
+    assert!(
+        offences.is_empty(),
+        "{} verifier assertion(s) sit inside a metric-reporting loop and would \
+         truncate the scoreboard record:\n  {}",
+        offences.len(),
+        offences.join("\n  "),
+    );
+}
+
+#[test]
+fn the_in_loop_assert_lint_is_sensitive() {
+    // Mutation guard. A lint validated only against a clean tree is
+    // validated against nothing: these two snippets differ by exactly the
+    // defect, and the lint must separate them.
+    let bad = r#"
+fn v() {
+    for name in FIXTURES {
+        let hits = measure(name);
+        common::scoreboard::record_count("v13.1_label_body", name, hits);
+        assert!(hits <= 0, "{name}: {hits} overlaps");
+    }
+}
+"#;
+    let good = r#"
+fn v() {
+    let mut failures: Vec<String> = Vec::new();
+    for name in FIXTURES {
+        let hits = measure(name);
+        common::scoreboard::record_count("v13.1_label_body", name, hits);
+        if hits > 0 {
+            failures.push(format!("{name}: {hits} overlaps"));
+        }
+    }
+    assert!(failures.is_empty(), "V13(1): {}", failures.join("\n"));
+}
+"#;
+    let (bad_hits, bad_loops) = scan_source(bad);
+    assert_eq!(bad_loops, 1, "the reporting loop was not recognised");
+    assert_eq!(bad_hits.len(), 1, "the in-loop assert was not caught");
+    assert_eq!(bad_hits[0].assert_line, 6);
+
+    let (good_hits, good_loops) = scan_source(good);
+    assert_eq!(good_loops, 1, "the reporting loop was not recognised");
+    assert!(
+        good_hits.is_empty(),
+        "collect-then-assert was flagged: {:?}",
+        good_hits.iter().map(|h| h.assert_line).collect::<Vec<_>>(),
+    );
+
+    // A `{` inside a format string must not shift the brace walk, or the
+    // loop body would be mis-delimited and the lint would drift silently.
+    let braces_in_strings = r#"
+fn v() {
+    for name in FIXTURES {
+        println!("{name} } { ");
+        common::scoreboard::record_count("m", name, 1);
+        assert!(false, "} {");
+    }
+}
+"#;
+    let (h, l) = scan_source(braces_in_strings);
+    assert_eq!(
+        l, 1,
+        "a closing brace inside a string closed the body early"
+    );
+    assert_eq!(h.len(), 1, "the in-loop assert was lost to a string brace");
+
+    // `impl Trait for Type` is not a loop.
+    let impl_block = r#"
+impl Foo for Bar {
+    fn go(&self) {
+        common::scoreboard::record_count("m", "f", 1);
+        assert!(true);
+    }
+}
+"#;
+    let (_, l) = scan_source(impl_block);
+    assert_eq!(l, 0, "an `impl … for …` block was mistaken for a loop");
+
+    // The conversion-failure idiom stays exempt.
+    let helper_panic = r#"
+fn v() {
+    for name in FIXTURES {
+        let r = analyse(name).unwrap_or_else(|e| panic!("{name}: {e}"));
+        common::scoreboard::record_count("m", name, r);
+    }
+}
+"#;
+    let (h, l) = scan_source(helper_panic);
+    assert_eq!(l, 1);
+    assert!(h.is_empty(), "`unwrap_or_else(|e| panic!(…))` is exempt");
+}

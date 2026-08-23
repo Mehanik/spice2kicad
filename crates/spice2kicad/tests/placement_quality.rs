@@ -1547,11 +1547,19 @@ fn wire_detour_within_budget_across_fixtures() {
         let sch = common::spice_to_kicad(&path, &tmp).expect("spice2kicad");
         let root = parse_sch(&sch);
         let (total, baseline) = wire_detour(&path, &root);
-        assert!(
-            baseline > 1e-6,
-            "{name}: no wired multi-pin net — the detour metric cannot grade this \
-             fixture, which is exactly the vacuity this verifier was rebuilt to remove",
-        );
+        if baseline <= 1e-6 {
+            // Vacuity guard. Collected rather than asserted in place: a
+            // panic here aborts the whole test function, so every later
+            // fixture goes unmeasured and reports nothing to the ADR-23
+            // sink. Nothing is recorded for THIS fixture — `ratio` would
+            // be inf/NaN, and a wrong cell is worse than an absent one,
+            // which the aggregator flags as a one-sided cell.
+            failures.push(format!(
+                "{name}: no wired multi-pin net — the detour metric cannot grade this \
+                 fixture, which is exactly the vacuity this verifier was rebuilt to remove",
+            ));
+            continue;
+        }
         let ratio = total / baseline;
         common::scoreboard::record("detour", name, ratio);
         // The denominator is a true lower bound on any rectilinear route
@@ -1560,12 +1568,14 @@ fn wire_detour_within_budget_across_fixtures() {
         // are counted but whose wire is not), never that the router got
         // clever. Guarding it here is what stops this verifier drifting
         // back into vacuity unnoticed.
-        assert!(
-            ratio >= 1.0 - 1e-9,
-            "{name}: wire_detour = {ratio:.4} is below the theoretical floor of 1.0 — \
-             the measurement is broken, not the router (emitted wire = {total:.2} mm, \
-             rectilinear ideal = {baseline:.2} mm)",
-        );
+        if ratio < 1.0 - 1e-9 {
+            failures.push(format!(
+                "{name}: wire_detour = {ratio:.4} is below the theoretical floor of 1.0 — \
+                 the measurement is broken, not the router (emitted wire = {total:.2} mm, \
+                 rectilinear ideal = {baseline:.2} mm)",
+            ));
+            continue;
+        }
         if std::env::var_os("S2K_QUALITY_DUMP").is_some() {
             println!("wire_detour (\"{name}\", {ratio}),");
             continue;

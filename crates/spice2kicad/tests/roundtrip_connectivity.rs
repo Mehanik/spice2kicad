@@ -426,13 +426,22 @@ fn emitted_geometry_round_trips_to_source_netlist_across_fixtures() {
         // passes trivially, and a silently-empty derivation (a library
         // lookup that stopped matching, a pose that stopped parsing)
         // would turn this whole file green while measuring nothing.
-        assert!(
-            terminals.len() >= 2,
-            "{name}: derived only {} terminal(s) — the certificate below would \
-             pass vacuously. This is a defect in A2's own derivation, not in the \
-             emitted schematic.",
-            terminals.len(),
-        );
+        //
+        // Collected, not asserted in place: an in-loop panic aborts the
+        // whole test function, so every later fixture goes unmeasured and
+        // reports nothing to the ADR-23 sink — and `t0.partition` is a
+        // TIER-0 metric, the one place a blind cell is most expensive.
+        // This fixture records nothing (its count would be vacuous), but
+        // the rest of the suite is still measured.
+        if terminals.len() < 2 {
+            failures.push(format!(
+                "{name}: derived only {} terminal(s) — the certificate below would \
+                 pass vacuously. This is a defect in A2's own derivation, not in the \
+                 emitted schematic.",
+                terminals.len(),
+            ));
+            continue;
+        }
 
         let findings = check_partition(&terminals, &geometry);
         common::scoreboard::record_count("t0.partition", name, findings.len());

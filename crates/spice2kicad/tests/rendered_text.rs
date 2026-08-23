@@ -269,7 +269,15 @@ fn rendered_text_does_not_overlap_across_fixtures() {
     // fixture starts passing — unlike a `continue`, which reports as
     // "passed" forever.
     let mut xf = common::xfail::Guard::new("rendered_text_does_not_overlap_across_fixtures");
-    for fixture in FIXTURES {
+    // Vacuity guard, collected rather than asserted in place: a panic
+    // inside this loop aborts the whole test function, so every later
+    // fixture goes unmeasured and reports nothing to the ADR-23 sink.
+    // The affected fixture records nothing (its `hits` would be an
+    // undercount, and a wrong cell is worse than an absent one); every
+    // other fixture is still measured, and the assertion below fires
+    // with the same message before `xf.finish()` grades anything.
+    let mut vacuous: Vec<String> = Vec::new();
+    'fixture: for fixture in FIXTURES {
         if EXCLUDED_FIXTURES.contains(fixture) {
             continue;
         }
@@ -277,7 +285,10 @@ fn rendered_text_does_not_overlap_across_fixtures() {
         let (_dir, sheets) = convert_and_render("ov", fixture);
         for (stem, _, svg) in sheets {
             let runs = ink_runs(&svg);
-            assert!(!runs.is_empty(), "{fixture}/{stem}: no text rendered");
+            if runs.is_empty() {
+                vacuous.push(format!("{fixture}/{stem}: no text rendered"));
+                continue 'fixture;
+            }
             for i in 0..runs.len() {
                 for j in (i + 1)..runs.len() {
                     let (a, b) = (&runs[i].bbox, &runs[j].bbox);
@@ -299,6 +310,11 @@ fn rendered_text_does_not_overlap_across_fixtures() {
             (hits > budget(fixture)).then(|| format!("{fixture}: {hits} rendered-text overlaps")),
         );
     }
+    assert!(
+        vacuous.is_empty(),
+        "rendered-text vacuity:\n  {}",
+        vacuous.join("\n  "),
+    );
     xf.finish();
 }
 

@@ -4760,6 +4760,8 @@ Two smaller follow-ups this surfaced, both real:
 
 1. `v13.1_label_body` still asserts inside its fixture loop and truncated
    the M3-B row. D2 converted four such verifiers; convert this one too.
+   **CLOSED — see D10**, which converts it and eight other sites, and adds
+   a source lint so the shape cannot come back.
 2. `q6.cov` printed `Δ = +0.00` for a value that moved 1.2247 → 1.4142.
    It is informational and excluded from the aggregate by design, so the
    zero is correct as a *contribution* — but printing it in the Δ column
@@ -5235,6 +5237,79 @@ budgets are stated against it. Re-pointing it would silently redefine a
 graded metric, so Q3 grades the new default against the *old* skeleton's
 idea of flow — the conservative choice, and the only one that keeps
 those literals comparable across the swap.
+
+
+### D10. The truncation defect, closed and made unrepeatable
+
+D6's follow-up list item 1 ("`v13.1_label_body` still asserts inside its
+fixture loop; convert this one too") and D9's blind-cell finding are the
+**same defect from two causes**, and this closes the second one.
+
+An `assert!` *inside* a per-fixture loop aborts the whole test function
+at the first violation, so every fixture after it is never measured and
+records nothing. `--no-fail-fast` cannot help: the truncation is *within*
+one test function, not across binaries. D9 put the lesson as "a blind
+cell is not conservatively blind" — a metric that stopped recording reads
+in the report exactly like a metric that had nothing to say, and D4
+rule 3 ("comparison complete") is stated over *registered* metrics, which
+is a weaker statement than it reads as.
+
+Measured, on the real thing. `v13.1_label_body` was made to fail on
+`multivibrator` (fixture 3 of 18 in `SHEETS`) and the suite run with the
+sink on:
+
+| verifier shape | fixtures recorded | test outcome |
+| --- | ---: | --- |
+| in-loop `assert!` (before) | **3 of 18** | FAILED |
+| collect-then-assert (after) | **18 of 18** | FAILED, same message |
+
+Fifteen cells were being thrown away by one violation. Note the shape of
+the real incident this reproduces: the panic landed on `sallen_key_lpf`,
+fixture 15, which is why the report was three fixtures short rather than
+obviously empty — the failure mode is quiet in proportion to how late it
+fires.
+
+**Nine sites converted**, in seven files: `v13.1_label_body` and
+`v13.glyph_neighbour_value` (`electrical_safety`), `detour`'s two guards
+(`placement_quality`), and the vacuity / self-consistency guards in
+`bend_bound`, `junction_parity`, `rendered_text`,
+`roundtrip_connectivity` and `placement_stability` (×2). Assertion
+semantics are unchanged — the same inputs fail with the same text, now
+aggregated into one message after the loop. No budget literal moved and
+`baseline_lock` is untouched; nothing outside `tests/` was edited.
+
+**A vacuity guard converts differently from a budget assertion.** When
+the guard that just failed is the one that *licenses* the number, the
+fixture records **nothing** and the loop moves on: a wrong cell is worse
+than an absent one, and the aggregator already flags absent cells as
+one-sided while a wrong cell is invisible. So `bend_bound`'s
+decomposition-exactness check, `junction_parity`'s unresolved-`lib_id`
+check, `rendered_text`'s no-ink check and `roundtrip_connectivity`'s
+two-terminal check all `continue` past the record. Truncation is thereby
+localised to the affected fixture instead of taking every later one with
+it.
+
+**Made unrepeatable, not just fixed.**
+`scoreboard::no_verifier_asserts_inside_a_loop_that_reports_a_metric` is
+a source lint over `crates/spice2kicad/tests/`: it flags any
+`assert!`/`assert_eq!`/`assert_ne!`/`debug_assert!`/`unreachable!`/bare
+`panic!` lexically inside a `for` body that also calls
+`common::scoreboard::record*`. It runs in the default `cargo test` path,
+needs no fixture list and no literal to maintain, and carries its own
+mutation guard (`the_in_loop_assert_lint_is_sensitive`) plus a vacuity
+floor on how many reporting loops it must still be able to see.
+
+What it does **not** catch, stated so the gap is not mistaken for
+coverage: a panic raised inside a *helper* the loop calls (the lint is
+lexical, not interprocedural); `.expect(…)` / `.unwrap()` /
+`unwrap_or_else(|e| panic!(…))`, which are deliberately exempt because
+"this fixture would not convert at all" is a different failure from
+"this fixture violates a budget" — and `common::spice_to_kicad` already
+records `t0.convert_fail` for it before failing; a `while`/`loop`/
+`for_each` fixture sweep (no verifier uses one); and a fixture-
+enumerating verifier that records *nothing at all*, which is D9's
+blind-cell rule and remains a separate obligation on whoever writes the
+verifier.
 
 
 
