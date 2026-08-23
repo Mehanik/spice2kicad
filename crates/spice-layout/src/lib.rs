@@ -1503,7 +1503,8 @@ fn pack_rows(
         | Placer::M5Streams
         | Placer::FlowSeed
         | Placer::FlowSeedV2
-        | Placer::FlowSeedV3 => shift.last().copied().unwrap_or(0) / 2,
+        | Placer::FlowSeedV3
+        | Placer::FlowSeedV4 => shift.last().copied().unwrap_or(0) / 2,
         Placer::M4YDatum => 0,
     };
     for (i, pe) in placed.iter_mut().enumerate() {
@@ -1660,7 +1661,8 @@ fn place_seed(
         | Placer::M5Streams
         | Placer::FlowSeed
         | Placer::FlowSeedV2
-        | Placer::FlowSeedV3 => {
+        | Placer::FlowSeedV3
+        | Placer::FlowSeedV4 => {
             let n_i32 = i32::try_from(n).unwrap_or(i32::MAX);
             let y_top: i32 = 0;
             let y_bot: i32 = (n_i32 + 4) * Y_RANK_STRIDE;

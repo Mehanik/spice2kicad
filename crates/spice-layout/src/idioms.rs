@@ -1283,15 +1283,25 @@ fn rail_facing_orientation(
 
 /// Flow-depth of each signal net, as hop count from the input boundary.
 ///
-/// Roots are declared `*@port … =input` nets; BFS walks element net
-/// adjacency, never crossing a rail (Power/Ground/`0`), so the depth
-/// orders signal nets from input to output. Nets unreachable from an
-/// input root are absent from the map (depth unknown).
+/// BFS walks element net adjacency, never crossing a rail
+/// (Power/Ground/`0`), so the depth orders signal nets from input to
+/// output. Nets unreachable from a root are absent from the map (depth
+/// unknown), and an **empty** map is the honest answer for a circuit
+/// with no signal-flow root at all — `apply_series_horizontal` then
+/// declines, which is correct for a rootless cycle.
 ///
-/// `variant` selects the **root policy**, not the traversal: under
-/// [`Placer::unified_depth_roots`] a third tier roots at drawn sources
-/// when the first two seed nothing. See that method for why.
-fn signal_net_depth(
+/// `variant` selects the **root policy**, not the traversal:
+///
+/// * [`Placer::unified_roots`] — the whole tier ladder below is
+///   replaced by [`crate::roots::signal_flow_roots`], the one policy the
+///   X layering reads too. That is the point of the variant: the three
+///   root divergences this function has had with `layers.rs` were all
+///   *which roots exist*, never how they are walked.
+/// * [`Placer::unified_depth_roots`] — the pre-unification half-step: a
+///   third tier that roots at drawn sources when the first two seed
+///   nothing. Retained as the scoreboard's control arm for the
+///   unification.
+pub(crate) fn signal_net_depth(
     checked: &CheckedNetlist,
     classes: &NetClassMap,
     variant: Placer,
@@ -1306,88 +1316,103 @@ fn signal_net_depth(
             }
         }
     }
+    // Under a unified-roots placer the three tiers below are replaced
+    // wholesale by the one policy `layers.rs` reads as well. The tier
+    // that fires (and the fact that exactly one does) is decided there;
+    // here we only consume the depth-0 nets it names.
+    let unified = variant
+        .unified_roots()
+        .then(|| crate::roots::signal_flow_roots(checked, classes, variant));
     let mut depth: HashMap<String, u32> = HashMap::new();
     let mut frontier: Vec<&str> = Vec::new();
-    for p in &checked.ports {
-        if matches!(p.dir, PortDir::Input) && depth.insert(p.net.clone(), 0).is_none() {
-            frontier.push(p.net.as_str());
+    if let Some(r) = &unified {
+        for net in &r.nets {
+            if depth.insert(net.clone(), 0).is_none() {
+                frontier.push(net.as_str());
+            }
         }
-    }
-    // Fallback root: no `*@port …=input` was declared, so the flow graph
-    // has no seed and every series element would be left directionless
-    // (an un-ported RC filter draws differently from its `*@port`-annotated
-    // twin). Seed instead from *leaf input nets* recognised by NAME
-    // convention — a Signal-class net whose name matches
-    // `layers::boundary_net_role` (`in`/`vin`/`input`, channel digits
-    // stripped) and which is touched by exactly one element, i.e. a
-    // boundary of the signal chain. This mirrors the identical backstop
-    // `layers::no_source_fallback` already applies for X-layer ordering, so
-    // depth and layer agree. Only fires when the port loop seeded nothing,
-    // so a fixture that DOES declare an input port is byte-unchanged.
-    if frontier.is_empty() {
-        let mut net_members: HashMap<&str, usize> = HashMap::new();
-        for e in &checked.elements {
-            let mut seen: Vec<&str> = Vec::new();
-            for n in &e.nodes {
-                if !seen.contains(&n.as_str()) {
-                    seen.push(n.as_str());
-                    *net_members.entry(n.as_str()).or_default() += 1;
+    } else {
+        for p in &checked.ports {
+            if matches!(p.dir, PortDir::Input) && depth.insert(p.net.clone(), 0).is_none() {
+                frontier.push(p.net.as_str());
+            }
+        }
+        // Fallback root: no `*@port …=input` was declared, so the flow graph
+        // has no seed and every series element would be left directionless
+        // (an un-ported RC filter draws differently from its `*@port`-annotated
+        // twin). Seed instead from *leaf input nets* recognised by NAME
+        // convention — a Signal-class net whose name matches
+        // `layers::boundary_net_role` (`in`/`vin`/`input`, channel digits
+        // stripped) and which is touched by exactly one element, i.e. a
+        // boundary of the signal chain. This mirrors the identical backstop
+        // `layers::no_source_fallback` already applies for X-layer ordering, so
+        // depth and layer agree. Only fires when the port loop seeded nothing,
+        // so a fixture that DOES declare an input port is byte-unchanged.
+        if frontier.is_empty() {
+            let mut net_members: HashMap<&str, usize> = HashMap::new();
+            for e in &checked.elements {
+                let mut seen: Vec<&str> = Vec::new();
+                for n in &e.nodes {
+                    if !seen.contains(&n.as_str()) {
+                        seen.push(n.as_str());
+                        *net_members.entry(n.as_str()).or_default() += 1;
+                    }
+                }
+            }
+            for e in &checked.elements {
+                for n in &e.nodes {
+                    let net = n.as_str();
+                    if net == "0"
+                        || matches!(classes.get(net), Some(NetClass::Power | NetClass::Ground))
+                    {
+                        continue;
+                    }
+                    if net_members.get(net).copied() == Some(1)
+                        && matches!(crate::roots::boundary_net_role(net), Some(PortDir::Input))
+                        && depth.insert(net.to_string(), 0).is_none()
+                    {
+                        frontier.push(net);
+                    }
                 }
             }
         }
-        for e in &checked.elements {
-            for n in &e.nodes {
-                let net = n.as_str();
-                if net == "0"
-                    || matches!(classes.get(net), Some(NetClass::Power | NetClass::Ground))
+        // Third root tier (`--placer=flow-seed-v2` / `-v3`) — **drawn
+        // sources**. The two tiers above are the whole reason this function
+        // and `layers.rs` can disagree: the layering's *principled* path
+        // roots at `layers::is_signal_source` (a `VoltageSrc`/`CurrentSrc`
+        // that is not `;@ power`-tagged), and only its no-source *fallback*
+        // is what the leaf-name backstop above mirrors. A netlist whose
+        // stimulus is DRAWN therefore takes the layering's rooted-DAG path
+        // while this map comes back empty — and an empty map makes
+        // `apply_series_horizontal` decline every element, since it requires
+        // a strict depth order across a series element's two nodes.
+        //
+        // `lc_ladder_lpf` is exactly that netlist: `VIN src 0` is drawn, `in`
+        // is touched by three elements so the leaf backstop rejects it, and
+        // the ladder's four series elements are left unpinned for the SA to
+        // rotate apart. Rooting at the source's Signal-class nets gives
+        // `src=0 → in=1 → n2=2 → n3=3 → out=4`.
+        //
+        // Last tier, deliberately: it fires only when the port loop AND the
+        // leaf backstop both seeded nothing, so every fixture that declares
+        // an input port or owns a leaf input net is byte-unchanged.
+        if frontier.is_empty() && variant.unified_depth_roots() {
+            for e in &checked.elements {
+                if !matches!(e.kind, ElementKind::VoltageSrc | ElementKind::CurrentSrc)
+                    || matches!(e.role, ElementRole::Power(_))
                 {
                     continue;
                 }
-                if net_members.get(net).copied() == Some(1)
-                    && matches!(crate::roots::boundary_net_role(net), Some(PortDir::Input))
-                    && depth.insert(net.to_string(), 0).is_none()
-                {
-                    frontier.push(net);
-                }
-            }
-        }
-    }
-    // Third root tier (`--placer=flow-seed-v2` / `-v3`) — **drawn
-    // sources**. The two tiers above are the whole reason this function
-    // and `layers.rs` can disagree: the layering's *principled* path
-    // roots at `layers::is_signal_source` (a `VoltageSrc`/`CurrentSrc`
-    // that is not `;@ power`-tagged), and only its no-source *fallback*
-    // is what the leaf-name backstop above mirrors. A netlist whose
-    // stimulus is DRAWN therefore takes the layering's rooted-DAG path
-    // while this map comes back empty — and an empty map makes
-    // `apply_series_horizontal` decline every element, since it requires
-    // a strict depth order across a series element's two nodes.
-    //
-    // `lc_ladder_lpf` is exactly that netlist: `VIN src 0` is drawn, `in`
-    // is touched by three elements so the leaf backstop rejects it, and
-    // the ladder's four series elements are left unpinned for the SA to
-    // rotate apart. Rooting at the source's Signal-class nets gives
-    // `src=0 → in=1 → n2=2 → n3=3 → out=4`.
-    //
-    // Last tier, deliberately: it fires only when the port loop AND the
-    // leaf backstop both seeded nothing, so every fixture that declares
-    // an input port or owns a leaf input net is byte-unchanged.
-    if frontier.is_empty() && variant.unified_depth_roots() {
-        for e in &checked.elements {
-            if !matches!(e.kind, ElementKind::VoltageSrc | ElementKind::CurrentSrc)
-                || matches!(e.role, ElementRole::Power(_))
-            {
-                continue;
-            }
-            for n in &e.nodes {
-                let net = n.as_str();
-                if net == "0"
-                    || matches!(classes.get(net), Some(NetClass::Power | NetClass::Ground))
-                {
-                    continue;
-                }
-                if depth.insert(net.to_string(), 0).is_none() {
-                    frontier.push(net);
+                for n in &e.nodes {
+                    let net = n.as_str();
+                    if net == "0"
+                        || matches!(classes.get(net), Some(NetClass::Power | NetClass::Ground))
+                    {
+                        continue;
+                    }
+                    if depth.insert(net.to_string(), 0).is_none() {
+                        frontier.push(net);
+                    }
                 }
             }
         }

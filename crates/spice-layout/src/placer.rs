@@ -177,6 +177,34 @@ pub enum Placer {
     /// bends, and the ADR-16 protocol (V16 non-increasing per fixture)
     /// is the instrument that says where.
     FlowSeedV3,
+    /// **Root-policy unification** — one signal-flow root set, read by
+    /// the X layering and the flow idioms alike.
+    ///
+    /// [`Placer::FlowSeedV2`] closed ONE of the three divergences
+    /// between `layers::assign_x_layers_with` and
+    /// `idioms::signal_net_depth` — the drawn source — by bolting a
+    /// third tier onto the depth map. This variant closes the *class*:
+    /// both consumers call `roots::signal_flow_roots`, a single tiered
+    /// policy (declared `*@port …=input` ≻ drawn source ≻ leaf-input
+    /// name ≻ none) with ADR-18's "boundary, not interior" filter
+    /// applied inside it — and, new here, applied to **declared ports**
+    /// too, so a port sitting on an interior net can no longer root
+    /// mid-chain unchallenged (`port_shapes`).
+    ///
+    /// The *traversals* are deliberately not unified: the layering needs
+    /// element roots for a longest-path DAG, the depth map needs net
+    /// roots for a shortest-hop BFS. Every defect this class produced
+    /// was a disagreement about which roots exist, never about the walk.
+    ///
+    /// One asymmetry is designed and permanent: `no_source_fallback`'s
+    /// **rail-rooted** policy stays layers-only. With no signal-flow
+    /// root the depth map returns EMPTY and `apply_series_horizontal`
+    /// declines — declining is correct for a rootless cycle, and
+    /// fabricating a direction from rail hops is not. `diff_pair`,
+    /// `multivibrator` and `wien_bridge_osc` are byte-identical for
+    /// exactly that reason, and are the cheapest check that they stayed
+    /// so.
+    FlowSeedV4,
 }
 
 impl Placer {
@@ -191,6 +219,7 @@ impl Placer {
         Self::M5Streams,
         Self::FlowSeedV2,
         Self::FlowSeedV3,
+        Self::FlowSeedV4,
     ];
 
     /// The name accepted by `--placer` and printed by the scoreboard.
@@ -205,6 +234,7 @@ impl Placer {
             Self::FlowSeed => "flow-seed",
             Self::FlowSeedV2 => "flow-seed-v2",
             Self::FlowSeedV3 => "flow-seed-v3",
+            Self::FlowSeedV4 => "flow-seed-v4",
         }
     }
 
@@ -233,6 +263,10 @@ impl Placer {
             Self::FlowSeedV3 => {
                 "orientation-churn stages 1+2: stage 1 plus the SA's V5 \
                  never-increase gate extended from mirror-Y to rotate"
+            }
+            Self::FlowSeedV4 => {
+                "root-policy unification: one tiered signal-flow root set, \
+                 read by the X layering and the flow idioms alike"
             }
         }
     }
@@ -270,7 +304,10 @@ impl Placer {
     /// at every rail-touching element?
     #[must_use]
     pub fn flow_seed_layering(self) -> bool {
-        matches!(self, Self::FlowSeed | Self::FlowSeedV2 | Self::FlowSeedV3)
+        matches!(
+            self,
+            Self::FlowSeed | Self::FlowSeedV2 | Self::FlowSeedV3 | Self::FlowSeedV4
+        )
     }
 
     /// Orientation-churn stage 1: does `idioms::signal_net_depth` fall
@@ -283,6 +320,21 @@ impl Placer {
     #[must_use]
     pub fn unified_depth_roots(self) -> bool {
         matches!(self, Self::FlowSeedV2 | Self::FlowSeedV3)
+    }
+
+    /// Root-policy unification: do `layers::assign_x_layers_with` and
+    /// `idioms::signal_net_depth` both read
+    /// `roots::signal_flow_roots` — one tiered policy — instead of two
+    /// independently-drifted ones?
+    ///
+    /// This **supersedes** [`Self::unified_depth_roots`] rather than
+    /// composing with it: v4 replaces the depth map's tier ladder
+    /// wholesale instead of appending a tier to it. `flow-seed-v2`'s
+    /// inline third tier stays until v4 is promoted — deleting it now
+    /// would retire the control arm the comparison is graded against.
+    #[must_use]
+    pub fn unified_roots(self) -> bool {
+        matches!(self, Self::FlowSeedV4)
     }
 
     /// Orientation-churn stage 2: does the SA's V5 never-increase gate
@@ -346,6 +398,8 @@ mod tests {
     #[test]
     fn the_orientation_churn_stages_are_off_by_default() {
         assert!(!Placer::default().unified_depth_roots());
+        assert!(!Placer::default().unified_roots());
+        assert!(!Placer::Champion.unified_roots());
         assert!(!Placer::default().sa_rotate_v5_gate());
         assert!(!Placer::Champion.unified_depth_roots());
         assert!(!Placer::Champion.sa_rotate_v5_gate());
@@ -358,6 +412,23 @@ mod tests {
         // against `flow-seed` isolates the stage under test.
         assert!(Placer::FlowSeedV2.flow_seed_layering());
         assert!(Placer::FlowSeedV3.flow_seed_layering());
+    }
+
+    /// v4 is the *unification*, not another stage on top of v2: it
+    /// replaces the depth map's tier ladder rather than extending it, so
+    /// it must NOT also report `unified_depth_roots` (that would run v2's
+    /// bolted-on third tier inside the else-branch v4 never takes, and
+    /// blur the two arms the scoreboard is comparing).
+    #[test]
+    fn the_root_unification_is_dead_on_the_default_path_and_distinct_from_v2() {
+        assert!(Placer::FlowSeedV4.unified_roots());
+        assert!(!Placer::FlowSeedV4.unified_depth_roots());
+        assert!(!Placer::FlowSeedV4.sa_rotate_v5_gate());
+        assert!(!Placer::FlowSeedV2.unified_roots());
+        assert!(!Placer::FlowSeedV3.unified_roots());
+        // Built ON the promoted default's layering, so an A/B against
+        // `flow-seed` isolates the root policy and nothing else.
+        assert!(Placer::FlowSeedV4.flow_seed_layering());
     }
 
     #[test]

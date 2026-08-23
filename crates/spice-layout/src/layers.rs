@@ -12,7 +12,7 @@ use spice_resolve::PortDir;
 
 use crate::net_class::{NetClass, NetClassMap};
 use crate::placer::Placer;
-use crate::roots::{boundary_net_role, is_signal_source};
+use crate::roots::{RootTier, SignalRoots, boundary_net_role, is_signal_source};
 
 /// Result of X-layer assignment for the full netlist.
 #[derive(Debug, Clone)]
@@ -40,6 +40,18 @@ pub struct LayerAssignment {
     /// "all at layer 0" (e.g. a pure multivibrator with only power
     /// sources). Caller may choose a column-major fallback layout.
     pub no_source_fallback: bool,
+    /// `true` when the layering rooted at a **signal-flow** root — a
+    /// declared `*@port …=input`, a drawn source, or a leaf input name.
+    /// `false` means it rooted at the rails (X = hops from the nearest
+    /// supply) or found no root at all.
+    ///
+    /// This is *not* `!no_source_fallback`: that flag records which code
+    /// path ran, and the fallback path is signal-rooted whenever
+    /// `flow-seed`'s roots span the signal graph. It is the layering
+    /// half of `roots::RootTier` — the half a test can compare
+    /// against the depth map's, which is how the two policies are held
+    /// together (see `roots.rs`).
+    pub rooted: bool,
 }
 
 /// Assign X layers to every element in `checked`.
@@ -97,8 +109,26 @@ pub fn assign_x_layers_with(
         }
     }
 
+    // Under a unified-roots placer BOTH consumers read `roots.rs`; on
+    // the legacy path each keeps its own independently-drifted policy.
+    let unified: Option<SignalRoots> = variant
+        .unified_roots()
+        .then(|| crate::roots::signal_flow_roots(checked, classes, variant));
+
     // Identify signal sources.
-    let sources: HashSet<usize> = (0..n).filter(|&i| is_signal_source(checked, i)).collect();
+    //
+    // Under the unified policy a drawn source roots the DAG only when it
+    // WON its tier: a declared `*@port …=input` outranks it, and a
+    // netlist carrying both therefore takes the port-rooted BFS below
+    // instead. That is the one place the unification had to pick a side
+    // — the two old policies ordered these tiers oppositely — and no
+    // current fixture declares an input port and draws its source, so
+    // the choice is settled by the scoreboard, not by argument.
+    let sources: HashSet<usize> = match &unified {
+        Some(r) if r.tier == RootTier::DrawnSources => r.elements.iter().copied().collect(),
+        Some(_) => HashSet::new(),
+        None => (0..n).filter(|&i| is_signal_source(checked, i)).collect(),
+    };
 
     // Build the co-net adjacency: every ordered pair of distinct elements
     // sharing a Signal net gets an edge, so the graph is **undirected** —
@@ -130,7 +160,14 @@ pub fn assign_x_layers_with(
     // fallback path; the layer term in cost is computed from the
     // resulting structure normally.
     if sources.is_empty() {
-        return no_source_fallback(checked, classes, &net_to_elements, n, variant);
+        return no_source_fallback(
+            checked,
+            classes,
+            &net_to_elements,
+            n,
+            variant,
+            unified.as_ref(),
+        );
     }
     // Step 3-5: directed DAG, longest-path layering.
     let (dag, feedback_edges) = break_cycles(adj);
@@ -142,6 +179,7 @@ pub fn assign_x_layers_with(
         order_key: identity_order(n),
         feedback_edges,
         no_source_fallback: false,
+        rooted: true,
     }
 }
 
@@ -159,6 +197,7 @@ fn no_source_fallback(
     net_to_elements: &BTreeMap<&str, Vec<usize>>,
     n: usize,
     variant: Placer,
+    unified: Option<&SignalRoots>,
 ) -> LayerAssignment {
     // Identify "leaf signal nets" — Signal-class nets touched by
     // exactly one element in the netlist. These are external
@@ -284,7 +323,18 @@ fn no_source_fallback(
     // below. ADR-18's "boundary, not interior" filter is retained
     // verbatim (`input_root` still carries the `signal_degree <= 2`
     // pass-through test), so a diff-pair transistor is never a root.
-    let flow_roots: HashSet<usize> = if variant.flow_seed_layering() {
+    //
+    // Under a unified-roots placer the set comes from `roots.rs`
+    // wholesale, so `input_root` above is the *legacy* spelling of the
+    // same idea and the two can no longer drift. The tier reaching here
+    // is `DeclaredPorts` or `LeafNames` (a `DrawnSources` win took the
+    // rooted-DAG path above) or `None` — and `None` yields an empty set,
+    // which is exactly how the rail-rooted fallback below stays reachable
+    // for a rootless cycle. That asymmetry is deliberate and permanent:
+    // see `roots.rs` § "The one designed asymmetry".
+    let flow_roots: HashSet<usize> = if let Some(r) = unified {
+        r.elements.iter().copied().collect()
+    } else if variant.flow_seed_layering() {
         (0..n).filter(|&i| input_root(i)).collect()
     } else {
         HashSet::new()
@@ -351,6 +401,7 @@ fn no_source_fallback(
             order_key: identity_order(n),
             feedback_edges: Vec::new(),
             no_source_fallback: true,
+            rooted: false,
         };
     }
     // Build undirected adjacency on Signal nets.
@@ -475,6 +526,7 @@ fn no_source_fallback(
         order_key,
         feedback_edges: Vec::new(),
         no_source_fallback: true,
+        rooted: use_flow_roots,
     }
 }
 
