@@ -640,7 +640,7 @@ pub fn place_with_hint(
     // column, and before `pick_orientations` (which skips pinned
     // elements). Pins what it places so the SA and phase 4.5 cannot revert
     // it. `refinement_meta` recomputes the identical pins.
-    idioms::apply_series_horizontal(&mut placement, &mut pinned, &checked, &allowed);
+    idioms::apply_series_horizontal(&mut placement, &mut pinned, &checked, &allowed, opts.placer);
     orient::debug_assert_seed_pins_satisfy_v14(
         &placement,
         &pinned,
@@ -1022,7 +1022,7 @@ pub fn refinement_meta(
     // so phase 4.5 sees the same pins and keeps each series element at its
     // constructed horizontal facing (it never re-orients a pinned
     // element).
-    idioms::apply_series_horizontal(&mut placement, &mut pinned, checked, &allowed);
+    idioms::apply_series_horizontal(&mut placement, &mut pinned, checked, &allowed, placer);
     orient::debug_assert_seed_pins_satisfy_v14(
         &placement,
         &pinned,
@@ -1500,7 +1500,9 @@ fn pack_rows(
         | Placer::M3SignedGate
         | Placer::M3SignedFull
         | Placer::M5Streams
-        | Placer::FlowSeed => shift.last().copied().unwrap_or(0) / 2,
+        | Placer::FlowSeed
+        | Placer::FlowSeedV2
+        | Placer::FlowSeedV3 => shift.last().copied().unwrap_or(0) / 2,
         Placer::M4YDatum => 0,
     };
     for (i, pe) in placed.iter_mut().enumerate() {
@@ -1655,7 +1657,9 @@ fn place_seed(
         | Placer::M3SignedGate
         | Placer::M3SignedFull
         | Placer::M5Streams
-        | Placer::FlowSeed => {
+        | Placer::FlowSeed
+        | Placer::FlowSeedV2
+        | Placer::FlowSeedV3 => {
             let n_i32 = i32::try_from(n).unwrap_or(i32::MAX);
             let y_top: i32 = 0;
             let y_bot: i32 = (n_i32 + 4) * Y_RANK_STRIDE;

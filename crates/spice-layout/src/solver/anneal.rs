@@ -307,20 +307,35 @@ pub(super) fn refine(
             current_overlaps
         };
         let overlap_ok = trial_overlaps <= current_overlaps;
-        // V5 pin-facing gate, applied to the mirror-Y move only: a flip
-        // that makes more signal pins face away from their net is
-        // rejected even when it lowers HPWL, because the immutable cost
-        // cannot see the resulting V5 routing defect (a wire doubling
-        // back through the flipped active device's body). Confined to
-        // mirror-Y so it never perturbs the jitter/rotate/swap trajectory
-        // of any other move or fixture.
-        let is_mirror = matches!(proposal, Proposal::MirrorY { .. });
-        let trial_misalignment = if alive && coincidence_ok && overlap_ok && is_mirror {
+        // V5 pin-facing gate: a move that makes more signal pins face
+        // away from their net is rejected even when it lowers HPWL,
+        // because the immutable cost cannot see the resulting V5 routing
+        // defect (a wire doubling back through the reoriented device's
+        // body) — `cost.rs` has deliberately no orientation term.
+        //
+        // **Scope is a registered placer choice** (orientation-churn
+        // stage 2, `--placer=flow-seed-v3`). On the default path the gate
+        // binds on the mirror-Y move ONLY, so it never perturbs the
+        // jitter/rotate/swap trajectory of any other move or fixture —
+        // which also means `!is_mirror ||` short-circuits to `true` for
+        // every **rotate**, leaving the SA free to stand a horizontal
+        // series element on end whenever compaction pays for it. Under
+        // stage 2 the same never-increase test binds on every reorienting
+        // move (`Proposal::reorients`), so an improving rotation still
+        // passes and a destructive one is refused. It stays a gate, never
+        // a weight: adding a `pin_facing` term to `cost.rs` is the
+        // Attempt-A failure CLAUDE.md records.
+        let v5_gated = if opts.placer.sa_rotate_v5_gate() {
+            proposal.reorients().is_some()
+        } else {
+            matches!(proposal, Proposal::MirrorY { .. })
+        };
+        let trial_misalignment = if alive && coincidence_ok && overlap_ok && v5_gated {
             pin_outward_misalignment(&seed, checked)
         } else {
             current_misalignment
         };
-        let misalignment_ok = !is_mirror || trial_misalignment <= current_misalignment;
+        let misalignment_ok = !v5_gated || trial_misalignment <= current_misalignment;
         // Signal-flow monotone gate. Evaluated last (it is the cheapest
         // recount — a scan of the precomputed pair list) and only while
         // the move is still alive, so it costs nothing on the moves the

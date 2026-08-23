@@ -119,6 +119,64 @@ pub enum Placer {
     /// **The default placer since the ADR-23 promotion (2026-08-18).**
     #[default]
     FlowSeed,
+    /// **Orientation-churn Stage 1** — one depth-root policy, shared by
+    /// the X layering and the flow idioms.
+    ///
+    /// `idioms::signal_net_depth` is what tells
+    /// [`crate::idioms::apply_series_horizontal`] which way a series
+    /// element's signal runs, and *that* pass is the only thing that
+    /// pins a series chain horizontal — the pin the SA and phase 4.5
+    /// both skip. Its root policy has two tiers: declared `*@port
+    /// …=input` nets, then a leaf-name backstop that requires the net be
+    /// touched by **exactly one** element. Neither tier knows about a
+    /// **drawn source**, which is precisely the root
+    /// `layers::assign_x_layers_with` uses on its principled (non-
+    /// fallback) path via `is_signal_source`.
+    ///
+    /// On `lc_ladder_lpf` — the one fixture with a drawn stimulus and no
+    /// `*@port …=input` — `in` is touched by `RS`, `C1` and `L1`, so the
+    /// leaf backstop rejects it, the depth map comes back **empty**, and
+    /// `apply_series_horizontal` declines every element of the ladder.
+    /// The seed's textbook drawing (`RS`, `L1`, `L2`, `L3` all horizontal
+    /// on one lane, shunts hanging below) is then left unpinned for the
+    /// SA to rotate apart.
+    ///
+    /// This variant adds a **third** tier, reached only when the first
+    /// two seed nothing: root at the Signal-class nets of drawn sources,
+    /// mirroring `layers::is_signal_source` verbatim (a `VoltageSrc` /
+    /// `CurrentSrc` that is not `;@ power`-tagged). The function's own
+    /// comment already claimed it mirrored the layering "so depth and
+    /// layer agree"; only the *fallback* was ever mirrored, never the
+    /// principled source-root path. Nothing else moves: the tier is
+    /// last, so any fixture whose port loop or leaf backstop seeds a
+    /// root is byte-unchanged.
+    FlowSeedV2,
+    /// **Orientation-churn Stages 1 + 2** — [`Placer::FlowSeedV2`] plus
+    /// the SA's V5 never-increase gate extended from mirror-Y to *every*
+    /// reorienting move.
+    ///
+    /// `pin_outward_misalignment` is already tracked incrementally in
+    /// the anneal loop and already precedented as a move gate, but the
+    /// predicate reads `!is_mirror || trial <= current`, which
+    /// short-circuits to `true` for every **rotate**. So the one soft
+    /// signal the SA has about pin facing is disarmed for the move that
+    /// changes facing most: the annealer rotates a horizontal series
+    /// element vertical whenever HPWL/compaction pays for it, and its
+    /// objective has no orientation term to notice (`cost.rs` has no
+    /// `pin_facing` weight — deliberately, see CLAUDE.md).
+    ///
+    /// Under this variant the gate is `proposal.reorients().is_some()`,
+    /// so an *improving* rotation still passes and a destructive one is
+    /// refused. It is a **never-increase** gate, not a new cost term —
+    /// no weight is added to `cost.rs`, which would re-create the
+    /// Attempt-A failure CLAUDE.md records.
+    ///
+    /// Known risk, recorded up front: ADR-17's corrected SA ablation
+    /// found the annealer genuinely load-bearing for **bend count** on
+    /// three complex fixtures. Constraining its rotate move can cost
+    /// bends, and the ADR-16 protocol (V16 non-increasing per fixture)
+    /// is the instrument that says where.
+    FlowSeedV3,
 }
 
 impl Placer {
@@ -131,6 +189,8 @@ impl Placer {
         Self::M3SignedGate,
         Self::M3SignedFull,
         Self::M5Streams,
+        Self::FlowSeedV2,
+        Self::FlowSeedV3,
     ];
 
     /// The name accepted by `--placer` and printed by the scoreboard.
@@ -143,6 +203,8 @@ impl Placer {
             Self::M3SignedFull => "m3-signed-full",
             Self::M5Streams => "m5-streams",
             Self::FlowSeed => "flow-seed",
+            Self::FlowSeedV2 => "flow-seed-v2",
+            Self::FlowSeedV3 => "flow-seed-v3",
         }
     }
 
@@ -163,6 +225,14 @@ impl Placer {
             Self::FlowSeed => {
                 "default: flow-faithful skeleton \
                  (signal-flow roots, stub followers, barycenter order)"
+            }
+            Self::FlowSeedV2 => {
+                "orientation-churn stage 1: one depth-root policy \
+                 (drawn sources root the flow idioms' depth map too)"
+            }
+            Self::FlowSeedV3 => {
+                "orientation-churn stages 1+2: stage 1 plus the SA's V5 \
+                 never-increase gate extended from mirror-Y to rotate"
             }
         }
     }
@@ -200,7 +270,27 @@ impl Placer {
     /// at every rail-touching element?
     #[must_use]
     pub fn flow_seed_layering(self) -> bool {
-        matches!(self, Self::FlowSeed)
+        matches!(self, Self::FlowSeed | Self::FlowSeedV2 | Self::FlowSeedV3)
+    }
+
+    /// Orientation-churn stage 1: does `idioms::signal_net_depth` fall
+    /// back to **drawn-source** roots when neither a declared `*@port
+    /// …=input` nor the leaf-name backstop seeds one?
+    ///
+    /// This unifies the depth-root policy with
+    /// `layers::assign_x_layers_with`'s `is_signal_source`, which the
+    /// depth function's own comment already claimed to mirror.
+    #[must_use]
+    pub fn unified_depth_roots(self) -> bool {
+        matches!(self, Self::FlowSeedV2 | Self::FlowSeedV3)
+    }
+
+    /// Orientation-churn stage 2: does the SA's V5 never-increase gate
+    /// (`pin_outward_misalignment`) bind on **every** reorienting move,
+    /// instead of on mirror-Y alone?
+    #[must_use]
+    pub fn sa_rotate_v5_gate(self) -> bool {
+        matches!(self, Self::FlowSeedV3)
     }
 
     /// Look a placer up by the name `--placer` accepts.
@@ -247,6 +337,27 @@ mod tests {
             assert_eq!(Placer::from_name(p.name()), Some(p), "{}", p.name());
         }
         assert_eq!(Placer::from_name("no-such-placer"), None);
+    }
+
+    /// The orientation-churn stages are **dead on the default path**.
+    /// Both are gated on a `Placer` accessor and nothing else, so this
+    /// assertion is the whole byte-identity argument for the shipping
+    /// output — `baseline_lock` is the empirical half.
+    #[test]
+    fn the_orientation_churn_stages_are_off_by_default() {
+        assert!(!Placer::default().unified_depth_roots());
+        assert!(!Placer::default().sa_rotate_v5_gate());
+        assert!(!Placer::Champion.unified_depth_roots());
+        assert!(!Placer::Champion.sa_rotate_v5_gate());
+        // v2 = stage 1 only; v3 = stages 1 + 2.
+        assert!(Placer::FlowSeedV2.unified_depth_roots());
+        assert!(!Placer::FlowSeedV2.sa_rotate_v5_gate());
+        assert!(Placer::FlowSeedV3.unified_depth_roots());
+        assert!(Placer::FlowSeedV3.sa_rotate_v5_gate());
+        // Both build ON the promoted default's layering, so a comparison
+        // against `flow-seed` isolates the stage under test.
+        assert!(Placer::FlowSeedV2.flow_seed_layering());
+        assert!(Placer::FlowSeedV3.flow_seed_layering());
     }
 
     #[test]

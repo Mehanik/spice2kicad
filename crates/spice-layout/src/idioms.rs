@@ -59,6 +59,7 @@ use spice_resolve::{ElementKind, ElementRole, PortDir, ResolvedElement};
 use kicad_symbols::{Orientation, Rotation, Symbol};
 
 use crate::net_class::{NetClass, NetClassMap, VertPref, classify_nets};
+use crate::placer::Placer;
 use crate::{CELL_W, GridPoint, Placement, WorldExtent, vertical_stride_cells, world_extent};
 
 /// True for a two-terminal passive (`R` / `C` / `L`) — the element kinds
@@ -1022,6 +1023,7 @@ pub(crate) fn apply_series_horizontal(
     pinned: &mut [bool],
     checked: &CheckedNetlist,
     allowed: &[Vec<Orientation>],
+    variant: Placer,
 ) {
     // Extra cells beyond a body-clean vertical stride, so a downstream
     // shunt's pin sits far enough from the series pin that the shared-node
@@ -1045,7 +1047,7 @@ pub(crate) fn apply_series_horizontal(
     // +4. The sweep table is in the commit message.
     const SHUNT_LABEL_MARGIN_UP_CELLS: i32 = 3;
     let classes = classify_nets(checked);
-    let depth = signal_net_depth(checked, &classes);
+    let depth = signal_net_depth(checked, &classes, variant);
     let stubs = detect_rail_stubs(checked);
 
     let is_signal = |n: &str| -> bool {
@@ -1285,7 +1287,15 @@ fn rail_facing_orientation(
 /// adjacency, never crossing a rail (Power/Ground/`0`), so the depth
 /// orders signal nets from input to output. Nets unreachable from an
 /// input root are absent from the map (depth unknown).
-fn signal_net_depth(checked: &CheckedNetlist, classes: &NetClassMap) -> HashMap<String, u32> {
+///
+/// `variant` selects the **root policy**, not the traversal: under
+/// [`Placer::unified_depth_roots`] a third tier roots at drawn sources
+/// when the first two seed nothing. See that method for why.
+fn signal_net_depth(
+    checked: &CheckedNetlist,
+    classes: &NetClassMap,
+    variant: Placer,
+) -> HashMap<String, u32> {
     let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
     for e in &checked.elements {
         for a in &e.nodes {
@@ -1337,6 +1347,46 @@ fn signal_net_depth(checked: &CheckedNetlist, classes: &NetClassMap) -> HashMap<
                     && matches!(crate::layers::boundary_net_role(net), Some(PortDir::Input))
                     && depth.insert(net.to_string(), 0).is_none()
                 {
+                    frontier.push(net);
+                }
+            }
+        }
+    }
+    // Third root tier (`--placer=flow-seed-v2` / `-v3`) — **drawn
+    // sources**. The two tiers above are the whole reason this function
+    // and `layers.rs` can disagree: the layering's *principled* path
+    // roots at `layers::is_signal_source` (a `VoltageSrc`/`CurrentSrc`
+    // that is not `;@ power`-tagged), and only its no-source *fallback*
+    // is what the leaf-name backstop above mirrors. A netlist whose
+    // stimulus is DRAWN therefore takes the layering's rooted-DAG path
+    // while this map comes back empty — and an empty map makes
+    // `apply_series_horizontal` decline every element, since it requires
+    // a strict depth order across a series element's two nodes.
+    //
+    // `lc_ladder_lpf` is exactly that netlist: `VIN src 0` is drawn, `in`
+    // is touched by three elements so the leaf backstop rejects it, and
+    // the ladder's four series elements are left unpinned for the SA to
+    // rotate apart. Rooting at the source's Signal-class nets gives
+    // `src=0 → in=1 → n2=2 → n3=3 → out=4`.
+    //
+    // Last tier, deliberately: it fires only when the port loop AND the
+    // leaf backstop both seeded nothing, so every fixture that declares
+    // an input port or owns a leaf input net is byte-unchanged.
+    if frontier.is_empty() && variant.unified_depth_roots() {
+        for e in &checked.elements {
+            if !matches!(e.kind, ElementKind::VoltageSrc | ElementKind::CurrentSrc)
+                || matches!(e.role, ElementRole::Power(_))
+            {
+                continue;
+            }
+            for n in &e.nodes {
+                let net = n.as_str();
+                if net == "0"
+                    || matches!(classes.get(net), Some(NetClass::Power | NetClass::Ground))
+                {
+                    continue;
+                }
+                if depth.insert(net.to_string(), 0).is_none() {
                     frontier.push(net);
                 }
             }
@@ -1902,5 +1952,77 @@ RB vcc out 100k
             placement.elements[rb].orientation,
             allowed[rb]
         );
+    }
+
+    /// Orientation-churn stage 1 (`--placer=flow-seed-v2`).
+    ///
+    /// A netlist with a **drawn** stimulus and no `*@port … =input`
+    /// seeds NEITHER of the two default root tiers: there is no declared
+    /// input port, and the leaf-name backstop requires the net be
+    /// touched by exactly one element (here `n1` is touched by three).
+    /// So the depth map comes back empty on the default path — and an
+    /// empty map makes `apply_series_horizontal` decline every element,
+    /// because it needs a strict depth order across a series element's
+    /// two nodes.
+    ///
+    /// This is the `lc_ladder_lpf` shape in miniature. Stage 1's third
+    /// tier roots at the drawn source, mirroring
+    /// `layers::is_signal_source`.
+    #[test]
+    fn drawn_source_roots_the_depth_map_only_under_stage_one() {
+        let src = "\
+drawn-source depth roots
+*@symbol Device:R for=R*
+*@symbol Device:C for=C*
+*@symbol Simulation_SPICE:VDC for=VIN
+VIN src 0  DC 0 AC 1
+RS  src n1 1k
+C1  n1  0  1n
+R2  n1  n2 1k
+C2  n2  0  1n
+.end
+";
+        let checked = checked_of(src);
+        let classes = classify_nets(&checked);
+        assert!(
+            signal_net_depth(&checked, &classes, Placer::FlowSeed).is_empty(),
+            "the shipping default has no drawn-source root tier — if this \
+             map is non-empty the change leaked onto the default path"
+        );
+        let depth = signal_net_depth(&checked, &classes, Placer::FlowSeedV2);
+        assert_eq!(depth.get("src"), Some(&0), "{depth:?}");
+        assert_eq!(depth.get("n1"), Some(&1), "{depth:?}");
+        assert_eq!(depth.get("n2"), Some(&2), "{depth:?}");
+        assert!(
+            !depth.contains_key("0"),
+            "the BFS must never cross a rail: {depth:?}"
+        );
+    }
+
+    /// The third tier is **last**, so a fixture whose port loop already
+    /// seeds a root is byte-unchanged by it: same map on both placers,
+    /// and the drawn source's own net does NOT become a second root.
+    #[test]
+    fn a_declared_input_port_outranks_the_drawn_source_tier() {
+        let src = "\
+declared port wins
+*@symbol Device:R for=R*
+*@symbol Device:C for=C*
+*@symbol Simulation_SPICE:VDC for=VIN
+*@port n1=input
+VIN src 0  DC 0 AC 1
+RS  src n1 1k
+C1  n1  0  1n
+R2  n1  n2 1k
+C2  n2  0  1n
+.end
+";
+        let checked = checked_of(src);
+        let classes = classify_nets(&checked);
+        let base = signal_net_depth(&checked, &classes, Placer::FlowSeed);
+        let stage1 = signal_net_depth(&checked, &classes, Placer::FlowSeedV2);
+        assert_eq!(base, stage1, "stage 1 must be inert once a tier fires");
+        assert_eq!(base.get("n1"), Some(&0), "{base:?}");
+        assert_eq!(base.get("src"), Some(&1), "{base:?}");
     }
 }
