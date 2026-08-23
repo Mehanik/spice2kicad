@@ -1505,7 +1505,8 @@ fn pack_rows(
         | Placer::FlowSeedV2
         | Placer::FlowSeedV3
         | Placer::FlowSeedV4
-        | Placer::DividerRails => shift.last().copied().unwrap_or(0) / 2,
+        | Placer::DividerRails
+        | Placer::DividerRailsStrict => shift.last().copied().unwrap_or(0) / 2,
         Placer::M4YDatum => 0,
     };
     for (i, pe) in placed.iter_mut().enumerate() {
@@ -1664,7 +1665,8 @@ fn place_seed(
         | Placer::FlowSeedV2
         | Placer::FlowSeedV3
         | Placer::FlowSeedV4
-        | Placer::DividerRails => {
+        | Placer::DividerRails
+        | Placer::DividerRailsStrict => {
             let n_i32 = i32::try_from(n).unwrap_or(i32::MAX);
             let y_top: i32 = 0;
             let y_bot: i32 = (n_i32 + 4) * Y_RANK_STRIDE;

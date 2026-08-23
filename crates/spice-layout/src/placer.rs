@@ -235,6 +235,23 @@ pub enum Placer {
     /// Nothing else moves — the geometry, the stride, the pin mechanism
     /// and the pinned-wins rule are the shipping ones.
     DividerRails,
+    /// **Rail-gated divider idiom, unloaded-tap variant** — the same
+    /// corrected predicate as [`Placer::DividerRails`], but with the
+    /// shipping tap-degree-2 gate *retained* on top of it.
+    ///
+    /// This is the deliberately **conservative** reading of the defect:
+    /// the rail test alone removes the over-match (a plain series chain
+    /// is declined) while the retained degree gate declines the loaded
+    /// bias divider the shipping predicate also declines. The predicate
+    /// is a strict *narrowing* of the shipping one, so the only fixture
+    /// it can move is one the shipping detector wrongly claimed.
+    ///
+    /// It exists to **attribute** the `divider-rails` scoreboard: that
+    /// arm changes three fixtures at once (`port_shapes` loses two
+    /// spurious pairs, `common_emitter` and `two_stage_amp` each gain
+    /// real ones), so its aggregate cannot say which direction paid for
+    /// which. This arm moves `port_shapes` only.
+    DividerRailsStrict,
 }
 
 impl Placer {
@@ -251,6 +268,7 @@ impl Placer {
         Self::FlowSeedV3,
         Self::FlowSeedV4,
         Self::DividerRails,
+        Self::DividerRailsStrict,
     ];
 
     /// The name accepted by `--placer` and printed by the scoreboard.
@@ -267,6 +285,7 @@ impl Placer {
             Self::FlowSeedV3 => "flow-seed-v3",
             Self::FlowSeedV4 => "flow-seed-v4",
             Self::DividerRails => "divider-rails",
+            Self::DividerRailsStrict => "divider-rails-strict",
         }
     }
 
@@ -303,6 +322,10 @@ impl Placer {
             Self::DividerRails => {
                 "flow-seed-v4 plus a rail-gated divider idiom: a divider \
                  spans supply -> ground, and its tap may be loaded"
+            }
+            Self::DividerRailsStrict => {
+                "divider-rails with the tap-degree-2 gate retained: \
+                 removes the over-match only, adds no new detection"
             }
         }
     }
@@ -347,6 +370,7 @@ impl Placer {
                 | Self::FlowSeedV3
                 | Self::FlowSeedV4
                 | Self::DividerRails
+                | Self::DividerRailsStrict
         )
     }
 
@@ -374,7 +398,10 @@ impl Placer {
     /// would retire the control arm the comparison is graded against.
     #[must_use]
     pub fn unified_roots(self) -> bool {
-        matches!(self, Self::FlowSeedV4 | Self::DividerRails)
+        matches!(
+            self,
+            Self::FlowSeedV4 | Self::DividerRails | Self::DividerRailsStrict
+        )
     }
 
     /// Rail-gated divider idiom: does [`crate::idioms::detect_dividers`]
@@ -388,7 +415,17 @@ impl Placer {
     /// bias divider (under-match). See [`Self::DividerRails`].
     #[must_use]
     pub fn rail_gated_dividers(self) -> bool {
-        matches!(self, Self::DividerRails)
+        matches!(self, Self::DividerRails | Self::DividerRailsStrict)
+    }
+
+    /// Rail-gated divider idiom, conservative reading: is the shipping
+    /// **tap-degree-2** gate retained *on top of* the rail test, so the
+    /// predicate only ever narrows and no fixture gains detection?
+    ///
+    /// This is the attribution arm — see [`Self::DividerRailsStrict`].
+    #[must_use]
+    pub fn divider_tap_must_be_unloaded(self) -> bool {
+        matches!(self, Self::DividerRailsStrict)
     }
 
     /// Orientation-churn stage 2: does the SA's V5 never-increase gate
@@ -495,6 +532,13 @@ mod tests {
         assert!(!Placer::Champion.rail_gated_dividers());
         assert!(!Placer::FlowSeedV4.rail_gated_dividers());
         assert!(Placer::DividerRails.rail_gated_dividers());
+        assert!(Placer::DividerRailsStrict.rail_gated_dividers());
+        // The strict arm is the NARROWING one: it keeps the tap-degree
+        // gate, so it can only ever decline where the shipping
+        // predicate accepted.
+        assert!(Placer::DividerRailsStrict.divider_tap_must_be_unloaded());
+        assert!(!Placer::DividerRails.divider_tap_must_be_unloaded());
+        assert!(!Placer::default().divider_tap_must_be_unloaded());
         // It composes ON `flow-seed-v4`, so an A/B against that arm
         // isolates the divider predicate and nothing else.
         assert!(Placer::DividerRails.unified_roots());

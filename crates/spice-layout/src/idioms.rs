@@ -133,6 +133,10 @@ pub(crate) struct DividerPair {
 /// than whichever happens to have the smaller element index.
 pub(crate) fn detect_dividers(checked: &CheckedNetlist, placer: Placer) -> Vec<DividerPair> {
     let rail_gated = placer.rail_gated_dividers();
+    // Conservative reading (`divider-rails-strict`): keep the shipping
+    // tap-degree gate ON TOP of the rail test, so the predicate only
+    // ever narrows. See `Placer::DividerRailsStrict`.
+    let unloaded_tap_only = placer.divider_tap_must_be_unloaded();
     // Only consulted on the rail-gated path; both are cheap pure
     // functions of `checked`, but computing them unconditionally would
     // put work on the shipping path for nothing.
@@ -188,6 +192,9 @@ pub(crate) fn detect_dividers(checked: &CheckedNetlist, placer: Placer) -> Vec<D
             // is routinely 3+. What it must not be is a rail — a
             // rail-class "midpoint" shorts one of the two resistors.
             if classes.as_ref().and_then(|c| c.get(tap)) != Some(&NetClass::Signal) {
+                continue;
+            }
+            if unloaded_tap_only && net_degree.get(tap).copied() != Some(2) {
                 continue;
             }
         } else {
@@ -1855,6 +1862,66 @@ RB3 b2  0  10k
             detect_dividers(&checked, Placer::DividerRails).is_empty(),
             "a 3-element ladder is a chain for the series pass, not a 2-element divider"
         );
+    }
+
+    /// The **strict** arm keeps the shipping tap-degree gate, so it
+    /// declines the loaded bias divider its sibling accepts — it is a
+    /// pure narrowing of the shipping predicate and can only ever move
+    /// a fixture the shipping detector wrongly claimed.
+    #[test]
+    fn the_strict_arm_narrows_only() {
+        let loaded = "\
+common-emitter bias divider
+*@symbol Device:R for=R*
+*@symbol Device:Q_NPN_BCE for=Q*
+VCC vcc 0 DC 12 ;@ power=+12V
+RB1 vcc b 100k
+RB2 b   0 22k
+Q1 c b 0 QMOD
+.model QMOD NPN
+.end
+";
+        let checked = checked_of(loaded);
+        assert!(
+            detect_dividers(&checked, Placer::DividerRailsStrict).is_empty(),
+            "the strict arm declines a LOADED divider, exactly as the shipping one does"
+        );
+        assert_eq!(
+            detect_dividers(&checked, Placer::DividerRails).len(),
+            1,
+            "the permissive arm accepts it (this is the difference under test)"
+        );
+
+        // An UNLOADED rail-to-rail divider passes both rail-gated arms.
+        let unloaded = "\
+unloaded divider
+*@symbol Device:R for=R*
+VCC vcc 0 DC 12 ;@ power=+12V
+RA vcc mid 10k
+RB mid 0   10k
+.end
+";
+        let checked = checked_of(unloaded);
+        assert_eq!(
+            detect_dividers(&checked, Placer::DividerRailsStrict).len(),
+            1
+        );
+        assert_eq!(detect_dividers(&checked, Placer::DividerRails).len(), 1);
+
+        // And the over-match is removed by BOTH: a plain series chain
+        // has degree-2 taps but no rails.
+        let chain = "\
+four in series, no rail at either end
+*@symbol Device:R for=R*
+R1 src ni 1k
+R2 ni  no 1k
+R3 no  nb 1k
+R4 nb  nz 1k
+.end
+";
+        let checked = checked_of(chain);
+        assert!(detect_dividers(&checked, Placer::DividerRailsStrict).is_empty());
+        assert!(detect_dividers(&checked, Placer::DividerRails).is_empty());
     }
 
     /// A split-supply divider (VCC -> tap -> VEE) is accepted: `VertPref`
