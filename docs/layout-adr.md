@@ -5238,6 +5238,159 @@ those literals comparable across the swap.
 
 
 
+
+### D10. Orientation churn — `flow-seed-v2` and `flow-seed-v3`
+
+Two challengers, registered together because they attack one observation
+from two sides. Neither is promoted; both are dead on the default path
+(no `--placer` flag ⇒ byte-identical output on all eighteen fixtures,
+`baseline_lock` unmoved, and no budget literal touched).
+
+**The observation.** On `lc_ladder_lpf` the *seed already draws the
+textbook schematic and the later stages take it apart.*
+
+| | RS | L1 | L2 | L3 |
+| --- | --- | --- | --- | --- |
+| `--no-refine` (seed only) | 90 | 90 | 90 | 90 |
+| shipped (`flow-seed`) | 180 | 90 | 0 | 270 |
+
+(90/270 = horizontal for a `Device:L`/`Device:R_US`; 0/180 = vertical.)
+The seed puts all four series elements horizontal on one lane at
+y=35.56 with the shunt caps hanging below. Two independent stages undo
+it, and the split was measured with `--refine-iterations 0`, which
+ablates the SA while leaving phase 4.5 running:
+
+| fixture / element | seed | SA off, 4.5 on | shipped |
+| --- | --- | --- | --- |
+| `lc_ladder_lpf` L3 | 90 | **0** | 270 |
+| `common_emitter` COUT | 90 | **180** | 0 |
+| `rc_phase_shift` Q1 | 180+M | **0+M** | 270 |
+| `opamp_inverting_real` RF | 90 | 180 | 0 |
+
+So `lc_ladder_lpf` is disturbed by both stages, while `common_emitter`'s
+`COUT` and `rc_phase_shift`'s `Q1` are **phase-4.5** effects, not SA
+ones. That matters for scoping: no change to the annealer can recover
+those two.
+
+#### Stage 1 — `flow-seed-v2`: one depth-root policy
+
+`idioms::signal_net_depth` is what tells `apply_series_horizontal` which
+way a series element's signal runs, and that pass is the only thing that
+**pins** a series chain horizontal — the pin the SA and phase 4.5 both
+skip. Its root policy had two tiers: declared `*@port …=input` nets, then
+a leaf-name backstop requiring the net be touched by *exactly one*
+element. Neither knows about a **drawn source** — which is exactly the
+root `layers::assign_x_layers_with` uses on its principled (non-fallback)
+path, via `is_signal_source`. The function's own comment claimed it
+mirrored the layering "so depth and layer agree"; only the *fallback* was
+ever mirrored.
+
+On `lc_ladder_lpf`, `in` is touched by `RS`, `C1` and `L1`, so the leaf
+backstop rejects it, the depth map comes back **empty**, and
+`apply_series_horizontal` — which needs a strict depth order across a
+series element's two nodes — declines the entire ladder. A third tier,
+reached only when the first two seed nothing, roots at the Signal-class
+nets of drawn sources: `src=0 → in=1 → n2=2 → n3=3 → out=4`.
+
+**Blast radius: two fixtures, `lc_ladder_lpf` and `sallen_key_driven`** —
+precisely the two with a drawn stimulus (`layers.rs`'s own note names
+them as the pair that never enters the no-source fallback). The other
+sixteen, including the five rootless ones (`diff_pair`, `multivibrator`,
+`wien_bridge_osc`, `named_rails`, `opamp_definition_level`), are
+byte-identical.
+
+| metric | fixture | flow-seed | v2 | Δpoints |
+| --- | --- | --- | --- | --- |
+| v13.4_text_mutual | sallen_key_driven | 2 | 0 | −2.00 |
+| v13.9_foreign_over_glyph | sallen_key_driven | 0 | 1 | +1.00 |
+| v5 | lc_ladder_lpf | 0 | 1 | +1.00 |
+| v16.bends | lc_ladder_lpf | 16 | **5** | −11.00 |
+| v16.bends | sallen_key_driven | 13 | 12 | −1.00 |
+| v16.branches | lc_ladder_lpf | 2 | 1 | −1.00 |
+| v16.branches | sallen_key_driven | 4 | 1 | −3.00 |
+| crossings | sallen_key_driven | 3 | 0 | −3.00 |
+| detour | lc_ladder_lpf | 1.1505 | **1.0139** | −13.66 |
+| detour | sallen_key_driven | 1.0764 | 1.1600 | +8.36 |
+| q3 | lc_ladder_lpf | 2 | 3 | +1.00 |
+| q3 | sallen_key_driven | 3 | 1 | −2.00 |
+| q5 | lc_ladder_lpf | 5 | 1 | −4.00 |
+| f5 | lc_ladder_lpf | 3 | 1 | −2.00 |
+| f5 | sallen_key_driven | 3 | 1 | −2.00 |
+| f6 | lc_ladder_lpf | 9 | 10 | +1.00 |
+| f6 | sallen_key_driven | 7 | 13 | +6.00 |
+
+`T1 = −1.00`, `T2 = −25.30`, `S = −1025.30`, Tier 0 clean on both sides,
+comparison complete: **PROMOTABLE**. Collected twice from scratch, same
+answer. **V16 (B, J) is non-increasing on every fixture**, which is the
+ADR-16 protocol's own instrument.
+
+#### Stage 2 — `flow-seed-v3`: the SA's V5 gate, armed for rotations
+
+`anneal::refine` tracks `pin_outward_misalignment` incrementally and uses
+it as a never-increase move gate — but the predicate read
+
+```rust
+let is_mirror = matches!(proposal, Proposal::MirrorY { .. });
+let misalignment_ok = !is_mirror || trial_misalignment <= current_misalignment;
+```
+
+`!is_mirror ||` short-circuits to `true` for every **rotate**, so the one
+soft signal the SA has about pin facing is disarmed for the move that
+changes facing most, and the SA's objective has no orientation term to
+notice (`cost.rs` deliberately has no `pin_facing` weight). This is the
+same shape as the V11-coincidence gate's own defect, recorded in
+`anneal.rs`: a filter scoped to mirror-Y "because the passive fixtures
+are already fine", which cost a Tier-0 short. Under v3 the gate reads
+`proposal.reorients().is_some()`. It stays a **gate**, never a weight.
+
+It works where the SA is the culprit: `opamp_inverting_real` returns to
+its seed pose exactly (`RIN` 90, `RF` 90, `X1` R0 unmirrored — the
+textbook inverting amp), detour 1.2326 → 1.1081, bends 6 → 5, q5 3 → 1,
+f5 2 → 0. It does **nothing** for `common_emitter`'s `COUT` or
+`rc_phase_shift`'s `Q1`, for the reason the ablation table above gives:
+those are phase-4.5 poses. And `pin_outward_misalignment` counts only
+pins whose net lies *across the body* from the pin's exit side, so a
+90° rotation that merely stands a series element on end frequently
+leaves the count unchanged and passes the gate untouched.
+
+**Verdict: NOT promotable**, on two counts.
+
+1. **The comparison is incomplete.** `v13_labels_dont_overlap_symbol_body`
+   asserts *inside* its fixture loop, so the challenger's own new
+   violation on `sallen_key_lpf` panics the test and the three fixtures
+   after it in `SHEETS` order never record. `--no-fail-fast` cannot help:
+   the truncation is within one test function. (Instrument note for D-list
+   "known limits": a verifier that asserts per iteration destroys the
+   measurements of every later fixture — collect-then-assert is what the
+   sink needs.)
+2. **A real Tier-1 regression on `sallen_key_lpf`**, visible in rendered
+   ink: `v13.1_label_body` 0 → 1, `v13.7_label_pintext` 0 → 1, and
+   decisively `v13.ink_overlap` 0 → 1 — the `kicad-cli` SVG measurement
+   that is the only falsifier of the emitter's own text model. The
+   aggregate `T1` nets to `+0.00` only because v3 also *fixes*
+   `v13.4_text_mutual` on `sallen_key_driven` (−2) and `v14.glyph_body`
+   on `sallen_key_lpf` (−1); per-fixture, `sallen_key_lpf` is strictly
+   worse.
+
+`T2 = −68.64` on the cells that were measured, so the direction is right
+and the mechanism is real. **V16 per-fixture is NOT non-increasing**:
+`v16.bends` rises on `rc_phase_shift` (10 → 11) and `v16.branches` on
+`opamp_inverting` (0 → 1). That is the recorded risk from ADR-17's
+corrected SA ablation — the annealer is load-bearing for bend count on
+some fixtures — surfacing exactly where it was predicted to.
+
+#### What this says about scope
+
+Stage 1 is a **root-policy unification**, contained by construction to
+the netlists whose depth map was empty, and it grades promotable on its
+own. Stage 2 is a **whole-SA trajectory change** and behaves like one:
+eight fixtures move, most for the better, one for the worse in rendered
+ink. If stage 2 is pursued, the next question is not the gate's scope but
+its *metric* — `pin_outward_misalignment` is not a churn measure, and a
+gate that only refuses across-body poses cannot protect a flow-faithful
+one.
+
+
 ## ADR-24 — A Steiner vertex is not an endpoint: the router's own Tier-0 severance
 
 **Status:** landed. Scope is confined to `crates/spice-route/`. **Every
