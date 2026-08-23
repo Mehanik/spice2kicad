@@ -205,8 +205,9 @@ pub fn emit_root(
     // Drawn extent of each hierarchical-sheet block. A sheet's port pins
     // all sit on one edge, so the pin set alone badly under-states how
     // much canvas the sheet occupies (30.48 mm wide, and taller than the
-    // ports it carries). The PWR_FLAG corner driver block needs the real
-    // rectangle to know where the drawing actually ends.
+    // ports it carries). The PWR_FLAG anchor chooser needs the real
+    // rectangle: a sheet-edge glyph anchor whose flag would land inside
+    // the sheet body must be scored as the collision it is.
     let mut sheet_bodies: Vec<spice_route::Bbox> = Vec::new();
     for (idx, block) in sheets.iter().enumerate() {
         let (sheet_node, pin_labels, sheet_pin_pos) = sheet_block(block, idx);
@@ -239,13 +240,14 @@ pub fn emit_root(
     // are foreign to every routed net (power nets are unrouted), so
     // appending them repels only foreign wires.
     let glyph_bodies = rail_glyph_body_bboxes(&net_pins, library, &negative_rails, &rail_tags);
-    let mut obstacles = placement_obstacles(placement, library);
-    obstacles.extend(glyph_bodies.iter().copied());
+    let host_bodies = placement_obstacles(placement, library);
+    let obstacles: Vec<_> = host_bodies.iter().chain(&glyph_bodies).copied().collect();
     for routed in route_nets(
         &net_pins,
         "root",
         library,
         &obstacles,
+        &host_bodies,
         &driven,
         &requires_driver,
         &negative_rails,
@@ -393,8 +395,8 @@ pub fn emit_child_sheet(
     let child_rail_tags = spice_layout::net_class::rail_tags(child.placement);
     let glyph_bodies =
         rail_glyph_body_bboxes(&net_pins, library, &child_negative_rails, &child_rail_tags);
-    let mut obstacles = placement_obstacles(child.placement, library);
-    obstacles.extend(glyph_bodies.iter().copied());
+    let host_bodies = placement_obstacles(child.placement, library);
+    let obstacles: Vec<_> = host_bodies.iter().chain(&glyph_bodies).copied().collect();
     let mut driven = collect_driven_nets(child.placement, library);
     // A subckt *port* net is exposed to the parent; its driver status
     // (real driver or a parent-side PWR_FLAG) is decided on the parent
@@ -411,6 +413,7 @@ pub fn emit_child_sheet(
         &child.name,
         library,
         &obstacles,
+        &host_bodies,
         &driven,
         &requires_driver,
         &child_negative_rails,
@@ -1555,6 +1558,7 @@ fn route_nets(
     scope: &str,
     library: &Library,
     obstacles: &[spice_route::Bbox],
+    host_bodies: &[spice_route::Bbox],
     driven: &std::collections::BTreeSet<String>,
     requires_driver: &std::collections::BTreeSet<String>,
     negative_rails: &std::collections::BTreeSet<String>,
@@ -1677,6 +1681,7 @@ fn route_nets(
         sheet_uuid: &suuid,
         project_name: GENERATOR,
         obstacles,
+        host_bodies,
         sheet_bodies,
         bounds: None,
     });
@@ -1768,7 +1773,8 @@ pub(crate) fn trial_route(placement: &Placement, library: &Library) -> TrialRout
     // model called `Q1` at R180 Tier-0 clean and the real route merged
     // `c` into `vcc`, while calling the one genuinely clean pose
     // (R0 + mirror-Y) a V11 violation.
-    let mut obstacles = placement_obstacles(placement, library);
+    let host_bodies = placement_obstacles(placement, library);
+    let mut obstacles = host_bodies.clone();
     obstacles.extend(
         rail_glyph_body_bboxes(&net_pins, library, &negative_rails, &rail_tags)
             .iter()
@@ -1785,6 +1791,7 @@ pub(crate) fn trial_route(placement: &Placement, library: &Library) -> TrialRout
         sheet_uuid: &suuid,
         project_name: GENERATOR,
         obstacles: &obstacles,
+        host_bodies: &host_bodies,
         bounds: None,
         sheet_bodies: &[],
     });

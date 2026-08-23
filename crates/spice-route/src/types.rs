@@ -125,12 +125,28 @@ pub struct RouteRequest<'a> {
     ///
     /// Distinct from [`RouteRequest::obstacles`], which carries only a
     /// small placeholder box for a sheet (a sheet has no V12-relevant
-    /// graphics for a wire to spear). The PWR_FLAG corner driver block
-    /// needs the sheet's *true* extent: its port pins all sit on one
-    /// edge, so pins and obstacles together under-state its footprint by
-    /// the full 30 mm sheet width, and a block placed from that estimate
-    /// lands inside the sheet body.
+    /// graphics for a wire to spear). The PWR_FLAG anchor chooser needs
+    /// the sheet's *true* extent: its port pins all sit on one edge, so
+    /// pins and obstacles together under-state its footprint by the full
+    /// 30 mm sheet width, and a flag placed from that estimate would land
+    /// inside the sheet body.
     pub sheet_bodies: &'a [Bbox],
+    /// Real symbol bodies **only** — the `placement_obstacles` half of
+    /// [`RouteRequest::obstacles`], without the rail-glyph bodies the
+    /// caller appends for V13(2A).
+    ///
+    /// Consumed solely by [`crate::pwrflag`]'s anchor chooser, which
+    /// scores a candidate PWR_FLAG pose the way
+    /// `no_power_glyph_foreign_body_overlap_across_fixtures` measures it:
+    /// against *foreign* symbol bodies, with the flag's own host excluded
+    /// (a glyph or flag clipping the host it attaches to is the accepted
+    /// V14 case). It cannot use `obstacles` for that, because the
+    /// rail-glyph boxes mixed in there are modelled at the raw host pin
+    /// with an identity pose — right for a wire-avoidance obstacle,
+    /// wrong as the drawn footprint of an offset or rot-180 glyph — so
+    /// the chooser models rail glyphs itself and takes only the symbol
+    /// bodies from here.
+    pub host_bodies: &'a [Bbox],
 }
 
 /// Axis-aligned bounding box in world millimetres. Used by the router
@@ -168,6 +184,32 @@ impl Bbox {
             x1: x_mm + h,
             y1: y_mm + h,
         }
+    }
+
+    /// Strict overlap of two boxes, ignoring boxes that merely kiss.
+    ///
+    /// The 1 µm tolerance is the same one the visual-quality verifiers
+    /// use (`placement_quality::Bbox::intersects`): on a 1.27 mm grid,
+    /// abutting footprints share an edge constantly — a `power:GND`
+    /// triangle hanging below an anchor and a `PWR_FLAG` chevron rising
+    /// above the same anchor is the canonical case — and counting that
+    /// as an overlap would make every legitimate co-location look like a
+    /// collision.
+    #[must_use]
+    pub fn intersects(&self, other: &Self) -> bool {
+        let eps = 1e-3;
+        self.x0 + eps < other.x1
+            && other.x0 + eps < self.x1
+            && self.y0 + eps < other.y1
+            && other.y0 + eps < self.y1
+    }
+
+    /// Shortest distance from a point to this box (0 inside).
+    #[must_use]
+    pub fn distance_to_point(&self, x: f64, y: f64) -> f64 {
+        let dx = (self.x0 - x).max(0.0).max(x - self.x1);
+        let dy = (self.y0 - y).max(0.0).max(y - self.y1);
+        dx.hypot(dy)
     }
 
     /// Strict interior intersection of an axis-parallel segment with

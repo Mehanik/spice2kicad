@@ -96,10 +96,11 @@ pub fn emit(
 /// `None` for a Signal net (which gets wires, not glyphs).
 ///
 /// Shared by Stage 1 (the per-pin rail glyphs) and the PWR_FLAG stage,
-/// which draws one more instance of the *same* glyph in the corner
-/// driver block. Both must resolve to the identical `lib_id` and Value,
-/// since KiCad ties `power:*` instances together by Value — that shared
-/// name is exactly what makes the corner flag drive the whole rail.
+/// which models the same glyph's drawn footprint when choosing where to
+/// stack a rail's driver marker. Both must resolve to the identical
+/// `lib_id`, since KiCad ties `power:*` instances together by Value —
+/// that shared name is exactly what lets a flag on ONE of a rail's glyph
+/// anchors drive every other instance of the rail.
 pub(crate) fn lib_id_for(net: &NetSpec) -> Option<&'static str> {
     Some(match net.class {
         // A negative supply rail is classed Ground for layout but must
@@ -190,6 +191,18 @@ pub(crate) fn glyph_rotation(lib_id: &str, canon: Direction) -> u16 {
         Direction::Up
     };
     if body == canon { 0 } else { 180 }
+}
+
+/// The rotation Stage 1 emits `net`'s rail glyph at, or `None` for a
+/// Signal net. Convenience wrapper over [`glyph_rotation`] for callers
+/// that hold a [`NetSpec`] rather than a `lib_id` + axis — notably the
+/// PWR_FLAG anchor chooser, which must model the glyph's DRAWN footprint
+/// (a `power:VEE` at rot 180 hangs below its anchor, not above it).
+pub(crate) fn glyph_rotation_for(net: &NetSpec) -> u16 {
+    let Some(lib_id) = lib_id_for(net) else {
+        return 0;
+    };
+    glyph_rotation(lib_id, canonical_axis(net.class, net.negative_rail))
 }
 
 /// True only in the V14 *forced-sideways* case the offset+stub fallback
@@ -385,12 +398,9 @@ fn power_symbol_sexpr(
 /// with its Value (net-name) text placed one glyph-clearing offset along
 /// `outward`.
 ///
-/// Split out of [`power_symbol_sexpr`] so the PWR_FLAG corner driver
-/// block can draw a rail glyph at a *synthesised* coordinate — one with
-/// no host pin to derive a pose from. Keeping both callers on this one
-/// body guarantees the corner glyph is byte-identical in `lib_id`,
-/// Value, and property layout to the in-circuit glyphs it stands for,
-/// which is what makes KiCad connect them by name.
+/// Split out of [`power_symbol_sexpr`] so a caller with a *synthesised*
+/// coordinate — one with no host pin to derive a pose from — can draw a
+/// rail glyph too.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn glyph_sexpr_at(
     lib_id: &str,

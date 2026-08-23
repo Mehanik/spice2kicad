@@ -468,7 +468,8 @@ invariant here.
   opamp_inverting_real) at R7. **PWR_FLAG driver emission is now
   live** (`crates/spice-route/src/pwrflag.rs`, called from
   `route()` after Stage 1): exactly one `power:PWR_FLAG` is placed,
-  wire-coincident, on a net iff (a) it has ≥1 pin, (b) ERC *requires*
+  **on a coordinate the sheet already draws**, on a net iff (a) it has
+  ≥1 pin, (b) ERC *requires*
   it driven — a Power/Ground net always, a Signal net only if some pin
   on it is `input`/`power_in` — and (c) it lacks a valid driver *for
   its class*. The driver rule is class-aware, mirroring KiCad's
@@ -511,6 +512,36 @@ invariant here.
   `spice-layout::place_seed`), which gates the `(symbol …)`,
   `lib_symbols`, `collect_net_pins`, obstacle, and property-bbox
   loops in `kicad-emitter/src/schematic.rs`.
+  **Where the flags go: on ink the sheet already draws.** A `PWR_FLAG`
+  adds no node to the netlist, so it must add no new place on the page
+  either. A sheet-local *signal* net's flag lands on a pin of its own net
+  (it connects by wire, so it has to). A global *rail*'s flag is stacked
+  on one of that rail's existing in-circuit `power:*` glyph anchors —
+  KiCad ties `power:*` instances together by Value, so any one of them
+  drives the whole rail. `pwrflag::choose_rail_anchor` picks the anchor
+  whose chevron clips the fewest foreign bodies / sheet bodies / foreign
+  rail glyphs (mirroring the zero-budget verifiers that would otherwise
+  catch the mistake after the fact), and breaks ties by **source order**,
+  not by extremal coordinate — an extremal rule lets a newly added part
+  steal the flag and tears the layout-cache path (P11).
+  Each rail flag carries a `(junction …)`: its anchor always has three
+  connected pins/wire-ends (glyph pin + flag pin + host pin, or + stub
+  endpoint), which is exactly eeschema's `AnalyzePoint` dot threshold, so
+  omitting it would put the file at odds with KiCad's own rule
+  (`tests/junction_parity.rs`, budget 0 both directions).
+  This replaced a *bottom-right corner driver block* (`3286946` …
+  2026-08-23), which parked each rail's flag past the content bbox
+  alongside a `power:*` glyph synthesised for it there: ERC-correct and
+  collision-free, but clutter adrift in dead space on all 18 fixtures,
+  and it pushed the content bbox outward at the cost of V15 headroom and
+  Q6 balance.
+  Verifier: `placement_quality.rs::pwr_flags_sit_on_existing_drawn_geometry`
+  — every flag anchor *coincides* with a drawn glyph anchor or symbol /
+  sheet pin, AND lies within 3 grid cells of a real circuit pin. Hard
+  floor 0, both clauses; the second is what the corner block failed (its
+  flags stood 7–60 mm from the nearest circuit pin, and the first clause
+  alone could not see it — the block's flag sat exactly on its companion
+  glyph).
   Verifier: `tests/power_source_suppression.rs` derives the
   power-tagged source refdes *generally* from each fixture's `.cir`
   (scanning the `;@ power=` trailing tag and `*@power for=` block —

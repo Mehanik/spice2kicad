@@ -58,22 +58,30 @@ fn vcc_pin_emits_power_vcc_symbol() {
         project_name: "test",
         obstacles: &[],
         bounds: None,
+        host_bodies: &[],
         sheet_bodies: &[],
     });
-    // Two `power:VCC` glyphs: the in-circuit rail glyph on the pin, plus
-    // the corner driver block's own glyph, which carries the rail's
-    // single PWR_FLAG. Both share the Value "VCC", which is exactly what
-    // makes KiCad treat them as one net and lets the corner flag drive
-    // the rail (see `pwrflag::emit_corner_block`).
-    assert_eq!(count_substring(&r.sexprs, "power:VCC"), 2, "{:?}", r.sexprs);
+    // Exactly one `power:VCC` glyph — the in-circuit rail glyph on the
+    // pin. The rail's single PWR_FLAG is stacked on that same glyph
+    // anchor rather than on a synthesised one of its own, so the driver
+    // marker adds no glyph and no new coordinate to the sheet.
+    assert_eq!(count_substring(&r.sexprs, "power:VCC"), 1, "{:?}", r.sexprs);
     assert_eq!(
         count_substring(&r.sexprs, "power:PWR_FLAG"),
         1,
         "exactly one driver per rail: {:?}",
         r.sexprs
     );
-    // The corner glyph and its flag connect by pin coincidence, so the
-    // no-wires property of power nets is unchanged.
+    assert!(
+        r.sexprs
+            .iter()
+            .filter(|s| s.to_string().contains("power:PWR_FLAG"))
+            .all(|s| s.to_string().contains("(at 10.16 20.32")),
+        "the flag stacks on the rail glyph's anchor pin: {:?}",
+        r.sexprs
+    );
+    // Glyph and flag connect by pin coincidence, so the no-wires
+    // property of power nets is unchanged.
     assert_eq!(count_wires(&r.sexprs), 0, "power nets emit no wires");
     assert!(
         r.warnings.is_empty(),
@@ -102,11 +110,20 @@ fn ground_pin_emits_power_gnd_symbol() {
         project_name: "test",
         obstacles: &[],
         bounds: None,
+        host_bodies: &[],
         sheet_bodies: &[],
     });
-    // In-circuit rail glyph + the corner driver block's glyph (see
-    // `vcc_pin_emits_power_vcc_symbol` for why there are two).
-    assert_eq!(count_substring(&r.sexprs, "power:GND"), 2, "{:?}", r.sexprs);
+    // One in-circuit rail glyph; the flag stacks on its anchor (see
+    // `vcc_pin_emits_power_vcc_symbol`).
+    assert_eq!(count_substring(&r.sexprs, "power:GND"), 1, "{:?}", r.sexprs);
+    assert!(
+        r.sexprs
+            .iter()
+            .filter(|s| s.to_string().contains("power:PWR_FLAG"))
+            .all(|s| s.to_string().contains("(at 10.16 40.64")),
+        "the flag stacks on the rail glyph's anchor pin: {:?}",
+        r.sexprs
+    );
     assert_eq!(
         count_substring(&r.sexprs, "power:PWR_FLAG"),
         1,
@@ -144,13 +161,12 @@ fn negative_rail_emits_power_vee_not_gnd() {
         project_name: "test",
         obstacles: &[],
         bounds: None,
+        host_bodies: &[],
         sheet_bodies: &[],
     });
-    // In-circuit rail glyph + the corner driver block's glyph (see
-    // `vcc_pin_emits_power_vcc_symbol` for why there are two). The
-    // corner glyph must use the same `power:VEE` lib_id as the circuit
-    // one, so the substantive V10 assertion below still bites on both.
-    assert_eq!(count_substring(&r.sexprs, "power:VEE"), 2, "{:?}", r.sexprs);
+    // One in-circuit rail glyph, with the rail's PWR_FLAG stacked on its
+    // anchor (see `vcc_pin_emits_power_vcc_symbol`).
+    assert_eq!(count_substring(&r.sexprs, "power:VEE"), 1, "{:?}", r.sexprs);
     assert_eq!(
         count_substring(&r.sexprs, "power:GND"),
         0,
@@ -183,6 +199,7 @@ fn signal_net_does_not_emit_power_symbol() {
         project_name: "test",
         obstacles: &[],
         bounds: None,
+        host_bodies: &[],
         sheet_bodies: &[],
     });
     assert_eq!(count_substring(&r.sexprs, "power:"), 0);
@@ -225,6 +242,7 @@ fn power_symbol_rotation_always_zero_v14() {
             project_name: "test",
             obstacles: &[],
             bounds: None,
+            host_bodies: &[],
             sheet_bodies: &[],
         });
         let s = r
@@ -277,6 +295,7 @@ fn forced_sideways_ground_glyph_offsets_with_stub_wire() {
         project_name: "test",
         obstacles: &[],
         bounds: None,
+        host_bodies: &[],
         sheet_bodies: &[],
     });
     // Exactly one stub wire from (10.16, 20.32) to (10.16, 19.05).
@@ -315,6 +334,7 @@ fn canonical_ground_glyph_has_no_stub_wire() {
         project_name: "test",
         obstacles: &[],
         bounds: None,
+        host_bodies: &[],
         sheet_bodies: &[],
     });
     assert_eq!(count_wires(&r.sexprs), 0, "canonical glyph emits no stub");
@@ -341,6 +361,7 @@ fn unknown_lib_id_falls_back_to_global_label() {
         project_name: "test",
         obstacles: &[],
         bounds: None,
+        host_bodies: &[],
         sheet_bodies: &[],
     });
     assert_eq!(count_substring(&r.sexprs, "power:VCC"), 0);
@@ -405,6 +426,7 @@ fn power_glyph_value_is_uppercase_rail_name() {
         project_name: "test",
         obstacles: &[],
         bounds: None,
+        host_bodies: &[],
         sheet_bodies: &[],
     });
     assert_eq!(power_glyph_value(&r.sexprs, "power:VCC"), "VCC");
@@ -430,6 +452,7 @@ fn negative_rail_glyph_value_is_uppercase() {
         project_name: "test",
         obstacles: &[],
         bounds: None,
+        host_bodies: &[],
         sheet_bodies: &[],
     });
     assert_eq!(power_glyph_value(&r.sexprs, "power:VEE"), "VEE");
@@ -457,6 +480,7 @@ fn ground_net_zero_glyph_value_is_gnd() {
         project_name: "test",
         obstacles: &[],
         bounds: None,
+        host_bodies: &[],
         sheet_bodies: &[],
     });
     assert_eq!(power_glyph_value(&r.sexprs, "power:GND"), "GND");
@@ -484,6 +508,7 @@ fn plus_rail_name_preserves_distinct_identity() {
         project_name: "test",
         obstacles: &[],
         bounds: None,
+        host_bodies: &[],
         sheet_bodies: &[],
     });
     // lib_id maps to VCC (default positive), but Value preserves "V+".

@@ -143,6 +143,7 @@ fn route_pipeline_emits_wires_for_two_pin_signal_net() {
         project_name: "test",
         obstacles: &[],
         bounds: None,
+        host_bodies: &[],
         sheet_bodies: &[],
     });
     // The router may emit a third segment as an outward-direction
@@ -399,6 +400,7 @@ fn route_pipeline_emits_junction_for_three_pin_t() {
         project_name: "test",
         obstacles: &[],
         bounds: None,
+        host_bodies: &[],
         sheet_bodies: &[],
     });
     let wires = count_starting(&r, "(wire");
@@ -520,6 +522,7 @@ fn three_collinear_pins_with_steiner_on_a_pin_stay_connected() {
         project_name: "test",
         obstacles: &[],
         bounds: None,
+        host_bodies: &[],
         sheet_bodies: &[],
     });
     assert_all_pins_endpoint_reachable(&nets[0], &r);
@@ -567,6 +570,7 @@ fn three_pin_nets_stay_connected_across_steiner_degeneracies() {
                 project_name: "test",
                 obstacles: &[],
                 bounds: None,
+                host_bodies: &[],
                 sheet_bodies: &[],
             });
             assert_all_pins_endpoint_reachable(&nets[0], &r);
@@ -644,6 +648,7 @@ fn pin_sets_stay_connected_across_random_layouts() {
                 project_name: "test",
                 obstacles: &[],
                 bounds: None,
+                host_bodies: &[],
                 sheet_bodies: &[],
             });
             assert_all_pins_endpoint_reachable(&nets[0], &r);
@@ -727,6 +732,7 @@ fn collect_segments(net: &NetSpec) -> Vec<spice_route::Segment> {
             project_name: "test",
             obstacles: &[],
             bounds: None,
+            host_bodies: &[],
             sheet_bodies: &[],
         },
         &mut out,

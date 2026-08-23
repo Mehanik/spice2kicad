@@ -1863,10 +1863,12 @@ fn v14_rail_pin_faces_rail() {
             // down the pin's outward direction — the V14 forced-sideways
             // and sheet-edge stub fallbacks. 3 cells is therefore strictly
             // beyond every legitimate offset, so this cannot exempt a glyph
-            // that really is on a host. The detached case it *does* exempt
-            // is the PWR_FLAG corner driver block, whose glyphs stand a
-            // clear 8 cells off the circuit and connect by name, not by
-            // wire (see `spice_route::pwrflag::emit_corner_block`).
+            // that really is on a host. Nothing is detached today — the
+            // PWR_FLAG corner driver block that used to stand 8 cells off
+            // the circuit is gone (`spice_route::pwrflag`), and it was
+            // never in scope here anyway, since PWR_FLAG is skipped above.
+            // The cap stays as the guard it is: a glyph that drifts off
+            // its host must not silently acquire a different one.
             if (host.px - ax).hypot(host.py - ay) > MAX_HOST_ATTACH_MM {
                 continue;
             }
@@ -2734,4 +2736,115 @@ fn v15_content_within_page_bounds() {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------
+// PWR_FLAG attachment (V10 / V15)
+// ---------------------------------------------------------------------
+
+/// A `PWR_FLAG` is a *driver marker*, not a component: it adds no node
+/// to the netlist, so it must add no new place on the page either. Every
+/// flag has to sit on geometry the circuit already draws.
+///
+/// Two claims, both hard floors — there is no legitimate quantity of
+/// orphan markers, so there is no budget to tune:
+///
+/// 1. **Coincidence** — the flag's anchor lands exactly on another
+///    `power:*` glyph's anchor (the rail path) or on a host symbol's /
+///    sheet's pin (the sheet-local signal-net path). This is also what
+///    keeps it electrically attached with no wire, which is the only
+///    reason it may be moved at all.
+///
+/// 2. **Proximity to the circuit** — that anchor is within
+///    [`MAX_HOST_ATTACH_MM`] of a *real* pin: a host symbol pin or a
+///    sheet port pin. Three grid cells is strictly beyond every
+///    legitimate attachment offset (the largest is the 2-cell sheet-edge
+///    stub) and strictly inside any parking spot.
+///
+/// **Why claim 2 and not "inside the content bbox".** The defect this
+/// test was written for is the *corner driver block*: between `3286946`
+/// and this test, each rail's flag was parked eight grid cells outward
+/// of the content bbox, paired with a `power:*` glyph synthesised for it
+/// there. A bbox-containment check could not have caught it, and neither
+/// could claim 1 alone — the block's flag sat exactly on its companion
+/// glyph's anchor, and that glyph's own body *extended the drawn bbox to
+/// include it*. What was actually wrong is that the pair as a whole hung
+/// on nothing: no pin of the circuit was anywhere near. That is the
+/// property measured here.
+#[test]
+fn pwr_flags_sit_on_existing_drawn_geometry() {
+    let library = load_test_library();
+    let mut failures: Vec<String> = Vec::new();
+    for (name, path) in fixtures() {
+        let tmp = tempdir(name);
+        let sch = common::spice_to_kicad(&path, &tmp).expect("spice2kicad");
+        let root = parse_sch(&sch);
+
+        // `real_pins` — pins of things that are actually part of the
+        // circuit. `anchors` additionally carries rail-glyph anchors,
+        // which are derived geometry (a glyph pin exists only because a
+        // host pin does), so they satisfy claim 1 but never claim 2.
+        let mut real_pins: Vec<(f64, f64)> = Vec::new();
+        let mut anchors: Vec<(f64, f64)> = Vec::new();
+        let mut flags: Vec<(String, f64, f64)> = Vec::new();
+        for sym in children(&root, "symbol") {
+            let Some((refdes, lib_id)) = placed_symbol_refdes_and_lib_id(sym) else {
+                continue;
+            };
+            let Some((ox, oy, orient)) = placed_symbol_pose(sym) else {
+                continue;
+            };
+            if lib_id == "power:PWR_FLAG" {
+                flags.push((refdes, ox, oy));
+            } else if lib_id.starts_with("power:") {
+                anchors.push((ox, oy));
+            } else if let Some(lib_sym) = library.lookup(&lib_id) {
+                for p in lib_sym.pins_in(orient) {
+                    real_pins.push((ox + p.x, oy - p.y));
+                }
+            }
+        }
+        // A hierarchical sheet's port pins are the circuit's pins too —
+        // a rail glyph (with its flag) legitimately hangs on one, via
+        // the 2-cell sheet-edge stub.
+        for sheet in children(&root, "sheet") {
+            for (_, px, py) in sheet_port_pins(sheet) {
+                real_pins.push((px, py));
+            }
+        }
+        anchors.extend(real_pins.iter().copied());
+
+        let mut orphans = 0usize;
+        for (refdes, fx, fy) in &flags {
+            // 1 µm: coordinates are grid-snapped and written at 2 dp, so
+            // an intended coincidence is exact and only float noise is
+            // absorbed.
+            let coincident = anchors
+                .iter()
+                .any(|(ax, ay)| (ax - fx).abs() < 1e-3 && (ay - fy).abs() < 1e-3);
+            let near_circuit = real_pins
+                .iter()
+                .any(|(px, py)| (px - fx).hypot(py - fy) <= MAX_HOST_ATTACH_MM + 1e-3);
+            if !coincident {
+                orphans += 1;
+                failures.push(format!(
+                    "{name}: {refdes} at ({fx:.2}, {fy:.2}) coincides with no drawn glyph \
+                     anchor or symbol pin — it is not attached to anything a reader can see"
+                ));
+            }
+            if !near_circuit {
+                orphans += 1;
+                failures.push(format!(
+                    "{name}: {refdes} at ({fx:.2}, {fy:.2}) is more than {MAX_HOST_ATTACH_MM} mm \
+                     from ANY circuit pin — a driver marker parked in dead space"
+                ));
+            }
+        }
+        common::scoreboard::record_count("v10.orphan_pwrflag", name, orphans);
+    }
+    assert!(
+        failures.is_empty(),
+        "orphan PWR_FLAG markers (floor 0, not a budget):\n  {}",
+        failures.join("\n  "),
+    );
 }

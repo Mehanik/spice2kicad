@@ -25,10 +25,7 @@ pub use types::{Bbox, Direction, NetSpec, PinRef, RouteRequest, RouteResult, Rou
 /// Signal nets are ignored. Library lookup is best-effort: when the
 /// chosen `lib_id` is missing, a `(global_label …)` is emitted in its
 /// place and a warning is recorded on `out`.
-/// Returns the final `#PWR<n>` counter so a later stage (the PWR_FLAG
-/// corner driver block, which draws one more rail glyph per rail) can
-/// keep allocating unique refdes from where Stage 1 left off.
-pub fn place_power_symbols(req: &RouteRequest<'_>, out: &mut RouteResult) -> usize {
+pub fn place_power_symbols(req: &RouteRequest<'_>, out: &mut RouteResult) {
     let mut pwr_counter: usize = 0;
     for net in req.nets {
         match net.class {
@@ -46,7 +43,6 @@ pub fn place_power_symbols(req: &RouteRequest<'_>, out: &mut RouteResult) -> usi
             NetClass::Signal => {}
         }
     }
-    pwr_counter
 }
 
 /// Stage 2 entry point — emit RSMT wires + junctions for every
@@ -349,24 +345,24 @@ fn build_pin_outward_map(
 #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)] // by-value signature is the public contract
 pub fn route(req: RouteRequest<'_>) -> RouteResult {
     let mut out = RouteResult::default();
-    let mut pwr_counter = place_power_symbols(&req, &mut out);
+    place_power_symbols(&req, &mut out);
     // PWR_FLAG drivers for every net with no driving pin (rails whose
     // pins are all power_in, signal nets whose pins are all input).
     // Single structural predicate, no fixture knowledge — see
-    // `pwrflag::emit`. Global rails are driven from a corner block in
-    // the bottom-right (which needs `obstacles` to know where the
-    // circuit ends, and `pwr_counter` to number the rail glyphs it
-    // draws there); sheet-local signal nets keep an on-pin flag.
+    // `pwrflag::emit`. Every flag lands on a coordinate this sheet
+    // already draws: a pin of its own net for a sheet-local signal net,
+    // and for a global rail the best of that rail's existing `power:*`
+    // glyph anchors — which is what `host_bodies` / `sheet_bodies` are
+    // for (scoring which anchor has room for the chevron).
     let mut flg_counter: usize = 0;
     pwrflag::emit(
         req.nets,
-        req.obstacles,
+        req.host_bodies,
         req.sheet_bodies,
         req.library,
         req.scope,
         req.sheet_uuid,
         req.project_name,
-        &mut pwr_counter,
         &mut flg_counter,
         &mut out,
     );

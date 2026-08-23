@@ -489,13 +489,15 @@ struct CacheCase {
     /// Zero-slack ratchet: how many pre-existing *glyph* geometries fail
     /// to survive the edit.
     ///
-    /// `common_emitter` is 0 — every one of its nine glyphs keeps its
-    /// exact pose (four merely renumber). `rc_lowpass` is 2: adding
-    /// `C2`'s ground moves the `PWR_FLAG` to the new last ground pin and
-    /// re-offsets `C1`'s GND glyph. Both are *decoration* re-anchoring
-    /// around new neighbours, downstream of placement — the user symbols
-    /// do not move in either case. Recorded to pin it, and it ratchets
-    /// down only.
+    /// Both cases are 0 today: every pre-existing glyph keeps its exact
+    /// pose (some merely renumber). `rc_lowpass_plus_r` was 2 until the
+    /// PWR_FLAG anchor chooser landed — adding `C2`'s ground used to move
+    /// the flag onto the new ground pin and re-offset `C1`'s GND glyph,
+    /// decoration re-anchoring around a new neighbour. The chooser breaks
+    /// ties by *source order* rather than by extremal coordinate for
+    /// exactly this reason (see
+    /// `spice_route::pwrflag::choose_rail_anchor`), so an appended
+    /// element no longer outbids an existing choice. Ratchets down only.
     glyph_pose_budget: usize,
 }
 
@@ -505,7 +507,7 @@ const CACHE_CASES: &[CacheCase] = &[
         base: "rc_lowpass",
         // A second series resistor splitting `out` into `out`/`mid`.
         added: "R2 out mid 1k\nC2 mid 0 100n\n",
-        glyph_pose_budget: 2,
+        glyph_pose_budget: 0,
     },
     CacheCase {
         name: "common_emitter_plus_c",
