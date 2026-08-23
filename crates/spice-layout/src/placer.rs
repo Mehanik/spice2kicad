@@ -205,6 +205,36 @@ pub enum Placer {
     /// exactly that reason, and are the cheapest check that they stayed
     /// so.
     FlowSeedV4,
+    /// **Rail-gated divider idiom** — [`Placer::FlowSeedV4`] plus a
+    /// `detect_dividers` predicate that matches an actual voltage
+    /// divider instead of any degree-2 interior net.
+    ///
+    /// The shipping detector accepts a tap net whose **degree is exactly
+    /// 2**, on the reasoning that "no third consumer" proves the node is
+    /// a divider midpoint. It proves nothing of the sort: *every*
+    /// interior net of a plain series chain has degree 2. So the
+    /// predicate both **over-matches** — `port_shapes`' four-resistor
+    /// chain `src→R1→ni→R2→no→R3→nb→R4→0` is claimed as two "dividers"
+    /// and pinned as two vertical stacks of two, before
+    /// [`crate::idioms::apply_series_horizontal`] can see the chain at
+    /// all — and **under-matches**: a real bias divider's tap drives a
+    /// base or a gate, so its degree is 3 and the detector never fires
+    /// on the one topology it was written for.
+    ///
+    /// Under this variant a divider is what the name says: two
+    /// two-terminal resistors meeting at a **Signal-class** tap, whose
+    /// two outer nets are **rails of opposite [`crate::net_class::VertPref`]**
+    /// — one positive supply (`Up`), one ground or negative rail
+    /// (`Down`). That is `rail → Ra → tap → Rb → rail`, the topology
+    /// whose conventional drawing IS the vertical stack the idiom emits,
+    /// and the polarity also fixes the stack ORDER (the supply-side
+    /// resistor on top) instead of leaving it to element index. The tap
+    /// degree gate is dropped entirely: a loaded tap is the *canonical*
+    /// divider, not a disqualification.
+    ///
+    /// Nothing else moves — the geometry, the stride, the pin mechanism
+    /// and the pinned-wins rule are the shipping ones.
+    DividerRails,
 }
 
 impl Placer {
@@ -220,6 +250,7 @@ impl Placer {
         Self::FlowSeedV2,
         Self::FlowSeedV3,
         Self::FlowSeedV4,
+        Self::DividerRails,
     ];
 
     /// The name accepted by `--placer` and printed by the scoreboard.
@@ -235,6 +266,7 @@ impl Placer {
             Self::FlowSeedV2 => "flow-seed-v2",
             Self::FlowSeedV3 => "flow-seed-v3",
             Self::FlowSeedV4 => "flow-seed-v4",
+            Self::DividerRails => "divider-rails",
         }
     }
 
@@ -267,6 +299,10 @@ impl Placer {
             Self::FlowSeedV4 => {
                 "root-policy unification: one tiered signal-flow root set, \
                  read by the X layering and the flow idioms alike"
+            }
+            Self::DividerRails => {
+                "flow-seed-v4 plus a rail-gated divider idiom: a divider \
+                 spans supply -> ground, and its tap may be loaded"
             }
         }
     }
@@ -306,7 +342,11 @@ impl Placer {
     pub fn flow_seed_layering(self) -> bool {
         matches!(
             self,
-            Self::FlowSeed | Self::FlowSeedV2 | Self::FlowSeedV3 | Self::FlowSeedV4
+            Self::FlowSeed
+                | Self::FlowSeedV2
+                | Self::FlowSeedV3
+                | Self::FlowSeedV4
+                | Self::DividerRails
         )
     }
 
@@ -334,7 +374,21 @@ impl Placer {
     /// would retire the control arm the comparison is graded against.
     #[must_use]
     pub fn unified_roots(self) -> bool {
-        matches!(self, Self::FlowSeedV4)
+        matches!(self, Self::FlowSeedV4 | Self::DividerRails)
+    }
+
+    /// Rail-gated divider idiom: does [`crate::idioms::detect_dividers`]
+    /// require the pair's two outer nets to be **rails of opposite
+    /// vertical preference** (a supply and a ground / negative rail) and
+    /// its tap to be a Signal net — instead of gating on the tap's
+    /// degree being exactly 2?
+    ///
+    /// The degree-2 gate is the defect: it matches every interior net of
+    /// a plain series chain (over-match) while rejecting every loaded
+    /// bias divider (under-match). See [`Self::DividerRails`].
+    #[must_use]
+    pub fn rail_gated_dividers(self) -> bool {
+        matches!(self, Self::DividerRails)
     }
 
     /// Orientation-churn stage 2: does the SA's V5 never-increase gate
@@ -429,6 +483,24 @@ mod tests {
         // Built ON the promoted default's layering, so an A/B against
         // `flow-seed` isolates the root policy and nothing else.
         assert!(Placer::FlowSeedV4.flow_seed_layering());
+    }
+
+    /// The rail-gated divider predicate is **dead on the default path**
+    /// and on the control arm: it is gated on one accessor and nothing
+    /// else, which is the whole byte-identity argument for the shipping
+    /// output (`baseline_lock` is the empirical half).
+    #[test]
+    fn the_rail_gated_divider_idiom_is_off_by_default() {
+        assert!(!Placer::default().rail_gated_dividers());
+        assert!(!Placer::Champion.rail_gated_dividers());
+        assert!(!Placer::FlowSeedV4.rail_gated_dividers());
+        assert!(Placer::DividerRails.rail_gated_dividers());
+        // It composes ON `flow-seed-v4`, so an A/B against that arm
+        // isolates the divider predicate and nothing else.
+        assert!(Placer::DividerRails.unified_roots());
+        assert!(Placer::DividerRails.flow_seed_layering());
+        assert!(!Placer::DividerRails.unified_depth_roots());
+        assert!(!Placer::DividerRails.sa_rotate_v5_gate());
     }
 
     #[test]

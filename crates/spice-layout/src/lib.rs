@@ -617,7 +617,7 @@ pub fn place_with_hint(
     // Runs AFTER V7 symmetry so a symmetry pin always wins (the
     // detector skips already-pinned elements) and BEFORE
     // `pick_orientations` so the newly-pinned pairs guide V5/V3.
-    let dividers = idioms::detect_dividers(&checked);
+    let dividers = idioms::detect_dividers(&checked, opts.placer);
     idioms::apply(&mut placement, &mut pinned, &checked, &dividers);
     apply_position_idioms(&mut placement, &mut pinned, &checked);
     // Idiom 4: pull each rail stub into the column of the node it
@@ -1016,7 +1016,7 @@ pub fn refinement_meta(
     // Mirror the exact seed→hint→symmetry→idiom sequence
     // `place_with_hint` runs, so the refinement phase sees the same
     // `pinned` mask (the divider-pinned pair must not be reoriented).
-    let dividers = idioms::detect_dividers(checked);
+    let dividers = idioms::detect_dividers(checked, placer);
     idioms::apply(&mut placement, &mut pinned, checked, &dividers);
     apply_position_idioms(&mut placement, &mut pinned, checked);
     // Mirror the series-horizontal construction `place_with_hint` runs,
@@ -1504,7 +1504,8 @@ fn pack_rows(
         | Placer::FlowSeed
         | Placer::FlowSeedV2
         | Placer::FlowSeedV3
-        | Placer::FlowSeedV4 => shift.last().copied().unwrap_or(0) / 2,
+        | Placer::FlowSeedV4
+        | Placer::DividerRails => shift.last().copied().unwrap_or(0) / 2,
         Placer::M4YDatum => 0,
     };
     for (i, pe) in placed.iter_mut().enumerate() {
@@ -1662,7 +1663,8 @@ fn place_seed(
         | Placer::FlowSeed
         | Placer::FlowSeedV2
         | Placer::FlowSeedV3
-        | Placer::FlowSeedV4 => {
+        | Placer::FlowSeedV4
+        | Placer::DividerRails => {
             let n_i32 = i32::try_from(n).unwrap_or(i32::MAX);
             let y_top: i32 = 0;
             let y_bot: i32 = (n_i32 + 4) * Y_RANK_STRIDE;

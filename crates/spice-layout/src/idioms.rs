@@ -40,7 +40,13 @@
 //! * they must share *exactly one* net (the tap),
 //! * that tap net must have **degree exactly 2** (only the two
 //!   resistors touch it — no third consumer, so it is genuinely a
-//!   divider midpoint and not an arbitrary shared node),
+//!   divider midpoint and not an arbitrary shared node) — but see
+//!   `Placer::DividerRails`, which replaces this clause: the degree test
+//!   matches every interior net of a plain *series chain* while
+//!   rejecting every *loaded* bias divider, so it both over- and
+//!   under-matches. Under that challenger the gate is instead "the two
+//!   outer nets are rails of opposite `VertPref`, and the tap is a
+//!   Signal net",
 //! * the two *outer* nets must be distinct from each other and from the
 //!   tap, and
 //! * neither resistor may already be pinned (an explicit user
@@ -58,7 +64,7 @@ use spice_resolve::{ElementKind, ElementRole, PortDir, ResolvedElement};
 
 use kicad_symbols::{Orientation, Rotation, Symbol};
 
-use crate::net_class::{NetClass, NetClassMap, VertPref, classify_nets};
+use crate::net_class::{NetClass, NetClassMap, VertPref, classify_nets, vertical_prefs};
 use crate::placer::Placer;
 use crate::{CELL_W, GridPoint, Placement, WorldExtent, vertical_stride_cells, world_extent};
 
@@ -102,7 +108,39 @@ pub(crate) struct DividerPair {
 /// Returns the pairs in a deterministic order (sorted by `upper` index).
 /// Pairs never share an element (greedy lowest-index matching), so the
 /// caller can apply them independently.
-pub(crate) fn detect_dividers(checked: &CheckedNetlist) -> Vec<DividerPair> {
+///
+/// # Two acceptance predicates
+///
+/// The **shipping** one (every placer except
+/// [`Placer::DividerRails`]) gates on the tap net's degree being
+/// **exactly 2**. See [`Placer::DividerRails`] for why that matches the
+/// wrong thing in both directions.
+///
+/// The **rail-gated** one, behind `--placer=divider-rails`, requires
+/// instead that
+///
+/// * the tap is a [`NetClass::Signal`] net (a rail-class "midpoint" is a
+///   short across the two resistors, not a divider tap), and
+/// * the two outer nets are **rails of opposite [`VertPref`]** — one
+///   positive supply (`Up`), one ground or negative rail (`Down`).
+///
+/// Everything else is shared: both resistors two-terminal, exactly two
+/// resistors meeting at the tap, distinct outer nets, greedy
+/// lowest-index matching, deterministic order.
+///
+/// The rail polarity additionally fixes the stack **order**: the
+/// supply-side resistor is `upper`, the return-side one `lower`, rather
+/// than whichever happens to have the smaller element index.
+pub(crate) fn detect_dividers(checked: &CheckedNetlist, placer: Placer) -> Vec<DividerPair> {
+    let rail_gated = placer.rail_gated_dividers();
+    // Only consulted on the rail-gated path; both are cheap pure
+    // functions of `checked`, but computing them unconditionally would
+    // put work on the shipping path for nothing.
+    let (classes, prefs) = if rail_gated {
+        (Some(classify_nets(checked)), Some(vertical_prefs(checked)))
+    } else {
+        (None, None)
+    };
     let elems = &checked.elements;
 
     // net name -> number of terminals touching it (degree). Counts
@@ -144,10 +182,20 @@ pub(crate) fn detect_dividers(checked: &CheckedNetlist) -> Vec<DividerPair> {
     tap_nets.sort_unstable();
 
     for tap in tap_nets {
-        // A divider midpoint connects exactly two terminals, both of
-        // which are the two resistors meeting here.
-        if net_degree.get(tap).copied() != Some(2) {
-            continue;
+        if rail_gated {
+            // A rail-to-rail divider's tap is what the circuit is FOR:
+            // it drives a base, a gate or an op-amp input, so its degree
+            // is routinely 3+. What it must not be is a rail — a
+            // rail-class "midpoint" shorts one of the two resistors.
+            if classes.as_ref().and_then(|c| c.get(tap)) != Some(&NetClass::Signal) {
+                continue;
+            }
+        } else {
+            // A divider midpoint connects exactly two terminals, both of
+            // which are the two resistors meeting here.
+            if net_degree.get(tap).copied() != Some(2) {
+                continue;
+            }
         }
         let rs = &net_resistors[tap];
         if rs.len() != 2 {
@@ -171,9 +219,28 @@ pub(crate) fn detect_dividers(checked: &CheckedNetlist) -> Vec<DividerPair> {
             continue;
         }
 
+        let (upper, lower) = if rail_gated {
+            // Both outer nets must be rails, and of OPPOSITE vertical
+            // preference: a supply above, a ground / negative rail
+            // below. That is exactly the topology whose conventional
+            // drawing is the vertical stack this idiom emits — and it is
+            // what a plain series chain (Signal outer nets) is not.
+            let prefs = prefs.as_ref().expect("rail-gated path computes prefs");
+            let (Some(&pa), Some(&pb)) = (prefs.get(outer_a), prefs.get(outer_b)) else {
+                continue;
+            };
+            if pa == pb {
+                continue;
+            }
+            // Supply-side resistor on top, return-side one beneath it.
+            if pa == VertPref::Up { (a, b) } else { (b, a) }
+        } else {
+            (a, b)
+        };
+
         used[a] = true;
         used[b] = true;
-        pairs.push(DividerPair { upper: a, lower: b });
+        pairs.push(DividerPair { upper, lower });
     }
 
     pairs.sort_unstable_by_key(|p| p.upper);
@@ -1501,7 +1568,7 @@ R2 mid 0 10k
 .end
 ";
         let checked = checked_of(src);
-        let pairs = detect_dividers(&checked);
+        let pairs = detect_dividers(&checked, Placer::default());
         assert_eq!(
             refdes_pairs(&checked, &pairs),
             vec![("R1".to_string(), "R2".to_string())]
@@ -1523,7 +1590,7 @@ C1 mid 0 100n
 .end
 ";
         let checked = checked_of(src);
-        let pairs = detect_dividers(&checked);
+        let pairs = detect_dividers(&checked, Placer::default());
         assert!(
             pairs.is_empty(),
             "tap with a third consumer must not be a divider, got {pairs:?}"
@@ -1544,7 +1611,7 @@ R2 a b 1k
         let checked = checked_of(src);
         // `a` and `b` both have degree 2, but each is shared by the SAME
         // two resistors, and the outer nets collapse — declined.
-        let pairs = detect_dividers(&checked);
+        let pairs = detect_dividers(&checked, Placer::default());
         assert!(
             pairs.is_empty(),
             "parallel resistors must not be a divider, got {pairs:?}"
@@ -1564,7 +1631,7 @@ R3 b 0 1k
 .end
 ";
         let checked = checked_of(src);
-        let pairs = detect_dividers(&checked);
+        let pairs = detect_dividers(&checked, Placer::default());
         // Greedy lowest-index: tap `a` pairs (R1,R2); R2 is then used,
         // so tap `b` cannot reuse it and (R2,R3) is declined.
         assert_eq!(pairs.len(), 1, "expected exactly one pair, got {pairs:?}");
@@ -1598,7 +1665,7 @@ X1 0 inv out vcc vee OPAMP
         let checked = checked_of(src);
         // X1 is lowered to a sheet instance; `inv` is touched by RIN,
         // RF, and X1's `inn` port -> degree 3, not a divider.
-        let pairs = detect_dividers(&checked);
+        let pairs = detect_dividers(&checked, Placer::default());
         assert!(
             pairs.is_empty(),
             "tap feeding a sheet-instance port must not be a divider, got {pairs:?}"
@@ -1618,10 +1685,195 @@ C1 mid 0 100n
 .end
 ";
         let checked = checked_of(src);
-        let pairs = detect_dividers(&checked);
+        let pairs = detect_dividers(&checked, Placer::default());
         assert!(
             pairs.is_empty(),
             "R-C series must not be a resistor divider, got {pairs:?}"
+        );
+    }
+
+    // ===================================================================
+    // Rail-gated divider predicate (`--placer=divider-rails`). The
+    // shipping predicate's tap-degree gate matches the wrong thing in
+    // BOTH directions; these tests pin down the corrected one.
+    // ===================================================================
+
+    /// Named refdes pairs preserving the detector's `(upper, lower)`
+    /// order — the rail-gated path derives that order from rail
+    /// polarity, so an order-insensitive assertion would not see it.
+    fn ordered_pairs(checked: &CheckedNetlist, pairs: &[DividerPair]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|p| {
+                (
+                    checked.elements[p.upper].refdes.clone(),
+                    checked.elements[p.lower].refdes.clone(),
+                )
+            })
+            .collect()
+    }
+
+    /// **The over-match.** `port_shapes`' shape: a four-resistor series
+    /// chain between two Signal nets. Every interior net has degree 2,
+    /// so the shipping predicate claims two "dividers" and pins them as
+    /// two vertical stacks of two — before the series-chain pass can see
+    /// the chain. The rail-gated predicate declines the whole chain.
+    #[test]
+    fn rail_gate_declines_a_plain_series_chain() {
+        let src = "\
+four in series, no rail at either end
+*@symbol Device:R for=R*
+R1 src ni 1k
+R2 ni  no 1k
+R3 no  nb 1k
+R4 nb  nz 1k
+.end
+";
+        let checked = checked_of(src);
+        assert_eq!(
+            detect_dividers(&checked, Placer::default()).len(),
+            2,
+            "the shipping predicate over-matches the chain (this is the defect)"
+        );
+        assert!(
+            detect_dividers(&checked, Placer::DividerRails).is_empty(),
+            "a chain between two Signal nets is not a divider"
+        );
+    }
+
+    /// **The under-match.** A real bias divider: the tap drives a
+    /// transistor base, so its degree is 3 and the shipping predicate
+    /// never fires on the one topology the idiom was written for.
+    #[test]
+    fn rail_gate_accepts_a_loaded_bias_divider() {
+        let src = "\
+common-emitter bias divider
+*@symbol Device:R for=R*
+*@symbol Device:Q_NPN_BCE for=Q*
+VCC vcc 0 DC 12 ;@ power=+12V
+RB1 vcc b 100k
+RB2 b   0 22k
+Q1 c b 0 QMOD
+.model QMOD NPN
+.end
+";
+        let checked = checked_of(src);
+        assert!(
+            detect_dividers(&checked, Placer::default()).is_empty(),
+            "the shipping predicate under-matches a loaded divider (this is the defect)"
+        );
+        assert_eq!(
+            ordered_pairs(&checked, &detect_dividers(&checked, Placer::DividerRails)),
+            vec![("RB1".to_string(), "RB2".to_string())],
+            "supply-side resistor on top, return-side beneath"
+        );
+    }
+
+    /// The stack order comes from rail polarity, not element index: a
+    /// netlist that writes the ground-side resistor first still stacks
+    /// the supply-side one on top.
+    #[test]
+    fn rail_gate_orders_the_stack_by_polarity_not_index() {
+        let src = "\
+ground-side resistor written first
+*@symbol Device:R for=R*
+VCC vcc 0 DC 12 ;@ power=+12V
+RLO b   0 22k
+RHI vcc b 100k
+.end
+";
+        let checked = checked_of(src);
+        assert_eq!(
+            ordered_pairs(&checked, &detect_dividers(&checked, Placer::DividerRails)),
+            vec![("RHI".to_string(), "RLO".to_string())]
+        );
+    }
+
+    /// Two resistors from the SAME rail to a tap are not a divider —
+    /// opposite `VertPref` is required, not merely "both rails".
+    #[test]
+    fn rail_gate_requires_opposite_rails() {
+        let src = "\
+both ends on ground
+*@symbol Device:R for=R*
+VCC vcc 0 DC 12 ;@ power=+12V
+RA 0 mid 1k
+RB mid gnd 1k
+RL vcc 0 1k
+.end
+";
+        let checked = checked_of(src);
+        assert!(
+            detect_dividers(&checked, Placer::DividerRails).is_empty(),
+            "ground -> tap -> ground is not a divider"
+        );
+    }
+
+    /// A tap feeding a hierarchical-sheet port is still declined when
+    /// its outer nets are not both rails — the rail gate subsumes the
+    /// sheet-degree guard for the `opamp_inverting` false positive
+    /// (`in` and `out` are Signal), so relaxing the degree test does not
+    /// re-open it.
+    #[test]
+    fn rail_gate_still_declines_the_opamp_feedback_pair() {
+        let src = "\
+opamp inverting (hierarchical sheet)
+*@symbol Device:R for=R*
+.subckt OPAMP inp inn out vcc vee
+E1 out 0 inp inn 1e5
+.ends
+VCC vcc 0 DC 15 ;@ power=+15V
+VEE vee 0 DC -15 ;@ power=-15V
+RIN in inv 1k
+RF inv out 10k
+X1 0 inv out vcc vee OPAMP
+.end
+";
+        let checked = checked_of(src);
+        assert!(
+            detect_dividers(&checked, Placer::DividerRails).is_empty(),
+            "RIN/RF span two Signal nets, not two rails"
+        );
+    }
+
+    /// A three-resistor rail-to-rail ladder is declined outright rather
+    /// than half-claimed: each interior tap has one Signal outer net, so
+    /// no pair passes. Pinning two of three would misdraw the ladder.
+    #[test]
+    fn rail_gate_declines_a_three_resistor_ladder() {
+        let src = "\
+three-resistor bias ladder
+*@symbol Device:R for=R*
+VCC vcc 0 DC 12 ;@ power=+12V
+RB1 vcc b1 10k
+RB2 b1  b2 10k
+RB3 b2  0  10k
+.end
+";
+        let checked = checked_of(src);
+        assert!(
+            detect_dividers(&checked, Placer::DividerRails).is_empty(),
+            "a 3-element ladder is a chain for the series pass, not a 2-element divider"
+        );
+    }
+
+    /// A split-supply divider (VCC -> tap -> VEE) is accepted: `VertPref`
+    /// puts a `*@power=-…` rail `Down`, so the polarity test spans it.
+    #[test]
+    fn rail_gate_accepts_a_split_supply_divider() {
+        let src = "\
+split-supply divider
+*@symbol Device:R for=R*
+VCC vcc 0 DC 15 ;@ power=+15V
+VEE vee 0 DC -15 ;@ power=-15V
+RA vcc mid 10k
+RB mid vee 10k
+.end
+";
+        let checked = checked_of(src);
+        assert_eq!(
+            ordered_pairs(&checked, &detect_dividers(&checked, Placer::DividerRails)),
+            vec![("RA".to_string(), "RB".to_string())]
         );
     }
 
