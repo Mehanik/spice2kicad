@@ -34,6 +34,7 @@ pub mod legalize;
 pub mod net_class;
 pub mod orient;
 pub mod placer;
+pub(crate) mod roots;
 pub mod sheets;
 pub mod sidecar;
 pub(crate) mod solver;

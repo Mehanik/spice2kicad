@@ -1344,7 +1344,7 @@ fn signal_net_depth(
                     continue;
                 }
                 if net_members.get(net).copied() == Some(1)
-                    && matches!(crate::layers::boundary_net_role(net), Some(PortDir::Input))
+                    && matches!(crate::roots::boundary_net_role(net), Some(PortDir::Input))
                     && depth.insert(net.to_string(), 0).is_none()
                 {
                     frontier.push(net);

@@ -8,10 +8,11 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use spice_policy::CheckedNetlist;
-use spice_resolve::{ElementKind, ElementRole, PortDir};
+use spice_resolve::PortDir;
 
 use crate::net_class::{NetClass, NetClassMap};
 use crate::placer::Placer;
+use crate::roots::{boundary_net_role, is_signal_source};
 
 /// Result of X-layer assignment for the full netlist.
 #[derive(Debug, Clone)]
@@ -585,51 +586,6 @@ fn barycenter_order(sig_adj: &[Vec<usize>], layers: &[u32], n: usize) -> Vec<u32
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/// Classify a *leaf* net name as a circuit input / output boundary.
-///
-/// This is a **name heuristic and a backstop only** — the explicit,
-/// preferred mechanism is a `*@port <net>=<dir>` directive (spec §4.7),
-/// which is applied additively by the caller and always wins by being a
-/// superset. The heuristic exists so a zero-annotation file still gets a
-/// left-to-right signal flow (design principle 2).
-///
-/// **Channel numbering is stripped before matching.** A multi-channel
-/// circuit — a dual opamp, a quad comparator, a stereo stage — *must*
-/// number its ports (`in1`, `in2`, `out1`, `out2`), so a matcher that
-/// only accepts the bare word silently excludes the entire class of
-/// circuits with more than one channel and draws every one of them
-/// backwards. Trailing ASCII digits and one optional `_`/`-`/`.`
-/// separator are therefore removed first.
-///
-/// Matching is then **exact against a closed set** in both directions.
-/// The previous implementation compared `in`/`out` by equality but
-/// `vin`/`vout` by prefix, an accidental asymmetry. Prefix matching is
-/// the wrong generalisation regardless: `in_amp`, `input_stage` and
-/// `inverting` are ordinary interior nets, not circuit boundaries, and a
-/// prefix rule claims all three.
-pub(crate) fn boundary_net_role(net: &str) -> Option<PortDir> {
-    let lo = net.to_ascii_lowercase();
-    let stem = lo.trim_end_matches(|c: char| c.is_ascii_digit());
-    // Only strip the separator when digits actually preceded it, so a
-    // plain `in_` (no channel number) is not silently accepted.
-    let stem = if stem.len() < lo.len() {
-        stem.trim_end_matches(['_', '-', '.'])
-    } else {
-        stem
-    };
-    match stem {
-        "in" | "input" | "vin" => Some(PortDir::Input),
-        "out" | "output" | "vout" => Some(PortDir::Output),
-        _ => None,
-    }
-}
-
-fn is_signal_source(checked: &CheckedNetlist, idx: usize) -> bool {
-    let el = &checked.elements[idx];
-    matches!(el.kind, ElementKind::VoltageSrc | ElementKind::CurrentSrc)
-        && !matches!(el.role, ElementRole::Power(_))
-}
 
 /// Iteratively detect and break cycles using Tarjan SCC.
 ///
