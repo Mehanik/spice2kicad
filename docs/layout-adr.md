@@ -6100,3 +6100,312 @@ would have to be settled *before* attempting. Ship the dots, re-ask.
   does *not* implement, and it would dot every ordinary two-terminal
   connection. The count matters: a pin where a wire merely *ends* is two
   exit angles, not three.
+
+## ADR-28 — Measure what the eye reads first: chain-axis uniformity and shared-current-path stacking
+
+**Status:** landed, **informational**. Two metrics, five registered
+metric ids, one new verifier
+(`crates/spice2kicad/tests/readability_metrics.rs`). Purely additive:
+`baseline_lock`'s diff is EMPTY, no budget literal moved, no existing
+verifier changed. Neither metric is a ratchet, and neither carries
+aggregate weight in the ADR-23 promotion rule.
+
+### The gap
+
+Three times the project's instruments have scored as an improvement
+something the owner, on sight, called damage:
+
+1. the SA scored destroying a textbook LC-ladder drawing as a **2.7×
+   cost improvement** — it rotated series elements off-axis to buy
+   wirelength, and its objective has no orientation term at all;
+2. phase 4.5 scored mangling two inductors as a **strict V5 win**, and
+   was correct by its own metric, at frozen positions;
+3. the ADR-23 aggregate scored `flow-seed` the largest improvement the
+   instrument had recorded, and the owner then said the **champion is
+   better on 4 of 18 fixtures**.
+
+Every one of those is a true statement about the metric that made it.
+The common cause is not a weighting: **no registered metric measures
+axis consistency, orientation uniformity, or device stacking**, which is
+what a reader picks up before reading a single refdes. ADR-23's own
+"Known limits" says it plainly — a property no verifier measures is
+invisible to the aggregate exactly as it is invisible to the ratchets —
+and the promotion's "two blind cells" post-mortem says what an unmeasured
+cell costs in practice. So the fix is a *measurement*, not a coefficient.
+
+Both metrics read the emitted `.kicad_sch` and re-derive their structure
+from the netlist. Neither imports a classification from `spice-layout`,
+following the `flow_geometry.rs` precedent: a metric that borrows the
+placer's own model can only restate it, never falsify it.
+
+### Metric A — series-chain axis uniformity (`chain.axis`, `chain.reversal`)
+
+A **series chain** is a maximal path of two-terminal signal elements
+linked by nets of **signal degree 2**: each interior net touches exactly
+two drawn, non-rail-stub elements, so the signal leaving one member has
+nowhere to go but into the next. Chain candidates are the drawn,
+two-pin, *series-signal* elements — two terminals, not a power source,
+NEITHER node rail-class — which is `flow_geometry.rs`'s F5
+discriminator, re-derived locally. Every candidate has at most two nets,
+so every vertex has chain-degree ≤ 2 and each component is a path or a
+cycle by construction.
+
+For each chain the metric picks the axis (horizontal or vertical) that
+reads the drawing **most charitably** and reports two counts:
+
+* **`chain.axis`** — members whose drawn pin axis differs from that
+  axis;
+* **`chain.reversal`** — members that ARE on that axis but travel
+  *against* the chain's majority direction, where a member's travel is
+  the sign of `exit_pin − entry_pin` and entry/exit are the nets the
+  chain arrives on and leaves by (endpoints use their free net for the
+  missing side).
+
+`chain.members` is registered as the denominator, so a zero that means
+"clean" is distinguishable from a zero that means "no chain here".
+
+**The specimen.** `lc_ladder_lpf`'s `RS → L1 → L2 → L3` is one chain.
+The shipping placer emits it at rotations 180 / 90 / 0 / 270 — one
+chain, four orientations — and scores `(axis 2, reversal 1)`. The
+deterministic seed (`--no-refine`) emits all four at 90 and scores
+`(0, 0)`. That is the ranking the metric exists to reproduce, and it
+does.
+
+### Metric B — shared-current-path stacking (`stack.side_by_side`)
+
+Devices in series on a DC current path — a cascode's two transistors, a
+collector load above its transistor, a rail-to-rail bias divider — are
+conventionally **stacked in Y**. The current runs down the page from
+supply to ground, and the stack is how a reader sees that it is one
+current.
+
+A **DC-series pair** is two drawn elements `u`, `v` such that
+
+1. each conducts DC between two *distinct* rail nets — there is a path
+   supply → … → `u` → … → ground in the DC graph that does not re-use
+   `u`'s own edge; and
+2. they share a non-rail net `N` whose **DC degree is exactly 2**, so
+   all of `u`'s current flows into `v`.
+
+`stack.side_by_side` counts the pairs drawn wider than tall
+(`|dx| > |dy|` between element centres, centre = mean of emitted body
+pins). `stack.pairs` is the denominator.
+
+The DC graph is deliberately narrower than the netlist graph:
+
+* a **capacitor** carries no DC and contributes no terminal at either
+  end — which is why an RC low-pass's `R1`/`C1` is never asked to stack;
+* a **BJT base / FET gate** is not a conductor (SPICE order `c b e` /
+  `d g s`), so the current path is collector–emitter / drain–source.
+  Counting a base would raise the DC degree of every bias node and
+  dissolve exactly the rail-to-rail divider this metric exists to see;
+* an **op-amp symbol or hierarchical `(sheet …)` instance** conducts DC
+  at its pins without having a single current path *through* it: it gets
+  no DC edge, but its terminals DO count toward a net's DC degree. That
+  asymmetry is load-bearing — without it `opamp_inverting`'s virtual
+  ground reads as degree 2 and `RIN`/`RF` are reported as a series pair
+  they are not.
+
+**Clause 2 is what keeps the metric from demanding nonsense**, and the
+suite's own fixtures prove it in both directions. `cascode_amp`'s
+`Q1`/`Q2` share `c1`, whose only DC conductors are those two: one
+current, one column. `diff_pair`'s `Q1`/`Q2` share `tail` with `RTAIL`,
+so that net has DC degree 3, the current *splits*, and the conventional
+drawing is side by side — and the metric does not count it.
+`stacking_discriminator_separates_the_cascode_from_the_diff_pair` is the
+assertion that keeps that honest; it is metric B's analogue of F5's
+`series_discriminator_separates_stub_from_series_on_common_emitter`.
+
+**The specimen.** `cascode_amp` presents five DC-series pairs —
+`RC/Q2`, `Q2/Q1`, `Q1/RE`, `RB1/RB2`, `RB2/RB3`, which is exactly the
+structure the fixture's own header claims ("Q2's emitter sits on Q1's
+collector, and the three-resistor bias chain RB1/RB2/RB3 is a vertical
+ladder from the rail to ground"). Under `--placer=champion` all five are
+stacked, score **0**. Under the shipping `flow-seed`, `Q1`/`Q2` are
+10.16 mm apart in X and 1.27 mm in Y, score **1** — which is the owner's
+stated reason for preferring the champion on that fixture.
+
+### The measured table
+
+Whole fixture set, both placers, `readability_metrics.rs` with
+`S2K_READABILITY_DUMP=1`. `A` = `chain.axis`, `R` = `chain.reversal`,
+`M` = `chain.members`, `S` = `stack.side_by_side`, `P` = `stack.pairs`.
+
+| fixture | A | R | M | S | P | note |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| rc_lowpass | 0 | 0 | 0 | 0 | 0 | |
+| rc_lowpass_ports | 0 | 0 | 0 | 0 | 0 | |
+| common_emitter | 0 | 0 | 0 | 0 | 3 | RC/Q1, Q1/RE, RB1/RB2 all stacked |
+| multivibrator | 0 | 0 | 0 | 0 | 2 | |
+| diff_pair | 0 | 0 | 0 | 0 | 2 | Q1/Q2 correctly NOT a pair |
+| opamp_inverting | 0 | 0 | 0 | 0 | 0 | |
+| opamp_inverting_real | 0 | 0 | 0 | 0 | 0 | |
+| port_shapes | 0 | 0 | 3 | 0 | 0 | uniform chain, drawn vertical (F5's business) |
+| opamp_definition_level | 0 | 0 | 0 | 0 | 0 | |
+| named_rails | 0 | 0 | 0 | 0 | 0 | |
+| rc_phase_shift | 0 | 0 | 4 | 0 | 2 | `R1→R2→R3→CIN` all horizontal, one direction |
+| two_stage_amp | 0 | 0 | 0 | 0 | 6 | |
+| **cascode_amp** | 0 | 0 | 0 | **1** | 5 | `Q1/Q2` side by side — champion scores **0** |
+| **lc_ladder_lpf** | **2** | **1** | 4 | 0 | 0 | `RS→L1→L2→L3` at four rotations |
+| sallen_key_lpf | 0 | 0 | 0 | 0 | 0 | |
+| wien_bridge_osc | 0 | 1 | 2 | 0 | 0 | `RS`/`CS` both horizontal, opposed |
+| sallen_key_driven | 0 | 0 | 0 | 0 | 0 | |
+| shunt_feedback_amp | 0 | 0 | 0 | 1 | 2 | `RB`/`RF` — see the ambiguities below |
+
+**Champion vs the shipping default, across all 18 fixtures × 5 metrics:
+exactly ONE cell differs**, `stack.side_by_side / cascode_amp`, champion
+0 → flow-seed 1. `lc_ladder_lpf` is byte-identical between the two
+placers (it has a real drawn source and never enters the rail-rooted
+fallback, as the promotion section records), so its `(2, 1)` is a
+property of **phase 4.5**, not of the layering swap — which is why its
+control arm is `--no-refine`, not `--placer=champion`.
+
+That thinness is itself a finding. The owner says the champion is better
+on four of eighteen fixtures; these two metrics see **one** of them. They
+close a named gap, they do not close the gap.
+
+### Informational at birth, and what would promote each
+
+Both are `Tier::Info` in `tests/scoreboard.rs`: printed per fixture, zero
+weight in the `(T1, T2)` aggregate, no per-fixture budget literal. That
+follows the project's own precedents — Q6's balance CoV and ADR-23 D8's
+V16 bend bound — and the reason is D8's: *a bound that were subtly wrong
+would, as a gate, block all work while being wrong.* The ambiguities
+below are unresolved, and a metric that can be wrong about a **correct**
+drawing must not be able to reject one.
+
+The only assertions in the new verifier are therefore
+
+* **synthetic control arms** — hand-placed pin geometry with a known
+  answer, so the metrics cannot silently degenerate to "always 0"
+  (`chain_metric_counts_a_known_synthetic_ladder`,
+  `stacking_metric_counts_a_known_synthetic_divider`); and
+* **specimen rankings in `≤` form** — they fire only if the arm the
+  owner prefers becomes strictly WORSE than the arm they reject, i.e.
+  only if the metric's own validation inverts. They can never block a
+  change that improves the shipping placer.
+
+**What would justify promoting metric A to a ratchet.** (a) The
+corner/fold ambiguity below is closed — either a fixture with a
+legitimately folded chain exists and the metric is shown to grade it
+correctly, or the metric is taught to allow one fold; and (b) the
+placer can actually reach 0 on `lc_ladder_lpf` with refinement ON, so
+the ratchet records an achieved state rather than an aspiration. At that
+point it becomes a per-fixture zero-slack literal exactly like F5, and
+Tier 2 (a continuous-ish aesthetic gradient, by CLAUDE.md's
+constraints-vs-costs decision rule).
+
+**What would justify promoting metric B.** (a) The feedback-resistor
+ambiguity below is closed, so `shunt_feedback_amp`'s cell is known to be
+a defect rather than a definitional artefact; and (b) at least one more
+fixture exercises a stack, so the ratchet is not a single-fixture
+statement. Metric B is more nearly categorical than A — "these two
+devices carry one current, so draw them in one column" is a yes/no
+geometric fact — so it is the better ratchet candidate of the two, and
+plausibly Tier 1 rather than Tier 2 when it gets there.
+
+Neither may become a **weighted** term in `cost.rs`. That is the V16
+doctrine applied to a new metric: subordination by coefficient is not
+subordination, and a tunable term at a safe weight does nothing (the
+Attempt-A failure). If either graduates, it graduates as a per-fixture
+count with a tier, or as a lexicographic key — never as a weight.
+
+### The ambiguities, recorded rather than silently resolved
+
+Where a choice was genuinely arguable it is listed here with the
+alternative, per the project's rule that a deferral written against the
+wrong reason never expires.
+
+1. **A two-element chain.** Included. A chain of two has no "majority",
+   so the metric arbitrarily names one member — but the *count* is
+   symmetric (1 either way), so only the message is arbitrary, not the
+   number. Excluding them would have made `wien_bridge_osc`'s `RS`/`CS`
+   invisible, and two series elements drawn in opposite directions is a
+   defect the eye catches immediately. *Alternative:* require ≥ 3
+   members, and report 2-chains separately.
+
+2. **Mirror as reversal.** Not counted as such. The metric never reads
+   the `(mirror …)` field; it reads where the entry and exit **pins**
+   landed. A mirror that reverses the drawn pin order IS counted (it
+   changes the travel vector), and a mirror that does not is not
+   (it changes nothing a reader sees). Grading the field rather than the
+   geometry would flag mirrors that are invisible on the sheet.
+
+3. **A chain that legitimately turns a corner.** Counted as a violation
+   — this is the definition's weakest point, and the main reason metric
+   A is informational. A long chain folded to fit an A4 page is good
+   practice, and the metric would score the fold. No fixture folds a
+   chain today (`lc_ladder_lpf` is the longest at four members and does
+   not need to), so the case is unmeasured rather than mis-measured.
+   *Alternative:* allow one axis change per chain free, or allow a
+   change at a member whose entry and exit both stay on the page's long
+   axis. Not chosen, because a free fold also excuses the
+   `lc_ladder_lpf` defect the metric exists to see.
+
+4. **Charitable axis selection.** For each chain the metric evaluates
+   BOTH axes and keeps the reading that minimises `(off_axis,
+   reversals)` lexicographically, breaking a tie toward **horizontal**
+   (the project's own F3/F5 convention is that signal flows left to
+   right). So the metric never invents a violation by insisting on an
+   axis the drawing did not choose. *Alternative:* fix the axis to
+   horizontal always — rejected, because it would double-count the
+   `port_shapes` chain, which is uniform and merely vertical, and
+   verticality is already F5's business. **A and F5 are complementary,
+   not redundant:** F5 asks "is this series element horizontal and
+   pointing downstream?", A asks "do the members of one chain agree with
+   *each other*?". `port_shapes` scores A = 0 and F5 = 3; that is
+   correct in both.
+
+5. **Axis and reversal are disjoint.** An off-axis member is counted
+   once, under `chain.axis`, and is not also counted as reversed. One
+   element cannot be blamed twice for one pose, and the split is what
+   lets a reader tell "the ladder zig-zags" (an axis defect) from "one
+   inductor is drawn backwards" (a direction defect) — different repairs
+   in the placer. *Alternative:* one combined "non-conforming members"
+   count. Rejected: it would hide which repair is needed.
+
+6. **Element centres, not shared pins, decide stacked-vs-side-by-side.**
+   "Laid out side by side" is a statement about where the bodies sit,
+   which is what a reader sees; measuring the shared-net *pins* instead
+   would score a correctly stacked pair as side-by-side whenever the
+   router took a jog. *Alternative:* the shared pin pair. Not chosen.
+
+7. **The exactly-diagonal pair.** `|dx| == |dy|` is NOT counted. It is
+   genuinely ambiguous, and an informational metric should not invent a
+   defect out of a tie.
+
+8. **A feedback resistor on a DC path.** Counted.
+   `shunt_feedback_amp`'s `RB`/`RF` share `b` at DC degree 2 and both sit
+   on a supply-to-ground path, so they satisfy the definition — but `RF`
+   is a collector-to-base feedback resistor, and the textbook drawing
+   runs it *along the feedback direction*, not stacked. This cell is
+   **1 on both placers** and is the clearest known candidate for a false
+   positive. *Alternative:* exclude pairs where one member is a feedback
+   arc in the flow graph. Not implemented, because it drags flow
+   direction into a metric that is otherwise pure DC topology, and
+   because F0-class fixtures with real feedback are exactly what would
+   let the question be settled with measurement rather than argument.
+
+9. **Distinct rail nets, not rail polarity.** Clause 1 asks for two
+   *distinct* rail nets rather than "one supply and one ground", so it
+   works unchanged on `named_rails`' `p5`/`n5` and on any future
+   split-supply fixture without a polarity table. The cost is that two
+   different *names* for one physical rail would read as distinct; no
+   fixture does that today (ground is always `0`).
+
+10. **A cycle has no endpoint.** A chain component that is a cycle (no
+    degree-1 member) is walked from its lexicographically smallest
+    member, so the result is deterministic. No fixture presents one; the
+    choice is recorded so a future oscillator ring does not surprise
+    anyone.
+
+### One aggregator change, and why it is not a behaviour change
+
+`tests/scoreboard.rs` now prints `(info)` in the Δ column for a
+`Tier::Info` row instead of `+0.00`. ADR-23 D6 recorded that exact
+defect as a live follow-up — `q6.cov` printed `Δ = +0.00` for a value
+that moved 1.2247 → 1.4142, which reads as "unchanged" — and it bites
+harder now that five of the registered ids are informational. The
+contribution really is zero, so nothing about the aggregate, the
+verdict, or the promotion rule changes; only the column that was lying
+about it.

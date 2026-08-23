@@ -1224,3 +1224,73 @@ invariant here.
   than two, hence the wider spread. Driving it down would mean stacking
   stubs in one column, which the idiom exists to prevent. Treat 6 as
   the fixture's correct score, not an owed fix.
+
+- **A1 / A2 — series-chain axis uniformity** (readability metric,
+  **informational**, ADR-28). A *series chain* is a maximal path of
+  two-terminal signal elements linked by nets of signal degree 2 — each
+  interior net touches exactly two drawn, non-rail-stub elements, so the
+  signal leaving one member has nowhere to go but into the next.
+  Textbook style draws a chain along one shared axis in one direction;
+  that is what makes a ladder read as a ladder.
+
+  Two disjoint counts per chain, under the axis that reads the drawing
+  most charitably (both axes are evaluated, the one minimising
+  `(off_axis, reversals)` wins, ties break toward horizontal):
+  **`chain.axis`** counts members off that axis, **`chain.reversal`**
+  counts members that are on it but travel against the chain's majority
+  direction. `chain.members` is the denominator, so "clean" is
+  distinguishable from "no chain here". An off-axis member is never also
+  counted as reversed — one element, one blame, and the split says which
+  repair the placer needs.
+
+  Complementary to F5, not redundant with it: F5 asks whether a series
+  element is horizontal and pointing downstream, A asks whether the
+  members of one chain agree with *each other*. `port_shapes` scores
+  A = 0 (a uniform chain) and F5 = 3 (it is uniformly vertical); both
+  are correct.
+
+  Motivating specimen: `lc_ladder_lpf`'s `RS → L1 → L2 → L3`, emitted at
+  rotations 180 / 90 / 0 / 270 — one chain, four orientations — scoring
+  `(2, 1)` against the `--no-refine` seed's `(0, 0)`. The two placers
+  are byte-identical on this fixture, so the defect belongs to phase
+  4.5, not to the layering.
+
+  Verifier: `crates/spice2kicad/tests/readability_metrics.rs`.
+  **No budget literal**: reported per fixture and registered with the
+  ADR-23 scoreboard as `Tier::Info`, on the Q6 / V16-bend-bound
+  precedent. ADR-28 records the open ambiguities (a chain that
+  legitimately folds is the sharpest) and what would justify promoting
+  it to a zero-slack Tier-2 ratchet.
+
+- **B1 — shared-current-path stacking** (readability metric,
+  **informational**, ADR-28). Devices in series on a DC current path —
+  a cascode's two transistors, a collector load above its transistor, a
+  rail-to-rail bias divider — are conventionally stacked in Y. A
+  *DC-series pair* is two drawn elements that (1) each conduct DC
+  between two distinct rail nets, and (2) share a non-rail net of DC
+  degree exactly 2, so all of one's current flows into the other.
+  **`stack.side_by_side`** counts the pairs drawn wider than tall
+  (`|dx| > |dy|` between element centres); `stack.pairs` is the
+  denominator; an exact diagonal is not counted.
+
+  The DC graph is narrower than the netlist graph on purpose: a
+  capacitor contributes no terminal, a BJT base / FET gate is a control
+  terminal and not a conductor, and an op-amp or hierarchical sheet
+  instance gets no DC *edge* but its terminals still count toward a
+  net's DC *degree*. Clause 2 is what keeps the metric honest —
+  `diff_pair`'s two transistors share `tail` with `RTAIL`, so that net
+  has DC degree 3, the current splits, and the pair is correctly NOT
+  counted, because a diff pair is drawn side by side on purpose.
+
+  Motivating specimen: `cascode_amp`'s `Q1`/`Q2`, stacked by
+  `--placer=champion` (score 0) and side by side under the shipping
+  default (score 1) — the owner's stated reason for preferring the
+  champion on that fixture.
+
+  Verifier: `crates/spice2kicad/tests/readability_metrics.rs`, with
+  `stacking_discriminator_separates_the_cascode_from_the_diff_pair` as
+  the falsifiability guard. **No budget literal**, same reasoning as A.
+  Known candidate false positive: `shunt_feedback_amp`'s `RB`/`RF`, a
+  collector-to-base feedback resistor that satisfies the definition but
+  is conventionally drawn along the feedback direction — ADR-28
+  ambiguity 8.

@@ -317,6 +317,47 @@ const METRICS: &[Metric] = &[
         0.0,
         "V16 bends above the EXACT optimum on 2-terminal ink (informational)",
     ),
+    // ADR-28 — the two things a human reads first. Registered as
+    // informational for the same reason as Q6 and the V16 bend bound:
+    // their definitions are still being calibrated (ADR-28 lists the
+    // open ambiguities), and a metric that can be wrong about a
+    // *correct* drawing must not be able to block work. They exist
+    // because the aggregate above has three times scored as an
+    // improvement something the owner read as damage, and none of the
+    // graded metrics measures axis consistency, orientation uniformity
+    // or device stacking. What would justify promoting each of them to
+    // a weighted metric — and then to a ratchet — is recorded in
+    // ADR-28.
+    m(
+        "chain.axis",
+        Tier::Info,
+        0.0,
+        "series-chain members off the chain's majority axis (informational)",
+    ),
+    m(
+        "chain.reversal",
+        Tier::Info,
+        0.0,
+        "series-chain members reversed against the chain's direction (informational)",
+    ),
+    m(
+        "chain.members",
+        Tier::Info,
+        0.0,
+        "series-chain members measured — the denominator for chain.* (informational)",
+    ),
+    m(
+        "stack.side_by_side",
+        Tier::Info,
+        0.0,
+        "DC-series device pairs drawn side-by-side instead of stacked (informational)",
+    ),
+    m(
+        "stack.pairs",
+        Tier::Info,
+        0.0,
+        "DC-series device pairs measured — the denominator for stack.* (informational)",
+    ),
 ];
 
 /// Weight applied to the Tier-1 total in the single-scalar aggregate.
@@ -477,10 +518,25 @@ fn report(champ_dir: &Path, chal_dir: &Path, champ_name: &str, chal_name: &str) 
                     }
                     met_delta += d;
                     if (b - a).abs() > 1e-9 {
-                        println!(
-                            "{:<28} {:<24} {:>10.4} {:>10.4} {:>+10.2}",
-                            met.id, f, a, b, d
-                        );
+                        // An informational metric carries no aggregate
+                        // weight, so its `d` is 0 by construction — and
+                        // printing `+0.00` beside a cell that moved
+                        // 0 -> 3 reads as "unchanged". ADR-23 D6
+                        // recorded that as a live defect after `q6.cov`
+                        // printed `Δ = +0.00` for a value that moved
+                        // 1.2247 -> 1.4142. Print the contribution only
+                        // where there is one.
+                        if met.tier == Tier::Info {
+                            println!(
+                                "{:<28} {:<24} {:>10.4} {:>10.4} {:>10}",
+                                met.id, f, a, b, "(info)"
+                            );
+                        } else {
+                            println!(
+                                "{:<28} {:<24} {:>10.4} {:>10.4} {:>+10.2}",
+                                met.id, f, a, b, d
+                            );
+                        }
                         printed_any = true;
                     }
                 }
@@ -490,10 +546,17 @@ fn report(champ_dir: &Path, chal_dir: &Path, champ_name: &str, chal_name: &str) 
             }
         }
         if printed_any {
-            println!(
-                "{:<28} {:<24} {:>10} {:>10} {:>+10.2}   [{:?}] {}",
-                "", "  ^ subtotal", "", "", met_delta, met.tier, met.what
-            );
+            if met.tier == Tier::Info {
+                println!(
+                    "{:<28} {:<24} {:>10} {:>10} {:>10}   [{:?}] {}",
+                    "", "  ^ subtotal", "", "", "(info)", met.tier, met.what
+                );
+            } else {
+                println!(
+                    "{:<28} {:<24} {:>10} {:>10} {:>+10.2}   [{:?}] {}",
+                    "", "  ^ subtotal", "", "", met_delta, met.tier, met.what
+                );
+            }
         }
     }
     println!("{}", "-".repeat(88));
