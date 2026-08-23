@@ -146,6 +146,40 @@ const METRICS: &[Metric] = &[
         1.0,
         "cross-net collinear wire overlaps (latent V11 short)",
     ),
+    // Registered 2026-08-23 by the blind-cell sweep (ADR-23 D10). Each
+    // of these graded a Tier-0 property with NO scoreboard cell at all,
+    // so the promotion rule's "no Tier-0 regression" clause was reading
+    // five metrics where it believed it was reading ten.
+    m(
+        "t0.erc_errors",
+        Tier::T0,
+        1.0,
+        "V2: `kicad-cli sch erc` error-severity violations",
+    ),
+    m(
+        "t0.netlist_mismatch",
+        Tier::T0,
+        1.0,
+        "emitted schematic differs from the source netlist (missing element / wrong net)",
+    ),
+    m(
+        "t0.nondeterministic",
+        Tier::T0,
+        1.0,
+        "repeat conversions differing from the first (default path)",
+    ),
+    m(
+        "t0.nondeterministic_nocache",
+        Tier::T0,
+        1.0,
+        "P10: two cache-less conversions of one fixture differ",
+    ),
+    m(
+        "t0.sheet_overlap",
+        Tier::T0,
+        1.0,
+        "symbol / power-glyph extent overlapping a hierarchical-sheet body",
+    ),
     // --- Tier 1 — readability constraints ---------------------------
     m("v12", Tier::T1, 1.0, "wires crossing foreign symbol bodies"),
     m("v13.1_label_body", Tier::T1, 1.0, "label bbox over body"),
@@ -230,6 +264,100 @@ const METRICS: &[Metric] = &[
         1.0,
         "foreign label/wire over a power-glyph body",
     ),
+    // Registered 2026-08-23 by the blind-cell sweep (ADR-23 D10). Every
+    // one of these was graded by a zero-budget verifier that reported
+    // NOTHING to the sink, so the aggregate scored it as "no change" on
+    // both sides of every comparison the scoreboard has ever run.
+    m(
+        "v4.plain_label_excess",
+        Tier::T1,
+        1.0,
+        "V4: nets carrying more plain labels than the cap allows",
+    ),
+    m(
+        "v4.global_label_misuse",
+        Tier::T1,
+        1.0,
+        "V4: global labels on nets that are not one-pin interface nets",
+    ),
+    m(
+        "v10.orphan_pwrflag",
+        Tier::T1,
+        1.0,
+        "V10: PWR_FLAG markers not sitting on drawn circuit geometry",
+    ),
+    m(
+        "v10.spurious_pwrflag",
+        Tier::T1,
+        1.0,
+        "V10: PWR_FLAG on a signal net that already has a passive/driving pin",
+    ),
+    m(
+        "v10.rail_glyph_kind",
+        Tier::T1,
+        1.0,
+        "V10: rail glyph of the wrong kind (GND triangle on a negative rail)",
+    ),
+    m(
+        "v10.power_source_drawn",
+        Tier::T1,
+        1.0,
+        "V10: `*@power` sources still drawn as a symbol instead of a glyph",
+    ),
+    m(
+        "v13.align_text_gap",
+        Tier::T1,
+        1.0,
+        "align-cluster value-text gaps below the ratchet floor",
+    ),
+    m(
+        "v13.label_in_body",
+        Tier::T1,
+        1.0,
+        "label anchors inside a foreign symbol body",
+    ),
+    m(
+        "v13.glyph_on_sheet_port",
+        Tier::T1,
+        1.0,
+        "power glyph anchored on a sheet port pin (overprints the port label)",
+    ),
+    m(
+        "v13.model_ink_escape",
+        Tier::T1,
+        1.0,
+        "text-bbox model disagreeing with real SVG ink — the V13 family's own fidelity",
+    ),
+    m(
+        "v14.glyph_orientation",
+        Tier::T1,
+        1.0,
+        "V14: power glyphs not at their canonical rotation",
+    ),
+    m(
+        "v14.rail_order",
+        Tier::T1,
+        1.0,
+        "V14/R-6: the Power band is not drawn above the Ground band",
+    ),
+    m(
+        "v15.off_page",
+        Tier::T1,
+        1.0,
+        "V15: content or instance anchors outside the A4 usable area",
+    ),
+    m(
+        "wire.same_net_overlap",
+        Tier::T1,
+        1.0,
+        "redundant collinear same-net wire overlaps (duplicated ink)",
+    ),
+    m(
+        "wire.dangling_whisker",
+        Tier::T1,
+        1.0,
+        "wire ends that attach to nothing",
+    ),
     // --- Tier 2 — aesthetic refinement ------------------------------
     m("v5", Tier::T2, 1.0, "pin outward-direction violations"),
     m("v16.bends", Tier::T2, 1.0, "V16 bends (B)"),
@@ -288,6 +416,12 @@ const METRICS: &[Metric] = &[
         Tier::T1,
         1.0,
         "cross-net collinear contact points (latent short, ADR-27)",
+    ),
+    m(
+        "junction.missing_mid_span",
+        Tier::T1,
+        1.0,
+        "mid-span same-net T-branches drawn without a junction dot",
     ),
     // --- informational ----------------------------------------------
     m("q6.cov", Tier::Info, 0.0, "Q6 balance CoV (informational)"),
@@ -641,9 +775,33 @@ fn report(champ_dir: &Path, chal_dir: &Path, champ_name: &str, chal_name: &str) 
         );
     }
 
+    // Orphan records: an id present in the .tsv that is in no METRICS
+    // row. The sink accepts any string and this function only ever walks
+    // METRICS, so such a measurement is written and then dropped — the
+    // *recorded-but-unregistered* half of the blind-cell class (ADR-23
+    // D10). The `every_recorded_metric_id_is_registered` lint catches
+    // every in-tree case at `cargo test` time; this catches a record made
+    // from anywhere else, and refuses the verdict rather than quietly
+    // grading a table with a hole in it.
+    let registered: BTreeSet<&str> = METRICS.iter().map(|m| m.id).collect();
+    let orphan_ids: BTreeSet<&str> = champ
+        .keys()
+        .chain(chal.keys())
+        .map(|(m, _)| m.as_str())
+        .filter(|m| !registered.contains(m))
+        .collect();
+    if !orphan_ids.is_empty() {
+        println!(
+            "\n!! {} recorded metric id(s) are in no METRICS row, so their cells were \
+             DROPPED from the table above — the comparison is INCOMPLETE: {}",
+            orphan_ids.len(),
+            orphan_ids.iter().copied().collect::<Vec<_>>().join(", ")
+        );
+    }
+
     let tier0_regressed = !t0_worse.is_empty();
     let aggregate_improves = totals.t1 < -1e-9 || (totals.t1.abs() <= 1e-9 && totals.t2 < -1e-9);
-    let complete = missing.is_empty() && uninstrumented.is_empty();
+    let complete = missing.is_empty() && uninstrumented.is_empty() && orphan_ids.is_empty();
     let promotable = !tier0_regressed && aggregate_improves && complete && c_conf.is_empty();
 
     println!("\nPromotion rule (ADR-23):");
@@ -805,7 +963,11 @@ fn champion_challenger_report() {
 //   * a verifier that enumerates fixtures and records NOTHING at all —
 //     that is D9's blind-cell rule, which this lint's premise (a
 //     `record` call in the loop) cannot see. It is a separate obligation,
-//     and sixteen fixture-enumerating verifiers are in that class today.
+//     now enforced by `every_fixture_enumerating_verifier_reports_a_metric`
+//     at the bottom of this file; and
+//   * a verifier that records under an id no METRICS row declares, which
+//     `report` silently drops — enforced by
+//     `every_recorded_metric_id_is_registered`.
 
 /// The macros that abort a test function where they stand.
 ///
@@ -1243,4 +1405,771 @@ fn v() {
     let (h, l) = scan_source(helper_panic);
     assert_eq!(l, 1);
     assert!(h.is_empty(), "`unwrap_or_else(|e| panic!(…))` is exempt");
+}
+
+// ---------------------------------------------------------------------------
+// Regression guard: no verifier and no metric id may be BLIND
+// ---------------------------------------------------------------------------
+//
+// # The defect this closes (ADR-23 D9 / D10)
+//
+// The report above prints "comparison complete" from the metrics that
+// *reported*. A verifier that reports nothing is indistinguishable, in
+// every cell of that table, from a metric with nothing to say — so the
+// promotion rule can pass while whole invariants are unwatched. D9's own
+// wording: **a blind cell is not conservatively blind.** It is scored as
+// `0.00` change, which is a claim, not an abstention.
+//
+// This is measured history, not a worry. Registering five silent metrics
+// during the `flow-seed` promotion moved the Tier-1 aggregate from −1.00
+// to −4.00, and one of the five was a genuine Tier-1 regression that no
+// table had shown. Blindness has two distinct causes and needs two
+// distinct lints:
+//
+//   1. **The verifier never records.** Caught by
+//      [`every_fixture_enumerating_verifier_reports_a_metric`].
+//   2. **The verifier records under an id nobody registered.** The sink
+//      accepts any string; [`report`] only ever iterates [`METRICS`], so
+//      an unregistered id lands in the `.tsv` and is then dropped on the
+//      floor. Caught by [`every_recorded_metric_id_is_registered`], and —
+//      for records made outside this crate's `tests/` tree — by the
+//      orphan-record check inside [`report`] itself.
+//
+// Cause 2 is not hypothetical either: `pwr_flags_sit_on_existing_drawn_geometry`
+// shipped in `9296edc` recording `v10.orphan_pwrflag`, an id that was in
+// no registry, so its Tier-1 floor was invisible to the scoreboard from
+// the day it landed.
+//
+// The sibling lint above (`no_verifier_asserts_inside_a_loop_that_reports_a_metric`)
+// catches a THIRD cause — a verifier that *stops* recording mid-loop —
+// and by construction cannot catch either of these two: its premise is a
+// `record` call the blind verifier does not have.
+
+/// Blank out comments, keeping string literals and byte offsets.
+///
+/// The complement of [`blank_literals`]: that one hides strings (so the
+/// brace walk is not fooled by a `{` inside a message) and is what the
+/// in-loop lint needs. Here the string literal *is* the payload — a
+/// metric id — while a `record` call named in a comment must not count.
+fn blank_comments(src: &str) -> Vec<char> {
+    let s: Vec<char> = src.chars().collect();
+    let mut out = s.clone();
+    let mut at = 0;
+    while at < s.len() {
+        // Skip over string / char literals verbatim, so a `//` inside one
+        // does not start a comment.
+        let next = match s[at] {
+            '/' if at + 1 < s.len() && s[at + 1] == '/' => {
+                let e = end_of_line_comment(&s, at);
+                blank_range(&mut out, at, e);
+                e
+            }
+            '/' if at + 1 < s.len() && s[at + 1] == '*' => {
+                let e = end_of_block_comment(&s, at);
+                blank_range(&mut out, at, e);
+                e
+            }
+            'r' if end_of_raw_string(&s, at).is_some() => {
+                end_of_raw_string(&s, at).unwrap_or(at + 1)
+            }
+            '"' => end_of_string(&s, at),
+            '\'' => end_of_char_literal(&s, at).unwrap_or(at + 1),
+            _ => at + 1,
+        };
+        at = next.max(at + 1);
+    }
+    out
+}
+
+/// Every metric id recorded through the sink in one source file, with the
+/// 1-based line it sits on.
+fn recorded_metric_ids(src: &str) -> Vec<(usize, String)> {
+    let ch = blank_comments(src);
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at < ch.len() {
+        if !(ch[at] == 's' && word_at(&ch, at, "scoreboard")) {
+            at += 1;
+            continue;
+        }
+        // `scoreboard::record` / `scoreboard::record_count`, then `(`,
+        // then (possibly after a newline) the id literal.
+        let mut p = at + "scoreboard".len();
+        if !(p + 2 < ch.len() && ch[p] == ':' && ch[p + 1] == ':') {
+            at += 1;
+            continue;
+        }
+        p += 2;
+        if !word_at(&ch, p, "record") && !word_at(&ch, p, "record_count") {
+            at += 1;
+            continue;
+        }
+        while p < ch.len() && ch[p] != '(' {
+            p += 1;
+        }
+        while p < ch.len() && ch[p] != '"' {
+            p += 1;
+        }
+        let start = p + 1;
+        let mut end = start;
+        while end < ch.len() && ch[end] != '"' {
+            end += 1;
+        }
+        if end < ch.len() {
+            let line = ch.iter().take(at).filter(|&&c| c == '\n').count() + 1;
+            out.push((line, ch[start..end].iter().collect::<String>()));
+        }
+        at = end.max(at + 1);
+    }
+    out
+}
+
+/// Every `.rs` file under `tests/` and `tests/common/`.
+fn suite_sources() -> Vec<PathBuf> {
+    let tests_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let mut sources: Vec<PathBuf> = Vec::new();
+    for dir in [tests_dir.clone(), tests_dir.join("common")] {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut v: Vec<PathBuf> = entries
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "rs"))
+            .collect();
+        v.sort();
+        sources.append(&mut v);
+    }
+    sources
+}
+
+fn file_name_of(p: &Path) -> String {
+    p.file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+#[test]
+fn every_recorded_metric_id_is_registered() {
+    let registered: BTreeSet<&str> = METRICS.iter().map(|m| m.id).collect();
+    let mut offences: Vec<String> = Vec::new();
+    let mut sites = 0_usize;
+    for path in &suite_sources() {
+        let name = file_name_of(path);
+        // This file records nothing; its `record_count("m", …)` strings
+        // are the lint fixtures below, deliberately naming ids that are
+        // not in the registry.
+        if name == "scoreboard.rs" {
+            continue;
+        }
+        let Ok(src) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        for (line, id) in recorded_metric_ids(&src) {
+            sites += 1;
+            if !registered.contains(id.as_str()) {
+                offences.push(format!(
+                    "{name}:{line} records `{id}`, which is in no METRICS entry. \
+                     `report` only ever iterates METRICS, so this measurement is \
+                     written to the .tsv and then dropped: the cell reads as \
+                     \"nothing to say\" on both sides of every comparison. Add an \
+                     `m(\"{id}\", Tier::…, …)` row, or stop recording it."
+                ));
+            }
+        }
+    }
+    assert!(
+        sites >= 40,
+        "found only {sites} recording site(s) — the id scanner stopped matching, \
+         so this lint would pass vacuously",
+    );
+    assert!(
+        offences.is_empty(),
+        "{} recorded metric id(s) are invisible to the scoreboard:\n  {}",
+        offences.len(),
+        offences.join("\n  "),
+    );
+}
+
+#[test]
+fn every_registered_metric_has_a_recording_site() {
+    let mut recorded: BTreeSet<String> = BTreeSet::new();
+    for path in &suite_sources() {
+        if file_name_of(path) == "scoreboard.rs" {
+            continue;
+        }
+        let Ok(src) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        recorded.extend(recorded_metric_ids(&src).into_iter().map(|(_, id)| id));
+    }
+    let orphans: Vec<&str> = METRICS
+        .iter()
+        .map(|m| m.id)
+        .filter(|id| !recorded.contains(*id))
+        .collect();
+    assert!(
+        orphans.is_empty(),
+        "{} registered metric(s) have no recording site in the suite, so their \
+         column is permanently empty and `report`'s completeness check would \
+         veto every comparison: {}",
+        orphans.len(),
+        orphans.join(", "),
+    );
+}
+
+// --- the fixture-enumeration scanner ---------------------------------------
+
+/// One `fn` item: its name, the offset of the `fn` keyword, and its body.
+struct FnItem {
+    name: String,
+    header: usize,
+    open: usize,
+    close: usize,
+    is_test: bool,
+}
+
+/// Every `fn` item in a literal-blanked source, with `#[test]` resolved by
+/// *association* rather than by a look-back window: each `#[test]`
+/// attribute belongs to the next `fn` keyword after it, which a fixed-size
+/// look-back cannot say (a short test body puts the previous `#[test]`
+/// inside the next item's window).
+fn scan_fn_items(ch: &[char]) -> Vec<FnItem> {
+    let mut items: Vec<FnItem> = Vec::new();
+    let mut at = 0;
+    while at < ch.len() {
+        if !word_at(ch, at, "fn") {
+            at += 1;
+            continue;
+        }
+        let mut p = at + 2;
+        while p < ch.len() && ch[p].is_whitespace() {
+            p += 1;
+        }
+        let ns = p;
+        while p < ch.len() && (ch[p].is_alphanumeric() || ch[p] == '_') {
+            p += 1;
+        }
+        if p == ns {
+            at += 2;
+            continue;
+        }
+        let name: String = ch[ns..p].iter().collect();
+        // First `{` at paren/bracket depth 0 opens the body.
+        let (mut paren, mut brack) = (0_i32, 0_i32);
+        let mut open = None;
+        while p < ch.len() {
+            match ch[p] {
+                '(' => paren += 1,
+                ')' => paren -= 1,
+                '[' => brack += 1,
+                ']' => brack -= 1,
+                '{' if paren == 0 && brack == 0 => {
+                    open = Some(p);
+                    break;
+                }
+                ';' if paren == 0 && brack == 0 => break, // a trait/extern signature
+                _ => {}
+            }
+            p += 1;
+        }
+        let Some(open) = open else {
+            at += 2;
+            continue;
+        };
+        let close = matching_brace(ch, open);
+        items.push(FnItem {
+            name,
+            header: at,
+            open,
+            close,
+            is_test: false,
+        });
+        at += 2;
+    }
+    // Associate each `#[test]` with the next `fn` after it.
+    let mut at = 0;
+    while at < ch.len() {
+        if word_at(ch, at, "#[test]") || (ch[at] == '#' && word_at(ch, at + 1, "[test]")) {
+            if let Some(i) = items.iter().position(|f| f.header > at) {
+                items[i].is_test = true;
+            }
+            at += 7;
+        } else {
+            at += 1;
+        }
+    }
+    items
+}
+
+/// Text spans that could name a list of fixtures: `const`/`static`/`let`
+/// initialisers and non-test `fn` bodies.
+fn candidate_bindings(ch: &[char], items: &[FnItem]) -> Vec<(String, usize, usize)> {
+    let mut out: Vec<(String, usize, usize)> = Vec::new();
+    let mut at = 0;
+    while at < ch.len() {
+        let kw = ["const", "static", "let"]
+            .into_iter()
+            .find(|k| word_at(ch, at, k));
+        let Some(kw) = kw else {
+            at += 1;
+            continue;
+        };
+        let mut p = at + kw.len();
+        while p < ch.len() && ch[p].is_whitespace() {
+            p += 1;
+        }
+        if word_at(ch, p, "mut") {
+            p += 3;
+            while p < ch.len() && ch[p].is_whitespace() {
+                p += 1;
+            }
+        }
+        let ns = p;
+        while p < ch.len() && (ch[p].is_alphanumeric() || ch[p] == '_') {
+            p += 1;
+        }
+        if p == ns {
+            at += kw.len();
+            continue;
+        }
+        let name: String = ch[ns..p].iter().collect();
+        // Skip the type annotation, then take everything to the `;` that
+        // closes the initialiser at depth 0.
+        let mut d = 0_i32;
+        let mut eq = None;
+        while p < ch.len() {
+            match ch[p] {
+                '(' | '[' | '{' => d += 1,
+                ')' | ']' | '}' => d -= 1,
+                '=' if d == 0 && ch.get(p + 1) != Some(&'=') => {
+                    eq = Some(p);
+                    break;
+                }
+                ';' if d == 0 => break,
+                _ => {}
+            }
+            p += 1;
+        }
+        let Some(eq) = eq else {
+            at += kw.len();
+            continue;
+        };
+        let mut d = 0_i32;
+        let mut q = eq + 1;
+        while q < ch.len() {
+            match ch[q] {
+                '(' | '[' | '{' => d += 1,
+                ')' | ']' | '}' => d -= 1,
+                ';' if d == 0 => break,
+                _ => {}
+            }
+            q += 1;
+        }
+        out.push((name, eq + 1, q.min(ch.len())));
+        at = eq + 1;
+    }
+    for f in items.iter().filter(|f| !f.is_test) {
+        out.push((f.name.clone(), f.open, f.close));
+    }
+    out
+}
+
+/// One fixture-enumerating verifier and how it was recognised.
+struct Enumerating {
+    name: String,
+    line: usize,
+    via: String,
+    records: bool,
+}
+
+/// Find every fixture-enumerating `#[test]` fn in one source file.
+///
+/// "Fixture-enumerating" is *measured*, not listed: `fixtures` is the set
+/// of `.cir` stems that actually exist on disk, and a binding (a `const`,
+/// a `let`, or a helper `fn`) counts as a fixture list when it names three
+/// or more of them. A test that loops over such a binding — directly, or
+/// through a helper that wraps one — grades emitted output on several
+/// circuits, which is exactly the shape that owes the sink a number.
+fn scan_fixture_enumerating(src: &str, fixtures: &BTreeSet<String>) -> Vec<Enumerating> {
+    let ch = blank_literals(src);
+    let raw: Vec<char> = src.chars().collect();
+    let items = scan_fn_items(&ch);
+    let bindings = candidate_bindings(&ch, &items);
+
+    let names_in = |lo: usize, hi: usize| -> usize {
+        let text: String = raw[lo.min(raw.len())..hi.min(raw.len())].iter().collect();
+        fixtures
+            .iter()
+            .filter(|f| text.contains(&format!("\"{f}\"")))
+            .count()
+    };
+
+    // A binding is a fixture list when it names >= 3 fixtures directly,
+    // or when it *wraps* one that does — `placement_quality::fixtures()`
+    // joins `FIXTURES_FOR_QUALITY` to paths, and `electrical_safety`'s
+    // `with_sheets` prepends one name to `SHEETS`. Exactly ONE hop, and
+    // only from a directly-qualifying list: making the relation
+    // transitive turns it into ordinary dataflow — `let root =
+    // parse(&sch)` inside a fixture loop would inherit it — and then
+    // every local in the file reads as a "fixture list".
+    let direct: BTreeSet<String> = bindings
+        .iter()
+        .filter(|(_, lo, hi)| names_in(*lo, *hi) >= 3)
+        .map(|(n, _, _)| n.clone())
+        .collect();
+    let mut sources = direct.clone();
+    for (name, lo, hi) in &bindings {
+        if sources.contains(name) {
+            continue;
+        }
+        let code: String = ch[(*lo).min(ch.len())..(*hi).min(ch.len())]
+            .iter()
+            .collect();
+        if direct.iter().any(|s| {
+            code.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .any(|t| t == s)
+        }) {
+            sources.insert(name.clone());
+        }
+    }
+
+    let line_of = |idx: usize| {
+        ch.iter()
+            .take(idx.min(ch.len()))
+            .filter(|&&c| c == '\n')
+            .count()
+            + 1
+    };
+    let mut out = Vec::new();
+    for f in items.iter().filter(|f| f.is_test) {
+        let body_code: String = ch[f.open..f.close.min(ch.len())].iter().collect();
+        let mut via: Option<String> = None;
+        let mut at = f.open;
+        while at < f.close {
+            if word_at(&ch, at, "for")
+                && let Some(open) = loop_body_open(&ch, at)
+                && open < f.close
+            {
+                let header: String = ch[at..open].iter().collect();
+                for s in &sources {
+                    if header
+                        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                        .any(|t| t == s)
+                    {
+                        via.get_or_insert_with(|| format!("loops over `{s}`"));
+                    }
+                }
+            }
+            at += 1;
+        }
+        if via.is_none() && body_code.contains("for ") && names_in(f.open, f.close) >= 3 {
+            via = Some(format!(
+                "names {} fixtures inline and loops",
+                names_in(f.open, f.close)
+            ));
+        }
+        if let Some(via) = via {
+            out.push(Enumerating {
+                name: f.name.clone(),
+                line: line_of(f.header),
+                via,
+                records: body_code.contains("scoreboard::record"),
+            });
+        }
+    }
+    out
+}
+
+/// Fixture-enumerating verifiers that deliberately report NOTHING.
+///
+/// **This list is the point of the lint.** Silence about an invariant is
+/// only defensible when someone wrote down why, so a blind verifier is
+/// either registered here with a reason or it is a defect. Entries expire
+/// on their own: the lint fails on a stale row exactly as it fails on an
+/// unregistered blind cell, so a verifier that later learns to record
+/// forces its exemption to be deleted.
+///
+/// The bar for adding a row is the same one `docs/invariants.md` sets for
+/// admitting a metric, read backwards: the verifier must have no scalar
+/// that would mean anything in a champion/challenger table — because it
+/// grades the *verifier* rather than the drawing, because its number is a
+/// tautology of the comparison itself, or because its violations are
+/// already counted under an id that IS registered (a second id would
+/// double-count them).
+const BLIND_CELL_EXEMPT: &[(&str, &str, &str)] = &[
+    (
+        "baseline_lock.rs",
+        "baseline_lock_all_fixtures",
+        "the OTHER instrument. Its scalar is \"differs from the champion's recorded \
+         geometry\", which ADR-23's opening finding says is 1 for essentially every \
+         element of any real challenger — \"regression and difference are the same \
+         measurement\" against a baseline sampled from the incumbent. A cell that is \
+         0 on the champion by construction and saturated on the challenger by \
+         construction grades nothing; the blast radius it does measure is reported in \
+         the commit message, where a human reads it.",
+    ),
+    (
+        "electrical_safety.rs",
+        "item3_interface_global_labels_clear_foreign_bodies",
+        "a focused GUARD on a strict subset of `v13_labels_dont_overlap_symbol_body` \
+         (global labels only, same fixtures, same geometry), and that verifier already \
+         records every one of these hits under `v13.1_label_body`. A second id would \
+         count the same overlap twice in the Tier-1 aggregate.",
+    ),
+    (
+        "junction_parity.rs",
+        "the_junction_rule_reproduction_is_sensitive",
+        "a mutation guard: it perturbs the ink on purpose and asserts the reproduction \
+         of KiCad's junction rule NOTICES. Its number grades the verifier, not the \
+         drawing, and a challenger cannot move it.",
+    ),
+    (
+        "junction_parity.rs",
+        "report_pin_anchored_branch_share",
+        "an informational reporter for a PROPOSED V16 `J` redefinition (ADR-27), \
+         explicitly \"reported, never asserted\". Registering it would put a candidate \
+         metric definition — one the project has deliberately not adopted — into the \
+         instrument that selects placers, which is what `docs/invariants.md` V16 \
+         forbids when it refuses speculative metrics. It gets a cell on the day the \
+         redefinition is signed off, not before.",
+    ),
+    (
+        "port_terminals.rs",
+        "erc_clean_on_port_annotated_fixtures",
+        "a focused re-run of ERC on the port-annotated fixtures; all eleven are \
+         already in `PHASE1_ERC_FIXTURES`, which records the same violation count \
+         under `t0.erc_errors`. A second id would be a second name for one ERC \
+         property on one set of files.",
+    ),
+    (
+        "roundtrip_connectivity.rs",
+        "the_reconstruction_is_sensitive_on_real_fixtures",
+        "a mutation guard on the ADR-22 net-partition reconstruction: it corrupts the \
+         emitted ink and asserts the certificate fails. Grades the verifier, not the \
+         drawing.",
+    ),
+    (
+        "visual_quality.rs",
+        "smoke_fixtures_list_complete",
+        "asserts that each `.cir` named in `FIXTURES` exists on disk. A property of \
+         the repository, not of any emitted schematic — identical for every placer.",
+    ),
+];
+
+#[test]
+fn every_fixture_enumerating_verifier_reports_a_metric() {
+    let tests_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let fixtures: BTreeSet<String> = std::fs::read_dir(tests_dir.join("fixtures"))
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|x| x == "cir"))
+                .filter_map(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let sources = suite_sources();
+    // `S2K_BLIND_DUMP=1` prints the whole audit — every verifier the
+    // scanner classifies as fixture-enumerating, and whether it reports.
+    // The classification is the load-bearing half of this lint, so it has
+    // to be readable without editing the lint.
+    let dump = std::env::var_os("S2K_BLIND_DUMP").is_some();
+    let mut enumerating = 0_usize;
+    let mut offences: Vec<String> = Vec::new();
+    let mut seen_exempt: BTreeSet<(String, String)> = BTreeSet::new();
+    for path in &sources {
+        let name = file_name_of(path);
+        let Ok(src) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        for e in scan_fixture_enumerating(&src, &fixtures) {
+            enumerating += 1;
+            if dump {
+                let tag = if e.records { "reports" } else { "BLIND  " };
+                println!("{tag}  {name}:{:<5} {:<58} ({})", e.line, e.name, e.via);
+            }
+            if e.records {
+                continue;
+            }
+            if let Some((_, _, why)) = BLIND_CELL_EXEMPT
+                .iter()
+                .find(|(f, t, _)| *f == name && *t == e.name)
+            {
+                seen_exempt.insert((name.clone(), e.name.clone()));
+                if dump {
+                    println!("          exempt: {why}");
+                }
+                continue;
+            }
+            offences.push(format!(
+                "{name}:{} `{}` ({}) records NO metric. A verifier that reports \
+                 nothing is scored by the scoreboard as \"no change\", which is a \
+                 claim and not an abstention (ADR-23 D9: a blind cell is not \
+                 conservatively blind). Add a `common::scoreboard::record_count(…)` \
+                 on the line before the assertion that already grades it — most \
+                 pass-fail gates have an obvious count, and a boolean gate records \
+                 0-or-1 — and register the id in METRICS. If the verifier genuinely \
+                 has no scalar worth comparing, add a justified row to \
+                 BLIND_CELL_EXEMPT.",
+                e.line, e.name, e.via,
+            ));
+        }
+    }
+
+    if dump {
+        println!(
+            "-- {enumerating} fixture-enumerating verifier(s) over {} fixtures",
+            fixtures.len()
+        );
+    }
+
+    // Vacuity guards. A lint whose premise stopped matching passes while
+    // checking nothing — which is the very failure it exists to prevent.
+    assert!(
+        fixtures.len() >= 10,
+        "found only {} fixture(s) under tests/fixtures — the scanner cannot \
+         recognise a fixture list without them",
+        fixtures.len(),
+    );
+    assert!(
+        sources.len() >= 20,
+        "scanned only {} test source(s) — the lint is not seeing the suite",
+        sources.len(),
+    );
+    assert!(
+        enumerating >= 40,
+        "found only {enumerating} fixture-enumerating verifier(s) — the scanner's \
+         premise stopped matching, so this lint would pass vacuously",
+    );
+
+    // Exemptions expire on their own: a row that no longer names a blind
+    // fixture-enumerating verifier is stale and must be deleted, exactly
+    // as `common::xfail`'s registry expires.
+    let stale: Vec<String> = BLIND_CELL_EXEMPT
+        .iter()
+        .filter(|(f, t, _)| !seen_exempt.contains(&((*f).to_string(), (*t).to_string())))
+        .map(|(f, t, _)| format!("{f}::{t}"))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "{} BLIND_CELL_EXEMPT row(s) no longer name a blind fixture-enumerating \
+         verifier — it now records, or it was renamed or deleted. Delete the row: \
+         {}",
+        stale.len(),
+        stale.join(", "),
+    );
+
+    assert!(
+        offences.is_empty(),
+        "{} fixture-enumerating verifier(s) are blind to the ADR-23 scoreboard:\n  {}",
+        offences.len(),
+        offences.join("\n  "),
+    );
+}
+
+#[test]
+fn the_blind_cell_lint_is_sensitive() {
+    // Mutation guard. A lint validated only against a clean tree is
+    // validated against nothing: these snippets differ by exactly the
+    // defect, and the scanners must separate them.
+    let fixtures: BTreeSet<String> = ["alpha", "beta", "gamma", "delta"]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+
+    let blind = r#"
+const SHEETS: &[&str] = &["alpha", "beta", "gamma"];
+#[test]
+fn v() {
+    let mut failures = Vec::new();
+    for name in SHEETS {
+        if measure(name) > 0 { failures.push(name); }
+    }
+    assert!(failures.is_empty());
+}
+"#;
+    let found = scan_fixture_enumerating(blind, &fixtures);
+    assert_eq!(
+        found.len(),
+        1,
+        "the fixture-enumerating verifier was missed"
+    );
+    assert!(
+        !found[0].records,
+        "a verifier with no `record` read as reporting"
+    );
+
+    let sighted = blind.replace(
+        "        if measure(name) > 0",
+        "        common::scoreboard::record_count(\"m.x\", name, 0);\n        if measure(name) > 0",
+    );
+    let found = scan_fixture_enumerating(&sighted, &fixtures);
+    assert_eq!(found.len(), 1);
+    assert!(found[0].records, "a recording verifier read as blind");
+
+    // A list of two fixtures is not a fixture list (a focused,
+    // single-case regression guard is out of scope by design).
+    let two = blind.replace("\"alpha\", \"beta\", \"gamma\"", "\"alpha\", \"beta\"");
+    assert!(
+        scan_fixture_enumerating(&two, &fixtures).is_empty(),
+        "a two-fixture list was treated as an enumeration",
+    );
+
+    // The list reached through a helper `fn` still counts — that is how
+    // `placement_quality::fixtures()` and `electrical_safety`'s
+    // `with_sheets` are written, and a scanner that missed it would let
+    // twelve real verifiers through.
+    let indirect = r#"
+const SHEETS: &[&str] = &["alpha", "beta", "gamma"];
+fn cases() -> Vec<&'static str> { SHEETS.to_vec() }
+#[test]
+fn v() {
+    for name in cases() {
+        let _ = measure(name);
+    }
+}
+"#;
+    let found = scan_fixture_enumerating(indirect, &fixtures);
+    assert_eq!(found.len(), 1, "the indirect fixture list was missed");
+    assert!(!found[0].records);
+
+    // A non-test helper that loops over the list is not a verifier.
+    let helper_only = r#"
+const SHEETS: &[&str] = &["alpha", "beta", "gamma"];
+fn measure_all() {
+    for name in SHEETS {
+        let _ = measure(name);
+    }
+}
+"#;
+    assert!(
+        scan_fixture_enumerating(helper_only, &fixtures).is_empty(),
+        "a non-test helper was graded as a verifier",
+    );
+
+    // `#[test]` binds to the NEXT fn, not to whatever sits within a
+    // fixed look-back window of one.
+    let short_bodies = r#"
+const SHEETS: &[&str] = &["alpha", "beta", "gamma"];
+#[test]
+fn a() { assert!(true); }
+fn b() { for name in SHEETS { let _ = name; } }
+"#;
+    assert!(
+        scan_fixture_enumerating(short_bodies, &fixtures).is_empty(),
+        "a plain fn following a short test was mistaken for a test",
+    );
+
+    // --- the id scanner --------------------------------------------------
+    let ids = recorded_metric_ids(
+        "fn v() {\n    common::scoreboard::record_count(\n        \"v16.bends\",\n        name,\n        1,\n    );\n}\n",
+    );
+    assert_eq!(ids.len(), 1, "a multi-line record call was missed");
+    assert_eq!(ids[0].1, "v16.bends");
+
+    let ids = recorded_metric_ids("// common::scoreboard::record_count(\"ghost\", n, 1);\n");
+    assert!(ids.is_empty(), "a record named in a comment was counted");
 }

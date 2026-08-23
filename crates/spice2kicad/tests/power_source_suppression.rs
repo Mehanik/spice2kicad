@@ -158,8 +158,12 @@ fn power_sources_emit_no_drawn_symbol() {
         let src = std::fs::read_to_string(&cir).expect("read fixture");
         let power_refs = power_source_refdes(&src);
         if power_refs.is_empty() {
+            // Nothing to grade, but the cell must exist on both sides of
+            // a scoreboard comparison or it reads as "nothing to say".
+            common::scoreboard::record_count("v10.power_source_drawn", fix, 0);
             continue;
         }
+        let before = failures.len();
         let dir = tempdir(fix);
         let sch = spice_to_kicad(&cir, &dir).expect("emit schematic");
         for (refdes, lib_id) in extract_symbols(&sch) {
@@ -171,6 +175,7 @@ fn power_sources_emit_no_drawn_symbol() {
                 ));
             }
         }
+        common::scoreboard::record_count("v10.power_source_drawn", fix, failures.len() - before);
     }
     assert!(
         failures.is_empty(),

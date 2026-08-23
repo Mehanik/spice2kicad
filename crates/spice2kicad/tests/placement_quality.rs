@@ -916,12 +916,16 @@ fn value_text_clear_gap_in_align_clusters() {
     const MIN_GAP_MM: &[(&str, f64)] = &[("diff_pair", 2.54)];
 
     let library = load_test_library();
+    // Collect-then-assert (ADR-23 D2): a crowded fixture must not abort
+    // the loop, or every later fixture goes unmeasured.
+    let mut failures: Vec<String> = Vec::new();
     for (name, path) in fixtures() {
         let clusters = horizontal_align_clusters(&path);
-        if clusters.is_empty() {
-            continue;
-        }
-        let Some(&(_, budget)) = MIN_GAP_MM.iter().find(|(n, _)| *n == name) else {
+        let budget = MIN_GAP_MM.iter().find(|(n, _)| *n == name).map(|&(_, b)| b);
+        let Some(budget) = budget.filter(|_| !clusters.is_empty()) else {
+            // Nothing to grade, but the cell must exist on both sides of
+            // a scoreboard comparison or it reads as "nothing to say".
+            common::scoreboard::record_count("v13.align_text_gap", name, 0);
             continue;
         };
 
@@ -945,6 +949,7 @@ fn value_text_clear_gap_in_align_clusters() {
         // Two bboxes overlap in Y (open intervals, 1 µm tolerance).
         let y_overlap = |a: &Bbox, b: &Bbox| a.y0 + 1e-3 < b.y1 && b.y0 + 1e-3 < a.y1;
 
+        let mut tight = 0usize;
         for cluster in clusters {
             // Members present in the schematic, ordered left-to-right by
             // body x0 so "consecutive" is geometric.
@@ -971,14 +976,23 @@ fn value_text_clear_gap_in_align_clusters() {
                 if !min_gap.is_finite() {
                     continue; // no Y-overlapping features → no crowding
                 }
-                assert!(
-                    min_gap + 1e-6 >= budget,
-                    "{name}: align value-text gap between {lref} and {rref} is {min_gap:.3} mm, \
-                     below the {budget:.3} mm ratchet floor (drive UP, never lower)",
-                );
+                if min_gap + 1e-6 < budget {
+                    tight += 1;
+                    failures.push(format!(
+                        "{name}: align value-text gap between {lref} and {rref} is \
+                         {min_gap:.3} mm, below the {budget:.3} mm ratchet floor \
+                         (drive UP, never lower)",
+                    ));
+                }
             }
         }
+        common::scoreboard::record_count("v13.align_text_gap", name, tight);
     }
+    assert!(
+        failures.is_empty(),
+        "align-cluster value-text gaps below the ratchet floor:\n  {}",
+        failures.join("\n  "),
+    );
 }
 
 /// Iterate every `(global_label …)` / `(label …)`: returns `(name, pos)`.
@@ -1015,6 +1029,9 @@ fn no_symbol_label_overlap_across_fixtures() {
     // body is genuinely a placement bug. We do not penalise glyph
     // overlap because we don't know which way each label justifies
     // (KiCad picks based on shape + rotation).
+    // Collect-then-assert (ADR-23 D2): an overlapping fixture must not
+    // abort the loop, or every later fixture goes unmeasured.
+    let mut failures: Vec<String> = Vec::new();
     for (name, path) in fixtures() {
         let tmp = tempdir(name);
         let sch = common::spice_to_kicad(&path, &tmp).expect("spice2kicad");
@@ -1025,19 +1042,28 @@ fn no_symbol_label_overlap_across_fixtures() {
         // closer to a symbol centre than that is genuinely on top
         // of the body drawing.
         let body_half = 1.27_f64;
+        let mut hits = 0usize;
         for (lname, lpos) in all_labels(&root) {
             for (refdes, spos) in &placed {
                 let dx = (lpos.0 - spos.0).abs();
                 let dy = (lpos.1 - spos.1).abs();
                 let eps = 1e-3_f64;
-                assert!(
-                    dx + eps >= body_half || dy + eps >= body_half,
-                    "{name}: label {lname:?} anchor {lpos:?} sits inside symbol \
-                     {refdes} body (centre {spos:?}, half {body_half})",
-                );
+                if dx + eps < body_half && dy + eps < body_half {
+                    hits += 1;
+                    failures.push(format!(
+                        "{name}: label {lname:?} anchor {lpos:?} sits inside symbol \
+                         {refdes} body (centre {spos:?}, half {body_half})",
+                    ));
+                }
             }
         }
+        common::scoreboard::record_count("v13.label_in_body", name, hits);
     }
+    assert!(
+        failures.is_empty(),
+        "label anchors inside a symbol body (budget 0):\n  {}",
+        failures.join("\n  "),
+    );
 }
 
 /// Build a refdes → set-of-net-names map by re-reading the SPICE
@@ -1133,7 +1159,10 @@ fn rails_correctly_ordered_across_fixtures() {
         }
         if power_ys.is_empty() || ground_ys.is_empty() {
             // Nothing to grade — but still tell the guard, so a stale
-            // registry entry naming this fixture is reported.
+            // registry entry naming this fixture is reported, and still
+            // report the cell, so the scoreboard sees a 0 rather than a
+            // hole it cannot distinguish from "nothing to say".
+            common::scoreboard::record_count("v14.rail_order", name, 0);
             xf.record(name, None);
             continue;
         }
@@ -1141,9 +1170,11 @@ fn rails_correctly_ordered_across_fixtures() {
         let min_ground = ground_ys.iter().copied().fold(f64::INFINITY, f64::min);
         // KiCad Y grows downward → Power should be at smaller Y than
         // Ground. Allow one grid cell of slack.
+        let misordered = max_power >= min_ground + 1.27;
+        common::scoreboard::record_count("v14.rail_order", name, usize::from(misordered));
         xf.record(
             name,
-            (max_power >= min_ground + 1.27).then(|| {
+            misordered.then(|| {
                 format!(
                     "{name}: rails not ordered. max(Power Y) = {max_power:.2}, \
                      min(Ground Y) = {min_ground:.2} (Power should be above Ground)"
@@ -1927,10 +1958,14 @@ fn v14_power_glyphs_have_canonical_orientation() {
     // `+5V`/`+12V`/`+3V3`/`VDD`) is emitted at rot 0 (chevron points
     // visually up). Per-pin rotation matching the host pin's outward
     // direction is no longer allowed.
+    // Collect-then-assert (ADR-23 D2): a mis-rotated glyph must not abort
+    // the loop, or every later fixture goes unmeasured.
+    let mut failures: Vec<String> = Vec::new();
     for (name, path) in fixtures() {
         let tmp = tempdir(name);
         let sch = common::spice_to_kicad(&path, &tmp).expect("spice2kicad");
         let root = parse_sch(&sch);
+        let mut wrong = 0usize;
         for sym in children(&root, "symbol") {
             let Some(lib_id) = find_child(sym, "lib_id")
                 .and_then(|n| list_iter(n).nth(1))
@@ -1969,13 +2004,21 @@ fn v14_power_glyphs_have_canonical_orientation() {
             // Rot 180 is what makes VEE actually point down; see
             // `rails::glyph_rotation`.
             let want = if lib_id == "power:VEE" { 180.0 } else { 0.0 };
-            assert!(
-                (rotation - want).abs() < f64::EPSILON,
-                "{name}: power glyph {lib_id} rendered at rot {rotation}, want {want}; V14 \
-                 requires GND down / VCC up / VEE (negative rail) down on the page",
-            );
+            if (rotation - want).abs() >= f64::EPSILON {
+                wrong += 1;
+                failures.push(format!(
+                    "{name}: power glyph {lib_id} rendered at rot {rotation}, want {want}; \
+                     V14 requires GND down / VCC up / VEE (negative rail) down on the page",
+                ));
+            }
         }
+        common::scoreboard::record_count("v14.glyph_orientation", name, wrong);
     }
+    assert!(
+        failures.is_empty(),
+        "V14 power-glyph orientation violations (budget 0):\n  {}",
+        failures.join("\n  "),
+    );
 }
 
 // --- V15: content lands within the page's usable area --------------------
@@ -2543,15 +2586,18 @@ fn no_symbol_sheet_overlap_across_fixtures() {
         "opamp_inverting",
         fixtures_dir().join("opamp_inverting.cir"),
     )];
+    // Collect-then-assert (ADR-23 D2).
+    let mut failures: Vec<String> = Vec::new();
     for (name, path) in cases {
         let tmp = tempdir(name);
         let sch = common::spice_to_kicad(path, &tmp).expect("spice2kicad");
         let root = parse_sch(&sch);
         let sheets = sheet_bboxes(&root);
-        assert!(
-            !sheets.is_empty(),
-            "{name}: expected at least one (sheet …)"
-        );
+        if sheets.is_empty() {
+            failures.push(format!("{name}: expected at least one (sheet …)"));
+            common::scoreboard::record_count("t0.sheet_overlap", name, 0);
+            continue;
+        }
 
         // Real placed symbols.
         let sym_boxes: Vec<(String, Bbox)> = children(&root, "symbol")
@@ -2564,15 +2610,24 @@ fn no_symbol_sheet_overlap_across_fixtures() {
             .filter_map(|sym| glyph_world_extent(&library, sym))
             .collect();
 
+        let mut overlaps = 0usize;
         for (i, sheet) in sheets.iter().enumerate() {
             for (refdes, b) in sym_boxes.iter().chain(glyph_boxes.iter()) {
-                assert!(
-                    !b.intersects(sheet),
-                    "{name}: {refdes} extent {b:?} overlaps sheet #{i} body {sheet:?}",
-                );
+                if b.intersects(sheet) {
+                    overlaps += 1;
+                    failures.push(format!(
+                        "{name}: {refdes} extent {b:?} overlaps sheet #{i} body {sheet:?}",
+                    ));
+                }
             }
         }
+        common::scoreboard::record_count("t0.sheet_overlap", name, overlaps);
     }
+    assert!(
+        failures.is_empty(),
+        "symbol/sheet body overlaps (budget 0):\n  {}",
+        failures.join("\n  "),
+    );
 }
 
 /// A `power:*` glyph anchored on a sheet *port pin* overprints the port
@@ -2585,6 +2640,8 @@ fn power_glyph_not_on_sheet_port_pin() {
         "opamp_inverting",
         fixtures_dir().join("opamp_inverting.cir"),
     )];
+    // Collect-then-assert (ADR-23 D2).
+    let mut failures: Vec<String> = Vec::new();
     for (name, path) in cases {
         let tmp = tempdir(name);
         let sch = common::spice_to_kicad(path, &tmp).expect("spice2kicad");
@@ -2595,9 +2652,14 @@ fn power_glyph_not_on_sheet_port_pin() {
         for sheet in children(&root, "sheet") {
             port_pins.extend(sheet_port_pins(sheet));
         }
-        assert!(!port_pins.is_empty(), "{name}: no sheet port pins found");
+        if port_pins.is_empty() {
+            failures.push(format!("{name}: no sheet port pins found"));
+            common::scoreboard::record_count("v13.glyph_on_sheet_port", name, 0);
+            continue;
+        }
 
         // Power-glyph anchor coordinates.
+        let mut hits = 0usize;
         for sym in children(&root, "symbol") {
             let Some((refdes, lib_id)) = placed_symbol_refdes_and_lib_id(sym) else {
                 continue;
@@ -2610,19 +2672,153 @@ fn power_glyph_not_on_sheet_port_pin() {
             };
             for (pname, px, py) in &port_pins {
                 let coincident = (gx - px).abs() < 1e-3 && (gy - py).abs() < 1e-3;
-                assert!(
-                    !coincident,
-                    "{name}: power glyph {refdes} ({lib_id}) at ({gx:.2},{gy:.2}) \
-                     sits exactly on sheet port pin '{pname}' — overprints the \
-                     port label (use detached-glyph-with-stub-wire offset)",
-                );
+                if coincident {
+                    hits += 1;
+                    failures.push(format!(
+                        "{name}: power glyph {refdes} ({lib_id}) at ({gx:.2},{gy:.2}) \
+                         sits exactly on sheet port pin '{pname}' — overprints the \
+                         port label (use detached-glyph-with-stub-wire offset)",
+                    ));
+                }
             }
         }
+        common::scoreboard::record_count("v13.glyph_on_sheet_port", name, hits);
     }
+    assert!(
+        failures.is_empty(),
+        "power glyphs on sheet port pins (budget 0):\n  {}",
+        failures.join("\n  "),
+    );
+}
+
+/// Every V15 violation on one emitted sheet file, as messages.
+///
+/// Extracted from the verifier so the fixture loop can be
+/// collect-then-assert (ADR-23 D2): a spilled fixture must not abort
+/// the loop, or every later fixture goes unmeasured and its scoreboard
+/// cell reads as "nothing to say".
+#[allow(clippy::too_many_lines)] // one cohesive check per sheet file
+fn v15_violations(name: &str, file: &std::path::Path) -> Vec<String> {
+    let mut violations: Vec<String> = Vec::new();
+    let root = parse_sch(file);
+    let mut coords = Vec::new();
+    collect_instance_coords(&root, &mut coords);
+    if coords.is_empty() {
+        violations.push(format!(
+            "{name} ({}): no instance-section coordinates collected",
+            file.display()
+        ));
+        return violations;
+    }
+    let min_x = coords.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
+    let min_y = coords.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
+    let max_x = coords.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max);
+    let max_y = coords.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max);
+
+    // Floor: content top-left corner sits at the page margin.
+    // No coordinate may be left of / above the margin (this is
+    // what catches the negative-X spill the fix removes).
+    if min_x < V15_MARGIN_MM - 1e-6 {
+        violations.push(format!(
+            "{name} ({}): min_x = {min_x:.3} < margin {V15_MARGIN_MM}; \
+             content spills off the left page border",
+            file.display()
+        ));
+    }
+    if min_y < V15_MARGIN_MM - 1e-6 {
+        violations.push(format!(
+            "{name} ({}): min_y = {min_y:.3} < margin {V15_MARGIN_MM}; \
+             content sits above the top page margin",
+            file.display()
+        ));
+    }
+    // The content sits at or beyond the margin, and inside the
+    // page — NOT exactly *on* the margin.
+    //
+    // This assertion used to demand `min == margin` (±1 cell).
+    // That was over-specified relative to V15's own definition,
+    // which `docs/invariants.md` now states explicitly: the
+    // invariant is `min >= margin`, and normalising the content
+    // bbox onto the margin is merely the simplest way to satisfy
+    // it, not the requirement. Two production behaviours
+    // legitimately leave the content further inside the page:
+    // the sticky page shift replayed from the layout cache
+    // (position stability, ADR-4) and the symmetric property-text
+    // reserve in `fold_symbol_instance`. Both only ever move
+    // content *away* from the page edge, so the floor asserted
+    // above is what carries the invariant; here we only bound the
+    // content to the page it must live on.
+    if min_x > V15_A4_W_MM + 1e-6 || min_y > V15_A4_H_MM + 1e-6 {
+        violations.push(format!(
+            "{name} ({}): content origin ({min_x:.3}, {min_y:.3}) is \
+             not on the A4 page",
+            file.display()
+        ));
+    }
+    // Ceiling: content fits inside the A4 drawable rectangle.
+    if max_x > V15_A4_W_MM + 1e-6 {
+        violations.push(format!(
+            "{name} ({}): max_x = {max_x:.3} exceeds A4 width {V15_A4_W_MM}",
+            file.display()
+        ));
+    }
+    if max_y > V15_A4_H_MM + 1e-6 {
+        violations.push(format!(
+            "{name} ({}): max_y = {max_y:.3} exceeds A4 height {V15_A4_H_MM}",
+            file.display()
+        ));
+    }
+
+    // Hidden instance-section property anchors (e.g. a power
+    // glyph's `#PWRn` Reference) carry real page coordinates and
+    // must ride the same uniform V15 translation as their symbol —
+    // they must not be left at their pre-translation (negative)
+    // coordinate. They do NOT vote on the content min above (a
+    // hidden prop parked at (0 0 0) must not drag the bbox toward
+    // the origin), but every one that *does* carry a coordinate
+    // must still land on the page.
+    //
+    // The bound here is non-negative + in-page, not `>= margin`: a
+    // co-located prop (a Reference emitted glyph-relative at
+    // `y - 1.27`) can legitimately sit up to one symbol's extent
+    // above/left of its glyph, just as a Reference label sits
+    // outside a symbol body. The bug this catches is the anchor
+    // stranded at its *pre-translation* coordinate (e.g. `#PWRn`
+    // at `x = -2.54`), which goes strongly negative — `>= 0` (with
+    // a one-cell tolerance for a glyph parked exactly at the
+    // margin) isolates it precisely.
+    let mut hidden = Vec::new();
+    collect_hidden_instance_prop_coords(&root, &mut hidden);
+    for (hx, hy) in &hidden {
+        // `(0, 0)` is KiCad's "unplaced placeholder" anchor
+        // (Sim/Footprint/Datasheet instance props); it is left
+        // untranslated by design and carries no page coordinate.
+        if *hx == 0.0 && *hy == 0.0 {
+            continue;
+        }
+        if *hx < -1.27 - 1e-6 || *hy < -1.27 - 1e-6 {
+            violations.push(format!(
+                "{name} ({}): hidden instance property anchor \
+                 ({hx:.3}, {hy:.3}) is negative — it was stranded at \
+                 its pre-translation coordinate instead of riding the \
+                 V15 translation with its symbol",
+                file.display()
+            ));
+        }
+        if *hx > V15_A4_W_MM + 1e-6 || *hy > V15_A4_H_MM + 1e-6 {
+            violations.push(format!(
+                "{name} ({}): hidden instance property anchor \
+                 ({hx:.3}, {hy:.3}) lies outside the A4 page",
+                file.display()
+            ));
+        }
+    }
+    violations
 }
 
 #[test]
 fn v15_content_within_page_bounds() {
+    let mut failures: Vec<String> = Vec::new();
     for (name, path) in v15_fixtures() {
         let tmp = tempdir(name);
         let sch = common::spice_to_kicad(&path, &tmp).expect("spice2kicad");
@@ -2637,115 +2833,25 @@ fn v15_content_within_page_bounds() {
             .filter(|p| p.extension().is_some_and(|x| x == "kicad_sch"))
             .collect();
         sheet_files.sort();
-        assert!(!sheet_files.is_empty(), "{name}: no .kicad_sch emitted");
-
-        for file in &sheet_files {
-            let root = parse_sch(file);
-            let mut coords = Vec::new();
-            collect_instance_coords(&root, &mut coords);
-            assert!(
-                !coords.is_empty(),
-                "{name} ({}): no instance-section coordinates collected",
-                file.display(),
-            );
-            let min_x = coords.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
-            let min_y = coords.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
-            let max_x = coords.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max);
-            let max_y = coords.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max);
-
-            // Floor: content top-left corner sits at the page margin.
-            // No coordinate may be left of / above the margin (this is
-            // what catches the negative-X spill the fix removes).
-            assert!(
-                min_x >= V15_MARGIN_MM - 1e-6,
-                "{name} ({}): min_x = {min_x:.3} < margin {V15_MARGIN_MM}; \
-                 content spills off the left page border",
-                file.display(),
-            );
-            assert!(
-                min_y >= V15_MARGIN_MM - 1e-6,
-                "{name} ({}): min_y = {min_y:.3} < margin {V15_MARGIN_MM}; \
-                 content sits above the top page margin",
-                file.display(),
-            );
-            // The content sits at or beyond the margin, and inside the
-            // page — NOT exactly *on* the margin.
-            //
-            // This assertion used to demand `min == margin` (±1 cell).
-            // That was over-specified relative to V15's own definition,
-            // which `docs/invariants.md` now states explicitly: the
-            // invariant is `min >= margin`, and normalising the content
-            // bbox onto the margin is merely the simplest way to satisfy
-            // it, not the requirement. Two production behaviours
-            // legitimately leave the content further inside the page:
-            // the sticky page shift replayed from the layout cache
-            // (position stability, ADR-4) and the symmetric property-text
-            // reserve in `fold_symbol_instance`. Both only ever move
-            // content *away* from the page edge, so the floor asserted
-            // above is what carries the invariant; here we only bound the
-            // content to the page it must live on.
-            assert!(
-                min_x <= V15_A4_W_MM + 1e-6 && min_y <= V15_A4_H_MM + 1e-6,
-                "{name} ({}): content origin ({min_x:.3}, {min_y:.3}) is \
-                 not on the A4 page",
-                file.display(),
-            );
-            // Ceiling: content fits inside the A4 drawable rectangle.
-            assert!(
-                max_x <= V15_A4_W_MM + 1e-6,
-                "{name} ({}): max_x = {max_x:.3} exceeds A4 width {V15_A4_W_MM}",
-                file.display(),
-            );
-            assert!(
-                max_y <= V15_A4_H_MM + 1e-6,
-                "{name} ({}): max_y = {max_y:.3} exceeds A4 height {V15_A4_H_MM}",
-                file.display(),
-            );
-
-            // Hidden instance-section property anchors (e.g. a power
-            // glyph's `#PWRn` Reference) carry real page coordinates and
-            // must ride the same uniform V15 translation as their symbol —
-            // they must not be left at their pre-translation (negative)
-            // coordinate. They do NOT vote on the content min above (a
-            // hidden prop parked at (0 0 0) must not drag the bbox toward
-            // the origin), but every one that *does* carry a coordinate
-            // must still land on the page.
-            //
-            // The bound here is non-negative + in-page, not `>= margin`: a
-            // co-located prop (a Reference emitted glyph-relative at
-            // `y - 1.27`) can legitimately sit up to one symbol's extent
-            // above/left of its glyph, just as a Reference label sits
-            // outside a symbol body. The bug this catches is the anchor
-            // stranded at its *pre-translation* coordinate (e.g. `#PWRn`
-            // at `x = -2.54`), which goes strongly negative — `>= 0` (with
-            // a one-cell tolerance for a glyph parked exactly at the
-            // margin) isolates it precisely.
-            let mut hidden = Vec::new();
-            collect_hidden_instance_prop_coords(&root, &mut hidden);
-            for (hx, hy) in &hidden {
-                // `(0, 0)` is KiCad's "unplaced placeholder" anchor
-                // (Sim/Footprint/Datasheet instance props); it is left
-                // untranslated by design and carries no page coordinate.
-                if *hx == 0.0 && *hy == 0.0 {
-                    continue;
-                }
-                assert!(
-                    *hx >= -1.27 - 1e-6 && *hy >= -1.27 - 1e-6,
-                    "{name} ({}): hidden instance property anchor \
-                     ({hx:.3}, {hy:.3}) is negative — it was stranded at \
-                     its pre-translation coordinate instead of riding the \
-                     V15 translation with its symbol",
-                    file.display(),
-                );
-                assert!(
-                    *hx <= V15_A4_W_MM + 1e-6 && *hy <= V15_A4_H_MM + 1e-6,
-                    "{name} ({}): hidden instance property anchor \
-                     ({hx:.3}, {hy:.3}) lies outside the A4 page",
-                    file.display(),
-                );
-            }
+        if sheet_files.is_empty() {
+            failures.push(format!("{name}: no .kicad_sch emitted"));
+            common::scoreboard::record_count("v15.off_page", name, 0);
+            continue;
         }
+
+        let mut hits = 0usize;
+        for file in &sheet_files {
+            let v = v15_violations(name, file);
+            hits += v.len();
+            failures.extend(v);
+        }
+        common::scoreboard::record_count("v15.off_page", name, hits);
     }
+    assert!(
+        failures.is_empty(),
+        "V15 page-bounds violations (budget 0):\n  {}",
+        failures.join("\n  "),
+    );
 }
 
 // ---------------------------------------------------------------------

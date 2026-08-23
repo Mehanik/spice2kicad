@@ -388,6 +388,7 @@ fn text_bbox_model_covers_rendered_ink() {
     let mut escapes: Vec<String> = Vec::new();
 
     for fixture in FIXTURES {
+        let before = escapes.len();
         let (_dir, sheets) = convert_and_render("cal", fixture);
         for (stem, sch, svg) in sheets {
             let root = parse_sch(&sch);
@@ -442,6 +443,7 @@ fn text_bbox_model_covers_rendered_ink() {
                 }
             }
         }
+        common::scoreboard::record_count("v13.model_ink_escape", fixture, escapes.len() - before);
     }
 
     for (class, (over, slack, n)) in &stats {

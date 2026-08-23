@@ -191,6 +191,7 @@ fn emitted_schematic_matches_source_netlist() {
     let mut failures: Vec<String> = Vec::new();
 
     for name in FIXTURES {
+        let before = failures.len();
         let src_path = fixtures_dir().join(format!("{name}.cir"));
         let src_text = std::fs::read_to_string(&src_path).expect("read fixture");
         let source = parse_elements(&src_text);
@@ -235,6 +236,7 @@ fn emitted_schematic_matches_source_netlist() {
                  in emitted but not source: {only_got:?}"
             ));
         }
+        common::scoreboard::record_count("t0.netlist_mismatch", name, failures.len() - before);
     }
 
     assert!(

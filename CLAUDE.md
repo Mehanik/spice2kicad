@@ -724,6 +724,21 @@ regression with an excuse. The scoreboard also does not grant the
 exception — it prints evidence; promotion stays an owner decision, as
 the global-improvement escape already requires.
 
+**Every fixture-enumerating verifier MUST report at least one metric.**
+A verifier that reports nothing is not abstaining — the scoreboard scores
+its cell as `0.00` change, which is a *claim* (ADR-23 D9: "a blind cell
+is not conservatively blind"). So is a verifier that records under an id
+no `METRICS` row declares: `report` iterates the registry and drops the
+rest on the floor. Three lints in
+`crates/spice2kicad/tests/scoreboard.rs` enforce this and run on the
+default `cargo test` path — one per cause (stops recording mid-loop /
+never records / records an unregistered id). If yours genuinely has no
+scalar worth comparing, add a **justified** row to `BLIND_CELL_EXEMPT`;
+the list is the point, and stale rows fail the lint. See ADR-23 D11 for
+the audit that found 25 of 60 verifiers blind, and for the five
+invariants (V1, V3, V7, V8, V9) that still have no cell because they are
+graded only by single-fixture tests.
+
 Full rule, coverage, unit choices and the ADR-19 M4 replay (which the
 instrument scores **net-better** in aggregate, while reproducing the
 `multivibrator` F6 2→18 regression that got it reverted): ADR-23.

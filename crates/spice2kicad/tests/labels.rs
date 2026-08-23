@@ -89,21 +89,33 @@ const SHEETS: &[&str] = &[
 
 #[test]
 fn v4_plain_label_count_per_net_within_budget() {
+    // Collect-then-assert (ADR-23 D2): an over-budget fixture must not
+    // abort the loop, or every later fixture goes unmeasured.
+    let mut failures: Vec<String> = Vec::new();
     for name in SHEETS {
         let src = fixtures_dir().join(format!("{name}.cir"));
         let tmp = tempdir(name);
         let sch = spice_to_kicad(&src, &tmp).expect("spice2kicad");
         let root = parse(&sch);
         let plain = count_labels(&root, "label");
+        let mut over = 0usize;
         for (net, n) in &plain {
-            assert!(
-                *n <= 2,
-                "{name}: net {net} carries {n} plain labels; V4 caps at 2 \
-                 (1 for purely-internal nets, 2 for nets touching a \
-                 hierarchical-sheet port)",
-            );
+            if *n > 2 {
+                over += 1;
+                failures.push(format!(
+                    "{name}: net {net} carries {n} plain labels; V4 caps at 2 \
+                     (1 for purely-internal nets, 2 for nets touching a \
+                     hierarchical-sheet port)",
+                ));
+            }
         }
+        common::scoreboard::record_count("v4.plain_label_excess", name, over);
     }
+    assert!(
+        failures.is_empty(),
+        "V4 plain-label budget exceeded (cap 2 per net per sheet):\n  {}",
+        failures.join("\n  "),
+    );
 }
 
 #[test]
@@ -126,18 +138,29 @@ fn v4_global_labels_reserved_for_interface_one_pin_nets() {
         ("sallen_key_lpf", &["in", "out"]),
         ("wien_bridge_osc", &["out"]),
     ];
+    // Collect-then-assert (ADR-23 D2): see the sibling verifier above.
+    let mut failures: Vec<String> = Vec::new();
     for (name, allowed) in allowed_per_fixture {
         let src = fixtures_dir().join(format!("{name}.cir"));
         let tmp = tempdir(name);
         let sch = spice_to_kicad(&src, &tmp).expect("spice2kicad");
         let root = parse(&sch);
         let globals = count_labels(&root, "global_label");
+        let mut unexpected = 0usize;
         for net in globals.keys() {
-            assert!(
-                allowed.contains(&net.as_str()),
-                "{name}: unexpected (global_label \"{net}\") — V4 reserves \
-                 global labels for cross-sheet or one-pin interface nets only",
-            );
+            if !allowed.contains(&net.as_str()) {
+                unexpected += 1;
+                failures.push(format!(
+                    "{name}: unexpected (global_label \"{net}\") — V4 reserves \
+                     global labels for cross-sheet or one-pin interface nets only",
+                ));
+            }
         }
+        common::scoreboard::record_count("v4.global_label_misuse", name, unexpected);
     }
+    assert!(
+        failures.is_empty(),
+        "V4 global-label policy violations:\n  {}",
+        failures.join("\n  "),
+    );
 }

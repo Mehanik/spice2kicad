@@ -158,6 +158,7 @@ fn conversion_is_byte_deterministic_across_fixtures() {
         let src = fixtures_dir().join(format!("{name}.cir"));
         let a = std::fs::read(convert_no_cache(&src, &tempdir(name))).expect("read a");
         let b = std::fs::read(convert_no_cache(&src, &tempdir(name))).expect("read b");
+        common::scoreboard::record_count("t0.nondeterministic_nocache", name, usize::from(a != b));
         if a != b {
             failures.push(format!(
                 "{name}: two cache-less conversions differ ({} vs {} bytes)",

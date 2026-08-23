@@ -5308,10 +5308,239 @@ lexical, not interprocedural); `.expect(…)` / `.unwrap()` /
 records `t0.convert_fail` for it before failing; a `while`/`loop`/
 `for_each` fixture sweep (no verifier uses one); and a fixture-
 enumerating verifier that records *nothing at all*, which is D9's
-blind-cell rule and remains a separate obligation on whoever writes the
-verifier.
+blind-cell rule. That is now closed too — see D11 below — but by a
+separate lint, because this one's premise (a `record` call inside the
+loop) is exactly what a never-recording verifier does not have.
 
 
+### D11. The blind-cell class, closed at the verifier AND at the registry
+
+D9 recorded the rule — **a blind cell is not conservatively blind** — and
+D10 above closed one of its three causes (a verifier that *stops*
+recording mid-loop). This closes the other two, and makes both
+unrepeatable by a lint rather than by vigilance.
+
+A cell can be blind three ways, and they need three different
+instruments because each one's premise is invisible to the others:
+
+| cause | what the report sees | caught by |
+| --- | --- | --- |
+| the verifier stops recording mid-loop | a truncated column | `no_verifier_asserts_inside_a_loop_that_reports_a_metric` (D10) |
+| the verifier never records at all | an absent column, scored `0.00` | `every_fixture_enumerating_verifier_reports_a_metric` (this section) |
+| the verifier records under an **unregistered id** | an absent column, scored `0.00` | `every_recorded_metric_id_is_registered` (this section) + an orphan-record check inside `report` |
+
+The third cause is the one nobody had named. [`report`] iterates
+`METRICS` and nothing else, so a `record` call naming an id no `m(…)` row
+declares writes a number into the `.tsv` and then has it dropped on the
+floor. It is *worse* than not recording: the measurement exists, the
+author believes it is graded, and the report's own "comparison complete"
+line stays green because completeness was only ever stated over
+registered metrics — exactly the weakness D10 flagged in D4 rule 3, one
+level further down.
+
+It had already happened. `pwr_flags_sit_on_existing_drawn_geometry`
+landed in `9296edc` with the PWR_FLAG-attachment fix, recording
+`v10.orphan_pwrflag` — an id in no registry. Its Tier-1 floor was
+invisible to the scoreboard from the day it shipped, and no test said so.
+
+#### The audit
+
+The scanner does not consult a list of verifiers; it *measures* which
+tests enumerate fixtures, so it cannot go stale. `tests/fixtures/*.cir`
+gives the fixture stems; a `const`, `static`, `let` or helper `fn` that
+names three or more of them is a **fixture list** (one hop of wrapping is
+followed, which is how `placement_quality::fixtures()` and
+`electrical_safety`'s `with_sheets` are reached, and no more — making the
+relation transitive turns it into ordinary dataflow and every local in
+the file becomes a "fixture list"); a `#[test]` that loops over one is a
+fixture-enumerating verifier. `S2K_BLIND_DUMP=1` prints the whole
+classification.
+
+**60 fixture-enumerating verifiers. 25 of them — 42% — reported nothing
+at all**, plus the one recording under an unregistered id. Four whole
+files (`labels.rs`, `netlist_equivalence.rs`,
+`power_source_suppression.rs`, `visual_quality.rs`) called the sink zero
+times.
+
+**18 of the 25 now record**, two more single-fixture verifiers were
+instrumented alongside them, and `v10.orphan_pwrflag` was registered:
+**21 new metric ids, 5 Tier-0 and 16 Tier-1**, taking the registry from
+48 to 69.
+
+Tier 0 was the worst of it. The promotion rule's first clause — "every
+Tier-0 metric is 0 on every fixture" — was reading five metrics while
+believing it read ten:
+
+| new Tier-0 id | the property nothing was watching |
+| --- | --- |
+| `t0.erc_errors` | V2. `kicad-cli sch erc` error-severity violations |
+| `t0.netlist_mismatch` | the emitted schematic differs from the source netlist |
+| `t0.nondeterministic` | repeat conversions of one fixture differ |
+| `t0.nondeterministic_nocache` | P10: two cache-less conversions differ |
+| `t0.sheet_overlap` | a symbol/glyph extent overlapping a hierarchical-sheet body |
+
+The sixteen Tier-1 additions cover V4 (both label-policy gates), V10
+(orphan and spurious `PWR_FLAG`s, wrong-kind rail glyphs, undrawn power
+sources), V13 (label-in-body, align-cluster text gaps, glyph-on-sheet-port,
+and the text-model/SVG-ink fidelity check), V14 (canonical glyph
+rotation and rail-band order), **V15 in its entirety**, junction dots on
+mid-span same-net tees, and two wire-hygiene floors (redundant collinear
+same-net ink, dangling whiskers).
+
+Instrumenting them converted six verifiers to collect-then-assert, for
+D10's reason: `negative_rails_render_as_vee_not_gnd`,
+`conversion_is_deterministic`, both `labels.rs` gates,
+`v14_power_glyphs_have_canonical_orientation`,
+`no_symbol_label_overlap_across_fixtures`,
+`value_text_clear_gap_in_align_clusters` and V15 (whose per-sheet-file
+checks moved into a `v15_violations` helper). Same inputs, same
+failures, same text, aggregated after the loop. **No assertion was
+weakened, no budget literal moved, `baseline_lock` is untouched, and
+nothing outside `crates/spice2kicad/tests/` was edited.**
+
+#### The exemption list is the point
+
+Seven verifiers legitimately have no scalar worth comparing, and they are
+now listed in `BLIND_CELL_EXEMPT` with a reason each. That list is the
+deliverable, not the leftovers: it converts silence into a decision
+somebody had to write down and sign. Entries **expire on their own** —
+the lint fails on a stale row exactly as it fails on an unregistered
+blind cell — so a verifier that later learns to record forces its
+exemption to be deleted, the same discipline `common::xfail` applies to
+deferred defects.
+
+The bar for a row is `docs/invariants.md`'s rule for admitting a metric,
+read backwards. Three grounds, and nothing else:
+
+1. **It grades the verifier, not the drawing.**
+   `junction_parity::the_junction_rule_reproduction_is_sensitive` and
+   `roundtrip_connectivity::the_reconstruction_is_sensitive_on_real_fixtures`
+   corrupt their own input on purpose and assert the checker notices; a
+   challenger cannot move either number.
+   `visual_quality::smoke_fixtures_list_complete` asserts the `.cir`
+   files exist on disk — a property of the repository.
+2. **Its number is a tautology of the comparison.**
+   `baseline_lock_all_fixtures` is the *other* instrument; its scalar is
+   "differs from the champion's recorded geometry", which this ADR's
+   opening finding says is saturated for any real challenger and zero for
+   the champion by construction. The blast radius it does measure belongs
+   in the commit message, where a human reads it.
+3. **Its violations are already counted under a registered id, and a
+   second id would double-count them in the aggregate.**
+   `electrical_safety::item3_interface_global_labels_clear_foreign_bodies`
+   is a focused guard on a strict subset of `v13.1_label_body`;
+   `port_terminals::erc_clean_on_port_annotated_fixtures` re-runs ERC on
+   eleven fixtures that are all already in `PHASE1_ERC_FIXTURES`, i.e.
+   all already counted by `t0.erc_errors`.
+
+`junction_parity::report_pin_anchored_branch_share` is the one exemption
+that is neither: it is a live measurement of a **proposed** V16 `J`
+redefinition (ADR-27), explicitly "reported, never asserted". Registering
+it would put a candidate metric definition — one the project has
+deliberately not adopted — into the instrument that selects placers,
+which is precisely what `docs/invariants.md` V16 refuses when it bars
+speculative metrics. It gets a cell the day the redefinition is signed
+off, and not before.
+
+#### Proof that the lints have teeth
+
+A lint validated only against a clean tree is validated against nothing.
+Both were run against the defect they exist to catch, on the real file,
+before the fix:
+
+```
+$ # with the `v10.orphan_pwrflag` registry row removed (the state at e2b0ebe)
+$ cargo test -p spice2kicad --test scoreboard -- every_recorded
+1 recorded metric id(s) are invisible to the scoreboard:
+  placement_quality.rs:2959 records `v10.orphan_pwrflag`, which is in no
+  METRICS entry. `report` only ever iterates METRICS, so this measurement
+  is written to the .tsv and then dropped: the cell reads as "nothing to
+  say" on both sides of every comparison.
+
+$ # and with its `record_count` line removed too — fully born blind
+$ cargo test -p spice2kicad --test scoreboard -- every_fixture
+1 fixture-enumerating verifier(s) are blind to the ADR-23 scoreboard:
+  placement_quality.rs:2891 `pwr_flags_sit_on_existing_drawn_geometry`
+  (loops over `fixtures`) records NO metric.
+```
+
+Each lint also carries a mutation guard
+(`the_blind_cell_lint_is_sensitive`) over synthetic sources — a blind
+loop vs. a recording one, a two-fixture list that must NOT count, a list
+reached through a helper `fn` that must, a non-test helper that must not,
+and `#[test]` binding to the *next* `fn` rather than to whatever falls in
+a fixed look-back window — plus vacuity floors (≥ 10 fixtures, ≥ 20
+sources, ≥ 40 enumerating verifiers, ≥ 40 recording sites), because a
+lint whose premise stops matching passes while checking nothing, which is
+the failure it exists to prevent one level up.
+
+#### Would any of this have changed a past verdict? Measured: no.
+
+The registry has issued exactly one promotion verdict — `flow-seed`, D9,
+2026-08-18 — so the question is answerable rather than rhetorical. Both
+arms were re-collected on the enlarged registry (whole suite each side,
+`--no-fail-fast`, one machine, `S2K_PLACER=champion` vs
+`S2K_PLACER=flow-seed`):
+
+```
+Tier 0   champion   : t0.cross_net_overlap/two_stage_amp = 2
+         challenger : clean
+         regressed  : none
+Aggregate  Tier 1 total Δ = -4.00 points
+           Tier 2 total Δ = -113.87 points
+VERDICT: challenger `flow-seed` is PROMOTABLE against `champion`.
+```
+
+**Not one of the twenty-one new cells moved.** The Tier-1 total is
+`-4.00` on 69 metrics exactly as it was on 48, and the four movers are
+the same four D9 named (`v13.2_label_prop` and `v13.6a_glyphtext` on
+`two_stage_amp`, both −1; `v14.glyph_body` on `sallen_key_lpf` and
+`v13.9_foreign_over_glyph` on `named_rails`, both +1). All five new
+Tier-0 metrics measure 0 on **both** arms, so the promotion gate's first
+clause is unchanged as well.
+
+Read it the right way round. This is not "the blind cells did not
+matter" — it is **why the defect survived**: the cells were blind *and*
+quiescent on the one comparison that has ever been run, so nothing
+disagreed with the table and nothing forced the omission into view. A
+metric that reads 0/0 on the only sample taken is indistinguishable, at
+that sample, from a metric nobody is reading. The value of registering
+them is entirely prospective: V2, V15, determinism, netlist equivalence
+and the whole V10 family now have somewhere to *show up* in the next
+comparison, and the D9 finding — that registering five silent metrics
+moved Tier 1 from −1.00 to −4.00 — is the proof that "quiescent this
+time" is not a property of the class.
+
+One caveat, stated so the number is not over-read: this is a re-grade on
+**today's** master, not a replay of the 2026-08-18 tree. ADR-24, 25, 26
+and 27 all landed in between, and the champion arm's Tier-0
+`t0.cross_net_overlap = 2` on `two_stage_amp` is one of their
+consequences, not a state D9 saw.
+
+#### What is still blind, stated so it is not mistaken for coverage
+
+The lint's premise is *enumeration*. A verifier that grades **one**
+fixture is outside it, and after this sweep five invariants have no
+scoreboard cell at all because that is the only way they are graded:
+
+* **V1** (symbols render visibly) and **V3** (verbatim `lib_symbols`) —
+  both **Tier 0**, graded by `visual_quality`'s twenty single-fixture
+  `v1_*` / `v3_*` tests, and on only five of the eighteen fixtures.
+* **V7** (symmetry) — three single-fixture `multivibrator` tests.
+* **V8** (subckt symbol mapping) and **V9** (SI value formatting) —
+  `symbol_mapping.rs` / `value_formatting.rs`, single-fixture throughout.
+
+V3, V8 and V9 are close to placer-invariant, so their absence costs
+little. **V1 and V7 are not**, and V1 is Tier 0. Extending the lint to
+single-fixture verifiers is not the right fix — it would sweep in every
+annotation-semantics test in the suite and produce a fifty-row exemption
+list — but instrumenting `visual_quality`'s `run_v1` / `run_v3` and the
+`v7_*` trio is cheap and should be the next increment.
+
+Finally, `report` now refuses the verdict on an orphan id it finds in the
+records themselves, not just on one the source lint can see. The lint
+covers `crates/spice2kicad/tests/`; a record made from anywhere else
+reaches the aggregator and would otherwise be dropped in silence.
 
 
 ### D10. Orientation churn — `flow-seed-v2` and `flow-seed-v3`

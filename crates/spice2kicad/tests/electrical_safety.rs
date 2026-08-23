@@ -2336,6 +2336,9 @@ fn negative_and_ground_nets(
 
 #[test]
 fn negative_rails_render_as_vee_not_gnd() {
+    // Collect-then-assert (ADR-23 D2): a wrong glyph on one fixture must
+    // not abort the loop, or every later fixture goes unmeasured.
+    let mut failures: Vec<String> = Vec::new();
     for name in SHEETS {
         let src = fixtures_dir().join(format!("{name}.cir"));
         let cir = std::fs::read_to_string(&src).expect("read .cir");
@@ -2347,12 +2350,16 @@ fn negative_rails_render_as_vee_not_gnd() {
         let ground: std::collections::BTreeSet<String> =
             ground.iter().map(|n| canonical_net(n)).collect();
         if negative.is_empty() {
+            // Nothing to grade, but the cell must exist on both sides of
+            // a scoreboard comparison or it reads as "nothing to say".
+            common::scoreboard::record_count("v10.rail_glyph_kind", name, 0);
             continue; // fixture has no negative rail
         }
         let tmp = tempdir(name);
         let sch = spice_to_kicad(&src, &tmp).expect("spice2kicad");
         let root = parse(&sch);
         let mut saw_negative = false;
+        let mut wrong = 0usize;
         for sym in children(&root, "symbol") {
             let Some(lib_id) = find_child(sym, "lib_id")
                 .and_then(|n| list_iter(n).nth(1))
@@ -2376,26 +2383,36 @@ fn negative_rails_render_as_vee_not_gnd() {
             }
             if negative.contains(&net) {
                 saw_negative = true;
-                assert_eq!(
-                    lib_id, "power:VEE",
-                    "{name}: negative rail '{net}' rendered with glyph '{lib_id}'; \
-                     must be 'power:VEE' (a ground triangle on a negative rail is \
-                     electrically misleading)",
-                );
-            } else if ground.contains(&net) {
-                assert_eq!(
-                    lib_id, "power:GND",
+                if lib_id != "power:VEE" {
+                    wrong += 1;
+                    failures.push(format!(
+                        "{name}: negative rail '{net}' rendered with glyph '{lib_id}'; \
+                         must be 'power:VEE' (a ground triangle on a negative rail is \
+                         electrically misleading)",
+                    ));
+                }
+            } else if ground.contains(&net) && lib_id != "power:GND" {
+                wrong += 1;
+                failures.push(format!(
                     "{name}: true-ground net '{net}' rendered with glyph '{lib_id}'; \
                      must be 'power:GND'",
-                );
+                ));
             }
         }
-        assert!(
-            saw_negative,
-            "{name}: expected at least one power:VEE glyph for negative rail(s) {negative:?}, \
-             but no negative-rail glyph was emitted",
-        );
+        if !saw_negative {
+            wrong += 1;
+            failures.push(format!(
+                "{name}: expected at least one power:VEE glyph for negative rail(s) \
+                 {negative:?}, but no negative-rail glyph was emitted",
+            ));
+        }
+        common::scoreboard::record_count("v10.rail_glyph_kind", name, wrong);
     }
+    assert!(
+        failures.is_empty(),
+        "rail glyphs of the wrong kind (budget 0):\n  {}",
+        failures.join("\n  "),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2515,6 +2532,7 @@ fn no_pwr_flag_on_signal_net_with_passive_pin() {
     // as a valid signal-net driver, so the flag is redundant noise.
     let mut violations: Vec<String> = Vec::new();
     for name in SHEETS {
+        let before = violations.len();
         let src = fixtures_dir().join(format!("{name}.cir"));
         let tmp = tempdir(name);
         let sch = spice_to_kicad(&src, &tmp).expect("spice2kicad");
@@ -2554,6 +2572,7 @@ fn no_pwr_flag_on_signal_net_with_passive_pin() {
                 ));
             }
         }
+        common::scoreboard::record_count("v10.spurious_pwrflag", name, violations.len() - before);
     }
     assert!(
         violations.is_empty(),
@@ -2608,6 +2627,7 @@ fn phase1_erc_stays_clean() {
     }
     let mut failures: Vec<String> = Vec::new();
     for name in PHASE1_ERC_FIXTURES {
+        let before = failures.len();
         let src = fixtures_dir().join(format!("{name}.cir"));
         let tmp = tempdir(name);
         let sch = spice_to_kicad(&src, &tmp).expect("spice2kicad");
@@ -2635,6 +2655,7 @@ fn phase1_erc_stays_clean() {
                 failures.push(format!("{name}: {}", lines[i].trim()));
             }
         }
+        common::scoreboard::record_count("t0.erc_errors", name, failures.len() - before);
     }
     assert!(
         failures.is_empty(),
@@ -2772,6 +2793,7 @@ fn no_same_net_collinear_wire_overlap() {
                 }
             }
         }
+        common::scoreboard::record_count("wire.same_net_overlap", name, hits);
         if hits > 0 {
             failures.push(format!("{name}: {hits} collinear same-net wire overlap(s)"));
         }
@@ -2862,6 +2884,7 @@ fn mid_span_same_net_t_has_junction() {
                 }
             }
         }
+        common::scoreboard::record_count("junction.missing_mid_span", name, hits);
         if hits > 0 {
             failures.push(format!(
                 "{name}: {hits} mid-span same-net T-branch(es) without a junction dot"
@@ -3301,6 +3324,9 @@ fn conversion_is_deterministic() {
     //
     // Those maps are now `BTreeMap`/`BTreeSet`. This test is the guard:
     // any future hash-ordered iteration that reaches the output trips it.
+    // Collect-then-assert (ADR-23 D2): a non-deterministic fixture must
+    // not abort the loop, or every later fixture goes unmeasured.
+    let mut failures: Vec<String> = Vec::new();
     for name in SHEETS {
         let src = fixtures_dir().join(format!("{name}.cir"));
         let first = {
@@ -3308,19 +3334,28 @@ fn conversion_is_deterministic() {
             std::fs::read_to_string(spice_to_kicad(&src, &tmp).expect("spice2kicad"))
                 .expect("read first conversion")
         };
+        let mut differing = 0usize;
         for attempt in 2..=4 {
             let tmp = tempdir(name);
             let again = std::fs::read_to_string(spice_to_kicad(&src, &tmp).expect("spice2kicad"))
                 .expect("read repeat conversion");
-            assert!(
-                again == first,
-                "{name}: conversion #{attempt} differs from #1 \
-                 ({} vs {} bytes) — output is not deterministic",
-                again.len(),
-                first.len(),
-            );
+            if again != first {
+                differing += 1;
+                failures.push(format!(
+                    "{name}: conversion #{attempt} differs from #1 ({} vs {} bytes) — \
+                     output is not deterministic",
+                    again.len(),
+                    first.len(),
+                ));
+            }
         }
+        common::scoreboard::record_count("t0.nondeterministic", name, differing);
     }
+    assert!(
+        failures.is_empty(),
+        "non-deterministic conversion(s) (budget 0):\n  {}",
+        failures.join("\n  "),
+    );
 }
 
 /// World coordinates of every hierarchical `(sheet … (pin …))` anchor.
@@ -3375,6 +3410,7 @@ fn no_dangling_whiskers_across_fixtures() {
     let unq = |v: i64| v as f64 / 1000.0;
     let mut failures: Vec<String> = Vec::new();
     for name in SHEETS {
+        let before = failures.len();
         let src = fixtures_dir().join(format!("{name}.cir"));
         let tmp = tempdir(name);
         let sch = spice_to_kicad(&src, &tmp).expect("spice2kicad");
@@ -3416,6 +3452,7 @@ fn no_dangling_whiskers_across_fixtures() {
                 ));
             }
         }
+        common::scoreboard::record_count("wire.dangling_whisker", name, failures.len() - before);
     }
     failures.sort();
     assert!(
