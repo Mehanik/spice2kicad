@@ -480,6 +480,24 @@ const METRICS: &[Metric] = &[
         0.0,
         "series-chain members measured — the denominator for chain.* (informational)",
     ),
+    // ADR-28's own blind spot, closed. `chain.axis` / `chain.reversal`
+    // measure a chain's axis UNIFORMITY and DIRECTION; neither measures
+    // adjacency, so a chain shattered into separated columns scores a
+    // perfect 0 on both. `port_shapes` is drawn as two vertical stacks
+    // of two, 31.75 mm apart, and read 0/0.
+    m(
+        "chain.stranded",
+        Tier::Info,
+        0.0,
+        "series-chain members drawn away from the rest of their chain (informational)",
+    ),
+    m(
+        "chain.run_members",
+        Tier::Info,
+        0.0,
+        "chain members measured for adjacency — the denominator for chain.stranded \
+         (informational)",
+    ),
     m(
         "stack.side_by_side",
         Tier::Info,

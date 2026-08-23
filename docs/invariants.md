@@ -1286,12 +1286,64 @@ invariant here.
   are byte-identical on this fixture, so the defect belongs to phase
   4.5, not to the layering.
 
+  **What A does NOT measure: adjacency.** Both counts are about *pose*,
+  so a chain shattered into separated columns is invisible to them.
+  `port_shapes` is drawn as two vertical stacks of two, 31.75 mm apart,
+  and scores `(0, 0)` — a perfect pair — while a drawing that repaired
+  it into one connected folded path scored `(1, 1)`. That inversion is
+  what C1 below exists to correct; A's counts are unchanged.
+
   Verifier: `crates/spice2kicad/tests/readability_metrics.rs`.
   **No budget literal**: reported per fixture and registered with the
   ADR-23 scoreboard as `Tier::Info`, on the Q6 / V16-bend-bound
   precedent. ADR-28 records the open ambiguities (a chain that
   legitimately folds is the sharpest) and what would justify promoting
   it to a zero-slack Tier-2 ratchet.
+
+- **C1 — series-chain compactness** (readability metric,
+  **informational**, ADR-28). The same chains A1/A2 measure, asked a
+  different question: *do these devices read as ONE connected run?*
+
+  Two consecutive members are **adjacent** when the wire between them —
+  the Manhattan distance between their pins on the net they share — is
+  no longer than **all the chain's device bodies laid end to end**. One
+  hop that swallows more sheet than every device in the chain occupies
+  is not spacing, it is a break. Unbroken links partition the chain into
+  maximal adjacent clusters; **`chain.stranded`** counts the members
+  outside the largest cluster, and **`chain.run_members`** is the
+  denominator. Members rather than links, so the unit matches A's, and
+  so the number says what a reader sees: *this many devices were drawn
+  away from the rest of their chain*. `total − largest` is symmetric, so
+  an even split needs no "which cluster is the main one" tie-break.
+
+  The threshold is stated in the chain's own drawn material, never in
+  millimetres and never per member pair. That is what lets it pass
+  `lc_ladder_lpf`'s textbook 22.86 mm strides (chain body 40.64 mm)
+  while failing `port_shapes`'s single 41.91 mm jump (chain body
+  30.48 mm). Two alternatives were measured and both rank the textbook
+  ladder WORST of the three specimens — see ADR-28.
+
+  **A chain's rail-terminated end element IS a member here**, unlike in
+  A. `port_shapes`'s `R4` ends on ground, so `chains()` excludes it, and
+  that exclusion is half of why the broken drawing scored 0. The
+  exclusion is a *pose* argument — a stub's orientation is fixed by its
+  rail glyph (V14, a Tier-1 hard constraint) and cannot also be asked to
+  obey the chain's direction — and C makes no demand on pose. A stub is
+  adopted only as a genuine *terminus*: the endpoint's free net must
+  carry exactly two drawn elements, the endpoint and one two-pin stub.
+  `chains()` itself is untouched, so `chain.members` is unchanged.
+
+  Motivating specimen, best to worst, reproduced by the metric:
+  `lc_ladder_lpf` under `--placer=flow-seed-v4` (0 of 5), `port_shapes`
+  as one connected folded path (0 of 4), `port_shapes` under the
+  shipping default (**2 of 4**).
+
+  Verifier: `crates/spice2kicad/tests/readability_metrics.rs`, with
+  `chain_stranded_ranks_the_ladder_the_fold_and_the_shattered_chain` as
+  the acceptance test and `chain_stranded_counts_a_known_synthetic_split`
+  as the non-vacuity control. **No budget literal**, same reasoning as
+  A. Flagged elsewhere and not previously noticed: `wien_bridge_osc`
+  (1 of 2) and `lc_ladder_lpf` under the shipping default (1 of 5).
 
 - **B1 — shared-current-path stacking** (readability metric,
   **informational**, ADR-28). Devices in series on a DC current path —

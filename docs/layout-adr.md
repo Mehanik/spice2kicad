@@ -6560,12 +6560,14 @@ would have to be settled *before* attempting. Ship the dots, re-ask.
 
 ## ADR-28 — Measure what the eye reads first: chain-axis uniformity and shared-current-path stacking
 
-**Status:** landed, **informational**. Two metrics, five registered
-metric ids, one new verifier
-(`crates/spice2kicad/tests/readability_metrics.rs`). Purely additive:
-`baseline_lock`'s diff is EMPTY, no budget literal moved, no existing
-verifier changed. Neither metric is a ratchet, and neither carries
-aggregate weight in the ADR-23 promotion rule.
+**Status:** landed, **informational**. **Amended 2026-08-24** — a third
+metric was added after metric A was found blind to the defect described
+under "The amendment" below. Three metrics, seven registered metric ids,
+one verifier (`crates/spice2kicad/tests/readability_metrics.rs`). Purely
+additive, at birth and at the amendment: `baseline_lock`'s diff is
+EMPTY, no budget literal moved, no existing verifier changed. No metric
+here is a ratchet, and none carries aggregate weight in the ADR-23
+promotion rule.
 
 ### The gap
 
@@ -6620,6 +6622,10 @@ reads the drawing **most charitably** and reports two counts:
 
 `chain.members` is registered as the denominator, so a zero that means
 "clean" is distinguishable from a zero that means "no chain here".
+
+**Both counts are about member *pose*, and that is A's blind spot** — a
+chain shattered into separated columns scores a perfect `(0, 0)`. See
+"The amendment" below; A's own definition and values are unchanged.
 
 **The specimen.** `lc_ladder_lpf`'s `RS → L1 → L2 → L3` is one chain.
 The shipping placer emits it at rotations 180 / 90 / 0 / 270 — one
@@ -6682,32 +6688,191 @@ stacked, score **0**. Under the shipping `flow-seed`, `Q1`/`Q2` are
 10.16 mm apart in X and 1.27 mm in Y, score **1** — which is the owner's
 stated reason for preferring the champion on that fixture.
 
+### The amendment — metric C, series-chain compactness (`chain.stranded`)
+
+Metric A shipped with a hole its author did not test for, and the hole
+is the same *shape* as the gap this ADR was written to close: **A
+measures a chain's axis uniformity and its direction, and nothing at
+all about whether the chain is drawn in one piece.** Both counts are
+statements about member *pose*. A chain shattered into separated columns
+is invisible to both.
+
+The specimen came out of a graded challenger run. `port_shapes` is a
+four-resistor series chain, `src → R1 → ni → R2 → no → R3 → nb → R4 → 0`.
+The shipping placer draws it as **two vertical stacks of two, 31.75 mm
+apart in X**, joined by a wire that jumps sideways mid-chain — the owner
+called it "completely mad" on sight. It scores
+
+```
+chain.axis = 0    chain.reversal = 0
+```
+
+a perfect pair, for two reasons that compound: the rail-terminated `R4`
+is not a chain member at all, and the surviving three happen to share
+one axis and one direction. Worse, a challenger that **repaired** it
+into one connected folded path scored `1 / 1` — the fold puts one member
+across the axis and draws one backwards. **The metric ranked the broken
+drawing above the better one**, which is precisely the inversion this
+ADR exists to prevent, one level down.
+
+`chain.stranded` closes it. Same chains, different question: *do these
+devices read as ONE connected run?*
+
+Two consecutive members are **adjacent** when the wire between them —
+the **Manhattan** run between their pins on the net they share — is no
+longer than **all the chain's device bodies laid end to end**
+(`Σ extent` over the chain, extent = a member's own pin-to-pin
+distance). A single hop that swallows more sheet than every device in
+the chain occupies is not spacing, it is a *break*. Unbroken links
+partition the chain into maximal adjacent **clusters**;
+`chain.stranded` counts the members outside the largest one, with
+`chain.run_members` as the denominator.
+
+Manhattan and not Euclidean because a schematic connection is
+rectilinear ink, so this is the length of wire the eye actually follows.
+Pins and not centres because the quantity of interest is the empty sheet
+*between* the bodies, and a body's own half-length varies with its pose,
+which has nothing to do with how far apart two devices sit. Members and
+not links as the unit, so it matches `chain.axis` / `chain.reversal`
+(which also count members) and so the number states what a reader sees:
+*this many devices were drawn away from the rest of their chain*.
+`total − largest` is symmetric, so an even split needs no arbitrary
+"which cluster is the main one" tie-break — the same argument
+ambiguity 1 makes for two-member chains.
+
+#### The rail-terminated end element counts here, and not in A
+
+`port_shapes`'s `R4` runs `nb → 0`, so `is_rail_stub` holds and
+`chains()` excludes it. That exclusion is right for A and wrong for C,
+and the reason is worth stating because it is the general rule:
+
+**A's exclusion is a *pose* argument.** A rail stub's orientation is
+fixed by its power glyph — V14, a Tier-1 *hard constraint* — so asking
+it to also obey the chain's axis and direction can demand a
+contradiction the placer is not allowed to satisfy. **C makes no demand
+on pose.** It asks only how far the next device was drawn, and a
+terminating stub carries the chain's own current: the reader's eye
+follows one wire into it and expects to find it there. So for adjacency
+it is on the chain.
+
+Adoption is deliberately narrow — a *terminus*, not "any stub". The
+chain endpoint's free net must carry exactly two drawn elements: the
+endpoint itself and one two-pin rail stub. A net with anything else on
+it is a fan-out, not the end of a run, and adopting one of several would
+make the measured population depend on which. `lc_ladder_lpf` exercises
+both sides: `RS`'s free net `src` reaches only the drawn source `VIN`
+(adopted, 5 members measured against 4 chain members), while `L3`'s
+`out` also carries `C4` and `RL` (not adopted).
+`chain_terminus_is_adopted_only_at_a_genuine_end_of_run` is the
+assertion. **`chains()` itself is untouched**, so `chain.members`,
+`chain.axis`, `chain.reversal` and
+`chain_discriminator_keeps_rail_stubs_out_of_the_chain` all keep their
+existing values and their existing meaning.
+
+#### The acceptance ranking, and the two definitions it killed
+
+Three drawings, ordered best to worst by the owner, and the requirement
+that the metric reproduce that order. Arms 2 and 3 are **transcribed
+pin-for-pin** from their emitted `.kicad_sch` files rather than
+re-converted in the verifier, for two separate reasons: arm 2's placer
+is not on `master` and is unreachable there at all, and arm 3 must stay
+pinned so that the strict `mid < worst` assertion cannot block a change
+that *repairs* the shipping placer. The transcription of arm 3
+reproduces the live default's score exactly — 2 of 4, runs
+1.27 / 41.91 / 1.27 — and the live value is printed by the same test,
+never asserted.
+
+| arm | drawing | chain body | link runs (mm) |
+| --- | --- | ---: | --- |
+| 1 | `lc_ladder_lpf` `--placer=flow-seed-v4` — textbook ladder, five members on one line | 40.64 | 15.24 · 7.62 · 22.86 · 22.86 |
+| 2 | `port_shapes` as one connected folded path | 30.48 | 22.86 · 11.43 · 5.08 |
+| 3 | `port_shapes` shipping default — two stacks 31.75 mm apart | 30.48 | 1.27 · **41.91** · 1.27 |
+
+**Reproduced.** `chain.stranded` = **0 of 5**, **0 of 4**, **2 of 4**.
+Arm 3 is strictly worst; arms 1 and 2 tie clean, which is the right
+answer and not a shrug — the fold is what separates them, folding is
+metric A's business, and ADR-28's own ambiguity 3 records that a fold is
+arguably good practice rather than a defect. A compactness counter that
+also charged the fold would be re-measuring A and would break the
+"one element, one blame" split of ambiguity 5.
+
+Both of the definitions the original ADR floated were tried on those
+three arms first, and **both rank the textbook ladder WORST**:
+
+* **Consecutive-member distance against a per-pair threshold.** With
+  `max(ext_u, ext_v)` (7.62 mm here) arm 1 fires on three of its four
+  links and arm 2 on two of three, against arm 3's one. With
+  `ext_u + ext_v` (15.24 mm) it is 2 · 1 · 1. Inverted either way, and
+  for a structural reason: `lc_ladder_lpf`'s 22.86 mm strides are what
+  the owner calls textbook, so **no fixed multiple of a member's own
+  size can separate generous spacing from a break**.
+* **Chain-span-vs-member-extent ratio,** `(Σ extent + Σ run) / Σ extent`:
+  arm 2 = 2.291, arm 3 = 2.458, arm 1 = **2.688**. The straight ladder
+  is ranked worst of the three, because a ratio *averages*: it cannot
+  distinguish one catastrophic hop from many generous ones, and a long
+  chain dilutes the very defect the metric exists to see. A ratio also
+  has no reachable "clean" value (members need *some* wire between them),
+  so it cannot report 0 = clean, which is the convention every other
+  count metric in the registry uses and which `chain.run_members`
+  depends on.
+* A third form was tried and rejected on the same bench:
+  **each run against twice the chain's median run**. It does reproduce
+  the ranking, but arm 2's longest link lands exactly on its threshold
+  (22.86 vs 2 × 11.43), and a median has no meaning for a two-member
+  chain — `wien_bridge_osc`'s `RS`/`CS`, the only two-member chain in
+  the suite, could never register a break under it.
+
+What survives is a threshold stated in the **chain's own drawn
+material**: generous but *even* spacing scales the threshold with it,
+one dominant hop does not. That is the same finding ADR-17 recorded from
+the other side — spacing *along* the flow is slack, structure *across*
+it is meaning.
+
 ### The measured table
 
-Whole fixture set, both placers, `readability_metrics.rs` with
-`S2K_READABILITY_DUMP=1`. `A` = `chain.axis`, `R` = `chain.reversal`,
-`M` = `chain.members`, `S` = `stack.side_by_side`, `P` = `stack.pairs`.
+Whole fixture set, `readability_metrics.rs` with
+`S2K_READABILITY_DUMP=1` under the shipping default placer. `A` =
+`chain.axis`, `R` = `chain.reversal`, `M` = `chain.members`,
+`St` = `chain.stranded`, `N` = `chain.run_members`,
+`S` = `stack.side_by_side`, `P` = `stack.pairs`. The `St`/`N` columns
+are the 2026-08-24 amendment; every other column is unchanged from the
+original measurement.
 
-| fixture | A | R | M | S | P | note |
-| --- | ---: | ---: | ---: | ---: | ---: | --- |
-| rc_lowpass | 0 | 0 | 0 | 0 | 0 | |
-| rc_lowpass_ports | 0 | 0 | 0 | 0 | 0 | |
-| common_emitter | 0 | 0 | 0 | 0 | 3 | RC/Q1, Q1/RE, RB1/RB2 all stacked |
-| multivibrator | 0 | 0 | 0 | 0 | 2 | |
-| diff_pair | 0 | 0 | 0 | 0 | 2 | Q1/Q2 correctly NOT a pair |
-| opamp_inverting | 0 | 0 | 0 | 0 | 0 | |
-| opamp_inverting_real | 0 | 0 | 0 | 0 | 0 | |
-| port_shapes | 0 | 0 | 3 | 0 | 0 | uniform chain, drawn vertical (F5's business) |
-| opamp_definition_level | 0 | 0 | 0 | 0 | 0 | |
-| named_rails | 0 | 0 | 0 | 0 | 0 | |
-| rc_phase_shift | 0 | 0 | 4 | 0 | 2 | `R1→R2→R3→CIN` all horizontal, one direction |
-| two_stage_amp | 0 | 0 | 0 | 0 | 6 | |
-| **cascode_amp** | 0 | 0 | 0 | **1** | 5 | `Q1/Q2` side by side — champion scores **0** |
-| **lc_ladder_lpf** | **2** | **1** | 4 | 0 | 0 | `RS→L1→L2→L3` at four rotations |
-| sallen_key_lpf | 0 | 0 | 0 | 0 | 0 | |
-| wien_bridge_osc | 0 | 1 | 2 | 0 | 0 | `RS`/`CS` both horizontal, opposed |
-| sallen_key_driven | 0 | 0 | 0 | 0 | 0 | |
-| shunt_feedback_amp | 0 | 0 | 0 | 1 | 2 | `RB`/`RF` — see the ambiguities below |
+| fixture | A | R | M | St | N | S | P | note |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| rc_lowpass | 0 | 0 | 0 | 0 | 0 | 0 | 0 | |
+| rc_lowpass_ports | 0 | 0 | 0 | 0 | 0 | 0 | 0 | |
+| common_emitter | 0 | 0 | 0 | 0 | 0 | 0 | 3 | RC/Q1, Q1/RE, RB1/RB2 all stacked |
+| multivibrator | 0 | 0 | 0 | 0 | 0 | 0 | 2 | |
+| diff_pair | 0 | 0 | 0 | 0 | 0 | 0 | 2 | Q1/Q2 correctly NOT a pair |
+| opamp_inverting | 0 | 0 | 0 | 0 | 0 | 0 | 0 | |
+| opamp_inverting_real | 0 | 0 | 0 | 0 | 0 | 0 | 0 | |
+| **port_shapes** | 0 | 0 | 3 | **2** | 4 | 0 | 0 | two stacks of two, one 41.91 mm jump — A and R see nothing |
+| opamp_definition_level | 0 | 0 | 0 | 0 | 0 | 0 | 0 | |
+| named_rails | 0 | 0 | 0 | 0 | 0 | 0 | 0 | |
+| rc_phase_shift | 0 | 0 | 4 | 0 | 4 | 0 | 2 | `R1→R2→R3→CIN` horizontal, one direction, runs 12.70/7.62/7.62 |
+| two_stage_amp | 0 | 0 | 0 | 0 | 0 | 0 | 6 | |
+| **cascode_amp** | 0 | 0 | 0 | 0 | 0 | **1** | 5 | `Q1/Q2` side by side — champion scores **0** |
+| **lc_ladder_lpf** | **2** | **1** | 4 | **1** | 5 | 0 | 0 | `RS→L1→L2→L3` at four rotations; `L2..L3` run 45.72 > body 40.64 |
+| sallen_key_lpf | 0 | 0 | 0 | 0 | 0 | 0 | 0 | |
+| **wien_bridge_osc** | 0 | 1 | 2 | **1** | 2 | 0 | 0 | `RS`/`CS` opposed AND 35.56 mm apart against a 15.24 mm body |
+| sallen_key_driven | 0 | 0 | 0 | 0 | 0 | 0 | 0 | |
+| shunt_feedback_amp | 0 | 0 | 0 | 0 | 0 | 1 | 2 | `RB`/`RF` — see the ambiguities below |
+
+**What the new column flags that nobody had named.** Two cells beyond
+the `port_shapes` specimen:
+
+* `wien_bridge_osc` — `RS`/`CS`, the oscillator's series arm, are drawn
+  35.56 mm apart against a 15.24 mm chain body, more than twice their
+  own size, *and* pointing in opposite directions (`chain.reversal = 1`,
+  already recorded). Two independent counts on one two-element arm is
+  the strongest single signal in the table.
+* `lc_ladder_lpf` under the shipping default — the same phase-4.5
+  mangling that produces its `(2, 1)` also strands `L3`: the `L2..L3`
+  run is 45.72 mm against a 40.64 mm body. Under
+  `--placer=flow-seed-v4` the fixture reads **0 of 5**, so this cell is
+  a second, independent witness to the same defect A already names, and
+  it is repaired by the same change.
 
 **Champion vs the shipping default, across all 18 fixtures × 5 metrics:
 exactly ONE cell differs**, `stack.side_by_side / cascode_amp`, champion
@@ -6723,8 +6888,9 @@ close a named gap, they do not close the gap.
 
 ### Informational at birth, and what would promote each
 
-Both are `Tier::Info` in `tests/scoreboard.rs`: printed per fixture, zero
-weight in the `(T1, T2)` aggregate, no per-fixture budget literal. That
+All three are `Tier::Info` in `tests/scoreboard.rs`: printed per
+fixture, zero weight in the `(T1, T2)` aggregate, no per-fixture budget
+literal. That
 follows the project's own precedents — Q6's balance CoV and ADR-23 D8's
 V16 bend bound — and the reason is D8's: *a bound that were subtly wrong
 would, as a gate, block all work while being wrong.* The ambiguities
@@ -6736,11 +6902,21 @@ The only assertions in the new verifier are therefore
 * **synthetic control arms** — hand-placed pin geometry with a known
   answer, so the metrics cannot silently degenerate to "always 0"
   (`chain_metric_counts_a_known_synthetic_ladder`,
+  `chain_stranded_counts_a_known_synthetic_split`,
   `stacking_metric_counts_a_known_synthetic_divider`); and
 * **specimen rankings in `≤` form** — they fire only if the arm the
   owner prefers becomes strictly WORSE than the arm they reject, i.e.
   only if the metric's own validation inverts. They can never block a
   change that improves the shipping placer.
+
+Metric C's acceptance test
+(`chain_stranded_ranks_the_ladder_the_fold_and_the_shattered_chain`) is
+the one exception to the `≤` rule, deliberately: its middle-vs-worst
+comparison is asserted **strictly**, because a tie there is the exact
+failure metric A shipped with. Strictness is only safe because both of
+its lower arms are **hand-placed** geometry, so the test grades a fixed
+pair of drawings; its only live arm is a non-default `--placer`, and the
+shipping default's score appears in that test's output as a print.
 
 **What would justify promoting metric A to a ratchet.** (a) The
 corner/fold ambiguity below is closed — either a fixture with a
@@ -6761,7 +6937,18 @@ devices carry one current, so draw them in one column" is a yes/no
 geometric fact — so it is the better ratchet candidate of the two, and
 plausibly Tier 1 rather than Tier 2 when it gets there.
 
-Neither may become a **weighted** term in `cost.rs`. That is the V16
+**What would justify promoting metric C.** (a) Its two open
+ambiguities below (11 and 12) are closed — in particular, a fixture that
+exercises a chain broken into *three* clusters exists, so the
+largest-cluster reading is known to grade multi-way shattering the way a
+reader does; and (b) the placer reaches 0 on `port_shapes` and
+`wien_bridge_osc` with the default placer, so the ratchet records an
+achieved state. Like B it is more nearly categorical than A — "these
+four devices are one current path, so draw them in one run" is close to
+a yes/no fact — but its threshold is a judgement about spacing, which
+argues for Tier 2 rather than Tier 1 when it gets there.
+
+None of the three may become a **weighted** term in `cost.rs`. That is the V16
 doctrine applied to a new metric: subordination by coefficient is not
 subordination, and a tunable term at a safe weight does nothing (the
 Attempt-A failure). If either graduates, it graduates as a per-fixture
@@ -6856,13 +7043,38 @@ wrong reason never expires.
     choice is recorded so a future oscillator ring does not surprise
     anyone.
 
+11. **A chain broken into three or more clusters (metric C).** Counted
+    as `total − largest`, so a chain in clusters of 2/1/1 scores 2, the
+    same as one in clusters of 2/2. Whether three-way shattering should
+    read *worse* than two-way at equal member count is genuinely
+    arguable, and no fixture presents the case, so it is unmeasured
+    rather than mis-measured. *Alternative:* count *breaks* (links)
+    instead of stranded members, which would give 2 and 1 respectively —
+    rejected because the link unit does not match A's member unit and
+    because on the acceptance ranking it separates arms 2 and 3 by only
+    one point instead of two.
+
+12. **A chain spread evenly across the whole page (metric C).** The
+    threshold scales with the chain, so a chain whose every link exceeds
+    its whole body — an even, enormous stride — reads as *fully*
+    shattered (`n − 1` stranded), while an even stride just under the
+    body reads clean. That discontinuity sits in a region no fixture
+    occupies, and the side it errs toward is deliberate: the alternative
+    is a threshold that does not scale, which is exactly what ranks
+    `lc_ladder_lpf` worst. A related cost is that the threshold grows
+    with chain length, so a very long chain tolerates a larger single
+    hop; the suite's longest chain is five members.
+    *Alternative:* cap the threshold at some multiple of the median link
+    run. Not chosen — a median is meaningless on the two-member chains
+    ambiguity 1 deliberately admits.
+
 ### One aggregator change, and why it is not a behaviour change
 
 `tests/scoreboard.rs` now prints `(info)` in the Δ column for a
 `Tier::Info` row instead of `+0.00`. ADR-23 D6 recorded that exact
 defect as a live follow-up — `q6.cov` printed `Δ = +0.00` for a value
 that moved 1.2247 → 1.4142, which reads as "unchanged" — and it bites
-harder now that five of the registered ids are informational. The
+harder now that seven of the registered ids are informational. The
 contribution really is zero, so nothing about the aggregate, the
 verdict, or the promotion rule changes; only the column that was lying
 about it.

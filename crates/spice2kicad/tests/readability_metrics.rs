@@ -1,5 +1,4 @@
-//! **A1 / A2 / B1 — the two things a human reads first** (ADR-28,
-//! informational).
+//! **The three things a human reads first** (ADR-28, informational).
 //!
 //! # Why this file exists
 //!
@@ -15,12 +14,13 @@
 //!
 //! Every one of those is a *true* statement about the metric that made
 //! it. None of the registered metrics measures **axis consistency**,
-//! **orientation uniformity** or **device stacking**, which is what the
-//! eye picks up before it reads a single refdes. A defect no verifier
+//! **orientation uniformity**, **chain adjacency** or **device
+//! stacking**, which is what the eye picks up before it reads a single
+//! refdes. A defect no verifier
 //! measures is invisible to the ratchets AND to the scoreboard (ADR-23
 //! "Known limits"), so the fix is a measurement, not a weight.
 //!
-//! Two are added here, both computed from the **emitted `.kicad_sch`
+//! Three are added here, all computed from the **emitted `.kicad_sch`
 //! geometry** so they grade any placer, present or future, rather than
 //! restating one placer's internals.
 //!
@@ -53,6 +53,43 @@
 //! horizontal and vertical" (an axis defect) from "one inductor is drawn
 //! backwards" (a direction defect) — different repairs in the placer.
 //!
+//! # C — series-chain compactness (`chain.stranded`)
+//!
+//! A's two counts measure a chain's axis *uniformity* and its
+//! *direction*. Neither measures **adjacency**, so a chain shattered
+//! into separated columns is invisible to both. `port_shapes` — a
+//! four-resistor series chain — is emitted as two vertical stacks of
+//! two, 31.75 mm apart, joined by a wire that jumps sideways mid-chain,
+//! and it scores `chain.axis = 0, chain.reversal = 0`. A perfect pair,
+//! for a drawing the owner called "completely mad" on sight; a
+//! challenger that repaired it into one connected folded path scored
+//! `1 / 1`, strictly worse. The metric ranked the broken drawing ABOVE
+//! the better one, which is the inverse of what ADR-28 exists for.
+//!
+//! `chain.stranded` closes that. Two consecutive members are
+//! **adjacent** when the wire between them — the Manhattan run between
+//! their pins on the net they share — is no longer than **all the
+//! chain's device bodies laid end to end**. One hop that swallows more
+//! sheet than every device in the chain occupies is not spacing, it is a
+//! break. Unbroken links partition the chain into maximal adjacent
+//! clusters, and `chain.stranded` counts the members outside the largest
+//! one, with `chain.run_members` as the denominator.
+//!
+//! Stating the threshold in the chain's own drawn material — not in
+//! millimetres, and not per member pair — is what lets it pass
+//! `lc_ladder_lpf`'s textbook 22.86 mm strides while failing
+//! `port_shapes`'s single 41.91 mm jump. ADR-28 records the two
+//! alternatives that were measured and rejected; both rank the textbook
+//! ladder WORST of the three specimens.
+//!
+//! Unlike A, C measures the chain's **rail-terminated end element** too.
+//! `port_shapes`'s `R4` terminates on ground, so `chains()` excludes it,
+//! and that exclusion is half of why the broken drawing scored 0. A
+//! stub's exclusion from A is a *pose* argument — its orientation is
+//! fixed by its rail glyph (V14) and cannot also be asked to obey the
+//! chain's direction. C makes no demand on pose, and a terminating stub
+//! carries the chain's own current, so for adjacency it is on the chain.
+//!
 //! # B — shared-current-path stacking (`stack.side_by_side`)
 //!
 //! Devices in series on a DC current path — a cascode's two transistors,
@@ -84,10 +121,10 @@
 //!
 //! # Informational at birth
 //!
-//! Both metrics are registered with the ADR-23 scoreboard as
+//! All three metrics are registered with the ADR-23 scoreboard as
 //! `Tier::Info` — printed per fixture, zero aggregate weight — on the
 //! precedent of Q6's balance CoV and `bend_bound.rs`'s V16 bound.
-//! **Neither is a zero-slack ratchet.** A metric whose definition is
+//! **None of them is a zero-slack ratchet.** A metric whose definition is
 //! still being calibrated must not be able to block work: an ambiguity
 //! resolved the wrong way (see ADR-28's list) would, as a gate, reject
 //! correct drawings while being wrong. What would justify promoting each
@@ -934,6 +971,180 @@ fn stacking_metrics(f: &Fixture) -> (usize, usize, Vec<String>) {
     (bad.len(), pairs.len(), bad)
 }
 
+// --- C: series-chain compactness -----------------------------------------
+
+/// A member's own drawn length: the Manhattan distance between its two
+/// body pins. This is the yardstick the adjacency threshold below is
+/// stated in, and it is read off the emitted symbol, so the metric
+/// carries no absolute millimetre constant and grades any symbol library.
+fn member_extent(f: &Fixture, refdes: &str) -> Option<f64> {
+    let ps = f.pins_of(refdes);
+    if ps.len() != 2 {
+        return None;
+    }
+    Some((ps[0].x_mm - ps[1].x_mm).abs() + (ps[0].y_mm - ps[1].y_mm).abs())
+}
+
+/// One consecutive link of a chain: the two members and the net that
+/// joins them.
+type Link = (String, String, String);
+
+/// A chain's members and consecutive links **including its
+/// rail-terminated ends**.
+///
+/// `chains()` deliberately excludes rail stubs, and for metric A that is
+/// right: a stub's pose is fixed by its rail glyph (V14, a Tier-1 hard
+/// constraint), so asking it to obey the chain's axis or direction would
+/// demand a contradiction. Compactness asks a different question —
+/// *does the current path read as ONE connected run of devices?* — and
+/// it makes no demand on any member's pose. A terminating stub carries
+/// the chain's own current and the reader's eye follows one wire into
+/// it, so for adjacency purposes it is on the chain. `port_shapes`'s
+/// `R4` is exactly that case, and its exclusion is half of why the
+/// broken drawing scored a perfect 0 (ADR-28's blind spot).
+///
+/// Only a *terminus* is adopted, under the strict condition that the
+/// endpoint's free net carries exactly two drawn elements: the chain
+/// endpoint and one two-pin rail stub. A net with anything else on it is
+/// a fan-out, not the end of the run. `chains()` itself is untouched, so
+/// `chain.members`, `chain.axis`, `chain.reversal` and the
+/// `chain_discriminator_keeps_rail_stubs_out_of_the_chain` contract are
+/// all unchanged.
+fn chain_run(f: &Fixture, c: &Chain) -> (Vec<String>, Vec<Link>) {
+    // A two-pin rail stub sitting alone with `endpoint` on `net`.
+    let terminus = |endpoint: &str, net: &str| -> Option<String> {
+        if f.is_rail_net(net) {
+            return None;
+        }
+        let on: Vec<&Elem> = f
+            .elements
+            .iter()
+            .filter(|e| !e.is_power_source && e.nodes.iter().any(|n| n == net))
+            .collect();
+        if on.len() != 2 {
+            return None;
+        }
+        let other = on.iter().find(|e| e.refdes != endpoint)?.refdes.clone();
+        if f.is_rail_stub(&other) && f.pins_of(&other).len() == 2 {
+            Some(other)
+        } else {
+            None
+        }
+    };
+
+    let mut members = c.members.clone();
+    let mut links: Vec<Link> = Vec::new();
+    for i in 0..c.members.len() - 1 {
+        links.push((
+            c.members[i].clone(),
+            c.members[i + 1].clone(),
+            c.ports[i].1.clone(),
+        ));
+    }
+    let head = c.members.first().expect("a chain has members").clone();
+    if let Some(stub) = terminus(&head, &c.ports[0].0) {
+        links.insert(0, (stub.clone(), head, c.ports[0].0.clone()));
+        members.insert(0, stub);
+    }
+    let tail = c.members.last().expect("a chain has members").clone();
+    let tail_net = c.ports.last().expect("ports match members").1.clone();
+    if let Some(stub) = terminus(&tail, &tail_net) {
+        links.push((tail, stub.clone(), tail_net));
+        members.push(stub);
+    }
+    (members, links)
+}
+
+/// The drawn separation of one link: the **Manhattan** distance between
+/// the two members' pins on the shared net.
+///
+/// Manhattan, not Euclidean, because a schematic's connection is
+/// rectilinear ink — this is the length of wire the eye has to follow
+/// from one device to the next, and an L-shaped jog costs what it draws.
+/// Pins, not centres: the quantity of interest is the empty sheet
+/// *between* the bodies, and a body's own half-length varies with its
+/// pose, which has nothing to do with how far apart the two devices sit.
+fn link_run(f: &Fixture, u: &str, v: &str, net: &str) -> Option<f64> {
+    let pu = f.pins_of(u).into_iter().find(|p| p.net == net)?;
+    let pv = f.pins_of(v).into_iter().find(|p| p.net == net)?;
+    Some((pu.x_mm - pv.x_mm).abs() + (pu.y_mm - pv.y_mm).abs())
+}
+
+/// `(chain.stranded, chain.run_members)` plus detail.
+///
+/// **Adjacency.** Two consecutive members are adjacent when the wire
+/// between them is no longer than **all of the chain's device bodies
+/// laid end to end** (`Σ extent` over the extended chain). One hop that
+/// swallows more sheet than every device in the chain occupies is not
+/// spacing, it is a *break*: the reader stops seeing one run.
+///
+/// The threshold is stated in the chain's own drawn material rather than
+/// in millimetres, on purpose — see ADR-28 for the two alternatives that
+/// were measured and rejected, both of which rank the textbook ladder
+/// WORST. Because the threshold scales with the whole chain, generous
+/// but *even* spacing is not a defect: `lc_ladder_lpf` under
+/// `--placer=flow-seed-v4` strides 22.86 mm between members against a
+/// 40.64 mm body and reads clean, while `port_shapes`'s single 41.91 mm
+/// jump against a 30.48 mm body does not. That matches the project's own
+/// measured finding that spacing *along* the flow is slack while the
+/// structure across it is meaning (ADR-17).
+///
+/// **The count.** Unbroken links partition the extended chain into
+/// maximal adjacent *clusters*; `chain.stranded` is the number of
+/// members outside the largest one. Members, not links, so the unit
+/// matches `chain.axis` / `chain.reversal` (which also count members),
+/// and so the number says what a reader sees: *this many devices were
+/// drawn away from the rest of their chain*. `total − max cluster` is
+/// symmetric, so no arbitrary "which cluster is the main one" tie-break
+/// enters the number.
+fn compactness_metrics(f: &Fixture) -> (usize, usize, Vec<String>) {
+    let cs = chains(f);
+    let (mut stranded, mut total) = (0usize, 0usize);
+    let mut detail = Vec::new();
+    for c in &cs {
+        let (members, links) = chain_run(f, c);
+        let body: f64 = members
+            .iter()
+            .filter_map(|r| member_extent(f, r))
+            .sum::<f64>();
+        // Cluster sizes, walking the chain in order.
+        let mut clusters: Vec<usize> = vec![1];
+        let mut broken: Vec<String> = Vec::new();
+        let mut runs: Vec<String> = Vec::new();
+        for (u, v, net) in &links {
+            if let Some(run) = link_run(f, u, v, net) {
+                runs.push(format!("{run:.2}"));
+            }
+            let cut = match link_run(f, u, v, net) {
+                Some(run) if run > body + TOL_MM => {
+                    broken.push(format!(
+                        "{u}..{v} on `{net}`: run {run:.2} > body {body:.2}"
+                    ));
+                    true
+                }
+                // An unmeasurable link (a member without two emitted
+                // body pins) is NOT a break: the metric must not invent
+                // a defect out of geometry it could not read.
+                _ => false,
+            };
+            if cut {
+                clusters.push(1);
+            } else {
+                *clusters.last_mut().expect("seeded with one cluster") += 1;
+            }
+        }
+        let largest = clusters.iter().copied().max().unwrap_or(0);
+        stranded += members.len() - largest;
+        total += members.len();
+        detail.push(format!(
+            "chain [{}]: body {body:.2}, runs [{}], clusters {clusters:?}, broken {broken:?}",
+            members.join(" -> "),
+            runs.join(" ")
+        ));
+    }
+    (stranded, total, detail)
+}
+
 // --- the fixtures --------------------------------------------------------
 
 /// Every fixture the suite converts, in `flow_geometry.rs`'s order.
@@ -976,27 +1187,41 @@ fn readability_metrics_are_reported_for_every_fixture() {
     let dump = std::env::var("S2K_READABILITY_DUMP").is_ok();
     if dump {
         println!(
-            "{:<24} {:>10} {:>10} {:>10} {:>10} {:>10}",
-            "fixture", "chain.axis", "chain.rev", "members", "stack.sbs", "pairs"
+            "{:<24} {:>10} {:>10} {:>8} {:>10} {:>6} {:>10} {:>6}",
+            "fixture",
+            "chain.axis",
+            "chain.rev",
+            "members",
+            "chain.strand",
+            "run",
+            "stack.sbs",
+            "pairs"
         );
     }
     let mut measured = 0usize;
     for name in FIXTURES {
         let f = load(name);
         let (axis, rev, members, chain_detail) = chain_metrics(&f);
+        let (strand, strand_n, strand_detail) = compactness_metrics(&f);
         let (sbs, pairs, stack_detail) = stacking_metrics(&f);
         common::scoreboard::record_count("chain.axis", name, axis);
         common::scoreboard::record_count("chain.reversal", name, rev);
         common::scoreboard::record_count("chain.members", name, members);
+        common::scoreboard::record_count("chain.stranded", name, strand);
+        common::scoreboard::record_count("chain.run_members", name, strand_n);
         common::scoreboard::record_count("stack.side_by_side", name, sbs);
         common::scoreboard::record_count("stack.pairs", name, pairs);
         measured += 1;
         if dump {
             println!(
-                "{:<24} {axis:>10} {rev:>10} {members:>10} {sbs:>10} {pairs:>10}",
+                "{:<24} {axis:>10} {rev:>10} {members:>8} {strand:>10} {strand_n:>6} {sbs:>10} {pairs:>6}",
                 f.name
             );
-            for d in chain_detail.iter().chain(stack_detail.iter()) {
+            for d in chain_detail
+                .iter()
+                .chain(strand_detail.iter())
+                .chain(stack_detail.iter())
+            {
                 println!("      {d}");
             }
         }
@@ -1053,6 +1278,89 @@ fn chain_axis_ranks_the_textbook_ladder_seed_above_the_shipped_drawing() {
         "metric A inverted the specimen ranking: the --no-refine seed \
          (axis={s_axis}, reversal={s_rev}) must not read worse than the shipped drawing \
          (axis={p_axis}, reversal={p_rev}).\n  seed:    {s_detail:?}\n  shipped: {p_detail:?}"
+    );
+}
+
+/// **The acceptance test for metric C**, and the case ADR-28's own
+/// metric was blind to.
+///
+/// `port_shapes` is a four-resistor series chain `src → R1 → ni → R2 →
+/// no → R3 → nb → R4 → 0`. The shipping placer draws it as **two
+/// vertical stacks of two, 31.75 mm apart**, joined by a wire that jumps
+/// sideways mid-chain — and it scores `chain.axis = 0,
+/// chain.reversal = 0`, a perfect pair, because the three surviving
+/// members happen to share one axis and one direction. A challenger that
+/// repaired it into one connected folded path scored `1 / 1` — the
+/// metric ranked the broken drawing **above** the better one.
+///
+/// Three drawings, best to worst, and `chain.stranded` must order them:
+///
+/// 1. `lc_ladder_lpf` under `--placer=flow-seed-v4` — the textbook
+///    ladder, five members on one line;
+/// 2. `port_shapes` as one connected folded path;
+/// 3. `port_shapes` as two disconnected stacks.
+///
+/// Arms 2 and 3 are **transcribed pin-for-pin** from the two emitted
+/// `.kicad_sch` files, not re-converted, and that is deliberate twice
+/// over. Arm 2's placer is not on `master`, so it is unreachable here at
+/// all. Arm 3 pins the drawing the metric was built against, so this
+/// test grades a fixed pair of geometries and **cannot block a change
+/// that repairs the shipping placer** — which is what "informational at
+/// birth" requires, and which the strict `mid < worst` assertion below
+/// would otherwise violate. The live default's score is printed, never
+/// asserted; it is recorded per fixture by
+/// `readability_metrics_are_reported_for_every_fixture`.
+#[test]
+fn chain_stranded_ranks_the_ladder_the_fold_and_the_shattered_chain() {
+    let ladder = load_arm("lc_ladder_lpf", &["--placer", "flow-seed-v4"]);
+    let (best, best_n, best_detail) = compactness_metrics(&ladder);
+
+    let fold = port_shapes_folded();
+    let (mid, mid_n, mid_detail) = compactness_metrics(&fold);
+
+    let shattered = port_shapes_shattered();
+    let (worst, worst_n, worst_detail) = compactness_metrics(&shattered);
+
+    println!("lc_ladder_lpf flow-seed-v4 : stranded={best} of {best_n}  {best_detail:?}");
+    println!("port_shapes   folded path  : stranded={mid} of {mid_n}  {mid_detail:?}");
+    println!("port_shapes   two stacks   : stranded={worst} of {worst_n}  {worst_detail:?}");
+    let live = load("port_shapes");
+    let (l_strand, l_n, _) = compactness_metrics(&live);
+    let (l_axis, l_rev, _, _) = chain_metrics(&live);
+    println!(
+        "port_shapes   live default : stranded={l_strand} of {l_n}, \
+         axis={l_axis} reversal={l_rev}  (reported, never asserted)"
+    );
+
+    assert_eq!(
+        (best_n, mid_n, worst_n),
+        (5, 4, 4),
+        "the measured population is a property of the NETLIST, not of the drawing: \
+         the ladder's chain is VIN→RS→L1→L2→L3 and port_shapes' is R1→R2→R3→R4 on \
+         both of its arms"
+    );
+    assert!(
+        best <= mid,
+        "the textbook ladder ({best}) must not read worse than the folded path ({mid})"
+    );
+    assert!(
+        mid < worst,
+        "THE defect this metric exists for: the connected folded path ({mid}) must read \
+         strictly better than the same chain shattered into two stacks ({worst}). \
+         `chain.axis` / `chain.reversal` rank these two the other way round.\n  \
+         fold:      {mid_detail:?}\n  shattered: {worst_detail:?}"
+    );
+
+    // And the thing the older pair cannot see, asserted on the same
+    // pinned geometry so it stays true whatever the placer later does.
+    let (f_axis, f_rev, _, _) = chain_metrics(&fold);
+    let (s_axis, s_rev, _, _) = chain_metrics(&shattered);
+    assert_eq!(
+        ((s_axis, s_rev), (f_axis, f_rev)),
+        ((0, 0), (1, 1)),
+        "the premise: on these two drawings metric A scores the SHATTERED one perfect \
+         (0, 0) and the repaired fold (1, 1) — strictly worse. That inversion is what \
+         metric C exists to correct, and it is why C is not a refinement of A"
     );
 }
 
@@ -1306,6 +1614,172 @@ fn chain_metric_counts_a_known_synthetic_ladder() {
         "on a tie the metric grades against the HORIZONTAL reading, so the two \
          VERTICAL members are the ones named off-axis"
     );
+}
+
+/// `port_shapes` drawn as ONE connected folded path — arm 2 of metric
+/// C's acceptance ranking, transcribed pin-for-pin from the emitted
+/// `.kicad_sch` of a placer that is not on `master`.
+///
+/// `R1` runs down, `R2` turns right (and is drawn backwards, which is
+/// why the arm scores `chain.axis = 1, chain.reversal = 1`), `R3`
+/// continues right along the row above, `R4` drops to ground. Four
+/// devices, one path, nothing stranded.
+fn port_shapes_folded() -> Fixture {
+    synthetic(
+        vec![
+            two_pin(ElementKind::Resistor, "R1", "src", "ni"),
+            two_pin(ElementKind::Resistor, "R2", "ni", "no"),
+            two_pin(ElementKind::Resistor, "R3", "no", "nb"),
+            two_pin(ElementKind::Resistor, "R4", "nb", "0"),
+        ],
+        vec![
+            pin("R1", "src", 35.56, 35.56),
+            pin("R1", "ni", 35.56, 43.18),
+            pin("R2", "no", 46.99, 39.37),
+            pin("R2", "ni", 54.61, 39.37),
+            pin("R3", "no", 54.61, 35.56),
+            pin("R3", "nb", 62.23, 35.56),
+            pin("R4", "nb", 62.23, 40.64),
+            pin("R4", "0", 62.23, 48.26),
+        ],
+        &["0"],
+    )
+}
+
+/// `port_shapes` as the shipping placer drew it when metric C was
+/// written — arm 3 of the acceptance ranking, transcribed pin-for-pin.
+///
+/// Two vertical stacks of two: `R1`/`R2` in a column at x = 35.56 and
+/// `R3`/`R4` in a column at x = 67.31, joined by a single 41.91 mm run
+/// that goes 31.75 mm across and 10.16 mm back up. Every member is
+/// vertical and every member travels down the page, which is exactly why
+/// `chain.axis` and `chain.reversal` both read 0.
+fn port_shapes_shattered() -> Fixture {
+    synthetic(
+        vec![
+            two_pin(ElementKind::Resistor, "R1", "src", "ni"),
+            two_pin(ElementKind::Resistor, "R2", "ni", "no"),
+            two_pin(ElementKind::Resistor, "R3", "no", "nb"),
+            two_pin(ElementKind::Resistor, "R4", "nb", "0"),
+        ],
+        vec![
+            pin("R1", "src", 35.56, 31.75),
+            pin("R1", "ni", 35.56, 39.37),
+            pin("R2", "ni", 35.56, 40.64),
+            pin("R2", "no", 35.56, 48.26),
+            pin("R3", "no", 67.31, 38.10),
+            pin("R3", "nb", 67.31, 45.72),
+            pin("R4", "nb", 67.31, 46.99),
+            pin("R4", "0", 67.31, 54.61),
+        ],
+        &["0"],
+    )
+}
+
+/// Metric C's non-vacuity control arm: the same four-element chain drawn
+/// four ways, with the right answer obvious by eye.
+///
+/// Also pins down the **rail-terminated terminus** decision. `R4`
+/// terminates on ground, so `chains()` excludes it — correctly, because
+/// metric A's axis and direction counts are *pose* questions and a
+/// stub's pose belongs to its rail glyph (V14). Compactness makes no
+/// demand on pose, and a terminating stub carries the chain's own
+/// current, so it IS measured here: `chain.run_members` is 4 where
+/// `chain.members` is 3.
+#[test]
+fn chain_stranded_counts_a_known_synthetic_split() {
+    let els = vec![
+        two_pin(ElementKind::Resistor, "R1", "src", "ni"),
+        two_pin(ElementKind::Resistor, "R2", "ni", "no"),
+        two_pin(ElementKind::Resistor, "R3", "no", "nb"),
+        two_pin(ElementKind::Resistor, "R4", "nb", "0"),
+    ];
+    // Every member is 7.62 long, so the chain body is 30.48 and a link
+    // is a break only above that.
+    let column = |xs: [f64; 4], ys: [f64; 4]| -> Fixture {
+        let mut pins = Vec::new();
+        for (i, (r, nets)) in [
+            ("R1", ["src", "ni"]),
+            ("R2", ["ni", "no"]),
+            ("R3", ["no", "nb"]),
+            ("R4", ["nb", "0"]),
+        ]
+        .iter()
+        .enumerate()
+        {
+            pins.push(pin(r, nets[0], xs[i], ys[i]));
+            pins.push(pin(r, nets[1], xs[i], ys[i] + 7.62));
+        }
+        synthetic(els.clone(), pins, &["0"])
+    };
+
+    // (a) one tight column: four members, three 1.27 mm links.
+    let good = column([0.0; 4], [0.0, 8.89, 17.78, 26.67]);
+    let (stranded, total, detail) = compactness_metrics(&good);
+    assert_eq!(
+        (stranded, total),
+        (0, 4),
+        "a single tight column strands nobody, and the rail-terminated R4 IS \
+         measured — 4 members, not 3: {detail:?}"
+    );
+    assert_eq!(
+        chain_metrics(&good).2,
+        3,
+        "`chain.members` still excludes the rail stub — `chains()` is untouched"
+    );
+
+    // (b) a long stride is not a break. Each link is 22.86 mm — three
+    // times any single member, and the exact stride the textbook
+    // `lc_ladder_lpf` drawing uses — yet the chain reads as one run.
+    // This is the case that kills a per-member distance threshold.
+    let strided = column([0.0; 4], [0.0, 30.48, 60.96, 91.44]);
+    let (stranded, _, detail) = compactness_metrics(&strided);
+    assert_eq!(
+        stranded, 0,
+        "a chain strided three member-lengths apart, evenly, is not shattered — a          per-member threshold would call every link here a break: {detail:?}"
+    );
+
+    // (c) the `port_shapes` shape: two tight pairs, one long jump.
+    let split = column([0.0, 0.0, 31.75, 31.75], [0.0, 8.89, 6.35, 15.24]);
+    let (stranded, total, detail) = compactness_metrics(&split);
+    assert_eq!(
+        (stranded, total),
+        (2, 4),
+        "two stacks of two, a chain-body-plus jump apart, strand the smaller half — \
+         and with equal halves the count is 2 either way, so no tie-break enters \
+         the number: {detail:?}"
+    );
+
+    // (d) one member flung off the end strands exactly one.
+    let one_off = column([0.0, 0.0, 0.0, 63.5], [0.0, 8.89, 17.78, 17.78]);
+    let (stranded, _, detail) = compactness_metrics(&one_off);
+    assert_eq!(
+        stranded, 1,
+        "a three-member run plus one outlier strands the outlier only: {detail:?}"
+    );
+}
+
+/// The terminus rule is a *terminus* rule, not "adopt any stub".
+///
+/// A chain endpoint whose free net fans out to more than one other drawn
+/// element is not the end of a run, and adopting one of them would make
+/// the measured population depend on which. `lc_ladder_lpf` carries both
+/// cases: `RS`'s free net `src` reaches only the drawn source `VIN`
+/// (adopted — five members measured against four chain members), while
+/// `L3`'s free net `out` carries `C4` and `RL` as well (not adopted).
+#[test]
+fn chain_terminus_is_adopted_only_at_a_genuine_end_of_run() {
+    let f = load_arm("lc_ladder_lpf", &["--placer", "flow-seed-v4"]);
+    let cs = chains(&f);
+    assert_eq!(cs.len(), 1, "lc_ladder_lpf presents one chain");
+    let (members, links) = chain_run(&f, &cs[0]);
+    assert_eq!(
+        members,
+        vec!["VIN", "RS", "L1", "L2", "L3"],
+        "the drawn source terminates the chain at `src` and is adopted; `out` fans \
+         out to C4 and RL, so nothing is adopted at the far end"
+    );
+    assert_eq!(links.len(), members.len() - 1, "a path has n-1 links");
 }
 
 /// A rail-to-rail divider drawn stacked, then drawn side by side. Also
