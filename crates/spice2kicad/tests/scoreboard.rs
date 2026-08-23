@@ -785,10 +785,10 @@ fn champion_challenger_report() {
 //
 // # What it does and does not catch
 //
-// Catches: any `assert!` / `assert_eq!` / `assert_ne!` / `unreachable!` /
-// bare `panic!` lexically inside a `for` loop body that also contains a
-// `common::scoreboard::record*` call, anywhere under `tests/`. That is
-// exactly the shape that truncates a metric mid-loop.
+// Catches: any `assert!` / `assert_eq!` / `assert_ne!` / `debug_assert!` /
+// `unreachable!` / bare `panic!` lexically inside a `for` loop body that
+// also contains a `common::scoreboard::record*` call, anywhere under
+// `tests/`. That is exactly the shape that truncates a metric mid-loop.
 //
 // Does NOT catch:
 //   * a panic raised inside a *helper function* the loop calls (the lint
@@ -803,19 +803,22 @@ fn champion_challenger_report() {
 //   * a `while` / `loop` / `.for_each()` fixture sweep (no verifier uses
 //     one today);
 //   * a verifier that enumerates fixtures and records NOTHING at all —
-//     that is D6's blind-cell rule, which this lint's premise (a
-//     `record` call in the loop) cannot see. It is a separate obligation.
+//     that is D9's blind-cell rule, which this lint's premise (a
+//     `record` call in the loop) cannot see. It is a separate obligation,
+//     and sixteen fixture-enumerating verifiers are in that class today.
 
 /// The macros that abort a test function where they stand.
 ///
-/// `debug_assert*!` is covered too — `word_at` matches the `assert!`
-/// suffix only on an identifier boundary, so `debug_assert!` is caught by
-/// its own name below rather than by accident.
+/// `word_at` matches on identifier boundaries, so the `assert!` entry does
+/// NOT match the tail of `debug_assert!` — the debug forms need their own
+/// entries, and have them.
 const ASSERT_MACROS: &[&str] = &[
     "assert!",
     "assert_eq!",
     "assert_ne!",
     "debug_assert!",
+    "debug_assert_eq!",
+    "debug_assert_ne!",
     "unreachable!",
     "panic!",
 ];
