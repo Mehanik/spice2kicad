@@ -298,7 +298,7 @@ For full grammar, examples, and diagnostics, see
 
   **What X means, and where the roots come from.** The shipping placer
   is `--placer=flow-seed-v4`, promoted to the default on 2026-08-24
-  (ADR-23 § "The second promotion", owner-authorised on the scoreboard's
+  (ADR-23 § "The second promotion", landed under the owner's standing "proceed without asking" instruction, on the scoreboard's
   table). Under it **X measures depth along the DC signal path**: the X
   layering roots at *signal-flow sources only*, demotes rail stubs
   (Power **or** Ground, signal degree ≤ 1) to **followers** assigned

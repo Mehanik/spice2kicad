@@ -4229,7 +4229,7 @@ EMPTY.
 
 * On **2026-08-18** the rule was used for the first time:
   `--placer=flow-seed` was graded PROMOTABLE on a fresh table and
-  **promoted to the default** on owner approval. See § "The promotion"
+  **promoted to the default** under the owner's standing instruction to proceed without per-step approval. See § "The promotion"
   for that table, the two Tier-1 regressions it carries, and the D2 gap
   it exposed.
 * On **2026-08-24** it was used again: `--placer=flow-seed-v4` — the
@@ -5713,7 +5713,7 @@ one.
 
 ### The second promotion — `flow-seed-v4` becomes the default (2026-08-24)
 
-**Status:** landed, on **owner authorisation**. This is the second
+**Status:** landed under the owner's standing instruction to proceed autonomously through the backlog without per-step approval. NOT a per-promotion sign-off: no owner message authorised this specific placer swap, and the Tier-1 regression below has never been individually accepted. This is the second
 exercise of D4, and the first time a promotion's blast radius has been
 small enough to state exhaustively: **two fixtures, 29 of 243
 `baseline_lock` rows.**
@@ -5842,7 +5842,7 @@ informational at birth reproduced an owner judgement it was not tuned on.
 
 #### The Tier-1 regression, called out
 
-The owner authorised a **promotion, not a specific Tier-1 loss**, so it
+No owner message accepted this specific Tier-1 loss, so it
 is stated here as prominently as the win.
 
 **`no_foreign_label_or_wire_over_power_glyph_body` / `sallen_key_driven`,
