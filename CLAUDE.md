@@ -97,9 +97,11 @@ crates/
   spice-resolve/     AST → resolved netlist; symbol / pinmap / ignore /
                      power / subckt decisions
   spice-layout/      placement: net-class → bands → layers → SA refine →
-                     symmetry → hierarchical sheets; `placer.rs` is the
-                     ADR-23 name registry (default `flow-seed`, control
-                     arm `champion`)
+                     symmetry → hierarchical sheets; `roots.rs` is the
+                     one signal-flow root policy both the layering and
+                     the flow idioms read; `placer.rs` is the ADR-23 name
+                     registry (default `flow-seed-v4`, control arms
+                     `flow-seed` and `champion`)
   spice-route/       Steiner routing, power glyphs, PWR_FLAG, conflict /
                      obstacle resolution
   kicad-emitter/     placed model → KiCad S-expressions; phase-4.5
@@ -294,33 +296,54 @@ For full grammar, examples, and diagnostics, see
   can see both the placer and the real router). The constraint resolver
   from spec §5 sits between the parser and the emitter.
 
-  **What X means, and the two policies that assign it.** The shipping
-  placer is `--placer=flow-seed`, promoted to the default on 2026-08-18
-  (ADR-23 § "The promotion", owner-approved on the scoreboard's table).
-  Under it **X measures depth along the DC signal path**: the X layering
-  roots at *signal-flow sources only* (declared `*@port` inputs and leaf
-  input nets, behind ADR-18's `signal_degree <= 2` "boundary not
-  interior" filter), demotes rail stubs (Power **or** Ground, signal
-  degree ≤ 1) to **followers** assigned after the BFS, and orders each
-  bucket by neighbour barycenter.
+  **What X means, and where the roots come from.** The shipping placer
+  is `--placer=flow-seed-v4`, promoted to the default on 2026-08-24
+  (ADR-23 § "The second promotion", owner-authorised on the scoreboard's
+  table). Under it **X measures depth along the DC signal path**: the X
+  layering roots at *signal-flow sources only*, demotes rail stubs
+  (Power **or** Ground, signal degree ≤ 1) to **followers** assigned
+  after the BFS, and orders each bucket by neighbour barycenter.
 
-  The **old policy is now the fallback, not the default**: rooting at
+  **One root policy, two traversals.** `crates/spice-layout/src/roots.rs`
+  owns the root set, and BOTH consumers read it —
+  `layers::assign_x_layers_with` takes its **element** roots for a
+  longest-path DAG, `idioms::signal_net_depth` its **net** roots for a
+  shortest-hop BFS. The traversals stay apart on purpose; every defect
+  this class produced was a disagreement about *which roots exist*, never
+  about the walk. The tiers are **`DeclaredPorts` ≻ `DrawnSources` ≻
+  `LeafNames` ≻ `None`**, with ADR-18's `signal_degree <= 2` "boundary
+  not interior" filter applied inside the tier — including to declared
+  ports, so a `*@port` on an interior net cannot root mid-chain
+  unchallenged. Before this unification the two consumers carried
+  independently-drifted policies; `roots.rs`'s module docs enumerate the
+  three defects that cost.
+
+  The **rail-rooted policy is the fallback, not the default**: rooting at
   `input_root(i) || touches_power(i)`, i.e. every rail-touching stub is
   a layer-0 root, so X measured *hops from the nearest power rail* — a
   functional that saturates at ~2 layers in any biased amplifier however
   many stages it has. A circuit with **no signal-flow root at all**
   (`diff_pair`, `multivibrator`, `wien_bridge_osc` — a pure cycle with
   no input) still takes that rail-rooted policy **verbatim**, and those
-  three fixtures are byte-identical across the promotion. So is
-  `lc_ladder_lpf` / `sallen_key_driven`, which have real drawn sources
-  and never entered the fallback at all. If you change the fallback,
-  those five are the cheapest check that you did not disturb it.
+  three fixtures are byte-identical across both promotions. That fallback
+  is **layers-only, forever**: when no signal-flow root exists the depth
+  map returns EMPTY and `apply_series_horizontal` declines, because
+  rail-hop depth is not a signal direction.
 
-  `Placer::Champion` — the pre-promotion placer — stays **registered**
-  as the scoreboard's control arm and must remain runnable
-  (`--placer champion`): every future challenger is graded against the
-  new default, and A/B against the old one is what attributes a
-  regression to the promotion rather than to the change under test.
+  **Which fixtures can move when you touch the root policy.** Only the
+  two with a *drawn* stimulus — `lc_ladder_lpf` and `sallen_key_driven`.
+  Every other fixture tags its source `;@ ignore`, so the drawn-source
+  tier is unreachable there. That is why the second promotion moved 29 of
+  243 `baseline_lock` rows against the first promotion's 157 of 282, and
+  it is the cheapest check on any future root change: if a third fixture
+  moves, the containment argument is wrong.
+
+  **Both superseded defaults stay registered as control arms** and must
+  remain runnable: `--placer flow-seed` (the 2026-08-18 default) is the
+  arm for the root-policy promotion, `--placer champion` (the original)
+  the arm for the one before it. A/B against a *specific* previous
+  architecture is the only way to attribute a future regression to a
+  particular promotion rather than to the change under test.
   `spice_layout::layers::assign_x_layers` (the variant-free entry point)
   is deliberately still pinned to the champion policy — it is a fixed
   *reference* layering for `cost::layer_order` and the Q3 verifier, not
@@ -712,6 +735,14 @@ stays per-fixture hard for both sides; Tier 1 and Tier 2 are judged in
 make sideways trades *within* a tier. On promotion, `baseline_lock` and
 every literal are regenerated at the challenger's values and the
 zero-slack regime resumes.
+
+It has now issued **two** promotions — `flow-seed` (2026-08-18) and
+`flow-seed-v4` (2026-08-24). When you re-record literals after one, read
+the measured values from the **scoreboard sink**, never from test output:
+several budgets only fail on excess and print their "you may lower this
+to N" hint through `eprintln!`, which cargo swallows on a *passing* test.
+Both promotions hit that trap; the first left an agent reporting "V16
+unchanged" when B had improved 19 → 10.
 
 **The scoreboard is NOT a licence to bypass a ratchet.** It applies to
 whole-placer comparisons only — a registered `--placer` variant graded

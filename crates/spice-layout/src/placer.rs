@@ -14,12 +14,15 @@
 //! measure the emitted geometry with the same verifiers. This module is
 //! that name registry; `--placer=<name>` on the CLI selects one.
 //!
-//! **[`Placer::FlowSeed`] is the default since the ADR-23 promotion**
-//! (2026-08-18): it was graded PROMOTABLE against the incumbent and the
-//! ratchets plus `baseline_lock` were regenerated at its geometry.
-//! [`Placer::Champion`] stays registered as the **control arm** — it
-//! must remain runnable, because every future challenger is graded
-//! against the new default and the old default stays available for A/B.
+//! **[`Placer::FlowSeedV4`] is the default since the second ADR-23
+//! promotion** (2026-08-24): it was graded PROMOTABLE against
+//! [`Placer::FlowSeed`] and the ratchets plus `baseline_lock` were
+//! regenerated at its geometry. **Two** control arms stay registered and
+//! runnable — [`Placer::FlowSeed`], the placer it replaced, and
+//! [`Placer::Champion`], the one *that* replaced — because every future
+//! challenger is graded against the new default and A/B against a
+//! previous architecture is what attributes a regression to a promotion
+//! rather than to the change under test.
 //!
 //! **A challenger is not a licence to bypass a ratchet.** An ordinary
 //! change still has to satisfy every per-fixture budget. The scoreboard
@@ -30,9 +33,10 @@
 ///
 /// Variants are *registered alternatives*, not tuning knobs: each one is
 /// a whole seed strategy that the scoreboard can grade end-to-end.
-/// [`Placer::FlowSeed`] is the default since the ADR-23 promotion;
-/// [`Placer::Champion`] is the retained control arm and every other
-/// variant is dead on the default path.
+/// [`Placer::FlowSeedV4`] is the default since the second ADR-23
+/// promotion; [`Placer::FlowSeed`] and [`Placer::Champion`] are the two
+/// retained control arms and every other variant is dead on the default
+/// path.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Placer {
     /// The former default, retained as the scoreboard's **control
@@ -116,8 +120,11 @@ pub enum Placer {
     /// integrity check is that `diff_pair`, `multivibrator` and
     /// `wien_bridge_osc` emit byte-identically across the swap.
     ///
-    /// **The default placer since the ADR-23 promotion (2026-08-18).**
-    #[default]
+    /// **The default placer from the first ADR-23 promotion
+    /// (2026-08-18) until the second (2026-08-24)**, when
+    /// [`Placer::FlowSeedV4`] superseded it. Retained as a **control
+    /// arm**: A/B against it is what attributes a future regression to
+    /// the root-policy unification rather than to the change under test.
     FlowSeed,
     /// **Orientation-churn Stage 1** — one depth-root policy, shared by
     /// the X layering and the flow idioms.
@@ -204,6 +211,19 @@ pub enum Placer {
     /// `multivibrator` and `wien_bridge_osc` are byte-identical for
     /// exactly that reason, and are the cheapest check that they stayed
     /// so.
+    ///
+    /// **The default placer since the second ADR-23 promotion
+    /// (2026-08-24).** Graded PROMOTABLE against [`Placer::FlowSeed`] on
+    /// a fresh whole-suite table — Tier 0 clean on both arms with no
+    /// regressed cell, Tier 1 −1.00, Tier 2 −25.30 — and promoted on
+    /// owner authorisation. Only the two fixtures with a drawn stimulus
+    /// move (`lc_ladder_lpf`, `sallen_key_driven`); the other sixteen are
+    /// byte-identical, verified with `diff` on the emitted sheets rather
+    /// than inferred. The headline repair is `lc_ladder_lpf`, which the
+    /// owner called "completely mad" under the old default (`RS`/`L1`/
+    /// `L2`/`L3` at rotations 180/90/0/270) and which now emits the
+    /// textbook ladder: all four at rot 90 on one line at y = 35.56.
+    #[default]
     FlowSeedV4,
     /// **Rail-gated divider idiom** — [`Placer::FlowSeedV4`] plus a
     /// `detect_dividers` predicate that matches an actual voltage
@@ -255,9 +275,10 @@ pub enum Placer {
 }
 
 impl Placer {
-    /// Every registered placer, the default first and the retained
-    /// control arm second.
+    /// Every registered placer, the default first and the two retained
+    /// control arms next.
     pub const ALL: &'static [Self] = &[
+        Self::FlowSeedV4,
         Self::FlowSeed,
         Self::Champion,
         Self::M4YDatum,
@@ -266,7 +287,6 @@ impl Placer {
         Self::M5Streams,
         Self::FlowSeedV2,
         Self::FlowSeedV3,
-        Self::FlowSeedV4,
         Self::DividerRails,
         Self::DividerRailsStrict,
     ];
@@ -294,7 +314,7 @@ impl Placer {
     pub fn description(self) -> &'static str {
         match self {
             Self::Champion => {
-                "the pre-promotion placer, retained as the scoreboard control arm \
+                "the original pre-promotion placer, retained as a scoreboard control arm \
                  (n-scaled Y frame; X = hops from the nearest power rail)"
             }
             Self::M4YDatum => "ADR-19 M4: content-derived, n-independent Y datum",
@@ -304,7 +324,7 @@ impl Placer {
             }
             Self::M5Streams => "ADR-19 M5': per-refdes SA proposal streams, deterministic sweep",
             Self::FlowSeed => {
-                "default: flow-faithful skeleton \
+                "control arm: the first-promotion flow-faithful skeleton \
                  (signal-flow roots, stub followers, barycenter order)"
             }
             Self::FlowSeedV2 => {
@@ -316,8 +336,8 @@ impl Placer {
                  never-increase gate extended from mirror-Y to rotate"
             }
             Self::FlowSeedV4 => {
-                "root-policy unification: one tiered signal-flow root set, \
-                 read by the X layering and the flow idioms alike"
+                "default: root-policy unification — one tiered signal-flow \
+                 root set, read by the X layering and the flow idioms alike"
             }
             Self::DividerRails => {
                 "flow-seed-v4 plus a rail-gated divider idiom: a divider \
@@ -458,20 +478,29 @@ mod tests {
     use super::Placer;
 
     #[test]
-    fn default_is_the_flow_seed_placer() {
-        assert_eq!(Placer::default(), Placer::FlowSeed);
-        assert_eq!(Placer::default().name(), "flow-seed");
+    fn default_is_the_unified_roots_placer() {
+        assert_eq!(Placer::default(), Placer::FlowSeedV4);
+        assert_eq!(Placer::default().name(), "flow-seed-v4");
     }
 
-    /// The promoted default did not retire the control arm. ADR-23's
-    /// promotion rule grades every future challenger against the new
-    /// default, and the old default has to stay runnable for the A/B
-    /// that attributes a regression to the promotion or to the change
-    /// under test.
+    /// Neither promotion retired its predecessor. ADR-23's promotion
+    /// rule grades every future challenger against the new default, and
+    /// each superseded default has to stay runnable for the A/B that
+    /// attributes a regression to a promotion rather than to the change
+    /// under test. `flow-seed` is the arm for the 2026-08-24 root-policy
+    /// promotion; `champion` is the arm for the 2026-08-18 one.
     #[test]
-    fn the_champion_control_arm_stays_registered() {
+    fn both_control_arms_stay_registered() {
         assert_eq!(Placer::from_name("champion"), Some(Placer::Champion));
         assert!(Placer::ALL.contains(&Placer::Champion));
+        assert_eq!(Placer::from_name("flow-seed"), Some(Placer::FlowSeed));
+        assert!(Placer::ALL.contains(&Placer::FlowSeed));
+        // Both must be genuinely *different* from the default, or the
+        // A/B they exist for would be vacuous.
+        assert_ne!(Placer::default(), Placer::FlowSeed);
+        assert_ne!(Placer::default(), Placer::Champion);
+        assert!(!Placer::FlowSeed.unified_roots());
+        assert!(!Placer::Champion.flow_seed_layering());
     }
 
     #[test]
@@ -488,8 +517,11 @@ mod tests {
     /// output — `baseline_lock` is the empirical half.
     #[test]
     fn the_orientation_churn_stages_are_off_by_default() {
+        // v2's bolted-on third tier and v3's SA rotate gate are both
+        // still challengers: the promoted default reads `roots.rs`
+        // instead, and never runs either.
         assert!(!Placer::default().unified_depth_roots());
-        assert!(!Placer::default().unified_roots());
+        assert!(!Placer::FlowSeed.unified_roots());
         assert!(!Placer::Champion.unified_roots());
         assert!(!Placer::default().sa_rotate_v5_gate());
         assert!(!Placer::Champion.unified_depth_roots());
@@ -499,7 +531,7 @@ mod tests {
         assert!(!Placer::FlowSeedV2.sa_rotate_v5_gate());
         assert!(Placer::FlowSeedV3.unified_depth_roots());
         assert!(Placer::FlowSeedV3.sa_rotate_v5_gate());
-        // Both build ON the promoted default's layering, so a comparison
+        // Both build ON the first promotion's layering, so a comparison
         // against `flow-seed` isolates the stage under test.
         assert!(Placer::FlowSeedV2.flow_seed_layering());
         assert!(Placer::FlowSeedV3.flow_seed_layering());
@@ -509,16 +541,17 @@ mod tests {
     /// replaces the depth map's tier ladder rather than extending it, so
     /// it must NOT also report `unified_depth_roots` (that would run v2's
     /// bolted-on third tier inside the else-branch v4 never takes, and
-    /// blur the two arms the scoreboard is comparing).
+    /// blur the two arms the scoreboard compared).
     #[test]
-    fn the_root_unification_is_dead_on_the_default_path_and_distinct_from_v2() {
+    fn the_root_unification_is_the_default_and_distinct_from_v2() {
+        assert!(Placer::default().unified_roots());
         assert!(Placer::FlowSeedV4.unified_roots());
         assert!(!Placer::FlowSeedV4.unified_depth_roots());
         assert!(!Placer::FlowSeedV4.sa_rotate_v5_gate());
         assert!(!Placer::FlowSeedV2.unified_roots());
         assert!(!Placer::FlowSeedV3.unified_roots());
-        // Built ON the promoted default's layering, so an A/B against
-        // `flow-seed` isolates the root policy and nothing else.
+        // Built ON the first promotion's layering, so the A/B against
+        // `flow-seed` isolated the root policy and nothing else.
         assert!(Placer::FlowSeedV4.flow_seed_layering());
     }
 

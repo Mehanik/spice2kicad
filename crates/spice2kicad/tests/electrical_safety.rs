@@ -2172,12 +2172,20 @@ fn v5_violation_budget(name: &str) -> usize {
         // and it is recorded here rather than hidden in the catch-all
         // so the zero-slack ratchet still trips if it grows to 2.
         "opamp_inverting_real" => 1,
-        // `lc_ladder_lpf` is CLEAN, and deliberately kept as the control
-        // arm: it is the other new fixture with a drawn source and the
-        // only one of the four with zero V5 residue, so "drawn stimulus"
-        // is demonstrably not what drives the metric.
+        // --- SECOND ADR-23 PROMOTION: `--placer=flow-seed-v4` becomes
+        // the default (owner-authorised, 2026-08-24) ------------------
         //
-        // diff_pair, port_shapes, lc_ladder_lpf: zero violations.
+        // V5 0 -> 1. `lc_ladder_lpf` was the suite's clean control arm
+        // here and now carries exactly one residual: `L3.2`, the far end
+        // of the straightened ladder, whose `out` net continues to `C4`
+        // and `RL` rather than leaving the pin outward. This is the
+        // documented V5-vs-flow tension (MEMORY "flow-orientation wall";
+        // invariants.md V5: "some V5 violations are the correct flow
+        // drawing") — the pose that produces it is the textbook one the
+        // owner asked for. Recorded as its own arm rather than left in
+        // the catch-all so the zero-slack ratchet still trips at 2.
+        "lc_ladder_lpf" => 1,
+        // diff_pair, port_shapes: zero violations.
         _ => 0,
     }
 }

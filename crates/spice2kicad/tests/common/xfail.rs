@@ -126,15 +126,28 @@ const XFAIL: &[(&str, &str, &str)] = &[
     // deferred long before this work — each is the SAME defect an
     // existing fixture already carries an entry for, not a new one.
     // `sallen_key_driven`'s rendered-ink entry expired with the pin-text
-    // / sheet-port-name model correction; only its model-side half is
-    // still owed.
-    (
-        "v13_property_text_no_mutual_overlap",
-        "sallen_key_driven",
-        "deferred V13(4) decoration nudge: RA's Reference and Value both clip #PWR5's rail text — \
-         the model-side residue of the defect whose rendered-ink half `rendered_text` no longer \
-         sees; RA is boxed in on every candidate anchor, so the nudge keeps its least-bad one",
-    ),
+    // / sheet-port-name model correction; its model-side half then
+    // expired too — see below.
+    //
+    // EXPIRED 2026-08-24 by the SECOND ADR-23 PROMOTION
+    // (`--placer=flow-seed-v4` becomes the default). ONE entry deleted,
+    // reported by its own tripwire as UNEXPECTED PASS:
+    //
+    //   * `v13_property_text_no_mutual_overlap` [sallen_key_driven] —
+    //     "RA's Reference and Value both clip #PWR5's rail text … RA is
+    //     boxed in on every candidate anchor, so the nudge keeps its
+    //     least-bad one". It was registered as a *decoration nudge*
+    //     defect. It was a ROOT-POLICY defect: `sallen_key_driven` draws
+    //     its stimulus, so the old depth map came back EMPTY and
+    //     `apply_series_horizontal` declined the whole circuit, leaving
+    //     RA boxed in. Give the fixture a real signal root and RA is not
+    //     boxed in, so the nudge has somewhere to go — `v13.4_text_mutual`
+    //     falls 2 -> 0.
+    //
+    // That is D9's finding landing a second time, on a second stage: **a
+    // defect attributed to a downstream stage can be a symptom of the
+    // skeleton, and a deferral written against the wrong stage never
+    // expires on its own.**
     // --- REGRESSIONS INTRODUCED BY THE ADR-23 PROMOTION of
     // `--placer=flow-seed` to the default (owner-approved, 2026-08-18).
     //
@@ -172,6 +185,34 @@ const XFAIL: &[(&str, &str, &str)] = &[
          verifier's own budget doc says — the label-nudge pass does not treat power-glyph bodies \
          as obstacles — so it is one fixture, one label, and it expires the day that pass learns \
          about glyphs",
+    ),
+    // --- REGRESSION INTRODUCED BY THE SECOND ADR-23 PROMOTION of
+    // `--placer=flow-seed-v4` to the default (owner-authorised,
+    // 2026-08-24).
+    //
+    // Read this as an owner-facing report, exactly like the block above.
+    // The owner authorised a **promotion**, not this specific Tier-1
+    // loss. It is the single `+1.00` Tier-1 cell on the promotion's
+    // table, weighed against the `-2.00` the same fixture gives back
+    // (`v13.4_text_mutual` 2 -> 0), for a net Tier-1 of -1.00. It was
+    // VISIBLE on the scoreboard before the decision, not discovered
+    // after it.
+    //
+    // Registered as a tripwire rather than given budget headroom, for
+    // the reason the block above states: a budget hides a count inside a
+    // number that only ratchets, and `#[ignore]` would drop the whole
+    // verifier. A tripwire is the only exclusion that announces itself
+    // the day it is fixed.
+    (
+        "no_foreign_label_or_wire_over_power_glyph_body",
+        "sallen_key_driven",
+        "TIER-1 REGRESSION introduced by the ADR-23 flow-seed-v4 promotion: the `out` net's wire \
+         (77.47,45.72)->(101.60,45.72) now crosses the `VEE` rail-glyph body (0 -> 1). Same \
+         deferred class as the `named_rails` entry directly above and fixable in the same place — \
+         this verifier's own budget doc records that the decoration pass does not treat \
+         power-glyph bodies as obstacles; here it is the ROUTER rather than the label-nudge that \
+         needs to learn it. One fixture, one wire, and it expires the day that pass learns about \
+         glyphs",
     ),
     // R-5, and the fixture ADR-20 named it on. ADR-20 concluded that R-5
     // was what made `shunt_feedback_amp` UNCONVERTIBLE, escalating it

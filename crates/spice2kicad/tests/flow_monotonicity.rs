@@ -337,7 +337,20 @@ const Q3_FLOW_MONOTONICITY_BUDGET: &[(&str, u32)] = &[
     // the FIRST fixture whose signal graph has a real root (its source
     // is drawn, not `;@ ignore`d), so it is the only place the rooted
     // layering path is actually measured.
-    ("lc_ladder_lpf", 2),
+    // --- SECOND ADR-23 PROMOTION: `--placer=flow-seed-v4` becomes the
+    // default (owner-authorised, 2026-08-24). Re-recorded at the NEW
+    // DEFAULT's measured value, read from the scoreboard sink. Only the
+    // two drawn-stimulus fixtures move; a whole-placer swap is the ONLY
+    // sanctioned way one of these RISES, and it is not available to an
+    // ordinary change.
+    //
+    // Q3 2 -> 3. RISE, and the one Tier-2 cell `lc_ladder_lpf` pays for
+    // its repair. Straightening the ladder onto a single lane puts the
+    // three shunt legs (`C1`/`RS`, `C4`/`RL`, `L3`/`RL`) beside their
+    // partners instead of below them, which the X-only monotonicity
+    // test reads as an inversion. Weighed against B 16 -> 5, detour
+    // -13.66 pp, Q5 5 -> 1 and F5 3 -> 1 on the same fixture.
+    ("lc_ladder_lpf", 3),
     ("sallen_key_lpf", 2),
     // Zero — an oscillator has no forward direction to violate, which
     // is the control arm the other three are read against.
@@ -346,7 +359,15 @@ const Q3_FLOW_MONOTONICITY_BUDGET: &[(&str, u32)] = &[
     // `tests/f0_defects.rs` once the Steiner-vertex-on-foreign-pin defect was
     // fixed. NEW-GEOMETRY BASELINES, zero slack, ratchet DOWN only. Adding
     // them moved no existing fixture's literal.
-    ("sallen_key_driven", 3),
+    // --- SECOND ADR-23 PROMOTION: `--placer=flow-seed-v4` becomes the
+    // default (owner-authorised, 2026-08-24). Re-recorded at the NEW
+    // DEFAULT's measured value, read from the scoreboard sink. Only the
+    // two drawn-stimulus fixtures move; a whole-placer swap is the ONLY
+    // sanctioned way one of these RISES, and it is not available to an
+    // ordinary change.
+    //
+    // Q3 3 -> 1. Ratchet DOWN.
+    ("sallen_key_driven", 1),
     // RISE 2 -> 3, rail-stub SIDE fix (Tier 2, global-improvement escape,
     // AWAITING OWNER SIGN-OFF). Same re-basing as the Q5 entry.
     ("shunt_feedback_amp", 2),

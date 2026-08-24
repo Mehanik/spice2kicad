@@ -277,7 +277,20 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     // whose ideal drawing is a single straight line, and the placer
     // spends 16 bends on it. That is the long-chain / no-fold headroom
     // F2 exists to expose.
-    ("lc_ladder_lpf", 16, 2),
+    // --- SECOND ADR-23 PROMOTION: `--placer=flow-seed-v4` becomes the
+    // default (owner-authorised, 2026-08-24). Re-recorded at the NEW
+    // DEFAULT's measured value, read from the scoreboard sink. Only the
+    // two drawn-stimulus fixtures move; a whole-placer swap is the ONLY
+    // sanctioned way one of these RISES, and it is not available to an
+    // ordinary change.
+    //
+    // B 16 -> 5, J 2 -> 1. The largest single-fixture V16 win the
+    // project has recorded on this fixture: the ladder is now drawn as
+    // the single straight line its own baseline comment said it should
+    // be ("the one circuit in the benchmark whose ideal drawing is a
+    // single straight line, and the placer spends 16 bends on it").
+    // Ratchet DOWN on both counts.
+    ("lc_ladder_lpf", 5, 1),
     ("sallen_key_lpf", 12, 1),
     // B = 10 on eight graded elements: an oscillator is a pure cycle,
     // and the placer lays it out as if it were a chain, so the loop
@@ -287,7 +300,15 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     // `tests/f0_defects.rs` once the Steiner-vertex-on-foreign-pin defect was
     // fixed. NEW-GEOMETRY BASELINES, zero slack, ratchet DOWN only. Adding
     // them moved no existing fixture's literal.
-    ("sallen_key_driven", 13, 4),
+    // --- SECOND ADR-23 PROMOTION: `--placer=flow-seed-v4` becomes the
+    // default (owner-authorised, 2026-08-24). Re-recorded at the NEW
+    // DEFAULT's measured value, read from the scoreboard sink. Only the
+    // two drawn-stimulus fixtures move; a whole-placer swap is the ONLY
+    // sanctioned way one of these RISES, and it is not available to an
+    // ordinary change.
+    //
+    // B 13 -> 12, J 4 -> 1. Ratchet DOWN on both counts.
+    ("sallen_key_driven", 12, 1),
     // B 12 -> 11, rail-stub SIDE fix. Ratchet DOWN.
     ("shunt_feedback_amp", 12, 3),
     // B 10 → 4. Phase 4.5's acceptance objective gained the V16

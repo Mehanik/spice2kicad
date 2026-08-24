@@ -945,14 +945,31 @@ const FLOW_POSE_RATCHET: &[(&str, usize, usize)] = &[
     // the suite. Every inductor in a ladder is a series element on the
     // main signal path, so a placer that draws series parts vertical has
     // nowhere to hide here. This is the F5 headroom F2 exists to expose.
-    ("lc_ladder_lpf", 3, 0),
+    // --- SECOND ADR-23 PROMOTION: `--placer=flow-seed-v4` becomes the
+    // default (owner-authorised, 2026-08-24). Re-recorded at the NEW
+    // DEFAULT's measured value, read from the scoreboard sink. Only the
+    // two drawn-stimulus fixtures move; a whole-placer swap is the ONLY
+    // sanctioned way one of these RISES, and it is not available to an
+    // ordinary change.
+    //
+    // F5 3 -> 1, P5 unchanged. The three series-pose violations were the
+    // three ladder members phase 4.5 had rotated off-axis. Ratchet DOWN.
+    ("lc_ladder_lpf", 1, 0),
     ("sallen_key_lpf", 2, 0),
     ("wien_bridge_osc", 0, 0),
     // --- F3 (Tier-0 router fix, ADR-24): the two fixtures promoted out of
     // `tests/f0_defects.rs` once the Steiner-vertex-on-foreign-pin defect was
     // fixed. NEW-GEOMETRY BASELINES, zero slack, ratchet DOWN only. Adding
     // them moved no existing fixture's literal.
-    ("sallen_key_driven", 3, 0),
+    // --- SECOND ADR-23 PROMOTION: `--placer=flow-seed-v4` becomes the
+    // default (owner-authorised, 2026-08-24). Re-recorded at the NEW
+    // DEFAULT's measured value, read from the scoreboard sink. Only the
+    // two drawn-stimulus fixtures move; a whole-placer swap is the ONLY
+    // sanctioned way one of these RISES, and it is not available to an
+    // ordinary change.
+    //
+    // F5 3 -> 1, P5 unchanged. Ratchet DOWN.
+    ("sallen_key_driven", 1, 0),
     // F5 1 -> 0: with RB above `b`, every series part on this fixture is
     // drawn horizontal. Ratchet DOWN.
     ("shunt_feedback_amp", 0, 0),
@@ -1128,14 +1145,40 @@ const STUB_RUN_RATCHET: &[(&str, u32)] = &[
     ("cascode_amp", 5),
     // Nine cells: the shunt capacitors of the ladder drift sideways of
     // the nodes they terminate, the length of the chain.
-    ("lc_ladder_lpf", 9),
+    // --- SECOND ADR-23 PROMOTION: `--placer=flow-seed-v4` becomes the
+    // default (owner-authorised, 2026-08-24). Re-recorded at the NEW
+    // DEFAULT's measured value, read from the scoreboard sink. Only the
+    // two drawn-stimulus fixtures move; a whole-placer swap is the ONLY
+    // sanctioned way one of these RISES, and it is not available to an
+    // ordinary change.
+    //
+    // F6 9 -> 10. RISE of one cell, and it is the drawn source `VIN`,
+    // not a rail stub in the usual sense: straightening the ladder onto
+    // one lane leaves `VIN` reaching 10 cells (12.70 mm) sideways to its
+    // node instead of 9. One cell, against B 16 -> 5 and detour
+    // -13.66 pp on the same fixture.
+    ("lc_ladder_lpf", 10),
     ("sallen_key_lpf", 0),
     ("wien_bridge_osc", 4),
     // --- F3 (Tier-0 router fix, ADR-24): the two fixtures promoted out of
     // `tests/f0_defects.rs` once the Steiner-vertex-on-foreign-pin defect was
     // fixed. NEW-GEOMETRY BASELINES, zero slack, ratchet DOWN only. Adding
     // them moved no existing fixture's literal.
-    ("sallen_key_driven", 7),
+    // --- SECOND ADR-23 PROMOTION: `--placer=flow-seed-v4` becomes the
+    // default (owner-authorised, 2026-08-24). Re-recorded at the NEW
+    // DEFAULT's measured value, read from the scoreboard sink. Only the
+    // two drawn-stimulus fixtures move; a whole-placer swap is the ONLY
+    // sanctioned way one of these RISES, and it is not available to an
+    // ordinary change.
+    //
+    // F6 7 -> 13. RISE, and the largest single Tier-2 cost of this
+    // promotion: `VIN` now sits 13 cells (16.51 mm) sideways of its
+    // node. Same mechanism as `lc_ladder_lpf` above — the drawn source
+    // is rooted at the head of the chain and the chain got longer in X
+    // — and it is what the fixture's detour rise (+8.36 pp) is made of.
+    // Weighed against crossings 3 -> 0, J 4 -> 1, Q3 3 -> 1, F5 3 -> 1
+    // and the V13(4) xfail discharge on the same fixture.
+    ("sallen_key_driven", 13),
     // F6 9 -> 5: RB's column is no longer dragged sideways by the
     // below-the-node re-column. Ratchet DOWN.
     ("shunt_feedback_amp", 5),

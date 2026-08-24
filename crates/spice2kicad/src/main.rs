@@ -58,16 +58,16 @@ struct Cli {
 
     /// Which registered placement engine to run (ADR-23).
     ///
-    /// `flow-seed` (the default since the ADR-23 promotion) is the
-    /// shipping placer — omitting the flag changes nothing. `champion`
-    /// is the retained **control arm**, the placer that shipped before
-    /// the promotion, kept runnable for A/B. Every other name is a
-    /// *challenger*: an alternative registered so the champion/
-    /// challenger scoreboard can grade it end-to-end against the same
-    /// verifiers. A non-default placer is not a supported output mode
-    /// and is not a licence to bypass a ratchet; see
-    /// `docs/layout-adr.md` ADR-23.
-    #[arg(long, default_value = "flow-seed", value_parser = parse_placer)]
+    /// `flow-seed-v4` (the default since the second ADR-23 promotion,
+    /// 2026-08-24) is the shipping placer — omitting the flag changes
+    /// nothing. `flow-seed` and `champion` are the retained **control
+    /// arms**, the two placers that shipped before it, kept runnable for
+    /// A/B. Every other name is a *challenger*: an alternative
+    /// registered so the champion/challenger scoreboard can grade it
+    /// end-to-end against the same verifiers. A non-default placer is
+    /// not a supported output mode and is not a licence to bypass a
+    /// ratchet; see `docs/layout-adr.md` ADR-23.
+    #[arg(long, default_value = "flow-seed-v4", value_parser = parse_placer)]
     placer: spice_layout::Placer,
 
     /// Disable the position-stability layout cache (ADR-4). By default

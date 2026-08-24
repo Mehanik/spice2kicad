@@ -352,7 +352,17 @@ const Q5_NEAR_MISS_BUDGET: &[(&str, u32)] = &[
     // Five near-misses. A doubly-terminated ladder is nothing BUT
     // shared axes, and the placer snaps none of them: worst in the suite
     // after `two_stage_amp`.
-    ("lc_ladder_lpf", 5),
+    // --- SECOND ADR-23 PROMOTION: `--placer=flow-seed-v4` becomes the
+    // default (owner-authorised, 2026-08-24). Re-recorded at the NEW
+    // DEFAULT's measured value, read from the scoreboard sink. Only the
+    // two drawn-stimulus fixtures move; a whole-placer swap is the ONLY
+    // sanctioned way one of these RISES, and it is not available to an
+    // ordinary change.
+    //
+    // Q5 5 -> 1. "A doubly-terminated ladder is nothing BUT shared axes,
+    // and the placer snaps none of them" — it snaps them now. Ratchet
+    // DOWN.
+    ("lc_ladder_lpf", 1),
     ("sallen_key_lpf", 3),
     ("wien_bridge_osc", 2),
     // --- F3 (Tier-0 router fix, ADR-24): the two fixtures promoted out of

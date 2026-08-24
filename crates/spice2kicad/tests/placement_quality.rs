@@ -1555,14 +1555,30 @@ fn wire_detour_within_budget_across_fixtures() {
         // Zero slack at 4 dp (the convention every literal here uses),
         // ratchet DOWN. No existing fixture's literal moved.
         ("cascode_amp", 1.2196),
-        ("lc_ladder_lpf", 1.1506),
+        // --- SECOND ADR-23 PROMOTION: `--placer=flow-seed-v4` becomes
+        // the default (owner-authorised, 2026-08-24). Re-recorded at the
+        // NEW DEFAULT's measured value, read from the scoreboard sink.
+        //
+        // detour 1.1506 -> 1.0139. Ratchet DOWN: 13.66 pp of excess wire
+        // removed, the largest Tier-2 gain of this promotion. A straight
+        // ladder is very nearly its own rectilinear lower bound.
+        ("lc_ladder_lpf", 1.0139),
         ("sallen_key_lpf", 1.3019),
         ("wien_bridge_osc", 1.0899),
         // --- F3 (Tier-0 router fix, ADR-24): promoted out of
         // `tests/f0_defects.rs` once the Steiner-vertex-on-foreign-pin
         // defect was fixed. NEW-GEOMETRY BASELINES, zero slack, ratchet
         // DOWN only. Adding them moved no existing fixture's literal.
-        ("sallen_key_driven", 1.0764),
+        // --- SECOND ADR-23 PROMOTION: `--placer=flow-seed-v4` becomes
+        // the default (owner-authorised, 2026-08-24). Re-recorded at the
+        // NEW DEFAULT's measured value, read from the scoreboard sink.
+        //
+        // detour 1.0764 -> 1.1601. RISE of 8.36 pp, the same geometry as
+        // this fixture's F6 rise: the drawn source roots the chain and
+        // its stub runs further sideways. Weighed against crossings
+        // 3 -> 0, V16 J 4 -> 1 and B 13 -> 12, Q3 3 -> 1 and F5 3 -> 1
+        // on the same fixture.
+        ("sallen_key_driven", 1.1601),
         // 1.2410 -> 1.2076 with the promoted flow-seed default, which
         // retires the rail-stub-SIDE-fix rise that was awaiting owner
         // sign-off. Ratchet DOWN.
@@ -1726,7 +1742,12 @@ fn crossing_count_within_budget_across_fixtures() {
         // `tests/f0_defects.rs` once the Steiner-vertex-on-foreign-pin
         // defect was fixed. NEW-GEOMETRY BASELINES, zero slack, ratchet
         // DOWN only. Adding them moved no existing fixture's literal.
-        ("sallen_key_driven", 3),
+        // --- SECOND ADR-23 PROMOTION: `--placer=flow-seed-v4` becomes
+        // the default (owner-authorised, 2026-08-24). Re-recorded at the
+        // NEW DEFAULT's measured value, read from the scoreboard sink.
+        //
+        // crossings 3 -> 0. Ratchet DOWN.
+        ("sallen_key_driven", 0),
         ("shunt_feedback_amp", 0),
     ];
     // Collect-then-assert: see `wire_detour_within_budget_across_fixtures`.

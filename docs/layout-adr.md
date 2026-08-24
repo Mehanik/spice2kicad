@@ -4221,17 +4221,27 @@ what the test must keep deriving independently.
 
 ## ADR-23 — Two instruments: the ratchets detect drift, the scoreboard selects an architecture
 
-**Status:** landed, and **exercised**. The seam, the sink, the
+**Status:** landed, and **exercised twice**. The seam, the sink, the
 aggregator and the promotion rule went in additively — with no
 `--placer` flag and no scoreboard invocation, emitted output was
 byte-identical on all thirteen fixtures and `baseline_lock`'s diff was
-EMPTY. On **2026-08-18** the rule was used for the first time:
-`--placer=flow-seed` was graded PROMOTABLE on a fresh table and
-**promoted to the default** on owner approval, regenerating
-`baseline_lock` and every per-fixture literal at its geometry.
-`champion` remains registered as the control arm. See § "The promotion"
-below for the fresh table, the two Tier-1 regressions it carries, and
-the D2 gap it exposed.
+EMPTY.
+
+* On **2026-08-18** the rule was used for the first time:
+  `--placer=flow-seed` was graded PROMOTABLE on a fresh table and
+  **promoted to the default** on owner approval. See § "The promotion"
+  for that table, the two Tier-1 regressions it carries, and the D2 gap
+  it exposed.
+* On **2026-08-24** it was used again: `--placer=flow-seed-v4` — the
+  root-policy unification — was graded PROMOTABLE and promoted on owner
+  authorisation. See § "The second promotion" for that table, its single
+  Tier-1 regression, and the two-fixture blast radius that makes it the
+  most contained architecture change the instrument has graded.
+
+Each promotion regenerated `baseline_lock` and every per-fixture literal
+at the new default's geometry. **Both superseded defaults stay
+registered as control arms** — `champion` for the first promotion,
+`flow-seed` for the second.
 
 ### The report
 
@@ -5008,6 +5018,12 @@ the first exercise of D4, and the first time `baseline_lock` and the
 per-fixture literals have been regenerated wholesale for an
 architecture change rather than a decoration one.
 
+> **SUPERSEDED AS THE DEFAULT (2026-08-24)** by `flow-seed-v4` — see
+> § "The second promotion" below. `flow-seed` is not retired: it stays
+> registered and runnable as that promotion's control arm. The numbers
+> in this section remain the record of what it won against `champion`,
+> and both of the Tier-1 regressions it introduced are still owed.
+
 #### Re-graded first, because D9's numbers were stale
 
 Two changes landed between D9's grading and this promotion, and both
@@ -5693,6 +5709,253 @@ ink. If stage 2 is pursued, the next question is not the gate's scope but
 its *metric* — `pin_outward_misalignment` is not a churn measure, and a
 gate that only refuses across-body poses cannot protect a flow-faithful
 one.
+
+
+### The second promotion — `flow-seed-v4` becomes the default (2026-08-24)
+
+**Status:** landed, on **owner authorisation**. This is the second
+exercise of D4, and the first time a promotion's blast radius has been
+small enough to state exhaustively: **two fixtures, 29 of 243
+`baseline_lock` rows.**
+
+#### What was promoted
+
+`flow-seed-v4` unifies the signal-root policy. Before it,
+`layers::assign_x_layers_with` and `idioms::signal_net_depth` each
+carried their own idea of where the signal enters the circuit, and the
+two had drifted apart three separate times (`roots.rs` module docs
+enumerate them). After it, both read one
+`roots::signal_flow_roots` with tiers **`DeclaredPorts` ≻ `DrawnSources`
+≻ `LeafNames` ≻ `None`**, ADR-18's "boundary, not interior" filter
+applied *inside* the tier — and, new here, applied to declared ports too,
+so a `*@port` sitting mid-chain can no longer root there unchallenged.
+
+The traversals stay deliberately separate: the layering needs **element**
+roots for a longest-path DAG, the depth map needs **net** roots for a
+shortest-hop BFS. Every defect this class produced was a disagreement
+about *which roots exist*, never about the walk.
+
+One asymmetry is designed and permanent: `no_source_fallback`'s
+rail-rooted policy stays **layers-only**. With no signal-flow root the
+depth map returns EMPTY and `apply_series_horizontal` declines — which is
+the correct answer for a rootless cycle, where fabricating a direction
+out of rail hops is not.
+
+#### Re-graded first, because the earlier grading was stale
+
+Three commits landed between v4's implementation and this promotion
+(`ca992aa` the divider challengers, `1d0056e` 21 newly-registered
+metrics, `e89a32e` the `chain.stranded` metric), so the verdict was
+re-measured on the promotion tree rather than inherited. Fresh run,
+whole suite each side, `--no-fail-fast`, one machine, base `e89a32e`:
+
+| | value |
+| --- | ---: |
+| Tier 0, champion (`flow-seed`) | clean |
+| Tier 0, challenger (`flow-seed-v4`) | clean |
+| Tier 0 **regressed** | **none** |
+| Tier 1 total Δ | **−1.00** |
+| Tier 2 total Δ | **−25.30** |
+| scalar `S` | −1025.30 |
+| coverage complete | yes |
+| **verdict** | **PROMOTABLE** |
+
+Every cell that moved — the whole table, 71 metrics × 18 fixtures:
+
+| metric | tier | fixture | flow-seed | flow-seed-v4 | Δ |
+| --- | --- | --- | ---: | ---: | ---: |
+| `v13.4_text_mutual` | 1 | sallen_key_driven | 2 | **0** | −2.00 |
+| `v13.9_foreign_over_glyph` | 1 | sallen_key_driven | 0 | 1 | **+1.00** |
+| `v5` | 2 | lc_ladder_lpf | 0 | 1 | +1.00 |
+| `v16.bends` | 2 | lc_ladder_lpf | 16 | **5** | −11.00 |
+| `v16.bends` | 2 | sallen_key_driven | 13 | **12** | −1.00 |
+| `v16.branches` | 2 | lc_ladder_lpf | 2 | **1** | −1.00 |
+| `v16.branches` | 2 | sallen_key_driven | 4 | **1** | −3.00 |
+| `crossings` | 2 | sallen_key_driven | 3 | **0** | −3.00 |
+| `detour` | 2 | lc_ladder_lpf | 1.1505 | **1.0139** | −13.66 pp |
+| `detour` | 2 | sallen_key_driven | 1.0764 | 1.1600 | +8.36 pp |
+| `q3` | 2 | lc_ladder_lpf | 2 | 3 | +1.00 |
+| `q3` | 2 | sallen_key_driven | 3 | **1** | −2.00 |
+| `q5` | 2 | lc_ladder_lpf | 5 | **1** | −4.00 |
+| `f5` | 2 | lc_ladder_lpf | 3 | **1** | −2.00 |
+| `f5` | 2 | sallen_key_driven | 3 | **1** | −2.00 |
+| `f6` | 2 | lc_ladder_lpf | 9 | 10 | +1.00 |
+| `f6` | 2 | sallen_key_driven | 7 | 13 | **+6.00** |
+| `q6.cov` | Info | lc_ladder_lpf | 1.3711 | 1.1136 | (info) |
+| `q6.cov` | Info | sallen_key_driven | 1.2247 | 1.0000 | (info) |
+| `chain.axis` | Info | lc_ladder_lpf | 2 | **0** | (info) |
+| `chain.reversal` | Info | lc_ladder_lpf | 1 | **0** | (info) |
+| `chain.stranded` | Info | lc_ladder_lpf | 1 | **0** | (info) |
+
+**That is the entire diff.** No other cell moved, on any of the other
+sixteen fixtures.
+
+#### Containment, verified rather than assumed
+
+Only `lc_ladder_lpf` and `sallen_key_driven` can move, and the reason is
+structural: they are the **only two fixtures with a drawn stimulus**.
+Every other fixture tags its source `;@ ignore`, so the old depth map's
+port/leaf tiers already decided the outcome and the new drawn-source tier
+is never reached. The sixteen were checked with `diff` on the emitted
+`.kicad_sch` under `--placer flow-seed` vs the new default — **byte
+identical, measured, not inferred** — and `baseline_lock` independently
+agrees: 29 of 243 rows moved, all of them on those two fixtures.
+
+This is a much tighter blast radius than the first promotion's ten
+fixtures and 157 rows, and it is worth naming why: **the unification
+changed a policy that was only ever consulted on a path most fixtures
+never take.** A root-policy change is contained by the population that
+has roots to disagree about.
+
+#### `lc_ladder_lpf`: the repair this promotion exists for
+
+The owner's report on the shipped drawing was "completely mad… L1 looks
+good, but why L2 rotated 90 and L3 180? I guess something in placer
+heuristic is fundamentally wrong." They were right, and the fault was
+exactly where they put it — in the skeleton, not in the refiner.
+
+| | RS | L1 | L2 | L3 |
+| --- | --- | --- | --- | --- |
+| `flow-seed` (old default) | 180 | 90 | 0 | 270 |
+| **`flow-seed-v4`** | **90** | **90** | **90** | **90** |
+
+All four now sit on **one line at y = 35.56**, with the shunt caps
+hanging below — the textbook doubly-terminated ladder. Verified in the
+emitted geometry, and independently in SVG ink.
+
+The mechanism: `lc_ladder_lpf` draws its source and declares no
+`*@port …=input`, and `in` is touched by `RS`, `C1` *and* `L1`, so the
+old depth map's leaf backstop rejected it. The map came back **empty**,
+`apply_series_horizontal` declined the whole ladder, and the seed's
+correct drawing was left unpinned for the SA and phase 4.5 to rotate
+apart. The drawn-source tier gives it a root, the idiom pins the chain
+horizontal, and the later stages have nothing left to take apart.
+
+**Two ADR-28 metrics independently witness the repair**, which is the
+first real use those metrics have had. `chain.axis` 2 → 0 and
+`chain.reversal` 1 → 0 say the four members now share one axis and one
+direction; `chain.stranded` 1 → 0 says they are drawn as one connected
+run rather than with `L3` marooned. ADR-28's measured table predicted
+exactly this — it records `lc_ladder_lpf` under `--placer=flow-seed-v4`
+as "0 of 5" — and the promotion delivers it. A metric that was
+informational at birth reproduced an owner judgement it was not tuned on.
+
+#### The Tier-1 regression, called out
+
+The owner authorised a **promotion, not a specific Tier-1 loss**, so it
+is stated here as prominently as the win.
+
+**`no_foreign_label_or_wire_over_power_glyph_body` / `sallen_key_driven`,
+0 → 1.** The `out` net's wire `(77.47,45.72)->(101.60,45.72)` now crosses
+the `VEE` rail-glyph body. It is the single `+1.00` Tier-1 cell on the
+table above, weighed against the `−2.00` the *same fixture* gives back
+(`v13.4_text_mutual` 2 → 0), for a net Tier-1 of −1.00. It was **visible
+on the scoreboard before the decision**, not discovered after it — which
+is the first promotion's "two blind cells" lesson holding.
+
+It is registered in `tests/common/xfail.rs` as a tripwire that expires
+the day it is fixed, not given budget headroom: a budget hides a count
+inside a number that only ratchets. It is the same deferred class as the
+`named_rails` entry beside it — the decoration/routing passes do not
+treat power-glyph bodies as obstacles — except that here it is the
+*router*, not the label-nudge, that needs to learn it.
+
+**The two Tier-1 regressions the previous promotion left riding the
+default are unchanged and still owed**: `v13.9_foreign_over_glyph` /
+`named_rails` and `v14.glyph_body` / `sallen_key_lpf`, both +1, both
+still registered. This promotion neither fixed nor worsened either; both
+fixtures are byte-identical across it.
+
+#### The one XFAIL discharged, and why it is the same finding again
+
+`v13_property_text_no_mutual_overlap` [`sallen_key_driven`] announced
+itself as **UNEXPECTED PASS** and was deleted. It had been filed as a
+*decoration nudge* defect — "RA is boxed in on every candidate anchor, so
+the nudge keeps its least-bad one". It was a **root-policy** defect: with
+the depth map empty, `apply_series_horizontal` declined the whole
+circuit, and *that* is what boxed RA in. Give the fixture a real signal
+root and the nudge has somewhere to go.
+
+That is D9's finding landing a second time, on a second downstream stage:
+**a defect attributed to a downstream stage can be a symptom of the
+skeleton, and a deferral written against the wrong stage never expires on
+its own.** Two promotions have now each discharged deferrals filed
+against the router and the decoration passes by fixing the layering.
+
+#### What was regenerated
+
+`baseline_lock`: **29 of 243 rows**, two fixtures. Sixteen fixtures
+byte-identical.
+
+Every per-fixture literal was re-recorded at the new default's measured
+value, **read from the scoreboard sink rather than from test output** —
+several budgets only fail on excess and print their "you may lower this
+to N" hint through `eprintln!`, which cargo swallows on a passing test.
+(The first promotion records an agent reporting "V16 unchanged" when B
+had improved 19 → 10 for exactly this reason. Here that trap was live
+again: `q5` / `lc_ladder_lpf` 5 → 1 and `crossings` / `sallen_key_driven`
+3 → 0 both *passed* their assertions and would have been left with four
+and three points of slack.)
+
+Eleven literals moved DOWN, five UP:
+
+| direction | literal |
+| --- | --- |
+| DOWN | `v16` `lc_ladder_lpf` (16,2) → **(5,1)**; `sallen_key_driven` (13,4) → **(12,1)** |
+| DOWN | `detour` `lc_ladder_lpf` 1.1506 → **1.0139** |
+| DOWN | `crossings` `sallen_key_driven` 3 → **0** |
+| DOWN | `q3` `sallen_key_driven` 3 → **1** |
+| DOWN | `q5` `lc_ladder_lpf` 5 → **1** |
+| DOWN | `f5` `lc_ladder_lpf` 3 → **1**; `sallen_key_driven` 3 → **1** |
+| UP | `q3` `lc_ladder_lpf` 2 → 3 |
+| UP | `f6` `lc_ladder_lpf` 9 → 10; `sallen_key_driven` 7 → 13 |
+| UP | `detour` `sallen_key_driven` 1.0764 → 1.1601 |
+| UP | `v5` `lc_ladder_lpf` 0 → 1 (new explicit arm; it was the catch-all's clean control) |
+
+The `v5` arm is worth a note. `lc_ladder_lpf` was this budget's stated
+clean control ("the only one of the four with zero V5 residue, so 'drawn
+stimulus' is demonstrably not what drives the metric") and now carries
+one residual: `L3.2`, the far end of the straightened ladder, whose `out`
+net continues to `C4` and `RL` instead of leaving the pin outward. That
+is the documented V5-vs-flow tension — the pose that produces it *is* the
+textbook drawing the owner asked for. It is recorded as its own arm, not
+left in the catch-all, so the zero-slack ratchet still trips at 2.
+
+`f6` on `sallen_key_driven` (7 → 13) is the largest single Tier-2 cost
+and is the same geometry as that fixture's detour rise: the drawn source
+`VIN` roots the chain, the chain got longer in X, and `VIN`'s stub now
+runs 13 cells (16.51 mm) sideways of its node. Both were on the graded
+table.
+
+#### Both control arms stay registered
+
+`flow-seed` joins `champion` as a retained control arm; neither is
+deleted and neither may be. `champion` is the arm for the 2026-08-18
+promotion, `flow-seed` the arm for this one, and A/B against a *specific*
+previous architecture is the only way to attribute a future regression to
+a particular promotion rather than to the change under test.
+`placer::tests::both_control_arms_stay_registered` pins that, and asserts
+they are genuinely distinct from the default so the A/B cannot go vacuous.
+
+`spice_layout::layers::assign_x_layers` — the variant-free entry point —
+remains pinned to the **champion** policy, deliberately and for the
+reason the first promotion gave: it is a fixed *reference* layering for
+`cost::layer_order` and the Q3 verifier, and re-pointing it would
+silently redefine a graded metric.
+
+#### What this does not claim
+
+The aggregate is small (`T1 = −1.00`, `T2 = −25.30`) and rests on two
+fixtures. That is not a weakness of the change, it is its scope: sixteen
+fixtures are byte-identical *by construction*, so there was never
+anything for them to contribute. But it does mean the usual caution
+applies in a sharper form than usual — this table cannot say anything at
+all about how the unified root policy behaves on a circuit shape the
+benchmark does not contain, and **the benchmark contains exactly two
+circuits with a drawn stimulus.** MEMORY "benchmark is the binding
+constraint" is the standing finding here, and F0-class fixtures with real
+drawn sources are what would let the next root-policy question be settled
+by measurement instead of by the two specimens that happen to exist.
 
 
 ## ADR-24 — A Steiner vertex is not an endpoint: the router's own Tier-0 severance
