@@ -1335,8 +1335,8 @@ invariant here.
 
   Motivating specimen, best to worst, reproduced by the metric:
   `lc_ladder_lpf` under `--placer=flow-seed-v4` (0 of 5), `port_shapes`
-  as one connected folded path (0 of 4), `port_shapes` under the
-  shipping default (**2 of 4**).
+  under `--placer=divider-rails` — one connected folded path — (0 of 4),
+  `port_shapes` under the shipping default (**2 of 4**).
 
   Verifier: `crates/spice2kicad/tests/readability_metrics.rs`, with
   `chain_stranded_ranks_the_ladder_the_fold_and_the_shattered_chain` as

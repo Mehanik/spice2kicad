@@ -1301,15 +1301,21 @@ fn chain_axis_ranks_the_textbook_ladder_seed_above_the_shipped_drawing() {
 /// 3. `port_shapes` as two disconnected stacks.
 ///
 /// Arms 2 and 3 are **transcribed pin-for-pin** from the two emitted
-/// `.kicad_sch` files, not re-converted, and that is deliberate twice
-/// over. Arm 2's placer is not on `master`, so it is unreachable here at
-/// all. Arm 3 pins the drawing the metric was built against, so this
-/// test grades a fixed pair of geometries and **cannot block a change
-/// that repairs the shipping placer** — which is what "informational at
-/// birth" requires, and which the strict `mid < worst` assertion below
-/// would otherwise violate. The live default's score is printed, never
-/// asserted; it is recorded per fixture by
+/// `.kicad_sch` files rather than re-converted, and for arm 3 that is
+/// load-bearing: it is the drawing the *shipping* placer makes today, so
+/// asserting `mid < worst` strictly against a live conversion of it
+/// would make this test block the very repair the metric exists to
+/// motivate. Pinned geometry is what keeps metric C informational at
+/// birth. The live default's score is printed, never asserted; it is
+/// recorded per fixture by
 /// `readability_metrics_are_reported_for_every_fixture`.
+///
+/// Arm 2's placer, `--placer=divider-rails`, was not on `master` when
+/// this metric was written and **is** now. It is therefore converted for
+/// real alongside its transcription and checked in `<=` form — the live
+/// arm may improve on the transcription, never read worse. That keeps
+/// the transcription from silently going stale if that placer changes,
+/// without letting a change to it be blocked here.
 #[test]
 fn chain_stranded_ranks_the_ladder_the_fold_and_the_shattered_chain() {
     let ladder = load_arm("lc_ladder_lpf", &["--placer", "flow-seed-v4"]);
@@ -1321,9 +1327,15 @@ fn chain_stranded_ranks_the_ladder_the_fold_and_the_shattered_chain() {
     let shattered = port_shapes_shattered();
     let (worst, worst_n, worst_detail) = compactness_metrics(&shattered);
 
+    let live_fold = load_arm("port_shapes", &["--placer", "divider-rails"]);
+    let (live_mid, live_mid_n, live_mid_detail) = compactness_metrics(&live_fold);
+
     println!("lc_ladder_lpf flow-seed-v4 : stranded={best} of {best_n}  {best_detail:?}");
     println!("port_shapes   folded path  : stranded={mid} of {mid_n}  {mid_detail:?}");
     println!("port_shapes   two stacks   : stranded={worst} of {worst_n}  {worst_detail:?}");
+    println!(
+        "port_shapes   divider-rails: stranded={live_mid} of {live_mid_n}  {live_mid_detail:?}"
+    );
     let live = load("port_shapes");
     let (l_strand, l_n, _) = compactness_metrics(&live);
     let (l_axis, l_rev, _, _) = chain_metrics(&live);
@@ -1332,12 +1344,19 @@ fn chain_stranded_ranks_the_ladder_the_fold_and_the_shattered_chain() {
          axis={l_axis} reversal={l_rev}  (reported, never asserted)"
     );
 
+    assert!(
+        live_mid <= mid,
+        "arm 2 is transcribed from `--placer=divider-rails`' own output; the live \
+         conversion now reads WORSE ({live_mid}) than the transcription ({mid}), so \
+         either that placer regressed or the transcription is stale.\n  live: \
+         {live_mid_detail:?}\n  transcribed: {mid_detail:?}"
+    );
     assert_eq!(
-        (best_n, mid_n, worst_n),
-        (5, 4, 4),
+        (best_n, mid_n, worst_n, live_mid_n),
+        (5, 4, 4, 4),
         "the measured population is a property of the NETLIST, not of the drawing: \
          the ladder's chain is VIN→RS→L1→L2→L3 and port_shapes' is R1→R2→R3→R4 on \
-         both of its arms"
+         all three of its arms"
     );
     assert!(
         best <= mid,
@@ -1617,8 +1636,10 @@ fn chain_metric_counts_a_known_synthetic_ladder() {
 }
 
 /// `port_shapes` drawn as ONE connected folded path — arm 2 of metric
-/// C's acceptance ranking, transcribed pin-for-pin from the emitted
-/// `.kicad_sch` of a placer that is not on `master`.
+/// C's acceptance ranking, transcribed pin-for-pin from
+/// `--placer=divider-rails`' emitted `.kicad_sch`. The acceptance test
+/// converts that placer for real as well and checks the live result
+/// against this transcription, so a drift here cannot go unnoticed.
 ///
 /// `R1` runs down, `R2` turns right (and is drawn backwards, which is
 /// why the arm scores `chain.axis = 1, chain.reversal = 1`), `R3`

@@ -6772,20 +6772,31 @@ existing values and their existing meaning.
 #### The acceptance ranking, and the two definitions it killed
 
 Three drawings, ordered best to worst by the owner, and the requirement
-that the metric reproduce that order. Arms 2 and 3 are **transcribed
-pin-for-pin** from their emitted `.kicad_sch` files rather than
-re-converted in the verifier, for two separate reasons: arm 2's placer
-is not on `master` and is unreachable there at all, and arm 3 must stay
-pinned so that the strict `mid < worst` assertion cannot block a change
-that *repairs* the shipping placer. The transcription of arm 3
-reproduces the live default's score exactly — 2 of 4, runs
+that the metric reproduce that order.
+
+Arms 2 and 3 are **transcribed pin-for-pin** from their emitted
+`.kicad_sch` files rather than re-converted in the verifier, and for arm
+3 that is load-bearing: it is the drawing the *shipping* placer makes
+today, so asserting `mid < worst` strictly against a live conversion of
+it would make this test block the very repair the metric exists to
+motivate. Pinned geometry is what keeps metric C informational at birth.
+The transcription reproduces the live default exactly — 2 of 4, runs
 1.27 / 41.91 / 1.27 — and the live value is printed by the same test,
 never asserted.
+
+Arm 2's placer, `--placer=divider-rails`, was **not on `master` when
+this metric was written and is now** (`e32f78c`, merged one commit
+before it). It is therefore converted for real alongside its
+transcription and checked in `≤` form — the live arm may improve on the
+transcription, never read worse. That keeps the transcription from
+silently going stale, without letting a change to that placer be blocked
+here. The live conversion currently reproduces the transcription
+exactly: 0 of 4, runs 22.86 / 11.43 / 5.08.
 
 | arm | drawing | chain body | link runs (mm) |
 | --- | --- | ---: | --- |
 | 1 | `lc_ladder_lpf` `--placer=flow-seed-v4` — textbook ladder, five members on one line | 40.64 | 15.24 · 7.62 · 22.86 · 22.86 |
-| 2 | `port_shapes` as one connected folded path | 30.48 | 22.86 · 11.43 · 5.08 |
+| 2 | `port_shapes` `--placer=divider-rails` — one connected folded path | 30.48 | 22.86 · 11.43 · 5.08 |
 | 3 | `port_shapes` shipping default — two stacks 31.75 mm apart | 30.48 | 1.27 · **41.91** · 1.27 |
 
 **Reproduced.** `chain.stranded` = **0 of 5**, **0 of 4**, **2 of 4**.
@@ -6913,10 +6924,12 @@ Metric C's acceptance test
 (`chain_stranded_ranks_the_ladder_the_fold_and_the_shattered_chain`) is
 the one exception to the `≤` rule, deliberately: its middle-vs-worst
 comparison is asserted **strictly**, because a tie there is the exact
-failure metric A shipped with. Strictness is only safe because both of
-its lower arms are **hand-placed** geometry, so the test grades a fixed
-pair of drawings; its only live arm is a non-default `--placer`, and the
-shipping default's score appears in that test's output as a print.
+failure metric A shipped with. Strictness is only safe because its
+*worst* arm is **hand-placed** geometry rather than a live conversion of
+the shipping placer's `port_shapes`; the shipping default's score
+appears in that test's output as a print. Its two live arms are both
+non-default `--placer` conversions, and the one that could otherwise
+block work — arm 2 — is asserted only in `≤` form.
 
 **What would justify promoting metric A to a ratchet.** (a) The
 corner/fold ambiguity below is closed — either a fixture with a
