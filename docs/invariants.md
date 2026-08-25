@@ -1377,3 +1377,44 @@ invariant here.
   collector-to-base feedback resistor that satisfies the definition but
   is conventionally drawn along the feedback direction — ADR-28
   ambiguity 8.
+
+- **D1 — device facing** (readability metric, **informational**,
+  ADR-29). A reader expects a three-terminal device's
+  **higher-DC-potential terminal drawn screen-up** — an NPN's collector
+  above its emitter, current running down the page from supply to
+  ground. **`device.facing_inverted`** counts the devices drawn the
+  other way up; `device.facing_resolved` is the denominator, so a zero
+  meaning "clean" is distinguishable from a zero meaning "the rank
+  declined everywhere".
+
+  The order comes from the netlist, never from a device library or a
+  `.model` card. Build the same DC graph B1 uses, then rank every net by
+  hop distance to the nearest **up-rail** (a positive supply) and to the
+  nearest **down-rail** (ground or a negative supply), rails absorbing
+  and the device's own edge removed. The conduction terminal strictly
+  nearer the up-rail *and* strictly further from the down-rail is the
+  one that must be on top. Because the answer is topological, a **PNP
+  needs no special case**: its emitter is the terminal on the supply
+  side, so the same comparison puts it up.
+
+  It **declines** — reports nothing rather than guessing — on a
+  floating device (both terminals unreachable from any rail through DC
+  conductors), on a tie, and on the two axes disagreeing (a
+  bidirectional or symmetric use). Declining is a real answer.
+
+  Motivating specimen: `two_stage_amp`'s `Q2`, emitted at 180 + mirror
+  by the shipping default and read as clean by every other registered
+  metric because it is locally violation-free. It is the **only**
+  inverted device in the suite (1 of 11 resolved).
+
+  Verifier: `crates/spice2kicad/tests/readability_metrics.rs`, with
+  `facing_ranks_the_repaired_arm_above_the_shipped_two_stage_amp` as
+  the acceptance test,
+  `facing_metric_counts_a_known_synthetic_inversion` as the
+  non-vacuity control and
+  `facing_discriminator_declines_rather_than_guessing` as the
+  falsifiability guard. **No budget literal**, same reasoning as A.
+  Known gap: the decline set has **no fixture at all** — every device in
+  the suite is a conventional rail-to-rail BJT — so the decline path is
+  graded only by synthetic arms until an analog switch or a
+  transmission gate joins the benchmark.

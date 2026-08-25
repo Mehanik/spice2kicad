@@ -26,6 +26,7 @@
 pub mod bands;
 pub mod channels;
 pub mod cost;
+pub mod dc_rank;
 pub mod footprint;
 pub mod glyph_geom;
 mod idioms;
@@ -990,6 +991,22 @@ pub struct RefinementMeta {
     /// V5 seed chooser and the SA refiner). The refinement phase may only
     /// pick orientations from this set — it never widens V14.
     pub allowed: Vec<Vec<Orientation>>,
+    /// Per-element **DC facing** (F2): `Some((hi, lo))` names the SPICE
+    /// terminal indices whose drawn order must be *`hi` above `lo`*, for
+    /// a Q / M / J device whose DC-potential rank resolved. See
+    /// [`dc_rank`] for the rank, and for the three ways a device
+    /// deliberately declines.
+    ///
+    /// It exists so phase 4.5's at-risk sweep gains a **third trigger**
+    /// beside its V5-offender and V12-offender gates — a reason to
+    /// *look at* an upside-down transistor that is otherwise
+    /// violation-free at its own position. It is an input to the search,
+    /// never a filter on it: the acceptance predicate is untouched.
+    ///
+    /// **All `None` unless [`Placer::facing_inverted_trigger`] is set**,
+    /// which is the whole byte-identity argument for the shipping
+    /// output — the ADR-23 challenger is dead on the default path.
+    pub facing: Vec<Option<dc_rank::Facing>>,
 }
 
 /// Compute the [`RefinementMeta`] for a netlist + hint, mirroring exactly
@@ -1058,7 +1075,20 @@ pub fn refinement_meta(
             }
         }
     }
-    Ok(RefinementMeta { pinned, allowed })
+    // F2 (ADR-23 challenger `facing-trigger`): the DC facing every
+    // device's pose should honour. Computed only for the challenger, so
+    // the default path carries an all-`None` vector and phase 4.5's
+    // sweep gate is bit-for-bit the offender-gated one it was.
+    let facing = if placer.facing_inverted_trigger() {
+        dc_rank::device_facings(checked)
+    } else {
+        vec![None; placement.elements.len()]
+    };
+    Ok(RefinementMeta {
+        pinned,
+        allowed,
+        facing,
+    })
 }
 
 /// Apply a position-stability [`Hint`] (ADR-4) over a seeded placement.
@@ -1506,7 +1536,8 @@ fn pack_rows(
         | Placer::FlowSeedV3
         | Placer::FlowSeedV4
         | Placer::DividerRails
-        | Placer::DividerRailsStrict => shift.last().copied().unwrap_or(0) / 2,
+        | Placer::DividerRailsStrict
+        | Placer::FacingTrigger => shift.last().copied().unwrap_or(0) / 2,
         Placer::M4YDatum => 0,
     };
     for (i, pe) in placed.iter_mut().enumerate() {
@@ -1666,7 +1697,8 @@ fn place_seed(
         | Placer::FlowSeedV3
         | Placer::FlowSeedV4
         | Placer::DividerRails
-        | Placer::DividerRailsStrict => {
+        | Placer::DividerRailsStrict
+        | Placer::FacingTrigger => {
             let n_i32 = i32::try_from(n).unwrap_or(i32::MAX);
             let y_top: i32 = 0;
             let y_bot: i32 = (n_i32 + 4) * Y_RANK_STRIDE;

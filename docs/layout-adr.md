@@ -6826,7 +6826,10 @@ would have to be settled *before* attempting. Ship the dots, re-ask.
 **Status:** landed, **informational**. **Amended 2026-08-24** — a third
 metric was added after metric A was found blind to the defect described
 under "The amendment" below. Three metrics, seven registered metric ids,
-one verifier (`crates/spice2kicad/tests/readability_metrics.rs`). Purely
+one verifier (`crates/spice2kicad/tests/readability_metrics.rs`).
+**A fourth metric, `device.facing_inverted`, joined the same verifier
+under ADR-29** (device facing); it is documented there, reuses this
+ADR's DC graph, and is informational on the same terms. Purely
 additive, at birth and at the amendment: `baseline_lock`'s diff is
 EMPTY, no budget literal moved, no existing verifier changed. No metric
 here is a ratchet, and none carries aggregate weight in the ADR-23
@@ -7354,3 +7357,200 @@ harder now that seven of the registered ids are informational. The
 contribution really is zero, so nothing about the aggregate, the
 verdict, or the promotion rule changes; only the column that was lying
 about it.
+
+---
+
+## ADR-29 — Give the refiner a reason to look: the facing-inverted trigger
+
+**Status:** landed as an ADR-23 **challenger** (`--placer=facing-trigger`),
+**dead on the default path**. One new module
+(`spice-layout/src/dc_rank.rs`), one new at-risk trigger in phase 4.5,
+one new ADR-28-style informational metric (`device.facing_inverted`,
+`device.facing_resolved`). `baseline_lock`'s diff is EMPTY, no budget
+literal moved, no verifier weakened. **Not promoted.**
+
+### The report
+
+> two_stage_amp — Q2 orientation is wrong, C should look up, E down
+
+### The mechanism, and why it is reach and not acceptance
+
+The seed emits **both** transistors at 180 + mirror — upside down. Phase
+4.5 repairs `Q1` and never so much as *considers* `Q2`.
+
+The reason is in `refine.rs`'s greedy sweep, which is **offender-gated**:
+an element becomes a candidate only when it currently carries a V5
+first-segment violation or a V12 wire speared through its body (plus
+ADR-20's Tier-0 repair mode, which lifts the gate entirely on a broken
+placement). At `Q2`'s post-SA position the flipped pose is
+*violation-free* — both first segments exit outward. V5 = 0, V12 = 0,
+V13 = 0, Tier 0 clean. The drawing costs a 35 mm bypass wire and an
+emitter-up device, and **no trigger in the phase can see either**.
+
+Acceptance was never the blocker, and that is measurable rather than
+argued: with the SA disabled (`--refine-iterations 0`) phase 4.5 flips
+**both** transistors to rot 0 on its own. The pose was always
+acceptable; the element was never reachable. So the repair is a **third
+trigger**, and the acceptance predicate is left completely alone.
+
+Measured, `two_stage_amp`, full pipeline:
+
+```
+flow-seed-v4    baseline severed=0 coincident=0 v11=0 v13=0 v12=0 v5=3 bends=21
+                final    severed=0 coincident=0 v11=0 v13=0 v12=0 v5=2 bends=17
+facing-trigger  baseline severed=0 coincident=0 v11=0 v13=0 v12=0 v5=3 bends=21
+                final    severed=0 coincident=0 v11=0 v13=0 v12=0 v5=2 bends=15
+```
+
+`Q2` goes from `(at 83.82 60.96 180) (mirror y)` to `(at 83.82 60.96 0)`.
+**The tuple accepted on the FINAL key**: Tier 0, V13, V12 and V5 are all
+identical on both sides, and the flip wins on V16 bends alone (17 → 15),
+which is the 35 mm bypass disappearing. That is the ordering contract
+working exactly as `docs/invariants.md` V16 specifies — bends broke a tie
+the higher keys left open, and could not have bought a Tier-1 regression
+if it had wanted to.
+
+### The predicate: DC rank, and no device library
+
+The convention is that a device's **higher-DC-potential terminal is drawn
+screen-up**. Everything needed is in the SPICE source: terminal identity
+from element syntax (`Q c b e`, `M d g s b`), and potential order from
+where those nets sit relative to the rails. Neither the `.model` card nor
+the KiCad symbol name is read.
+
+`dc_rank.rs` builds an undirected **DC graph** over nets — R / L / D /
+drawn V / I sources join their two nodes, a BJT joins collector–emitter
+and a FET drain–source, a **capacitor contributes nothing** (which is
+what keeps one RC-coupled stage's ranks independent of the next's), and
+a `;@ power=` source and a hierarchical sheet instance contribute
+nothing. Then two multi-source BFS's: `up(n)` = hops to the nearest
+`VertPref::Up` rail, `dn(n)` = hops to the nearest `VertPref::Down` rail.
+Reading polarity off `net_class::VertPref` rather than off a net *name*
+is what makes `named_rails`-style circuits work, and it is the same
+classification V14 keys off. **A rail is absorbing**: current entering a
+rail leaves through the supply, and letting the walk continue would
+manufacture paths that run *through* the power supply.
+
+Two decisions carry the result:
+
+* **The device's own edge is removed** from its own walk. Ranking a
+  device by a path through itself is circular — every transistor would
+  read "collector one hop further from ground than emitter" however it is
+  wired. With the edge removed, the hard cases fall out:
+
+  | case | resolution |
+  | --- | --- |
+  | `cascode_amp` | the shared middle net `c1` is the lower device's collector AND the upper's emitter, and ranks strictly between the rail-adjacent nets. Both devices resolve **C up**. |
+  | `diff_pair` | each collector is one hop from `vcc` via its `RC`; the shared `tail` is one hop from `vee` via `RTAIL`. Both halves resolve **C up**, and the *negative supply* counts as a down-rail exactly as ground does — because `VertPref`, not the name, decides. |
+  | PNP / folded-cascode branch | the emitter is the terminal on the supply side, so the same comparison returns `(2, 0)` — **E up, C down** — with no polarity special case anywhere in the module. This is the whole reason the rule is stated over *potential* and not over device type. |
+
+* **Both axes must agree, strictly.** `a` is the up-terminal iff
+  `up(a) < up(b)` **and** `dn(a) > dn(b)`. Anything else **declines**:
+  a floating pass transistor (both terminals unreachable, tying at
+  infinity), a tie on either axis, or the two axes disagreeing — a
+  bidirectional or symmetric use, where "which side is more positive" is
+  not a property of the topology at all. Declining is the correct answer
+  and falls back to the phase's existing behaviour. It never guesses.
+
+### What it must never become
+
+This is an **input to the search** — a reason to look — and an
+informational metric. It is deliberately **not**:
+
+* a hard candidate filter. ADR-15's Stage-5 post-mortem measured exactly
+  that move (`allowed`-set filtering on a flow proxy) and it cost Tier 1:
+  *"making the orientation choice hard does not make it good — it makes
+  it permanent."* Here the router still gets the last word.
+* a `cost.rs` weight. CLAUDE.md's constraints-vs-costs rule and the V14
+  Attempt-A failure it records both apply.
+
+The acceptance predicate, its tuple order, its guards and ADR-20's Tier-0
+exemption are **byte-identical**. The worst case of a wrong facing answer
+is therefore "trialled a pose and refused it" — which is precisely what
+licenses a heuristic here where a hard filter would need to be right.
+
+The only other thing widened is the phase's `nothing_to_chase` early-out,
+which now also asks whether a device is drawn upside down. Without that,
+the phase would return before the sweep ever ran on a placement whose
+only remaining defect is a flipped but locally-clean transistor — which
+is `Q2` once `Q1` has been repaired. It decides whether the search runs,
+never what it accepts.
+
+### Cost: measured, and confined to one fixture
+
+Trial routes per conversion, every fixture, both arms:
+
+| fixture | `flow-seed-v4` | `facing-trigger` |
+| --- | --- | --- |
+| `two_stage_amp` | 24 | **36** |
+| the other seventeen | — | *identical* |
+
++12 on the one fixture with an inverted device; 17 of 18 unchanged, and
+the eleven fixtures that reach the phase's early-out still measure 1.
+
+### The metric, and the empty decline set
+
+`device.facing_inverted` (+ `device.facing_resolved` as its denominator)
+joins ADR-28's three in `readability_metrics.rs`, `Tier::Info`, zero
+aggregate weight, re-derived from the emitted `.kicad_sch` and the
+netlist rather than imported from `spice-layout` — the `flow_geometry.rs`
+precedent, so the metric can falsify the placer's model instead of
+restating it.
+
+On the shipping default, across all eighteen fixtures:
+
+```
+device.facing_resolved  = 11   (common_emitter 1, multivibrator 2, diff_pair 2,
+                                rc_phase_shift 1, two_stage_amp 2, cascode_amp 2,
+                                shunt_feedback_amp 1)
+device.facing_inverted  = 1    (two_stage_amp Q2: `c2` y=66.04 drawn BELOW `e2` y=55.88)
+```
+
+**Every device in the suite resolves; the decline set is empty.** That is
+worth stating plainly rather than reading as a clean bill of health: the
+eleven are all three-terminal BJTs in conventional rail-to-rail service,
+which is the easy half of the predicate's domain. The cases the rank is
+*designed* to decline — a pass transistor between two floating nets, a
+symmetric bidirectional use, a tie — have **no fixture at all**, so they
+are held by synthetic control arms on both sides (the `dc_rank` unit
+tests, and `facing_discriminator_declines_rather_than_guessing`). A
+predicate whose decline path is exercised only by its own tests is a
+predicate whose decline path the benchmark cannot grade, which is the
+MEMORY "benchmark is the binding constraint" finding one level down. The
+first analog switch or transmission gate added to the suite is the real
+test of it.
+
+### The scoreboard — graded, PROMOTABLE, deliberately not promoted
+
+`just scoreboard-run flow-seed-v4` / `just scoreboard-run facing-trigger`,
+whole suite each side, one machine, `--no-fail-fast`:
+
+```
+metric                   fixture          flow-seed-v4  facing-trigger   Δpoints
+v16.bends                two_stage_amp         17.0000      15.0000        -2.00   [T2]
+detour                   two_stage_amp          1.0794       1.0340        -4.55   [T2]
+v16.bend_gap             two_stage_amp         12.0000      10.0000       (info)
+device.facing_inverted   two_stage_amp          1.0000       0.0000       (info)
+
+Tier 0   champion   : clean
+         challenger : clean
+         regressed  : none
+Aggregate  Tier 1 total Δ = +0.00 points
+           Tier 2 total Δ = -6.55 points
+VERDICT: challenger `facing-trigger` is PROMOTABLE against `flow-seed-v4`.
+```
+
+**Those are all four cells that moved, on all seventy-odd registered
+metrics across eighteen fixtures.** Tier 1 is `+0.00` — not "net zero
+after trades", but *nothing moved at all* — and seventeen of the
+eighteen sheets are byte-identical, verified with `cmp` on the emitted
+`.kicad_sch` rather than inferred. The Tier-2 gain is the 35 mm bypass
+disappearing, in both of the units that can see it (two bends, and 4.5
+percentage points of excess wire).
+
+It is **not promoted.** ADR-23 D4 is explicit that the scoreboard prints
+evidence and promotion stays an owner decision, and this change was
+built as a challenger on purpose: the default path is byte-identical, so
+there is nothing to lose by waiting and one thing to gain — the decline
+set is untested by the benchmark (above), and a promotion would put a
+predicate with an ungraded branch on the shipping path.

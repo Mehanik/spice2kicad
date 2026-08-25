@@ -108,14 +108,14 @@ pub fn refine_orientations(placement: &mut Placement, library: &Library, meta: &
     // higher tier) — or, worse, one that is Tier-0 broken: a severed net
     // or a pin-on-pin short can exist with V5 and V12 both clean, and
     // that is precisely the case the pass must not walk away from.
-    if is_settled(&baseline) {
+    if nothing_to_chase(&baseline, placement, library, meta) {
         return;
     }
 
     // Greedy single-element descent first: cheap, each accepted step
     // *strictly* reduces real V5, so it converges in at most `v5` steps.
     greedy_descent(placement, library, meta, &mut baseline, &mut cache);
-    if is_settled(&baseline) {
+    if nothing_to_chase(&baseline, placement, library, meta) {
         return;
     }
 
@@ -251,6 +251,104 @@ fn is_settled(m: &Measure) -> bool {
     tier0(m) == (0, 0, 0) && m.v5 == 0 && m.v12 == 0
 }
 
+/// Two co-axial pins are at the same screen height within this slop.
+/// Everything the placer emits lands on the 1.27 mm grid, so anything
+/// above f64 round-trip noise is a real difference.
+const FACING_TOL_MM: f64 = 0.01;
+
+/// **F2 — the third at-risk trigger.** Is element `i` a device drawn
+/// with its higher-DC-potential terminal facing screen-DOWN?
+///
+/// `meta.facing[i]` names the SPICE terminal indices `(hi, lo)` whose
+/// drawn order should be *`hi` above `lo`* (see
+/// `spice_layout::dc_rank`). This maps them through the element's
+/// `pin_mapping` to the emitted pins and compares world Y — which grows
+/// **downward** in eeschema, so `y(hi) > y(lo)` is upside down.
+///
+/// # Why the other two triggers cannot see this
+///
+/// The sweep is offender-gated: an element is a candidate only when it
+/// carries a V5 first-segment violation or a V12 wire through its body.
+/// A transistor can be flipped and still be locally perfect — on
+/// `two_stage_amp` the seed emits both `Q1` and `Q2` at 180 + mirror,
+/// and at `Q2`'s post-SA position BOTH its first segments leave
+/// outward. V5 is 0, V12 is 0, and the drawing costs a 35 mm bypass wire
+/// and an emitter-up device. Nothing in a violation-derived gate can
+/// reach it; with the SA disabled the phase flips both, so what saved
+/// `Q2` was **reach, not acceptance**.
+///
+/// # What it is NOT
+///
+/// It grants *reach* and nothing else. It is not part of [`accepts`],
+/// not a key of [`objective`], and not a guard: a pose this trigger
+/// exposes still has to strictly improve
+/// `(severed, coincident, v11, v13, v12, v5, bends)` under the unchanged
+/// guards. The worst case of a wrong facing answer is therefore "trialled
+/// a pose and refused it" — which is exactly why the predicate is allowed
+/// to be heuristic where a hard filter would not be (ADR-15 Stage 5).
+///
+/// A horizontal pose (both pins at the same height) is **not** inverted:
+/// the convention is about which terminal is on top, and a device drawn
+/// on its side has no answer to that. Same for an element whose facing
+/// declined, whose symbol is missing, or whose pins are unmapped.
+fn is_facing_inverted(
+    placement: &Placement,
+    library: &Library,
+    meta: &RefinementMeta,
+    i: usize,
+) -> bool {
+    let Some((hi, lo)) = meta.facing.get(i).copied().flatten() else {
+        return false;
+    };
+    let Some(el) = placement.elements.get(i) else {
+        return false;
+    };
+    let Some(symbol) = library.lookup(&el.lib_id) else {
+        return false;
+    };
+    let pins = symbol.pins_in(el.orientation);
+    let (_, oy) = el.origin.to_mm();
+    // Same world transform as [`pin_probes`] / `collect_net_pins`: a
+    // library pin at local `(x, y)` lands at world `(ox + x, oy - y)`.
+    let world_y = |terminal: usize| -> Option<f64> {
+        let number = el.pin_mapping.get(terminal)?;
+        pins.iter().find(|p| &p.number == number).map(|p| oy - p.y)
+    };
+    match (world_y(hi), world_y(lo)) {
+        (Some(y_hi), Some(y_lo)) => y_hi > y_lo + FACING_TOL_MM,
+        _ => false,
+    }
+}
+
+/// How many placed devices are currently drawn upside down. Zero on the
+/// default path by construction (`meta.facing` is all-`None`).
+fn facing_inverted_count(placement: &Placement, library: &Library, meta: &RefinementMeta) -> usize {
+    (0..placement.elements.len())
+        .filter(|&i| is_facing_inverted(placement, library, meta, i))
+        .count()
+}
+
+/// Is there nothing left for the phase to *look for*?
+///
+/// [`is_settled`] answers that for the objective's own counts. This adds
+/// the one thing the objective cannot see: an upside-down device
+/// ([`is_facing_inverted`]). Without it the phase would return before
+/// the sweep ever ran on a placement whose only defect is a flipped but
+/// locally-clean transistor — which is precisely `two_stage_amp`'s `Q2`
+/// once `Q1` has been repaired.
+///
+/// This is an **early-out**, not the acceptance predicate: widening it
+/// only decides whether the search runs at all. Cheap by construction —
+/// [`facing_inverted_count`] reads placed geometry and never routes.
+fn nothing_to_chase(
+    m: &Measure,
+    placement: &Placement,
+    library: &Library,
+    meta: &RefinementMeta,
+) -> bool {
+    is_settled(m) && facing_inverted_count(placement, library, meta) == 0
+}
+
 /// Greedy single-element orientation descent: repeatedly pick, for each
 /// offending non-pinned element, the V14-allowed orientation that most
 /// reduces real V5 without regressing V11 / overlap / V12 / V13. Each
@@ -282,6 +380,14 @@ fn greedy_descent(
             let refdes = &placement.elements[i].refdes;
             let is_v5_offender = baseline.offenders.iter().any(|v| &v.refdes == refdes);
             let is_v12_offender = baseline.v12_offenders.contains(refdes);
+            // The THIRD trigger (F2), and the only one that does not
+            // read a *violation*: a device drawn with its
+            // higher-DC-potential terminal facing screen-down. See
+            // [`is_facing_inverted`] for why the other two cannot see
+            // it. Off unless the ADR-23 `facing-trigger` challenger is
+            // selected — `meta.facing` is all-`None` otherwise, so this
+            // is `false` for every element on the default path.
+            let is_facing_offender = is_facing_inverted(placement, library, meta, i);
             // Tier-0 repair mode: when the placement arrives severed or
             // shorted, the at-risk filter does not apply. Neither
             // `offenders` nor `v12_offenders` names the element whose
@@ -293,7 +399,7 @@ fn greedy_descent(
             // a full sweep of trial routes, and only ever on a placement
             // the CLI would otherwise refuse to ship.
             let tier0_repair = tier0(baseline) != (0, 0, 0);
-            if !tier0_repair && !is_v5_offender && !is_v12_offender {
+            if !tier0_repair && !is_v5_offender && !is_v12_offender && !is_facing_offender {
                 continue;
             }
 
@@ -372,7 +478,10 @@ fn greedy_descent(
                 placement.elements[i].orientation = orient;
                 *baseline = m;
                 improved_this_sweep = true;
-                if is_settled(baseline) && baseline.v13 == 0 {
+                if is_settled(baseline)
+                    && baseline.v13 == 0
+                    && facing_inverted_count(placement, library, meta) == 0
+                {
                     return;
                 }
             }
@@ -1538,6 +1647,16 @@ mod severed_guard_tests {
     /// Build a fixture's placement exactly as the CLI does
     /// (parse → resolve → policy → place), with no layout-cache hint.
     fn fixture(name: &str) -> (Placement, Library, RefinementMeta) {
+        fixture_with_placer(name, spice_layout::Placer::Champion)
+    }
+
+    /// [`fixture`], with the placer named explicitly. The F2 test below
+    /// needs two arms of the SAME fixture, and the champion pinning the
+    /// two guard tests rely on is documented inside.
+    fn fixture_with_placer(
+        name: &str,
+        placer: spice_layout::Placer,
+    ) -> (Placement, Library, RefinementMeta) {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("crates/ dir");
@@ -1572,7 +1691,7 @@ mod severed_guard_tests {
         let opts = LayoutOptions {
             refine: true,
             refine_iterations: 200,
-            placer: spice_layout::Placer::Champion,
+            placer,
             ..LayoutOptions::default()
         };
         let meta =
@@ -1582,6 +1701,67 @@ mod severed_guard_tests {
             spice_layout::place_with_hint(checked, &library, &opts, &spice_layout::Hint::default())
                 .expect("place");
         (placement, library, meta)
+    }
+
+    /// **F2 — the reach proof, at the unit level** (ADR-29).
+    ///
+    /// `two_stage_amp`'s seed emits BOTH transistors at 180 + mirror.
+    /// Under the shipping default, phase 4.5 repairs `Q1` and leaves
+    /// `Q2` upside down — not because the upright pose is refused, but
+    /// because the offender-gated sweep never *offers* it: at `Q2`'s
+    /// post-SA position the flipped pose carries no V5 and no V12
+    /// violation of its own, so neither existing trigger names it.
+    ///
+    /// The two arms differ in exactly one thing — whether
+    /// `RefinementMeta::facing` is populated — and the acceptance
+    /// predicate is identical on both sides. So this test is the
+    /// statement that the defect was **reach**, and it fails the day
+    /// somebody "simplifies" the third trigger away.
+    #[test]
+    fn the_facing_trigger_reaches_two_stage_amp_q2_and_the_default_does_not() {
+        let upright = Orientation {
+            rotation: Rotation::R0,
+            mirror_y: false,
+        };
+        let pose = |placer: spice_layout::Placer, refdes: &str| -> Orientation {
+            let (mut placement, library, meta) = fixture_with_placer("two_stage_amp", placer);
+            refine_orientations(&mut placement, &library, &meta);
+            placement
+                .elements
+                .iter()
+                .find(|e| e.refdes == refdes)
+                .unwrap_or_else(|| panic!("two_stage_amp has {refdes}"))
+                .orientation
+        };
+
+        // `Q1` is repaired on BOTH arms: it *is* an offender, so the
+        // existing gate reaches it. This is the control that says the
+        // difference below is about reach and not about the fixture.
+        assert_eq!(
+            pose(spice_layout::Placer::FlowSeedV4, "Q1"),
+            upright,
+            "Q1 is a V5 offender and the shipping sweep already repairs it"
+        );
+        assert_eq!(
+            pose(spice_layout::Placer::FacingTrigger, "Q1"),
+            upright,
+            "the extra trigger must not disturb the element the old ones already fix"
+        );
+
+        // `Q2` is the defect.
+        assert_ne!(
+            pose(spice_layout::Placer::FlowSeedV4, "Q2"),
+            upright,
+            "the shipping default is expected to leave Q2 flipped — if this now passes, \
+             the underlying defect moved and ADR-29's premise needs re-deriving, not \
+             this assertion relaxing"
+        );
+        assert_eq!(
+            pose(spice_layout::Placer::FacingTrigger, "Q2"),
+            upright,
+            "the facing trigger must reach Q2 and the tuple must accept the upright pose \
+             (it wins on the FINAL key, V16 bends: 17 -> 15)"
+        );
     }
 
     /// The demonstrated case, measured on the real fixture rather than

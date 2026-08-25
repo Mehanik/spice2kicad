@@ -272,6 +272,36 @@ pub enum Placer {
     /// real ones), so its aggregate cannot say which direction paid for
     /// which. This arm moves `port_shapes` only.
     DividerRailsStrict,
+    /// **Facing-inverted at-risk trigger (F2)** — [`Placer::FlowSeedV4`]
+    /// plus a third reason for layout phase 4.5 to *look at* an element.
+    ///
+    /// Phase 4.5's at-risk sweep is **offender-gated**: an element is a
+    /// candidate only when it currently carries a V5 first-segment
+    /// violation or a V12 wire speared through its body. On
+    /// `two_stage_amp` the seed emits BOTH transistors upside down (rot
+    /// 180 + mirror); the phase repaired `Q1` and never considered `Q2`,
+    /// because at its post-SA position the flipped `Q2` is
+    /// violation-free — both first segments leave outward. The cost is a
+    /// 35 mm bypass wire and an emitter-up transistor, and no trigger
+    /// could see either. With the SA disabled the phase flips *both*, so
+    /// **reach, not acceptance, is what saved `Q2`**.
+    ///
+    /// Under this variant [`crate::dc_rank::device_facings`] supplies a
+    /// third trigger: a Q / M / J device whose higher-DC-potential
+    /// terminal is drawn screen-DOWN. The rank is derived from the SPICE
+    /// source alone — terminal identity from element syntax, potential
+    /// order from DC reachability to the rails — so it consults no
+    /// device library and needs no polarity special case.
+    ///
+    /// **The acceptance predicate is untouched.** A candidate pose still
+    /// has to strictly improve
+    /// `(severed, coincident, v11, v13, v12, v5, bends)` under the same
+    /// guards, so the worst case of a wrong facing answer is "trialled a
+    /// pose and refused it". It is deliberately NOT a hard candidate
+    /// filter (ADR-15's Stage-5 post-mortem measured that move causing
+    /// Tier-1 damage) and NOT a `cost.rs` weight (CLAUDE.md
+    /// constraints-vs-costs, and the V14 Attempt-A failure).
+    FacingTrigger,
 }
 
 impl Placer {
@@ -289,6 +319,7 @@ impl Placer {
         Self::FlowSeedV3,
         Self::DividerRails,
         Self::DividerRailsStrict,
+        Self::FacingTrigger,
     ];
 
     /// The name accepted by `--placer` and printed by the scoreboard.
@@ -306,6 +337,7 @@ impl Placer {
             Self::FlowSeedV4 => "flow-seed-v4",
             Self::DividerRails => "divider-rails",
             Self::DividerRailsStrict => "divider-rails-strict",
+            Self::FacingTrigger => "facing-trigger",
         }
     }
 
@@ -346,6 +378,10 @@ impl Placer {
             Self::DividerRailsStrict => {
                 "divider-rails with the tap-degree-2 gate retained: \
                  removes the over-match only, adds no new detection"
+            }
+            Self::FacingTrigger => {
+                "flow-seed-v4 plus a third phase-4.5 at-risk trigger: a \
+                 device whose higher-DC-potential terminal is drawn down"
             }
         }
     }
@@ -391,6 +427,7 @@ impl Placer {
                 | Self::FlowSeedV4
                 | Self::DividerRails
                 | Self::DividerRailsStrict
+                | Self::FacingTrigger
         )
     }
 
@@ -420,7 +457,7 @@ impl Placer {
     pub fn unified_roots(self) -> bool {
         matches!(
             self,
-            Self::FlowSeedV4 | Self::DividerRails | Self::DividerRailsStrict
+            Self::FlowSeedV4 | Self::DividerRails | Self::DividerRailsStrict | Self::FacingTrigger
         )
     }
 
@@ -454,6 +491,20 @@ impl Placer {
     #[must_use]
     pub fn sa_rotate_v5_gate(self) -> bool {
         matches!(self, Self::FlowSeedV3)
+    }
+
+    /// F2: does layout phase 4.5's at-risk sweep gain a **third**
+    /// trigger — a Q / M / J device whose higher-DC-potential terminal
+    /// is drawn screen-down (see [`crate::dc_rank`]) — beside the
+    /// existing V5-offender and V12-offender gates?
+    ///
+    /// This is a *reach* change and nothing else: the acceptance
+    /// predicate, its tuple order and its guards are all unchanged, so
+    /// every pose the extra trigger reaches still has to earn its way in
+    /// on `(severed, coincident, v11, v13, v12, v5, bends)`.
+    #[must_use]
+    pub fn facing_inverted_trigger(self) -> bool {
+        matches!(self, Self::FacingTrigger)
     }
 
     /// Look a placer up by the name `--placer` accepts.
@@ -578,6 +629,26 @@ mod tests {
         assert!(Placer::DividerRails.flow_seed_layering());
         assert!(!Placer::DividerRails.unified_depth_roots());
         assert!(!Placer::DividerRails.sa_rotate_v5_gate());
+    }
+
+    /// The facing-inverted at-risk trigger is **dead on the default
+    /// path** and on both control arms: it is gated on one accessor and
+    /// nothing else, which is the whole byte-identity argument for the
+    /// shipping output (`baseline_lock` is the empirical half).
+    #[test]
+    fn the_facing_inverted_trigger_is_off_by_default() {
+        assert!(!Placer::default().facing_inverted_trigger());
+        assert!(!Placer::FlowSeedV4.facing_inverted_trigger());
+        assert!(!Placer::FlowSeed.facing_inverted_trigger());
+        assert!(!Placer::Champion.facing_inverted_trigger());
+        assert!(Placer::FacingTrigger.facing_inverted_trigger());
+        // It composes ON `flow-seed-v4` and changes nothing else, so an
+        // A/B against the default isolates the trigger.
+        assert!(Placer::FacingTrigger.unified_roots());
+        assert!(Placer::FacingTrigger.flow_seed_layering());
+        assert!(!Placer::FacingTrigger.rail_gated_dividers());
+        assert!(!Placer::FacingTrigger.unified_depth_roots());
+        assert!(!Placer::FacingTrigger.sa_rotate_v5_gate());
     }
 
     #[test]

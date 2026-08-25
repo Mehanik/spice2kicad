@@ -119,6 +119,33 @@
 //! `stacking_discriminator_separates_the_cascode_from_the_diff_pair`,
 //! the assertion that keeps this honest.
 //!
+//! # D — device facing (`device.facing_inverted`)
+//!
+//! A reader expects a transistor's **higher-DC-potential terminal drawn
+//! screen-up**: an NPN's collector above its emitter, current running
+//! down the page from supply to ground. `two_stage_amp`'s `Q2` is
+//! emitted upside down (rot 180 + mirror) and every registered metric
+//! reads it as clean — it is locally violation-free, its V5 first
+//! segments both leave outward, and no chain or stacking count has an
+//! opinion about a three-terminal device's pose.
+//!
+//! The order is derived from the netlist, not from a device library.
+//! Build the same DC graph metric B uses, then rank every net by hop
+//! distance to the nearest **up-rail** (a positive supply) and to the
+//! nearest **down-rail** (ground, or a negative supply), with rails
+//! absorbing and the device's own edge removed. The conduction terminal
+//! that is strictly nearer the up-rail *and* strictly further from the
+//! down-rail is the one that must be drawn on top. Because the answer
+//! comes from topology, a PNP needs no special case: its emitter is the
+//! terminal on the supply side, so the same comparison puts it up.
+//!
+//! `device.facing_inverted` counts the devices drawn the other way up;
+//! `device.facing_resolved` is the denominator, so a zero that means
+//! "clean" is distinguishable from a zero that means "the rank declined
+//! everywhere". Declining is a real answer here — a floating pass
+//! transistor, a tie, or two axes that disagree all report nothing
+//! rather than guessing.
+//!
 //! # Informational at birth
 //!
 //! All three metrics are registered with the ADR-23 scoreboard as
@@ -291,6 +318,18 @@ struct Fixture {
     pins: Vec<BodyPin>,
     elements: Vec<Elem>,
     rail_nets: HashSet<String>,
+    /// Rail nets on the **down** side of the page — ground, and any
+    /// negative supply. Metric D's rank needs the page polarity of a
+    /// rail, not merely that it is one, and a negative supply is a rail
+    /// that belongs at the BOTTOM (the same distinction V14 keys off).
+    down_rails: HashSet<String>,
+}
+
+/// The canonical *ground / negative supply* names — the down half of
+/// [`is_canonical_rail_name`].
+fn is_canonical_ground_name(net: &str) -> bool {
+    let lo = net.to_ascii_lowercase();
+    net == "0" || matches!(lo.as_str(), "gnd" | "vss" | "vee" | "v-" | "vminus")
 }
 
 fn is_canonical_rail_name(net: &str) -> bool {
@@ -305,6 +344,12 @@ fn is_canonical_rail_name(net: &str) -> bool {
 impl Fixture {
     fn is_rail_net(&self, net: &str) -> bool {
         self.rail_nets.contains(net)
+    }
+
+    /// Is this a rail the page draws DOWNWARD from — ground, or a
+    /// negative supply? Only meaningful for a rail net.
+    fn is_down_rail(&self, net: &str) -> bool {
+        self.down_rails.contains(net)
     }
 
     fn elem(&self, refdes: &str) -> Option<&Elem> {
@@ -441,6 +486,7 @@ fn load_arm(name: &str, extra: &[&str]) -> Fixture {
     let mut by_refdes: HashMap<String, Vec<(String, String)>> = HashMap::new();
     let mut elements: Vec<Elem> = Vec::new();
     let mut rail_nets: HashSet<String> = HashSet::new();
+    let mut down_rails: HashSet<String> = HashSet::new();
     for el in &resolved.elements {
         let mut pairs = Vec::with_capacity(el.pin_mapping.len());
         for (i, kicad_pin) in el.pin_mapping.iter().enumerate() {
@@ -450,9 +496,19 @@ fn load_arm(name: &str, extra: &[&str]) -> Fixture {
         }
         by_refdes.insert(el.refdes.clone(), pairs);
         let is_power_source = matches!(el.role, spice_resolve::ElementRole::Power(_));
+        // A `;@ power=` string beginning with `-` marks a NEGATIVE
+        // supply: a rail net, but one drawn at the bottom of the page.
+        // `named_rails`' `n5` is the case a name test cannot catch.
+        let negative_rail = matches!(
+            &el.role,
+            spice_resolve::ElementRole::Power(rail) if rail.trim_start().starts_with('-')
+        );
         for net in &el.nodes {
             if is_power_source || is_canonical_rail_name(net) {
                 rail_nets.insert(net.clone());
+            }
+            if negative_rail || net == "0" || is_canonical_ground_name(net) {
+                down_rails.insert(net.clone());
             }
         }
         elements.push(Elem {
@@ -516,11 +572,20 @@ fn load_arm(name: &str, extra: &[&str]) -> Fixture {
         }
     }
 
+    // Ground names reached only through a sheet instance still belong on
+    // the down side.
+    for net in &rail_nets {
+        if net == "0" || is_canonical_ground_name(net) {
+            down_rails.insert(net.clone());
+        }
+    }
+
     Fixture {
         name: name.to_string(),
         pins,
         elements,
         rail_nets,
+        down_rails,
     }
 }
 
@@ -1147,6 +1212,147 @@ fn compactness_metrics(f: &Fixture) -> (usize, usize, Vec<String>) {
 
 // --- the fixtures --------------------------------------------------------
 
+// --- D: device facing (F2) -----------------------------------------------
+
+/// The DC graph as `net -> [(other net, via refdes)]`, shared by metric
+/// B's reachability walk and metric D's rank. Built from [`dc_edge`], so
+/// the two can never disagree about what conducts.
+fn dc_graph(f: &Fixture) -> BTreeMap<&str, Vec<(&str, &str)>> {
+    let mut adj: BTreeMap<&str, Vec<(&str, &str)>> = BTreeMap::new();
+    for e in &f.elements {
+        let Some((a, b)) = dc_edge(f, e) else {
+            continue;
+        };
+        // `dc_edge` returns owned Strings; re-borrow from the element's
+        // own nodes so the adjacency can hold `&str` for the walk.
+        let find = |want: &str| -> Option<&str> {
+            e.nodes.iter().map(String::as_str).find(|n| *n == want)
+        };
+        let (Some(a), Some(b)) = (find(&a), find(&b)) else {
+            continue;
+        };
+        adj.entry(a).or_default().push((b, e.refdes.as_str()));
+        adj.entry(b).or_default().push((a, e.refdes.as_str()));
+    }
+    adj
+}
+
+/// Hop distance from every net to the nearest rail of one page polarity,
+/// with `skip`'s edge removed.
+///
+/// A rail is **absorbing**: reaching one records the distance and stops.
+/// Current entering a rail leaves through the supply, not out the far
+/// side into the next signal net, and letting the walk continue would
+/// manufacture paths that run *through* the power supply.
+///
+/// A net absent from the result is unreachable — treated as infinitely
+/// far, so an unreachable terminal loses every strict comparison and the
+/// device declines.
+fn rail_hops(
+    f: &Fixture,
+    adj: &BTreeMap<&str, Vec<(&str, &str)>>,
+    down: bool,
+    skip: &str,
+) -> BTreeMap<String, usize> {
+    let mut dist: BTreeMap<String, usize> = BTreeMap::new();
+    let mut q: VecDeque<(&str, usize)> = VecDeque::new();
+    let mut roots: Vec<&str> = f
+        .rail_nets
+        .iter()
+        .map(String::as_str)
+        .filter(|n| f.is_down_rail(n) == down)
+        .collect();
+    roots.sort_unstable();
+    for r in roots {
+        dist.insert(r.to_string(), 0);
+        q.push_back((r, 0));
+    }
+    while let Some((net, d)) = q.pop_front() {
+        // A rail that is not a root of THIS walk is a terminus.
+        if d > 0 && f.is_rail_net(net) {
+            continue;
+        }
+        for (other, via) in adj.get(net).into_iter().flatten() {
+            if *via == skip || dist.contains_key(*other) {
+                continue;
+            }
+            dist.insert((*other).to_string(), d + 1);
+            q.push_back((other, d + 1));
+        }
+    }
+    dist
+}
+
+/// The net of `refdes`'s conduction terminal that must be drawn ABOVE
+/// the other, as `(hi net, lo net)` — or `None` when the rank declines.
+///
+/// The device's own edge is removed from the walk: ranking a device by a
+/// path through itself is circular, and would make every transistor read
+/// "collector one hop further from ground than emitter" however it is
+/// wired.
+///
+/// Declines on a tie, on the two axes disagreeing, and on both terminals
+/// being unreachable — a floating pass transistor, a bidirectional
+/// switch, a symmetric use. Declining is a real answer, not a failure.
+fn facing_of(f: &Fixture, refdes: &str) -> Option<(String, String)> {
+    let el = f.elem(refdes)?;
+    if !matches!(
+        el.kind,
+        ElementKind::Bjt | ElementKind::Mosfet | ElementKind::Jfet
+    ) {
+        return None;
+    }
+    // `dc_edge` returns `(nodes[0], nodes[2])` for a device: collector /
+    // drain first, emitter / source second.
+    let (a, b) = dc_edge(f, el)?;
+    let adj = dc_graph(f);
+    let up = rail_hops(f, &adj, false, refdes);
+    let dn = rail_hops(f, &adj, true, refdes);
+    let hops = |m: &BTreeMap<String, usize>, n: &str| m.get(n).copied().unwrap_or(usize::MAX);
+    let (ua, ub) = (hops(&up, &a), hops(&up, &b));
+    let (da, db) = (hops(&dn, &a), hops(&dn, &b));
+    if ua < ub && da > db {
+        Some((a, b))
+    } else if ub < ua && db > da {
+        Some((b, a))
+    } else {
+        None
+    }
+}
+
+/// `(device.facing_inverted, device.facing_resolved, detail)`.
+///
+/// A device is **inverted** when its higher-DC-potential terminal is
+/// drawn strictly BELOW the other — world Y grows downward in eeschema,
+/// so `y(hi) > y(lo)`. A device drawn on its side (both terminals at the
+/// same height) is not counted: the convention is about which terminal
+/// is on top, and a horizontal pose has no answer to that.
+fn facing_metrics(f: &Fixture) -> (usize, usize, Vec<String>) {
+    let mut inverted = 0usize;
+    let mut resolved = 0usize;
+    let mut detail = Vec::new();
+    let mut refdeses: Vec<&str> = f.elements.iter().map(|e| e.refdes.as_str()).collect();
+    refdeses.sort_unstable();
+    for r in refdeses {
+        let Some((hi, lo)) = facing_of(f, r) else {
+            continue;
+        };
+        let pin = |net: &str| f.pins_of(r).into_iter().find(|p| p.net == net).cloned();
+        let (Some(p_hi), Some(p_lo)) = (pin(&hi), pin(&lo)) else {
+            continue;
+        };
+        resolved += 1;
+        if p_hi.y_mm > p_lo.y_mm + TOL_MM {
+            inverted += 1;
+            detail.push(format!(
+                "facing {r}: `{hi}` (y={:.2}) drawn BELOW `{lo}` (y={:.2})",
+                p_hi.y_mm, p_lo.y_mm
+            ));
+        }
+    }
+    (inverted, resolved, detail)
+}
+
 /// Every fixture the suite converts, in `flow_geometry.rs`'s order.
 /// There are no budget literals here on purpose — see the module docs.
 const FIXTURES: &[&str] = &[
@@ -1187,7 +1393,7 @@ fn readability_metrics_are_reported_for_every_fixture() {
     let dump = std::env::var("S2K_READABILITY_DUMP").is_ok();
     if dump {
         println!(
-            "{:<24} {:>10} {:>10} {:>8} {:>10} {:>6} {:>10} {:>6}",
+            "{:<24} {:>10} {:>10} {:>8} {:>10} {:>6} {:>10} {:>6} {:>8} {:>8}",
             "fixture",
             "chain.axis",
             "chain.rev",
@@ -1195,7 +1401,9 @@ fn readability_metrics_are_reported_for_every_fixture() {
             "chain.strand",
             "run",
             "stack.sbs",
-            "pairs"
+            "pairs",
+            "face.inv",
+            "face.res"
         );
     }
     let mut measured = 0usize;
@@ -1204,6 +1412,7 @@ fn readability_metrics_are_reported_for_every_fixture() {
         let (axis, rev, members, chain_detail) = chain_metrics(&f);
         let (strand, strand_n, strand_detail) = compactness_metrics(&f);
         let (sbs, pairs, stack_detail) = stacking_metrics(&f);
+        let (finv, fres, facing_detail) = facing_metrics(&f);
         common::scoreboard::record_count("chain.axis", name, axis);
         common::scoreboard::record_count("chain.reversal", name, rev);
         common::scoreboard::record_count("chain.members", name, members);
@@ -1211,16 +1420,19 @@ fn readability_metrics_are_reported_for_every_fixture() {
         common::scoreboard::record_count("chain.run_members", name, strand_n);
         common::scoreboard::record_count("stack.side_by_side", name, sbs);
         common::scoreboard::record_count("stack.pairs", name, pairs);
+        common::scoreboard::record_count("device.facing_inverted", name, finv);
+        common::scoreboard::record_count("device.facing_resolved", name, fres);
         measured += 1;
         if dump {
             println!(
-                "{:<24} {axis:>10} {rev:>10} {members:>8} {strand:>10} {strand_n:>6} {sbs:>10} {pairs:>6}",
+                "{:<24} {axis:>10} {rev:>10} {members:>8} {strand:>10} {strand_n:>6} {sbs:>10} {pairs:>6} {finv:>8} {fres:>8}",
                 f.name
             );
             for d in chain_detail
                 .iter()
                 .chain(strand_detail.iter())
                 .chain(stack_detail.iter())
+                .chain(facing_detail.iter())
             {
                 println!("      {d}");
             }
@@ -1496,6 +1708,196 @@ fn chain_discriminator_keeps_rail_stubs_out_of_the_chain() {
     }
 }
 
+// --- D: device facing ----------------------------------------------------
+
+/// **The acceptance test for metric D**, and the defect it was written
+/// for. `two_stage_amp`'s seed emits BOTH transistors upside down; the
+/// shipping placer's phase 4.5 repairs `Q1` and never looks at `Q2`,
+/// because at its post-SA position the flipped `Q2` carries no V5 and no
+/// V12 violation of its own. The ADR-23 challenger `facing-trigger` adds
+/// the reach.
+///
+/// Asserted in `<=` form, like metrics A / B / C: it fires only if the
+/// arm that repairs the drawing reads strictly WORSE than the one that
+/// leaves it flipped — i.e. only if the metric's own validation
+/// inverts. It can never block a change that improves the shipping
+/// placer. Non-vacuity is carried by the synthetic control arm below.
+#[test]
+fn facing_ranks_the_repaired_arm_above_the_shipped_two_stage_amp() {
+    let shipped = load("two_stage_amp");
+    let repaired = load_arm("two_stage_amp", &["--placer", "facing-trigger"]);
+
+    let (s_inv, s_res, s_detail) = facing_metrics(&shipped);
+    let (r_inv, r_res, r_detail) = facing_metrics(&repaired);
+    println!("two_stage_amp shipped : inverted={s_inv}/{s_res} {s_detail:?}");
+    println!("two_stage_amp repaired: inverted={r_inv}/{r_res} {r_detail:?}");
+
+    assert!(
+        s_res >= 2,
+        "two_stage_amp has two NPN stages; the rank must resolve both, resolved {s_res}"
+    );
+    assert!(
+        r_inv <= s_inv,
+        "metric D inverted the specimen ranking: the arm that repairs the pose \
+         ({r_inv} inverted) must not read worse than the one that leaves it flipped \
+         ({s_inv}).\n  shipped:  {s_detail:?}\n  repaired: {r_detail:?}"
+    );
+}
+
+/// The facing rank is derived from the **netlist**, so which devices
+/// resolve must not depend on which placer drew the sheet. Only the
+/// *pose* is a placer property; the denominator is not.
+///
+/// Same shape as metric B's `c_pairs == s_pairs` assertion, and it
+/// exists for the same reason: a metric whose denominator moves with the
+/// arm cannot compare two arms.
+#[test]
+fn the_facing_rank_is_a_property_of_the_netlist_not_the_placer() {
+    for name in ["two_stage_amp", "cascode_amp", "diff_pair"] {
+        let a = load(name);
+        let b = load_arm(name, &["--placer", "champion"]);
+        let (_, a_res, _) = facing_metrics(&a);
+        let (_, b_res, _) = facing_metrics(&b);
+        assert_eq!(
+            a_res, b_res,
+            "{name}: the resolved-device set is a property of the netlist; the shipping \
+             placer saw {a_res}, the champion {b_res}"
+        );
+    }
+}
+
+/// **Non-vacuity, and the sign convention.** A hand-drawn common-emitter
+/// stage: collector to the supply through `RC`, emitter to ground
+/// through `RE`. Drawn collector-up it scores 0; drawn collector-down —
+/// the same netlist, one pose changed — it scores 1. A metric that
+/// always returns 0 fails the second half.
+#[test]
+fn facing_metric_counts_a_known_synthetic_inversion() {
+    let els = vec![
+        two_pin(ElementKind::Resistor, "RC", "vcc", "c"),
+        two_pin(ElementKind::Resistor, "RE", "e", "0"),
+        two_pin(ElementKind::Resistor, "RB", "vcc", "b"),
+        three_pin(ElementKind::Bjt, "Q1", "c", "b", "e"),
+    ];
+    let passives = vec![
+        pin("RC", "vcc", 0.0, 0.0),
+        pin("RC", "c", 0.0, 10.0),
+        pin("RE", "e", 0.0, 40.0),
+        pin("RE", "0", 0.0, 50.0),
+        pin("RB", "vcc", -20.0, 0.0),
+        pin("RB", "b", -20.0, 25.0),
+    ];
+
+    // (a) upright: collector above emitter (world Y grows DOWNWARD).
+    let mut up = passives.clone();
+    up.extend([
+        pin("Q1", "c", 0.0, 20.0),
+        pin("Q1", "b", -10.0, 25.0),
+        pin("Q1", "e", 0.0, 30.0),
+    ]);
+    let good = synthetic(els.clone(), up, &["vcc", "0"]);
+    assert_eq!(
+        facing_of(&good, "Q1"),
+        Some(("c".to_string(), "e".to_string())),
+        "collector must rank above emitter: it is one hop from the supply, \
+         the emitter one hop from ground"
+    );
+    let (inv, res, detail) = facing_metrics(&good);
+    assert_eq!(
+        (inv, res),
+        (0, 1),
+        "upright stage must be clean: {detail:?}"
+    );
+
+    // (b) the same netlist, the transistor flipped.
+    let mut down = passives;
+    down.extend([
+        pin("Q1", "c", 0.0, 30.0),
+        pin("Q1", "b", -10.0, 25.0),
+        pin("Q1", "e", 0.0, 20.0),
+    ]);
+    let bad = synthetic(els, down, &["vcc", "0"]);
+    let (inv, res, detail) = facing_metrics(&bad);
+    assert_eq!(
+        (inv, res),
+        (1, 1),
+        "a flipped transistor must be counted, or the metric is vacuous: {detail:?}"
+    );
+}
+
+/// **The decline set is the point.** Metric D must report *nothing*
+/// rather than guess when the topology does not order the two conduction
+/// terminals — a device floating between two nets that reach no rail
+/// through any DC conductor, and a device wired symmetrically so both
+/// terminals sit the same distance from both rails.
+///
+/// This is the assertion that keeps the rank falsifiable: without it, a
+/// predicate that silently widened to "collector is whatever SPICE
+/// listed first" would score identically on every fixture in the suite
+/// (all eleven of whose devices resolve), and nothing would notice.
+#[test]
+fn facing_discriminator_declines_rather_than_guessing() {
+    // (a) floating: `na` / `nb` touch no DC conductor but Q1 itself.
+    let floating = synthetic(
+        vec![
+            two_pin(ElementKind::Resistor, "RG", "vcc", "g"),
+            three_pin(ElementKind::Bjt, "Q1", "na", "g", "nb"),
+        ],
+        vec![
+            pin("RG", "vcc", -20.0, 0.0),
+            pin("RG", "g", -20.0, 25.0),
+            pin("Q1", "na", 0.0, 30.0),
+            pin("Q1", "g", -10.0, 25.0),
+            pin("Q1", "nb", 0.0, 20.0),
+        ],
+        &["vcc", "0"],
+    );
+    assert_eq!(
+        facing_of(&floating, "Q1"),
+        None,
+        "both conduction terminals are unreachable from any rail — decline"
+    );
+    assert_eq!(
+        facing_metrics(&floating),
+        (0, 0, Vec::new()),
+        "a declined device must not reach the numerator OR the denominator"
+    );
+
+    // (b) a symmetric tie: each terminal is one resistor from the supply
+    // and one from ground, so neither axis separates them.
+    let tie = synthetic(
+        vec![
+            two_pin(ElementKind::Resistor, "RA", "vcc", "na"),
+            two_pin(ElementKind::Resistor, "RB", "na", "0"),
+            two_pin(ElementKind::Resistor, "RC", "vcc", "nb"),
+            two_pin(ElementKind::Resistor, "RD", "nb", "0"),
+            two_pin(ElementKind::Resistor, "RG", "vcc", "g"),
+            three_pin(ElementKind::Bjt, "Q1", "na", "g", "nb"),
+        ],
+        vec![
+            pin("RA", "vcc", -40.0, 0.0),
+            pin("RA", "na", -40.0, 10.0),
+            pin("RB", "na", -40.0, 20.0),
+            pin("RB", "0", -40.0, 30.0),
+            pin("RC", "vcc", 40.0, 0.0),
+            pin("RC", "nb", 40.0, 10.0),
+            pin("RD", "nb", 40.0, 20.0),
+            pin("RD", "0", 40.0, 30.0),
+            pin("RG", "vcc", -20.0, 0.0),
+            pin("RG", "g", -20.0, 25.0),
+            pin("Q1", "na", 0.0, 30.0),
+            pin("Q1", "g", -10.0, 25.0),
+            pin("Q1", "nb", 0.0, 20.0),
+        ],
+        &["vcc", "0"],
+    );
+    assert_eq!(
+        facing_of(&tie, "Q1"),
+        None,
+        "a symmetric tie has no preferred way up — decline"
+    );
+}
+
 // --- synthetic control arms: the metrics are not vacuously zero ----------
 
 /// Build a fixture out of hand-placed pins, bypassing conversion.
@@ -1506,11 +1908,20 @@ fn chain_discriminator_keeps_rail_stubs_out_of_the_chain() {
 /// independent of any placer. Same role as
 /// `placement_stability.rs::p11_delta_grouping_catches_one_symbol_out_of_step`.
 fn synthetic(elements: Vec<Elem>, pins: Vec<BodyPin>, rails: &[&str]) -> Fixture {
+    let rail_nets: HashSet<String> = rails.iter().map(|s| (*s).to_string()).collect();
+    // Page polarity by canonical name — a synthetic arm names its rails
+    // `vcc` / `0`, so no `;@ power=` string is involved.
+    let down_rails = rail_nets
+        .iter()
+        .filter(|n| is_canonical_ground_name(n))
+        .cloned()
+        .collect();
     Fixture {
         name: "synthetic".to_string(),
         pins,
         elements,
-        rail_nets: rails.iter().map(|s| (*s).to_string()).collect(),
+        rail_nets,
+        down_rails,
     }
 }
 
@@ -1519,6 +1930,17 @@ fn two_pin(kind: ElementKind, refdes: &str, a: &str, b: &str) -> Elem {
         refdes: refdes.to_string(),
         kind,
         nodes: vec![a.to_string(), b.to_string()],
+        is_power_source: false,
+        is_sheet: false,
+    }
+}
+
+/// A three-terminal device, in SPICE order (`c b e` / `d g s`).
+fn three_pin(kind: ElementKind, refdes: &str, a: &str, b: &str, c: &str) -> Elem {
+    Elem {
+        refdes: refdes.to_string(),
+        kind,
+        nodes: vec![a.to_string(), b.to_string(), c.to_string()],
         is_power_source: false,
         is_sheet: false,
     }

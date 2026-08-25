@@ -510,6 +510,26 @@ const METRICS: &[Metric] = &[
         0.0,
         "DC-series device pairs measured — the denominator for stack.* (informational)",
     ),
+    // F2 — device facing. A reader expects a transistor's
+    // higher-DC-potential terminal drawn screen-UP; `two_stage_amp`'s
+    // `Q2` is emitted upside down and every metric above reads it as
+    // clean, because it is locally violation-free. Informational for the
+    // same reason as the rest of ADR-28: the rank is derived from DC
+    // reachability and it deliberately DECLINES on ties, on
+    // bidirectional use and on floating devices, so it must not be able
+    // to block work while its decline set is still being learned.
+    m(
+        "device.facing_inverted",
+        Tier::Info,
+        0.0,
+        "devices drawn with the higher-DC-potential terminal down (informational)",
+    ),
+    m(
+        "device.facing_resolved",
+        Tier::Info,
+        0.0,
+        "devices whose DC facing resolved — the denominator for device.* (informational)",
+    ),
 ];
 
 /// Weight applied to the Tier-1 total in the single-scalar aggregate.
@@ -1959,6 +1979,20 @@ const BLIND_CELL_EXEMPT: &[(&str, &str, &str)] = &[
          already in `PHASE1_ERC_FIXTURES`, which records the same violation count \
          under `t0.erc_errors`. A second id would be a second name for one ERC \
          property on one set of files.",
+    ),
+    (
+        "readability_metrics.rs",
+        "the_facing_rank_is_a_property_of_the_netlist_not_the_placer",
+        "a falsifiability guard on metric D, not a measurement of any drawing: it \
+         asserts that `device.facing_resolved` — which devices the DC rank resolves \
+         at all — is identical under two placers, i.e. that the DENOMINATOR is a \
+         property of the netlist. A challenger cannot move it without falsifying the \
+         assertion itself. It also converts one arm under a pinned `--placer champion`, \
+         and recording a pinned arm's numbers would file them under the row being \
+         collected for a different placer (see `convert`'s own note). The number it \
+         does grade — the inverted COUNT — is already recorded per fixture by \
+         `readability_metrics_are_reported_for_every_fixture` under \
+         `device.facing_inverted`.",
     ),
     (
         "roundtrip_connectivity.rs",
