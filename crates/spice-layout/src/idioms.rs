@@ -1049,6 +1049,142 @@ pub(crate) fn apply_rail_stub_columns(
     }
 }
 
+/// World-frame offset (mm) of `element`'s pin on `net` from the element's
+/// own origin, at orientation `orient`. `None` when the element has no
+/// terminal on `net`, or the symbol has no such pin.
+///
+/// The symbol-frame pin `y` is **negated**: world/screen Y grows downward
+/// and `pins_in` yields the KiCad symbol frame, which is the same eeschema
+/// flip [`crate::world_extent`] applies (`grow(p.x, -p.y)`). Note that
+/// `PlacedElement::world_pin_mm` adds it instead — a known upstream defect
+/// being corrected on its own track; do not mirror it here.
+fn pin_offset_world(e: &ResolvedElement, orient: Orientation, net: &str) -> Option<(f64, f64)> {
+    let ti = e.nodes.iter().position(|n| n == net)?;
+    let want = e.pin_mapping.get(ti)?;
+    e.symbol
+        .pins_in(orient)
+        .into_iter()
+        .find(|p| &p.number == want)
+        .map(|p| (p.x, -p.y))
+}
+
+/// World `(x, y)` mm of the pin of placed element `pe` (resolved as `e`)
+/// that connects to `net`, in the screen frame (Y grows downward).
+fn world_pin_xy_of(
+    pe: &crate::PlacedElement,
+    e: &ResolvedElement,
+    net: &str,
+) -> Option<(f64, f64)> {
+    let (dx, dy) = pin_offset_world(e, pe.orientation, net)?;
+    let (ox, oy) = pe.origin.to_mm();
+    Some((ox + dx, oy + dy))
+}
+
+/// The grid origin that puts `e`'s pin on `net` at world `target` (mm)
+/// when the element is drawn at `orient`, snapped to the schematic grid
+/// (CLAUDE.md "everything lands on the KiCad schematic grid").
+fn origin_placing_pin_at(
+    e: &ResolvedElement,
+    orient: Orientation,
+    net: &str,
+    target: (f64, f64),
+) -> Option<GridPoint> {
+    let (dx, dy) = pin_offset_world(e, orient, net)?;
+    #[allow(clippy::cast_possible_truncation)]
+    Some(GridPoint::new(
+        ((target.0 - dx) / GridPoint::STEP_MM).round() as i32,
+        ((target.1 - dy) / GridPoint::STEP_MM).round() as i32,
+    ))
+}
+
+/// The X column `net`'s rail stubs occupy **as placed** — the mean world X
+/// of the stubs' own pins on `net`, read after
+/// [`apply_rail_stub_columns`] has had its say. `None` when the net
+/// carries no stub.
+///
+/// This reads the placement rather than re-deriving a column from
+/// [`rail_stub_anchor_x`] on purpose: the divider members are the divider
+/// idiom's property, so the only column that is *true* is the one they
+/// actually stand in.
+fn stub_column_x(
+    placement: &Placement,
+    checked: &CheckedNetlist,
+    stubs: &[RailStub],
+    net: &str,
+) -> Option<f64> {
+    let mut sum = 0.0_f64;
+    let mut n = 0_u32;
+    for s in stubs.iter().filter(|s| s.signal_net == net) {
+        if let Some((x, _)) = world_pin_xy_of(
+            &placement.elements[s.element],
+            &checked.elements[s.element],
+            net,
+        ) {
+            sum += x;
+            n += 1;
+        }
+    }
+    (n > 0).then(|| sum / f64::from(n))
+}
+
+/// The world Y of the wire `net` sends to the device it drives — the Y of
+/// `net`'s pin on the element with the most terminals that is neither
+/// `series` (the element under construction) nor one of the node's rail
+/// stubs.
+///
+/// For a bias divider that is the transistor base / FET gate the tap
+/// feeds, i.e. the height at which the node's horizontal run is already
+/// drawn. Landing the series element's downstream pin there makes that run
+/// straight. `None` when the node drives nothing with three or more pins,
+/// in which case the caller has no Y to honour and declines.
+fn node_outgoing_wire_y(
+    placement: &Placement,
+    checked: &CheckedNetlist,
+    stubs: &[RailStub],
+    net: &str,
+    series: usize,
+) -> Option<f64> {
+    let mut best: Option<(usize, f64)> = None;
+    for (j, e) in checked.elements.iter().enumerate() {
+        if j == series || e.nodes.len() < 3 || !e.nodes.iter().any(|n| n == net) {
+            continue;
+        }
+        if stubs.iter().any(|s| s.element == j) {
+            continue;
+        }
+        let Some((_, y)) = world_pin_xy_of(&placement.elements[j], e, net) else {
+            continue;
+        };
+        if best.is_none_or(|(pins, _)| e.nodes.len() > pins) {
+            best = Some((e.nodes.len(), y));
+        }
+    }
+    best.map(|(_, y)| y)
+}
+
+/// Which construction [`apply_series_horizontal`] applies to an accepted
+/// series element. The three variants are the case the pass has always
+/// accepted, plus one for each of its two historical *declines* — F1
+/// replaces each decline with a narrower construction rather than widening
+/// the accepting one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Construction {
+    /// The shipping case: the downstream node carries rail stub(s) on
+    /// exactly ONE rail side, which are re-columned to drop straight off
+    /// the output node.
+    Recolumn,
+    /// F1 case (a), behind [`Placer::terminal_net_series`] — an endpoint
+    /// net is *terminal*, so there is nothing on it to re-column and
+    /// nothing to collide with. The position half is a pin-anchored
+    /// re-seat of the element itself.
+    TerminalNet,
+    /// F1 case (b), behind [`Placer::divider_node_series`] — the
+    /// downstream node is a bias divider *through* the node. Orient onto
+    /// the divider's column at the node's outgoing-wire Y, and never touch
+    /// the divider itself.
+    DividerNode,
+}
+
 /// Draw series signal elements horizontally on the flow lane, upstream
 /// pin left, with their downstream shunts re-columned onto the output node
 /// — dropping **beneath** it for a ground / negative-rail stub and rising
@@ -1092,6 +1228,11 @@ pub(crate) fn apply_rail_stub_columns(
 /// [`crate::pick_orientations`] (which skips pinned elements). Skips any
 /// element already pinned by a stronger opinion (user `align`/`place`, a
 /// cache hint, V7 symmetry, a divider).
+// One loop over the elements deciding, for each, WHICH construction it
+// gets and then applying it. The three constructions share the role test,
+// the flow direction and the V14 gate, so splitting them into separate
+// passes would duplicate all three and let them drift.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn apply_series_horizontal(
     placement: &mut Placement,
     pinned: &mut [bool],
@@ -1128,6 +1269,31 @@ pub(crate) fn apply_series_horizontal(
         n != "0" && !matches!(classes.get(n), Some(NetClass::Power | NetClass::Ground))
     };
 
+    // A **terminal** net is one the drawing has nothing else to hang off,
+    // by either of two structural tests (CLAUDE.md principle 9 — no refdes
+    // and no element-kind matching):
+    //
+    //  * it carries a declared `*@port`, the user's own statement that this
+    //    net is a circuit boundary (`layers.rs` reads the same field for
+    //    the left/right X bias); or
+    //  * exactly one element touches it, so once that element is placed the
+    //    net is a bare wire out to a label. `;@ ignore`d loads are already
+    //    absent from `checked.elements`, which is what makes `out` a leaf
+    //    on the amplifier fixtures.
+    let declared_ports: HashSet<&str> = checked.ports.iter().map(|p| p.net.as_str()).collect();
+    let mut net_degree: HashMap<&str, usize> = HashMap::new();
+    for el in &checked.elements {
+        let mut seen: HashSet<&str> = HashSet::new();
+        for n in &el.nodes {
+            if seen.insert(n.as_str()) {
+                *net_degree.entry(n.as_str()).or_insert(0) += 1;
+            }
+        }
+    }
+    let is_terminal = |n: &str| -> bool {
+        declared_ports.contains(n) || net_degree.get(n).copied().unwrap_or(0) <= 1
+    };
+
     for i in 0..checked.elements.len() {
         if pinned[i] {
             continue;
@@ -1155,13 +1321,6 @@ pub(crate) fn apply_series_horizontal(
             (Some(x), Some(y)) if x > y => (nb, na),
             _ => continue,
         };
-        // CRITICAL GUARD — shunt-bearing only. Re-orient a series element
-        // horizontal ONLY when its downstream node actually carries a rail
-        // stub to re-column beneath the output. Applying it to every
-        // directed series element re-basins fixtures with nothing to drop
-        // (measured: `common_emitter` COUT forced, B 4→7; `opamp_inverting`
-        // regressed). A series element whose downstream node has no shunt
-        // has no re-column to anchor, so leave it to the general chooser.
         let mut down_up_side = false;
         let mut down_down_side = false;
         for s in stubs.iter().filter(|s| s.signal_net == down) {
@@ -1170,19 +1329,45 @@ pub(crate) fn apply_series_horizontal(
                 VertPref::Down => down_down_side = true,
             }
         }
-        if !down_up_side && !down_down_side {
+        let construction = if down_up_side && down_down_side {
+            // BOTH-SIDES GUARD — a downstream node carrying rail stubs on
+            // BOTH the up and down rail sides is a divider THROUGH the node
+            // (e.g. `common_emitter`'s R1/R2 bias divider on the base, or
+            // `named_rails`'s pull-up/pull-down pair on `out`), not a shunt
+            // to drop beneath an output. Re-columning it perturbs geometry
+            // the divider idiom owns, so the shipping pass declines —
+            // mirrors `rail_stub_anchor_x`'s `node_has_both_sides`.
+            //
+            // F1 case (b) keeps the hands-off half and drops the rest: the
+            // divider is still read-only, but the series element is oriented
+            // ONTO its column instead of being abandoned to the general
+            // chooser.
+            if variant.divider_node_series() {
+                Construction::DividerNode
+            } else {
+                continue;
+            }
+        } else if down_up_side || down_down_side {
+            Construction::Recolumn
+        } else if variant.terminal_net_series() && (is_terminal(up) || is_terminal(down)) {
+            // SHUNT-BEARING GUARD, relaxed by F1 case (a). Re-orienting a
+            // series element horizontal with nothing to jointly place
+            // re-basins fixtures that have nothing to drop (measured:
+            // `common_emitter` COUT forced, B 4→7; `opamp_inverting`
+            // regressed), which is why the shipping pass requires a
+            // downstream shunt to anchor the re-column.
+            //
+            // A *terminal* net removes that hazard instead of widening past
+            // it: nothing else touches the net, so there is nothing to
+            // re-column and nothing for the element to swing into. The
+            // position half survives as a pin-anchored re-seat below.
+            Construction::TerminalNet
+        } else {
+            // No shunt to re-column and no terminal net to swing into — no
+            // anchor, so leave the element to the general chooser
+            // (conservative, and the shipping behaviour).
             continue;
-        }
-        // Both-sides guard — a downstream node carrying rail stubs on BOTH
-        // the up and down rail sides is a divider THROUGH the node (e.g.
-        // `common_emitter`'s R1/R2 bias divider on the base, or
-        // `named_rails`'s pull-up/pull-down pair on `out`), not a shunt to
-        // drop beneath an output. Grabbing it re-columns the divider and
-        // perturbs it. Decline — mirrors `rail_stub_anchor_x`'s
-        // `node_has_both_sides`.
-        if down_up_side && down_down_side {
-            continue;
-        }
+        };
         // Series elements are pure-signal 2-pin passives → V14 allows all
         // eight orientations, so any horizontal one is V14-legal. Checked,
         // not assumed: see `v14_permits`.
@@ -1193,8 +1378,65 @@ pub(crate) fn apply_series_horizontal(
         if !v14_permits(allowed, i, orient, &e.refdes) {
             continue;
         }
+        // Both F1 constructions also need a POSITION, and it must be
+        // derived BEFORE anything is mutated: orienting and pinning an
+        // element whose target then turns out to be underivable would
+        // freeze a bare rotation at a position chosen for the old pose —
+        // exactly the orientation-only change ADR-15 Stage 5 measured the
+        // cost of.
+        let origin = match construction {
+            Construction::Recolumn => placement.elements[i].origin,
+            Construction::TerminalNet => {
+                // Hold the pin on the element's INTERIOR side at its current
+                // world position, so the body swings out into the empty
+                // half-plane the terminal net is, rather than rotating about
+                // its own origin into whatever sits beside it. The
+                // terminal-side pin is deliberately free: it reaches a
+                // label, not a neighbour. When BOTH ends are terminal there
+                // is no interior side, and upstream is the conventional
+                // anchor (signal runs left→right from it).
+                let anchor = if is_terminal(up) && !is_terminal(down) {
+                    down
+                } else {
+                    up
+                };
+                let Some(at) = world_pin_xy_of(&placement.elements[i], e, anchor) else {
+                    continue;
+                };
+                let Some(o) = origin_placing_pin_at(e, orient, anchor, at) else {
+                    continue;
+                };
+                o
+            }
+            Construction::DividerNode => {
+                // Land the downstream pin ON the divider's own column, at
+                // the Y of the wire the node already sends to the device it
+                // drives. The divider members are read here and never
+                // written — their column and their stack belong to the
+                // divider / rail-stub idioms.
+                let Some(x) = stub_column_x(placement, checked, &stubs, down) else {
+                    continue;
+                };
+                let Some(y) = node_outgoing_wire_y(placement, checked, &stubs, down, i) else {
+                    continue;
+                };
+                let Some(o) = origin_placing_pin_at(e, orient, down, (x, y)) else {
+                    continue;
+                };
+                o
+            }
+        };
+
+        placement.elements[i].origin = origin;
         placement.elements[i].orientation = orient;
         pinned[i] = true;
+
+        if construction != Construction::Recolumn {
+            // Neither F1 construction re-columns anything: a terminal net
+            // has no members to move, and a divider node's members are the
+            // divider idiom's property.
+            continue;
+        }
 
         // Re-column every downstream shunt onto this element's downstream
         // pin so it drops straight beneath the output node, AND drop it far
@@ -2368,5 +2610,248 @@ C2  n2  0  1n
         assert_eq!(base, stage1, "stage 1 must be inert once a tier fires");
         assert_eq!(base.get("n1"), Some(&0), "{base:?}");
         assert_eq!(base.get("src"), Some(&1), "{base:?}");
+    }
+
+    /// Seed-only placement under one named placer, so a test can A/B the
+    /// F1 constructions against the shipping default without the SA in
+    /// the way. `refine: false` is load-bearing, not a speed-up: the
+    /// annealer is globally coupled, so with it on, "did this element
+    /// move?" cannot be attributed to the pass under test.
+    fn seed_with(checked: &CheckedNetlist, placer: Placer) -> Placement {
+        crate::place_with(
+            checked.clone(),
+            fixture_library(),
+            &crate::LayoutOptions {
+                placer,
+                refine: false,
+                ..crate::LayoutOptions::default()
+            },
+        )
+        .expect("place")
+    }
+
+    /// Screen-frame world `(x, y)` of a placed element's pin on `net`.
+    fn pin_at(
+        placement: &Placement,
+        checked: &CheckedNetlist,
+        refdes: &str,
+        net: &str,
+    ) -> (f64, f64) {
+        let i = checked
+            .elements
+            .iter()
+            .position(|e| e.refdes == refdes)
+            .expect("element present");
+        world_pin_xy_of(&placement.elements[i], &checked.elements[i], net).expect("pin on net")
+    }
+
+    fn orientation_of(
+        placement: &Placement,
+        checked: &CheckedNetlist,
+        refdes: &str,
+    ) -> Orientation {
+        let i = checked
+            .elements
+            .iter()
+            .position(|e| e.refdes == refdes)
+            .expect("element present");
+        placement.elements[i].orientation
+    }
+
+    fn is_horizontal(o: Orientation) -> bool {
+        matches!(o.rotation, Rotation::R90 | Rotation::R270)
+    }
+
+    /// F1 case (a) — the shunt-bearing guard's terminal-net relaxation.
+    ///
+    /// `COUT` couples the collector node to a declared `*@port …=output`
+    /// that nothing else touches. The shipping pass declines it (no
+    /// downstream shunt to re-column) and it is left standing on end, so
+    /// the emitter attaches the `out` label vertically. Under
+    /// `--placer=terminal-series` it is drawn horizontal, upstream pin at
+    /// the lower X, and the interior-side pin does not move.
+    #[test]
+    fn a_terminal_net_series_element_goes_horizontal_only_under_f1() {
+        let src = "\
+terminal-net series
+*@symbol Device:R for=R*
+*@symbol Device:C for=C*
+*@port in=input
+*@port out=output
+VCC vcc 0 DC 12 ;@ power=+12V
+R1  in  mid 10k
+RL  vcc mid 47k
+COUT mid out 1u
+.end
+";
+        let checked = checked_of(src);
+        let f1 = seed_with(&checked, Placer::TerminalSeries);
+        let i_cout = checked
+            .elements
+            .iter()
+            .position(|e| e.refdes == "COUT")
+            .expect("COUT present");
+
+        // The mechanism claim, stated where it is unambiguous: under the
+        // shipping default the pass DECLINES this element, so it is left
+        // to `pick_orientations` unpinned — a choice the SA rotate move
+        // and phase 4.5 may both undo. Under F1 the pass constructs the
+        // pose and **pins** it. (Asserting "the default draws it vertical"
+        // would be the weaker claim and is specimen-dependent: the V5 seed
+        // chooser sometimes stumbles onto a horizontal pose on its own.)
+        let pinned_under = |placer: Placer| -> bool {
+            crate::refinement_meta(&checked, &crate::Hint::default(), placer)
+                .expect("refinement meta")
+                .pinned[i_cout]
+        };
+        assert!(
+            !pinned_under(Placer::FlowSeedV4),
+            "the shipping default must leave COUT unpinned here; if it does \
+             not, the shunt-bearing guard no longer declines and this test \
+             proves nothing"
+        );
+        assert!(
+            pinned_under(Placer::TerminalSeries),
+            "F1 must PIN the constructed pose — an unpinned orientation is \
+             one `pick_orientations`, the SA and phase 4.5 can each undo"
+        );
+
+        let o = orientation_of(&f1, &checked, "COUT");
+        assert!(is_horizontal(o), "COUT must be drawn horizontal, got {o:?}");
+
+        // Direction: the upstream (interior) pin is at the lower X, so the
+        // signal runs left -> right out to the port label.
+        let (up_x, _) = pin_at(&f1, &checked, "COUT", "mid");
+        let (down_x, _) = pin_at(&f1, &checked, "COUT", "out");
+        assert!(
+            up_x < down_x,
+            "upstream pin must sit left: {up_x} !< {down_x}"
+        );
+    }
+
+    /// The joint half of case (a), tested on the mechanism rather than
+    /// through the whole pipeline: `origin_placing_pin_at` is the inverse
+    /// of `world_pin_xy_of`, so re-seating an element at a new orientation
+    /// leaves the anchored pin exactly where it was.
+    ///
+    /// This is what makes the construction *joint* (position AND
+    /// orientation) instead of the bare rotation ADR-15 Stage 5 measured
+    /// the cost of — and it is checked here because the end-to-end
+    /// placement runs `pick_orientations` and `legalize` afterwards, which
+    /// would make a pipeline-level before/after ambiguous.
+    #[test]
+    fn re_seating_holds_the_anchored_pin_still() {
+        let src = "\
+pin-anchored re-seat
+*@symbol Device:C for=C*
+*@port in=input
+*@port out=output
+CIN in out 1u
+.end
+";
+        let checked = checked_of(src);
+        let placement = seed_with(&checked, Placer::FlowSeedV4);
+        let e = &checked.elements[0];
+        let pe = &placement.elements[0];
+        let before = world_pin_xy_of(pe, e, "in").expect("pin on `in`");
+        for &o in &Orientation::ALL {
+            let origin = origin_placing_pin_at(e, o, "in", before).expect("re-seat");
+            let mut moved = pe.clone();
+            moved.origin = origin;
+            moved.orientation = o;
+            let after = world_pin_xy_of(&moved, e, "in").expect("pin on `in`");
+            assert!(
+                (before.0 - after.0).abs() < 1e-9 && (before.1 - after.1).abs() < 1e-9,
+                "{o:?}: the anchored pin moved {before:?} -> {after:?}"
+            );
+        }
+    }
+
+    /// F1 case (b) — the both-sides guard becomes orient-but-don't-re-column.
+    ///
+    /// `b` carries `RB1` (to `+12V`) and `RB2` (to ground): a bias divider
+    /// THROUGH the node, which the shipping pass declines outright. Under
+    /// `--placer=terminal-series-divider` the coupling cap is drawn
+    /// horizontal with its downstream pin ON the divider's own column and
+    /// at the Y of the wire the node sends to `Q1`'s base — and the
+    /// divider members do not move a single cell.
+    #[test]
+    fn the_divider_node_case_orients_onto_the_column_without_moving_the_divider() {
+        let src = "\
+divider-node series
+*@symbol Device:R for=R*
+*@symbol Device:C for=C*
+*@symbol Device:Q_NPN_BCE for=Q*
+*@port in=input
+VCC vcc 0 DC 12 ;@ power=+12V
+CIN in  b   1u
+RB1 vcc b   100k
+RB2 b   0   22k
+RC  vcc c   4k7
+RE  e   0   1k
+Q1  c b e   QGENERIC
+.model QGENERIC NPN (BF=200 IS=1e-15)
+.end
+";
+        let checked = checked_of(src);
+        let terminal_only = seed_with(&checked, Placer::TerminalSeries);
+        let f1 = seed_with(&checked, Placer::TerminalSeriesDivider);
+
+        // Case (a) alone must NOT reach this element: `in` is a declared
+        // port, but the both-sides guard is consulted FIRST and case (a)
+        // only fires when the downstream node carries no stub at all.
+        // That ordering is what makes the two challenger arms attributable
+        // — if the (a)-only arm already produced this pose, the (b) arm's
+        // aggregate could not be read.
+        let i_cin = checked
+            .elements
+            .iter()
+            .position(|e| e.refdes == "CIN")
+            .expect("CIN present");
+        assert_ne!(
+            (
+                terminal_only.elements[i_cin].origin,
+                terminal_only.elements[i_cin].orientation
+            ),
+            (f1.elements[i_cin].origin, f1.elements[i_cin].orientation),
+            "the (a)-only arm already produced the (b) pose; the two arms \
+             are no longer separable"
+        );
+        let o = orientation_of(&f1, &checked, "CIN");
+        assert!(is_horizontal(o), "CIN must be drawn horizontal, got {o:?}");
+
+        // The downstream pin lands ON the divider column ...
+        let (cin_x, cin_y) = pin_at(&f1, &checked, "CIN", "b");
+        let (rb1_x, _) = pin_at(&f1, &checked, "RB1", "b");
+        let (rb2_x, _) = pin_at(&f1, &checked, "RB2", "b");
+        let column = f64::midpoint(rb1_x, rb2_x);
+        assert!(
+            (cin_x - column).abs() <= GridPoint::STEP_MM / 2.0,
+            "CIN's `b` pin must sit on the divider column {column}, got {cin_x}"
+        );
+        // ... at the Y of the wire the node sends to Q1's base.
+        let (_, base_y) = pin_at(&f1, &checked, "Q1", "b");
+        assert!(
+            (cin_y - base_y).abs() <= GridPoint::STEP_MM / 2.0,
+            "CIN's `b` pin must sit at the base-wire Y {base_y}, got {cin_y}"
+        );
+
+        // The divider members are READ, never written: same origin and
+        // same orientation as the arm that never looked at them.
+        for r in ["RB1", "RB2"] {
+            let i = checked
+                .elements
+                .iter()
+                .position(|e| e.refdes == r)
+                .expect("element present");
+            assert_eq!(
+                terminal_only.elements[i].origin, f1.elements[i].origin,
+                "{r} moved; the divider members belong to the divider idiom"
+            );
+            assert_eq!(
+                terminal_only.elements[i].orientation, f1.elements[i].orientation,
+                "{r} was re-oriented; the divider members belong to the divider idiom"
+            );
+        }
     }
 }

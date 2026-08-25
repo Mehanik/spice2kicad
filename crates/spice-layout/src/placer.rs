@@ -302,6 +302,63 @@ pub enum Placer {
     /// Tier-1 damage) and NOT a `cost.rs` weight (CLAUDE.md
     /// constraints-vs-costs, and the V14 Attempt-A failure).
     FacingTrigger,
+    /// **Terminal-net series orientation** — [`Placer::FlowSeedV4`] plus a
+    /// third acceptance case in
+    /// [`crate::idioms::apply_series_horizontal`].
+    ///
+    /// That pass is the only mechanism in the tree that draws a series
+    /// element horizontally *and* **pins** it, which is the only thing the
+    /// SA and phase 4.5 both respect. It declines in two places, and the
+    /// first is its **shunt-bearing guard**: unless the downstream node
+    /// carries a rail stub to re-column, it leaves the element to the
+    /// general chooser. The guard exists for a real measurement — forcing
+    /// horizontality on *every* directed series element cost
+    /// `common_emitter` B 4→7 — but it also declines exactly where a
+    /// coupling capacitor meets the sheet boundary, which is why `CIN` /
+    /// `COUT` stand on end and their `*@port` labels attach vertically.
+    ///
+    /// Under this variant an element **one of whose endpoint nets is
+    /// terminal** is accepted too. Terminal means, structurally: the net
+    /// carries a declared `*@port`, or exactly one element touches it (a
+    /// leaf). Either way the net has nothing on it to re-column — which is
+    /// the hazard the shunt-bearing guard exists for — so the construction
+    /// needs no downstream anchor.
+    ///
+    /// It is still **joint** position+orientation, per the ADR-15 Stage-5
+    /// root diagnosis ("making the orientation choice hard does not make it
+    /// good, it makes it permanent"): the pin on the element's *interior*
+    /// side is held at its current world position while the pose changes,
+    /// so the element swings out into the empty half-plane the terminal net
+    /// is, instead of rotating about its own origin into whatever sits
+    /// beside it. The terminal-side pin is deliberately free.
+    TerminalSeries,
+    /// **Terminal-net + divider-node series orientation** —
+    /// [`Placer::TerminalSeries`] plus a relaxation of the *second*
+    /// decline in [`crate::idioms::apply_series_horizontal`], its
+    /// **both-sides guard**.
+    ///
+    /// A downstream node carrying rail stubs on both sides (`common_emitter`
+    /// `b`, `two_stage_amp` `b1`/`b2`, `cascode_amp` `b2`) is a bias divider
+    /// *through* the node, not a shunt to drop beneath an output. The
+    /// shipping pass declines outright, because re-columning the divider
+    /// would perturb geometry the divider idiom owns.
+    ///
+    /// Declining is stronger than it needs to be. Under this variant the
+    /// guard becomes **orient-but-do-not-re-column**: the series element is
+    /// drawn horizontal and pinned with its downstream pin landing on the
+    /// divider's own column at the Y of the wire that leaves the node for
+    /// the device it drives (a transistor base, a gate). The divider
+    /// members are read, never written — they stay exactly where the
+    /// divider idiom and [`crate::idioms::apply_rail_stub_columns`] put
+    /// them. That is the conventional drawing: a horizontal coupling cap
+    /// arriving at the base wire, with the divider hanging vertically
+    /// through the same node.
+    ///
+    /// The split from [`Placer::TerminalSeries`] is for **attribution**:
+    /// the terminal case and the divider case move overlapping fixtures
+    /// (`two_stage_amp` gets both), so a single arm's aggregate could not
+    /// say which half paid for which.
+    TerminalSeriesDivider,
 }
 
 impl Placer {
@@ -320,6 +377,8 @@ impl Placer {
         Self::DividerRails,
         Self::DividerRailsStrict,
         Self::FacingTrigger,
+        Self::TerminalSeries,
+        Self::TerminalSeriesDivider,
     ];
 
     /// The name accepted by `--placer` and printed by the scoreboard.
@@ -338,6 +397,8 @@ impl Placer {
             Self::DividerRails => "divider-rails",
             Self::DividerRailsStrict => "divider-rails-strict",
             Self::FacingTrigger => "facing-trigger",
+            Self::TerminalSeries => "terminal-series",
+            Self::TerminalSeriesDivider => "terminal-series-divider",
         }
     }
 
@@ -382,6 +443,14 @@ impl Placer {
             Self::FacingTrigger => {
                 "flow-seed-v4 plus a third phase-4.5 at-risk trigger: a \
                  device whose higher-DC-potential terminal is drawn down"
+            }
+            Self::TerminalSeries => {
+                "flow-seed-v4 plus the terminal-net series case: a series \
+                 element on a `*@port` or leaf net is drawn horizontal"
+            }
+            Self::TerminalSeriesDivider => {
+                "terminal-series plus the divider-node case: orient onto the \
+                 divider column instead of declining, never re-column it"
             }
         }
     }
@@ -428,6 +497,8 @@ impl Placer {
                 | Self::DividerRails
                 | Self::DividerRailsStrict
                 | Self::FacingTrigger
+                | Self::TerminalSeries
+                | Self::TerminalSeriesDivider
         )
     }
 
@@ -457,7 +528,12 @@ impl Placer {
     pub fn unified_roots(self) -> bool {
         matches!(
             self,
-            Self::FlowSeedV4 | Self::DividerRails | Self::DividerRailsStrict | Self::FacingTrigger
+            Self::FlowSeedV4
+                | Self::DividerRails
+                | Self::DividerRailsStrict
+                | Self::FacingTrigger
+                | Self::TerminalSeries
+                | Self::TerminalSeriesDivider
         )
     }
 
@@ -505,6 +581,32 @@ impl Placer {
     #[must_use]
     pub fn facing_inverted_trigger(self) -> bool {
         matches!(self, Self::FacingTrigger)
+    }
+
+    /// F1 case (a): does [`crate::idioms::apply_series_horizontal`] accept
+    /// a directed series element whose upstream **or** downstream net is a
+    /// *terminal* net (a declared `*@port`, or a leaf net no second
+    /// element touches), instead of declining under its shunt-bearing
+    /// guard?
+    ///
+    /// The construction stays joint — the interior-side pin is held at its
+    /// world position while the pose changes — because ADR-15 Stage 5
+    /// measured what an orientation-only change costs.
+    #[must_use]
+    pub fn terminal_net_series(self) -> bool {
+        matches!(self, Self::TerminalSeries | Self::TerminalSeriesDivider)
+    }
+
+    /// F1 case (b): does that same pass **orient without re-columning**
+    /// when the downstream node carries rail stubs on both sides (a bias
+    /// divider through the node), instead of declining outright?
+    ///
+    /// The series element's downstream pin is placed on the divider's own
+    /// column at the node's outgoing-wire Y; the divider members are read,
+    /// never moved.
+    #[must_use]
+    pub fn divider_node_series(self) -> bool {
+        matches!(self, Self::TerminalSeriesDivider)
     }
 
     /// Look a placer up by the name `--placer` accepts.
@@ -649,6 +751,33 @@ mod tests {
         assert!(!Placer::FacingTrigger.rail_gated_dividers());
         assert!(!Placer::FacingTrigger.unified_depth_roots());
         assert!(!Placer::FacingTrigger.sa_rotate_v5_gate());
+    }
+
+    /// The F1 series-orientation cases are **dead on the default path**:
+    /// both are gated on a `Placer` accessor and nothing else, which is the
+    /// whole byte-identity argument for the shipping output
+    /// (`baseline_lock` is the empirical half).
+    #[test]
+    fn the_terminal_series_cases_are_off_by_default() {
+        assert!(!Placer::default().terminal_net_series());
+        assert!(!Placer::default().divider_node_series());
+        assert!(!Placer::FlowSeed.terminal_net_series());
+        assert!(!Placer::Champion.terminal_net_series());
+        assert!(!Placer::DividerRails.terminal_net_series());
+        // (a) alone, then (a) + (b) — the attribution split.
+        assert!(Placer::TerminalSeries.terminal_net_series());
+        assert!(!Placer::TerminalSeries.divider_node_series());
+        assert!(Placer::TerminalSeriesDivider.terminal_net_series());
+        assert!(Placer::TerminalSeriesDivider.divider_node_series());
+        // Both compose ON the default, so an A/B against it isolates the
+        // series-orientation cases and nothing else.
+        for p in [Placer::TerminalSeries, Placer::TerminalSeriesDivider] {
+            assert!(p.unified_roots(), "{}", p.name());
+            assert!(p.flow_seed_layering(), "{}", p.name());
+            assert!(!p.unified_depth_roots(), "{}", p.name());
+            assert!(!p.sa_rotate_v5_gate(), "{}", p.name());
+            assert!(!p.rail_gated_dividers(), "{}", p.name());
+        }
     }
 
     #[test]

@@ -5958,6 +5958,111 @@ drawn sources are what would let the next root-policy question be settled
 by measurement instead of by the two specimens that happen to exist.
 
 
+### D12. F1 — the two series-orientation declines, replaced by constructions
+
+**Status: registered as challengers, graded, NOT promoted.** Two arms,
+`--placer=terminal-series` and `--placer=terminal-series-divider`, both
+dead on the default path (each gated on one `Placer` accessor and nothing
+else; `baseline_lock` is the empirical half and its diff is empty).
+
+**The report.** "Both VIN and VOUT as well as capacitors connected to it
+should be horizontal. This is common issue for many circuits." Measured:
+vertically-attached port labels on **6 of 18** fixtures — `two_stage_amp`
+(in + out), `common_emitter` (out), `cascode_amp` (out),
+`opamp_inverting_real` (in), `sallen_key_lpf` (in), `port_shapes` (2 of
+4). A port label's direction is decoration reading the terminal element's
+pin geometry, so the label is a *symptom*: fix the element's pose and the
+label follows.
+
+**Why the one working mechanism did not fire.**
+`idioms::apply_series_horizontal` is the only pass that draws a series
+element horizontally *jointly with position* and then **pins** it — the
+one mechanism the SA and phase 4.5 both respect. It declines in exactly
+two places, and both declines land on top of the owner's report:
+
+* the **shunt-bearing guard** declines when the downstream node carries
+  no rail stub to re-column. That is `COUT`'s case on every amplifier
+  fixture: the load is `;@ ignore`d, so `out` carries nothing;
+* the **both-sides guard** declines when the downstream node carries rail
+  stubs on *both* sides — a bias divider through the node. That is
+  `CIN`'s case on `common_emitter` / `two_stage_amp` / `cascode_amp`.
+
+Each guard is replaced by a **narrower construction** rather than being
+widened, which is the whole design:
+
+* **(a) terminal net.** Accept when either endpoint net is *terminal* —
+  a declared `*@port`, or a net exactly one element touches. A terminal
+  net has nothing on it, so there is nothing to re-column and nothing to
+  collide with: the guard's hazard is *removed*, not overridden. The
+  construction stays joint — the pin on the element's interior side is
+  held at its world position while the pose changes, so the body swings
+  out into the empty half-plane instead of rotating about its own origin.
+* **(b) divider node.** Orient-but-do-not-re-column: the series element
+  is drawn horizontal with its downstream pin landing on the divider's
+  own column at the Y of the wire the node already sends to the device it
+  drives (a base, a gate). The divider members are **read, never
+  written** — the hands-off half of the old guard is kept and the rest
+  dropped.
+
+**Did the ADR-15 Stage-5 hazard recur? No — verified, not assumed.** The
+guard's own comment records the measurement that motivated it
+(`common_emitter` COUT forced horizontal, B 4→7). Under `terminal-series`
+`common_emitter`'s B is **4 → 4**, unchanged, and B *falls* on six other
+fixtures. The Stage-5 diagnosis holds and explains why: what cost bends
+there was a bare orientation change against an independently-chosen
+position, and the joint position half is what this pass supplies.
+
+**The measured table** (18 fixtures × 34 metrics, ADR-23 instrument):
+
+| arm | Tier 0 | T1 Δ | T2 Δ | verdict |
+| --- | --- | ---: | ---: | --- |
+| `terminal-series` (a only) vs `flow-seed-v4` | clean both sides | **+0.00** | **−82.37** | **PROMOTABLE** |
+| `terminal-series-divider` (a+b) vs `flow-seed-v4` | clean both sides | +2.00 | −38.03 | not promotable |
+| `terminal-series-divider` vs `terminal-series` | clean both sides | +2.00 | +44.34 | not promotable |
+
+The whole Tier-1 cost is case (b), and it is three cells:
+`v13.5_prop_pintext / common_emitter` **0 → 2**, against
+`v14.glyph_body / sallen_key_lpf` **1 → 0** and
+`v13.9_foreign_over_glyph / sallen_key_lpf` **0 → 1** (both of which case
+(a) already produces on its own, netting 0).
+
+**The attribution is the point, and it inverts the obvious reading.** By
+the aggregate, case (a) alone is the better change — it is promotable and
+case (b) spends 44 Tier-2 points and 2 Tier-1 points on top of it. By the
+*owner's report*, case (a) alone is the worse change: it repairs 5 of the
+8 bad label rotations but **breaks a sixth** (`common_emitter` `in`,
+180 → 90) and leaves `two_stage_amp` `in` at 90, while case (a)+(b)
+repairs all six of the reachable ones and breaks none. The independent
+witness is `flow_geometry`'s
+`series_discriminator_separates_stub_from_series_on_common_emitter`,
+which **fails under `terminal-series` and passes under
+`terminal-series-divider`** — a named property, not an aggregate.
+
+That is a concrete instance of MEMORY "benchmark is the binding
+constraint": the instrument scores the arm that fixes fewer of the
+reported defects higher, because the reported defect (a port label
+standing on end) has **no registered metric**. The three ADR-28
+readability metrics are the closest thing, and they are *identical*
+across all three arms on all 18 fixtures — `chain.axis`,
+`chain.reversal`, `chain.stranded` and `stack.side_by_side` see nothing
+at all here. A port-label-direction metric is the missing instrument, and
+until it exists this comparison cannot be settled by the scoreboard.
+
+**Neither arm is promoted.** Case (a)+(b) is what the owner asked for and
+is not promotable on the aggregate; case (a) alone is promotable and is
+not what was asked for. The honest resolution is a metric, not a
+promotion.
+
+**What neither arm reaches: `port_shapes`.** Its two remaining vertical
+labels (`no`, `src`) are not blocked by either guard. The shipping
+`detect_dividers` degree-2 over-match claims `R1/R2` and `R3/R4` as two
+"dividers" and **pins all four vertically before
+`apply_series_horizontal` runs at all**, so the pass never sees the
+chain. That is the defect `--placer=divider-rails` /
+`divider-rails-strict` were registered for (D-series above), and it is
+strictly upstream of F1.
+
+
 ## ADR-24 — A Steiner vertex is not an endpoint: the router's own Tier-0 severance
 
 **Status:** landed. Scope is confined to `crates/spice-route/`. **Every
