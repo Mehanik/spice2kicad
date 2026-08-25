@@ -132,6 +132,88 @@ fn property_value<'a>(inst: &'a Value, key: &str) -> Option<&'a str> {
     None
 }
 
+// --- V8 correctness clauses, as a countable defect list -----------------
+
+/// The fixtures whose `.subckt` instances carry a `*@symbol` override,
+/// with the library symbol and the refdes set each must produce.
+///
+/// `docs/invariants.md` V8 clauses (a)–(c) — the *correctness* half that
+/// CLAUDE.md's tier table puts in **Tier 0** — are exactly what
+/// [`v8_defects`] counts. Clause (d) (pin connectivity) stays in its own
+/// test below; it is a V4-flavoured wiring property, not a
+/// sheet-vs-symbol decision.
+const V8_FIXTURES: &[(&str, &str, &[&str])] = &[
+    (
+        "opamp_inverting_real",
+        "Amplifier_Operational:OPAMP",
+        &["X1"],
+    ),
+    (
+        "opamp_definition_level",
+        "Amplifier_Operational:OPAMP",
+        &["X1", "X2"],
+    ),
+];
+
+/// Every V8 correctness defect on one emitted parent schematic.
+///
+/// (a) exactly one `(symbol …)` per expected refdes carrying `lib_id`,
+/// (b) no `(sheet …)` block on the parent, (c) no `<subckt>.kicad_sch`
+/// written beside it.
+///
+/// Shared by the named contract tests and by the ADR-23 recording
+/// verifier, so the cell and the gate cannot drift apart.
+fn v8_defects(root: &Value, out_dir: &Path, lib_id: &str, want_refs: &[&str]) -> Vec<String> {
+    let mut defects: Vec<String> = Vec::new();
+
+    let instances: Vec<&Value> = instance_symbols(root)
+        .into_iter()
+        .filter(|inst| first_string_arg(inst, "lib_id") == Some(lib_id))
+        .collect();
+    if instances.len() != want_refs.len() {
+        defects.push(format!(
+            "expected {} (symbol …) instance(s) with lib_id {lib_id:?} on the parent \
+             sheet, found {}",
+            want_refs.len(),
+            instances.len(),
+        ));
+    }
+    let mut got: Vec<&str> = instances
+        .iter()
+        .filter_map(|inst| property_value(inst, "Reference"))
+        .collect();
+    got.sort_unstable();
+    let mut want: Vec<&str> = want_refs.to_vec();
+    want.sort_unstable();
+    if got != want {
+        defects.push(format!(
+            "{lib_id:?} instances must carry refdes {want:?}, got {got:?}"
+        ));
+    }
+
+    let sheets = children(root, "sheet");
+    if !sheets.is_empty() {
+        defects.push(format!(
+            "parent schematic still contains {} (sheet …) block(s); an \
+             explicitly-`*@symbol`ed subckt must not lower to a hierarchical sheet",
+            sheets.len()
+        ));
+    }
+
+    // The child file is named after the subckt; every V8 fixture's is
+    // `OPAMP`, which is also the only subckt they define.
+    let child = out_dir.join("OPAMP.kicad_sch");
+    if child.exists() {
+        defects.push(format!(
+            "child sheet file {} should not be written when the instance is \
+             rendered as a flat symbol",
+            child.display()
+        ));
+    }
+
+    defects
+}
+
 // --- V8 framework smoke --------------------------------------------------
 
 /// Sanity check the test driver: the fixture parses, the emitter
@@ -155,43 +237,46 @@ fn v8_driver_smoke_emits_parent_schematic() {
 fn v8_opamp_inverting_real_emits_symbol_not_sheet() {
     let (sch, tmp) = emit("opamp_inverting_real");
     let root = parse_sch(&sch);
-
-    // (a) the parent contains a placed (symbol …) with the requested lib_id.
-    let opamp_lib_id = "Amplifier_Operational:OPAMP";
-    let opamp_instances: Vec<&Value> = instance_symbols(&root)
-        .into_iter()
-        .filter(|inst| first_string_arg(inst, "lib_id") == Some(opamp_lib_id))
-        .collect();
-    assert_eq!(
-        opamp_instances.len(),
-        1,
-        "V8: expected exactly one (symbol …) instance with lib_id {opamp_lib_id:?} on the parent sheet"
-    );
-
-    // … and that instance is X1.
-    let refdes = property_value(opamp_instances[0], "Reference");
-    assert_eq!(
-        refdes,
-        Some("X1"),
-        "V8: opamp instance must carry refdes X1, got {refdes:?}"
-    );
-
-    // (b) NO (sheet …) block on the parent.
-    let sheets = children(&root, "sheet");
+    let defects = v8_defects(&root, &tmp, "Amplifier_Operational:OPAMP", &["X1"]);
     assert!(
-        sheets.is_empty(),
-        "V8: parent schematic still contains {} (sheet …) block(s); \
-         the OPAMP subckt must not be lowered to a hierarchical sheet \
-         when X1 has an explicit *@symbol override",
-        sheets.len()
+        defects.is_empty(),
+        "V8: opamp_inverting_real:\n  {}",
+        defects.join("\n  "),
     );
+}
 
-    // (c) NO child OPAMP.kicad_sch alongside the parent.
-    let child = tmp.join("OPAMP.kicad_sch");
+/// The ADR-23 Tier-0 cell for V8.
+///
+/// V8's correctness clauses are Tier 0 in CLAUDE.md's tier table, and
+/// until now they were graded ONLY by the single-fixture tests around
+/// this one — invisible to the blind-cell lint, whose premise is fixture
+/// enumeration, and absent from the promotion rule's Tier-0 clause.
+///
+/// Deliberately drives `common::spice_to_kicad` rather than this file's
+/// local [`emit`]: that helper carries `common::placer_args()`, so a
+/// challenger collection (`S2K_PLACER=<name>`) measures the *challenger's*
+/// output. A cell collected through a conversion that ignores the placer
+/// flag would read identically on both arms by construction, which is the
+/// dead-cell failure this work exists to remove.
+#[test]
+fn v8_subckt_symbol_mapping_across_fixtures() {
+    let mut failures: Vec<String> = Vec::new();
+    for (name, lib_id, want_refs) in V8_FIXTURES {
+        let tmp = tempdir(name);
+        let src = fixtures_dir().join(format!("{name}.cir"));
+        let sch = common::spice_to_kicad(&src, &tmp).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let root = parse_sch(&sch);
+        let defects = v8_defects(&root, &tmp, lib_id, want_refs);
+        common::scoreboard::record_count("t0.v8_subckt_symbol", name, defects.len());
+        for d in defects {
+            failures.push(format!("{name}: {d}"));
+        }
+    }
     assert!(
-        !child.exists(),
-        "V8: child sheet file {child:?} should not be written when X1 \
-         is rendered as a flat symbol"
+        failures.is_empty(),
+        "V8: {} correctness violation(s):\n  {}",
+        failures.len(),
+        failures.join("\n  "),
     );
 }
 
@@ -251,35 +336,12 @@ fn v8_opamp_inverting_real_pin_connectivity() {
 fn definition_level_symbol_inherited_by_all_instances() {
     let (sch, tmp) = emit("opamp_definition_level");
     let root = parse_sch(&sch);
-
-    let opamp_lib_id = "Amplifier_Operational:OPAMP";
-    let opamps: Vec<&Value> = instance_symbols(&root)
-        .into_iter()
-        .filter(|inst| first_string_arg(inst, "lib_id") == Some(opamp_lib_id))
-        .collect();
-    assert_eq!(
-        opamps.len(),
-        2,
-        "both X1 and X2 must inherit the definition-level OPAMP symbol"
-    );
-
-    let mut refs: Vec<&str> = opamps
-        .iter()
-        .filter_map(|inst| property_value(inst, "Reference"))
-        .collect();
-    refs.sort_unstable();
-    assert_eq!(refs, vec!["X1", "X2"]);
-
-    // No hierarchical sheet, and no child OPAMP.kicad_sch.
-    let sheets = children(&root, "sheet");
+    let defects = v8_defects(&root, &tmp, "Amplifier_Operational:OPAMP", &["X1", "X2"]);
     assert!(
-        sheets.is_empty(),
-        "definition-annotated subckt must not lower to a sheet; found {}",
-        sheets.len()
-    );
-    assert!(
-        !tmp.join("OPAMP.kicad_sch").exists(),
-        "no child OPAMP.kicad_sch should be written"
+        defects.is_empty(),
+        "V8: opamp_definition_level — both X1 and X2 must inherit the \
+         definition-level OPAMP symbol:\n  {}",
+        defects.join("\n  "),
     );
 }
 

@@ -27,9 +27,14 @@ invariant here.
   is a `(symbol …)` instance whose `lib_id` resolves to an empty
   or stub library entry, so the body has no `(rectangle …)` /
   `(polyline …)` graphics. Verified by an SVG-export glyph-count
-  test: render with `kicad-cli sch export svg`, count drawn glyphs,
-  assert one per placed `Symbol`. Lives downstream of
-  `crates/kicad-emitter/src/schematic.rs`.
+  test: render with `kicad-cli sch export svg`, strip the
+  `stroked-text` groups, and require at least four non-text `<path`
+  elements per placed non-power component. Verifier:
+  `visual_quality::v1_symbols_render_visible_ink_across_fixtures`,
+  which grades **all eighteen** fixtures and reports the per-fixture
+  shortfall as the Tier-0 scoreboard cell `t0.v1_ink_deficit`
+  (ADR-23 D13; it replaced five single-fixture `v1_*` tests). Lives
+  downstream of `crates/kicad-emitter/src/schematic.rs`.
 
 - **V2 — Zero ERC errors.** `kicad-cli sch erc` on every emitted
   `.kicad_sch` reports zero errors. Warning policy is **TBD**:
@@ -62,10 +67,27 @@ invariant here.
   same path. Implementation is the `Symbol::body` raw passthrough
   described in CLAUDE.md "Implementation notes". This decision is
   final for v0.1; revisiting is a v0.2 concern (tracked in CLAUDE.md
-  "Project status"). Verified by a round-trip test that re-parses
-  the source `.kicad_sym`, locates each used symbol in the emitted
-  file's `(lib_symbols)`, and asserts byte equality of the body
-  sub-tree.
+  "Project status").
+
+  **Verifier — what is actually implemented, and what is not.** This
+  paragraph used to describe a round-trip test that re-parses the source
+  `.kicad_sym`, locates each used symbol in the emitted `(lib_symbols)`
+  and asserts byte equality of the body sub-tree. **That test does not
+  exist in the suite and never has**; the claim was corrected on
+  2026-08-25, when V3 was given a scoreboard cell and its verifier was
+  read for the first time in a while (ADR-23 D13). What exists is
+  `visual_quality::v3_defects`, driven by the enumerating
+  `v3_lib_symbols_are_populated_across_fixtures` over all eighteen
+  fixtures — a **renderability proxy**: every `lib_id` an instance
+  references resolves inside `(lib_symbols …)`, carries at least one
+  graphical primitive, has `(pin …)` entries, and on non-power symbols
+  every pin length is `> 0`. That catches the failure V3 exists to
+  prevent (a stub entry rendering blank on a machine without the
+  library — which is also how V1 fails). It would **not** catch a body
+  the emitter altered while leaving it drawable. The Tier-0 scoreboard
+  cell is named `t0.v3_lib_symbol_defects`, not `t0.v3_verbatim`, for
+  exactly that reason. Writing the byte-equality check is the remaining
+  work if V3 is ever to be verified as stated.
 
   **No synthesis exception (today).** V3 is *unconditional* byte-for-byte
   verbatim for every `lib_symbols` entry — there is no synthesis or
@@ -332,6 +354,11 @@ invariant here.
   with V6's classify → bands → layers pipeline as a pass that runs
   after band/layer seeding and before V5's orientation chooser
   (`place_with_hint` in `crates/spice-layout/src/lib.rs`).
+  Clauses (a), (b) and (c) each report their violation count as a
+  Tier-2 scoreboard cell — `v7.x_symmetry`, `v7.y_alignment`,
+  `v7.orientation` (ADR-23 D13). Unlike V3/V8/V9, symmetry is a
+  *placement output*, so a challenger can move these; the cells'
+  scope is the one fixture V7 is graded on.
 
 - **V8 — Standard symbol mapping for subckts.** A SPICE `.subckt`
   whose top-level instantiation `X<n>` carries a `*@symbol <lib_id>`
@@ -366,7 +393,12 @@ invariant here.
   the symbol's pin world positions are wired (or labelled per V4)
   to the same parent-sheet nets that X1's terminals reference in
   SPICE. Verifier lives at
-  `crates/spice2kicad/tests/symbol_mapping.rs`.
+  `crates/spice2kicad/tests/symbol_mapping.rs`. Clauses (a)–(c) — the
+  Tier-0 correctness half — are computed as a countable defect list by
+  `v8_defects`, shared by the named contract tests and by
+  `v8_subckt_symbol_mapping_across_fixtures`, which reports the count
+  per fixture as the scoreboard cell `t0.v8_subckt_symbol` (ADR-23 D13).
+  Clause (d) keeps its own test.
   Interaction with V6 (structural placement): the V6 net-class and
   signal-flow pipeline places X-instances in the correct band and
   layer using only structural information; V8 controls whether that
@@ -429,8 +461,17 @@ invariant here.
       The unit-letter (`F`/`H`/`Ω`) is intentionally excluded per
       project policy above — extending the regex is a v0.2
       decision tracked under spec §9. Verifier lives at
-      `crates/spice2kicad/tests/visual_quality.rs` (or a sibling
-      `value_formatting.rs` if that file gets crowded).
+      `crates/spice2kicad/tests/value_formatting.rs`.
+    - **No scoreboard cell, on purpose (ADR-23 D13).** V9 is the one
+      invariant a `--placer` variant cannot move: the value string comes
+      from `format_value` / `format_si` applied to the resolved element
+      value, and the placer only chooses positions and orientations. A
+      cell for it would read 0 on both arms of every comparison, and a
+      permanently-quiescent cell is scored by the aggregator as "no
+      change" — a claim, not an abstention (ADR-23 D9). V9 keeps its own
+      zero-slack gate, which runs on both arms like every other test.
+      This decision expires the day value text becomes
+      geometry-dependent (e.g. a placer that abbreviates text to fit).
     - **Out of scope.** V9 governs only the on-schematic `Value`
       property text. The SPICE netlist exporter and the round-trip
       canonicalizer (`tests/common/mod.rs::normalize_value`) are

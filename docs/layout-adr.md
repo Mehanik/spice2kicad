@@ -5553,6 +5553,15 @@ annotation-semantics test in the suite and produce a fifty-row exemption
 list — but instrumenting `visual_quality`'s `run_v1` / `run_v3` and the
 `v7_*` trio is cheap and should be the next increment.
 
+**Done in D13** (2026-08-25), which took the increment further than this
+paragraph asked: V1, V3 **and V8** now have Tier-0 cells (V1/V3 over all
+eighteen fixtures, not five), V7 has three Tier-2 cells, and V9's absence
+was converted from an omission into a **recorded decision** — it is the
+one invariant here a `--placer` variant cannot move, so a cell for it
+could only ever be quiescent. The sentence above under-rates the cost of
+V3's and V8's absence: placer-invariance is an argument about whether a
+cell can *move*, and Tier 0's job is to gate, not to move.
+
 Finally, `report` now refuses the verdict on an orphan id it finds in the
 records themselves, not just on one the source lint can see. The lint
 covers `crates/spice2kicad/tests/`; a record made from anywhere else
@@ -6061,6 +6070,156 @@ labels (`no`, `src`) are not blocked by either guard. The shipping
 chain. That is the defect `--placer=divider-rails` /
 `divider-rails-strict` were registered for (D-series above), and it is
 strictly upstream of F1.
+
+
+### D13. The Tier-0 clause now reads every Tier-0 invariant
+
+D11 closed the blind-cell class *for fixture-enumerating verifiers* and
+then wrote down, under "what is still blind", the residue its own lint
+could not reach: five invariants graded only by **single-fixture** tests,
+which the lint's premise (enumeration) is structurally unable to see.
+Three of them — **V1, V3, V8** — are Tier 0 in CLAUDE.md's tier table.
+
+That made the promotion rule's first clause narrower than its own text.
+"No Tier-0 cell worse than the champion" was evaluated over eleven
+registered ids covering V2 and V11 (plus conversion failure, determinism,
+netlist equivalence and sheet overlap), while the tier table names V1,
+V2, V3, V8 and V11 as Tier 0's members. A challenger that emitted stub
+`lib_symbols`, or that lowered an explicitly-`*@symbol`ed `.subckt` back
+to a hierarchical sheet, would have been graded on Tier 1 and Tier 2
+alone and could have been reported PROMOTABLE.
+
+#### The ground truth, re-measured rather than inherited
+
+`METRICS` before this change: **73 rows**. Recording sites in the suite,
+read off the source: every row had one. The gap was not a broken cell, it
+was an *absent* one:
+
+| invariant | tier | cell before | cell after |
+| --- | --- | --- | --- |
+| V1 symbols render visibly | 0 | **none** | `t0.v1_ink_deficit` (18 fixtures) |
+| V2 zero ERC errors | 0 | `t0.erc_errors` | unchanged |
+| V3 `lib_symbols` populated | 0 | **none** | `t0.v3_lib_symbol_defects` (18 fixtures) |
+| V4 label policy | 1 | `v4.plain_label_excess`, `v4.global_label_misuse` | unchanged |
+| V5 pin facing | 2 | `v5` | unchanged |
+| V6 structural placement | 2 | no `v6.*` id, but graded by the general fixture-wide checks that replaced its three archetype tests — `t0.sym_overlap`, `t0.sheet_overlap`, `v13.label_in_body`, `v14.rail_order`, `detour`, `crossings` — plus `q3`/`q5`/`f3`–`f6`/`p5` | unchanged |
+| V7 symmetry | 2 | **none** | `v7.x_symmetry`, `v7.y_alignment`, `v7.orientation` |
+| V8 subckt symbol mapping | 0 | **none** | `t0.v8_subckt_symbol` (2 fixtures) |
+| V9 SI value formatting | 1 | **none** | **deliberately none** — see below |
+| V10 routing surface | 1 | `v10.*` ×4 | unchanged |
+| V11 coincidence is electrical | 0 | `t0.partition`, `t0.v11_pin_overlap`, `t0.v11_wire_label`, `t0.cross_net_overlap`, `junction.cross_net` | unchanged |
+| V12 wires through bodies | 1 | `v12` | unchanged |
+| V13 text overlap | 1 | `v13.*` ×15 | unchanged |
+| V14 glyph orientation | 1 | `v14.*` ×4 | unchanged |
+| V15 page fit | 1 | `v15.off_page` | unchanged |
+| V16 rectilinearity | 2 | `v16.bends`, `v16.branches` (+3 informational) | unchanged |
+
+D11's list was right in both directions: V1, V3, V7, V8 and V9 were the
+complete set with no cell, and nothing else was missing. V6 is the one
+that reads as a gap and is not — it has no id bearing its number because
+its verifiers were generalised out of three archetype tests into six
+fixture-wide ones, every one of which records.
+
+#### What was built
+
+Four verifiers changed shape, and nothing else. Each now **counts**
+defects where it used to panic on the first one, records the count, and
+asserts once after the sweep — D2's contract and D10's collect-then-assert
+shape, applied to verifiers the lint could not demand it from:
+
+* `visual_quality::v1_symbols_render_visible_ink_across_fixtures`
+  replaces five single-fixture `v1_*` tests and grades **all eighteen**
+  fixtures. The cell is the *shortfall* against the ≥4-non-text-paths-per-
+  component floor, clamped at zero, so extra ink from a wire-happier
+  placer cannot read as a Tier-0 improvement.
+* `visual_quality::v3_lib_symbols_are_populated_across_fixtures` likewise
+  replaces five `v3_*` tests, over all eighteen.
+* `symbol_mapping::v8_subckt_symbol_mapping_across_fixtures` grades V8
+  clauses (a)–(c) — right symbol at the right refdes, no `(sheet …)` on
+  the parent, no stray `<subckt>.kicad_sch` — on both annotated fixtures,
+  through a shared `v8_defects` helper the two named contract tests now
+  call as well, so cell and gate cannot drift.
+* the `v7_*` trio records three Tier-2 counts on `multivibrator`.
+
+Net: `METRICS` 73 → 79 (3 Tier-0, 3 Tier-2, and V9 deliberately absent).
+Ten single-fixture tests became two enumerating ones and one was added,
+so the suite's test count falls by seven while its *fixture* coverage of
+V1 and V3 rises from five to eighteen.
+
+**Scope caveat on the V3 cell, stated so it is not over-read.**
+`docs/invariants.md` V3 defines the invariant as byte-for-byte
+passthrough and describes a verifier that re-parses the source
+`.kicad_sym` and compares sub-trees. **That verifier does not exist in
+this suite and never has.** What exists — and what the cell reports — is
+the renderability proxy: every referenced `lib_id` resolves inside
+`(lib_symbols …)`, carries a graphical primitive, and has non-zero-length
+pins on non-power symbols. It catches the failure V3 exists to prevent (a
+stub that renders blank on a machine without the library); it would not
+catch a body the emitter altered while leaving it drawable. The cell is
+named `t0.v3_lib_symbol_defects`, not `t0.v3_verbatim`, for that reason.
+
+#### V9 gets no cell, on purpose
+
+V9 is Tier 1 and it is the one invariant here that a `--placer` variant
+**cannot move**. Value text is produced by `spice_layout::format_value` /
+`format_si` from the resolved element value; the placer chooses positions
+and orientations and never touches the string. A V9 cell would therefore
+read 0 on both arms of every comparison that will ever be run — and a
+cell that can never move is *exactly* the thing D9 calls out: scored as
+`0.00` change, which is a claim rather than an abstention. Registering
+one would add the appearance of coverage without the substance, which is
+worse than the documented absence.
+
+V9 keeps its own zero-slack gate in `value_formatting.rs`, which runs on
+both arms of a scoreboard collection like every other test. If value
+formatting ever becomes geometry-dependent — a placer that abbreviates
+text to fit, say — this decision expires and V9 gets a cell that day.
+
+The same argument is *weaker* for V3 and V8 (also close to
+placer-invariant, as D11 observed) and it was not applied to them,
+because they are **Tier 0**: for a correctness invariant the cost of a
+quiescent cell is one row in a table, and the cost of no cell is a gate
+that does not gate. The asymmetry is deliberate — Tier 0 gets cells on
+the strength of *being* Tier 0, Tier 1 and 2 get them on the strength of
+being able to move.
+
+#### The cells were made to fire
+
+A cell that reads 0 everywhere is indistinguishable from a blind one at
+the sample taken — the D11 finding, one level down — so each new cell was
+driven off zero by breaking the property it grades, on the real fixtures,
+before being trusted. None of these mutations is committed.
+
+* **V1 and V3, together.** `lib_symbol_inline`
+  (`crates/kicad-emitter/src/schematic.rs`) was made to emit a bare
+  `(symbol "<lib_id>")` stub instead of the captured body — the exact
+  regression V1 and V3 were written against. `t0.v3_lib_symbol_defects`
+  went to 1–4 per fixture on all eighteen and `t0.v1_ink_deficit` to
+  16–64, and both verifiers failed with the readable defect list.
+* **V8.** The `*@symbol … for=X1` block directive was removed from
+  `tests/fixtures/opamp_inverting_real.cir`, so the resolver lowered X1
+  back to a hierarchical sheet. `t0.v8_subckt_symbol` went 0 → 4 on that
+  fixture (missing instance, wrong refdes set, phantom `(sheet …)`, stray
+  `OPAMP.kicad_sch`) and stayed 0 on `opamp_definition_level`, which is
+  the discrimination the cell has to make.
+* **V7.** `V7_AXIS_TOLERANCE_MM` was tightened from 1.27 mm to 0.001 mm.
+  `v7.x_symmetry` went 0 → 3 and `v7.y_alignment` 0 → 4. Weaker evidence
+  than the other three, and labelled as such: it proves the count is
+  computed from the emitted geometry and is not pinned to zero, but it
+  perturbs the verifier's own threshold rather than the drawing.
+  `v7.orientation` could not be driven off zero this way — it is a
+  two-clause boolean on Q1/Q2's poses with no threshold to move, and no
+  registered placer produces a non-mirrored `multivibrator`.
+
+#### What this does not change
+
+Nothing about the aggregate. No metric's `points_per_unit` moved, no
+tier assignment moved, `TIER1_WEIGHT` is untouched, and the promotion
+predicate is the same expression it was. The three new Tier-0 cells enter
+the clause that was already there; the three V7 cells enter the Tier-2
+sum at the standard 1.0-point-per-count used by every other count metric.
+Emitted geometry is untouched: this change edits only
+`crates/spice2kicad/tests/`, and `baseline_lock`'s diff is empty.
 
 
 ## ADR-24 — A Steiner vertex is not an endpoint: the router's own Tier-0 severance

@@ -406,36 +406,49 @@ fn element_orientation(root: &Value, refdes: &str) -> Option<(f64, Option<String
 // four pairs and lands them within a fraction of a cell.
 const V7_AXIS_TOLERANCE_MM: f64 = 1.27;
 
-/// Asserts both elements of a pair sit at mirrored x-distances about
+/// The mirror pairs the fixture declares (`tests/fixtures/multivibrator.cir`):
+/// Q1↔Q2, RC1↔RC2, RB1↔RB2, C1↔C2, all mirrored about the vertical axis
+/// through Q1/Q2's midpoint.
+const V7_PAIRS: &[(&str, &str)] = &[("Q1", "Q2"), ("RC1", "RC2"), ("RB1", "RB2"), ("C1", "C2")];
+
+/// `Some(message)` when a pair is NOT at mirrored x-distances about
 /// `axis_x`, within [`V7_AXIS_TOLERANCE_MM`].
-fn assert_x_symmetric(root: &Value, axis_x: f64, left: &str, right: &str) {
+///
+/// Returns rather than panics so the ADR-23 cell and the assertion read
+/// the same number: the verifiers below count the messages, record the
+/// count, then assert the list is empty.
+fn x_symmetry_defect(root: &Value, axis_x: f64, left: &str, right: &str) -> Option<String> {
     let lx = element_x(root, left).unwrap_or_else(|| panic!("{left} placed"));
     let rx = element_x(root, right).unwrap_or_else(|| panic!("{right} placed"));
     let dl = (lx - axis_x).abs();
     let dr = (rx - axis_x).abs();
     let delta = (dl - dr).abs();
-    assert!(
-        delta <= V7_AXIS_TOLERANCE_MM,
-        "{V7_HINT}: pair ({left}, {right}) not mirrored about x={axis_x:.2}: \
-         |{left}.x - axis| = {dl:.2}, |{right}.x - axis| = {dr:.2}, \
-         delta = {delta:.2} mm > {V7_AXIS_TOLERANCE_MM:.2} mm"
-    );
+    (delta > V7_AXIS_TOLERANCE_MM).then(|| {
+        format!(
+            "{V7_HINT}: pair ({left}, {right}) not mirrored about x={axis_x:.2}: \
+             |{left}.x - axis| = {dl:.2}, |{right}.x - axis| = {dr:.2}, \
+             delta = {delta:.2} mm > {V7_AXIS_TOLERANCE_MM:.2} mm"
+        )
+    })
 }
 
 #[test]
 fn v7_multivibrator_x_symmetry() {
-    // Multivibrator pairs (from tests/fixtures/multivibrator.cir):
-    // Q1↔Q2, RC1↔RC2, RB1↔RB2, C1↔C2 — all mirrored about the
-    // vertical axis through Q1/Q2's midpoint.
     let sch = emit("multivibrator");
     let root = parse_sch(&sch);
     let q1x = element_x(&root, "Q1").expect("Q1 placed");
     let q2x = element_x(&root, "Q2").expect("Q2 placed");
     let axis_x = f64::midpoint(q1x, q2x);
 
-    assert_x_symmetric(&root, axis_x, "RC1", "RC2");
-    assert_x_symmetric(&root, axis_x, "RB1", "RB2");
-    assert_x_symmetric(&root, axis_x, "C1", "C2");
+    // Q1/Q2 define the axis, so they are symmetric about it by
+    // construction; the graded pairs are the other three.
+    let defects: Vec<String> = V7_PAIRS
+        .iter()
+        .skip(1)
+        .filter_map(|(l, r)| x_symmetry_defect(&root, axis_x, l, r))
+        .collect();
+    common::scoreboard::record_count("v7.x_symmetry", "multivibrator", defects.len());
+    assert!(defects.is_empty(), "{}", defects.join("\n"));
 }
 
 #[test]
@@ -445,42 +458,50 @@ fn v7_multivibrator_y_alignment() {
     let root = parse_sch(&sch);
 
     let tol = V7_AXIS_TOLERANCE_MM;
-    for (a, b) in [("Q1", "Q2"), ("RC1", "RC2"), ("RB1", "RB2"), ("C1", "C2")] {
+    let mut defects: Vec<String> = Vec::new();
+    for (a, b) in V7_PAIRS {
         let ay = element_y(&root, a).unwrap_or_else(|| panic!("{a} placed"));
         let by = element_y(&root, b).unwrap_or_else(|| panic!("{b} placed"));
-        assert!(
-            (ay - by).abs() <= tol,
-            "{V7_HINT}: pair ({a}, {b}) not coplanar in Y: \
-             {a}.y = {ay:.2}, {b}.y = {by:.2}, delta = {:.2} mm",
-            (ay - by).abs()
-        );
+        if (ay - by).abs() > tol {
+            defects.push(format!(
+                "{V7_HINT}: pair ({a}, {b}) not coplanar in Y: \
+                 {a}.y = {ay:.2}, {b}.y = {by:.2}, delta = {:.2} mm",
+                (ay - by).abs()
+            ));
+        }
     }
+    common::scoreboard::record_count("v7.y_alignment", "multivibrator", defects.len());
+    assert!(defects.is_empty(), "{}", defects.join("\n"));
 }
 
 #[test]
 fn v7_multivibrator_orientation_mirrored() {
     // Q1 and Q2 must carry mirrored orientations: same rotation, but
     // exactly one of the two has a `(mirror y)` token so the BJT
-    // arrows point toward each other. Today both are emitted with
-    // identity orientation (rot=0, no mirror), so this test fails.
+    // arrows point toward each other.
     let sch = emit("multivibrator");
     let root = parse_sch(&sch);
 
     let (q1_rot, q1_mirror) = element_orientation(&root, "Q1").expect("Q1 placed");
     let (q2_rot, q2_mirror) = element_orientation(&root, "Q2").expect("Q2 placed");
 
-    assert!(
-        (q1_rot - q2_rot).abs() < 1e-6,
-        "{V7_HINT}: Q1 and Q2 must share rotation for a clean Y-mirror; \
-         got Q1.rot = {q1_rot}, Q2.rot = {q2_rot}"
-    );
+    let mut defects: Vec<String> = Vec::new();
+    if (q1_rot - q2_rot).abs() >= 1e-6 {
+        defects.push(format!(
+            "{V7_HINT}: Q1 and Q2 must share rotation for a clean Y-mirror; \
+             got Q1.rot = {q1_rot}, Q2.rot = {q2_rot}"
+        ));
+    }
     let q1_mirrored_y = q1_mirror.as_deref() == Some("y");
     let q2_mirrored_y = q2_mirror.as_deref() == Some("y");
-    assert!(
-        q1_mirrored_y ^ q2_mirrored_y,
-        "{V7_HINT}: exactly one of Q1, Q2 must carry `(mirror y)`; \
-         got Q1.mirror = {q1_mirror:?}, Q2.mirror = {q2_mirror:?}"
-    );
+    if !(q1_mirrored_y ^ q2_mirrored_y) {
+        defects.push(format!(
+            "{V7_HINT}: exactly one of Q1, Q2 must carry `(mirror y)`; \
+             got Q1.mirror = {q1_mirror:?}, Q2.mirror = {q2_mirror:?}"
+        ));
+    }
+    common::scoreboard::record_count("v7.orientation", "multivibrator", defects.len());
+    assert!(defects.is_empty(), "{}", defects.join("\n"));
 }
 
 // --- framework smoke tests for the V7 helpers ----------------------------

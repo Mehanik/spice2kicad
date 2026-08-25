@@ -180,6 +180,33 @@ const METRICS: &[Metric] = &[
         1.0,
         "symbol / power-glyph extent overlapping a hierarchical-sheet body",
     ),
+    // Registered 2026-08-25, closing the residue D11 named under "what
+    // is still blind": three Tier-0 invariants graded ONLY by
+    // single-fixture tests, which the blind-cell lint cannot see because
+    // its premise is fixture *enumeration*. The promotion rule's Tier-0
+    // clause was reading eleven metrics where CLAUDE.md's tier table
+    // lists V1, V2, V3, V8 and V11 as its members — V1, V3 and V8 had no
+    // cell at all. Their verifiers are now enumerating and record the
+    // same number they assert on.
+    m(
+        "t0.v1_ink_deficit",
+        Tier::T0,
+        1.0,
+        "V1: non-text SVG paths short of the ≥4-per-component glyph-ink floor",
+    ),
+    m(
+        "t0.v3_lib_symbol_defects",
+        Tier::T0,
+        1.0,
+        "V3: `lib_symbols` entries missing, bodiless, pinless or zero-length-pinned",
+    ),
+    m(
+        "t0.v8_subckt_symbol",
+        Tier::T0,
+        1.0,
+        "V8: annotated `.subckt` instance not flat-mapped (wrong/absent symbol, \
+         phantom sheet, stray child .kicad_sch)",
+    ),
     // --- Tier 1 — readability constraints ---------------------------
     m("v12", Tier::T1, 1.0, "wires crossing foreign symbol bodies"),
     m("v13.1_label_body", Tier::T1, 1.0, "label bbox over body"),
@@ -360,6 +387,31 @@ const METRICS: &[Metric] = &[
     ),
     // --- Tier 2 — aesthetic refinement ------------------------------
     m("v5", Tier::T2, 1.0, "pin outward-direction violations"),
+    // V7, registered 2026-08-25 alongside the Tier-0 sweep above. Unlike
+    // V3/V8/V9 — which a `--placer` variant cannot move, because they
+    // are resolver/emitter properties — symmetry IS a placement output,
+    // and the `multivibrator` mirror is exactly the kind of structure a
+    // new global optimum destroys silently. ADR-23 D11 named the `v7_*`
+    // trio as part of the next increment for that reason. One fixture is
+    // all V7 is graded on today; the cell inherits that scope.
+    m(
+        "v7.x_symmetry",
+        Tier::T2,
+        1.0,
+        "V7: mirror pairs not equidistant about the symmetry axis",
+    ),
+    m(
+        "v7.y_alignment",
+        Tier::T2,
+        1.0,
+        "V7: mirror pairs not coplanar in Y",
+    ),
+    m(
+        "v7.orientation",
+        Tier::T2,
+        1.0,
+        "V7: the mirrored device pair's poses are not a clean Y-mirror",
+    ),
     m("v16.bends", Tier::T2, 1.0, "V16 bends (B)"),
     m("v16.branches", Tier::T2, 1.0, "V16 branches (J)"),
     m("crossings", Tier::T2, 1.0, "wire crossings"),

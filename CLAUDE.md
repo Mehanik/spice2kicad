@@ -766,9 +766,11 @@ default `cargo test` path — one per cause (stops recording mid-loop /
 never records / records an unregistered id). If yours genuinely has no
 scalar worth comparing, add a **justified** row to `BLIND_CELL_EXEMPT`;
 the list is the point, and stale rows fail the lint. See ADR-23 D11 for
-the audit that found 25 of 60 verifiers blind, and for the five
-invariants (V1, V3, V7, V8, V9) that still have no cell because they are
-graded only by single-fixture tests.
+the audit that found 25 of 60 verifiers blind, and D13 for the follow-up
+that gave the five single-fixture-only invariants cells: V1, V3 and V8
+(Tier 0) and V7 (Tier 2) now have them, and **V9 is a recorded deliberate
+non-cell** — value formatting is placer-invariant, so its cell could only
+ever read 0/0.
 
 Full rule, coverage, unit choices and the ADR-19 M4 replay (which the
 instrument scores **net-better** in aggregate, while reproducing the

@@ -136,30 +136,27 @@ fn export_svg(sch: &Path, out_dir: &Path) -> Result<PathBuf, String> {
     Ok(dir.join(format!("{stem}.svg")))
 }
 
-fn run_v1(name: &str) {
-    if skip_if_no_kicad_cli() {
-        return;
-    }
+/// One fixture's V1 measurement: `(non-text SVG paths, the floor they
+/// must clear, components counted)`.
+///
+/// Split out of the old per-fixture `run_v1` so the ADR-23 cell and the
+/// assertion read the SAME number: there is one definition of V1 in the
+/// suite, and the scoreboard reports exactly the quantity the Tier-0
+/// gate asserts on (`tests/common/scoreboard.rs`'s contract).
+///
+/// Heuristic floor: a properly inlined symbol body contributes body
+/// strokes plus per-pin segments and label outlines. Blank (stub)
+/// symbols emit zero body strokes per component, so any realistic
+/// per-component path count flags the regression. We require ≥ 4
+/// non-text paths per placed component (a passive resistor with two
+/// pins clears this trivially; a stub does not).
+fn v1_ink(name: &str) -> (usize, usize, usize) {
     let (sch, tmp) = emit(name);
     let svg_path = export_svg(&sch, &tmp).expect("export svg");
     let svg = std::fs::read_to_string(&svg_path).expect("read svg");
     let paths = non_text_path_count(&svg);
-
-    // Heuristic floor: a properly inlined symbol body contributes
-    // body strokes plus per-pin segments and label outlines. Blank
-    // (stub) symbols emit zero body strokes per component, so any
-    // realistic per-component path count flags the regression. We
-    // require ≥ 4 non-text paths per placed component (a passive
-    // resistor with two pins clears this trivially; a stub does
-    // not).
     let components = component_count(name);
-    let want = components * 4;
-    assert!(
-        paths >= want,
-        "V1 visual: {name}.svg has {paths} non-text paths; expected ≥ {want} \
-         (≈4 per non-power component, {components} components). \
-         Symbols are likely rendering blank."
-    );
+    (paths, components * 4, components)
 }
 
 /// Count placed (non-`.subckt`-internal, non-`;@ ignore`d, non-power)
@@ -399,47 +396,79 @@ fn parse_sch(sch: &Path) -> Value {
     lexpr::from_str(&src).expect("parse sch as lexpr")
 }
 
-fn run_v3(name: &str) {
+/// Every V3 defect in one fixture's emitted schematic, as reader-facing
+/// strings.
+///
+/// Counting rather than panicking is what lets the ADR-23 cell and the
+/// Tier-0 gate share one definition: the verifier below asserts the list
+/// is empty, and the scoreboard records its length.
+///
+/// **Scope, stated so the cell is not over-read.** `docs/invariants.md`
+/// V3 defines the invariant as *byte-for-byte* passthrough of the source
+/// `.kicad_sym` body, and describes a verifier that re-parses the library
+/// and compares sub-trees. What is implemented here — and has been since
+/// the invariant landed — is the *renderability* proxy: every referenced
+/// `lib_id` resolves inside `(lib_symbols …)`, carries at least one
+/// graphical primitive, and has pins with non-zero length on non-power
+/// symbols. That proxy catches the failure V3 exists to prevent (a stub
+/// entry that renders blank on a machine without the library) but would
+/// not catch a body the emitter altered while keeping it drawable. The
+/// byte-equality verifier does not exist in this suite; the cell reports
+/// the proxy, not the ideal.
+fn v3_defects(name: &str) -> Vec<String> {
     let (sch, _tmp) = emit(name);
     let root = parse_sch(&sch);
     let instances = instance_symbols(&root);
-    assert!(!instances.is_empty(), "V3: {name} has no symbol instances");
+    let mut defects: Vec<String> = Vec::new();
+    if instances.is_empty() {
+        defects.push(format!("V3: {name} has no symbol instances"));
+        return defects;
+    }
 
     let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for inst in &instances {
         let Some(lib_id) = first_string_arg(inst, "lib_id") else {
-            panic!("V3: instance without lib_id in {name}");
+            defects.push(format!("V3: {name}: instance without lib_id"));
+            continue;
         };
         if !seen.insert(lib_id.to_string()) {
             continue;
         }
-        let lib_sym = find_lib_symbol_by_id(&root, lib_id)
-            .unwrap_or_else(|| panic!("V3: {name}: lib_id {lib_id:?} not found in (lib_symbols)"));
+        let Some(lib_sym) = find_lib_symbol_by_id(&root, lib_id) else {
+            defects.push(format!(
+                "V3: {name}: lib_id {lib_id:?} not found in (lib_symbols)"
+            ));
+            continue;
+        };
 
-        assert!(
-            has_graphical_primitive(lib_sym),
-            "V3: {name}: lib_symbol {lib_id:?} contains no graphical primitive \
-             (polyline/rectangle/circle/arc/text). Symbol will render blank."
-        );
+        if !has_graphical_primitive(lib_sym) {
+            defects.push(format!(
+                "V3: {name}: lib_symbol {lib_id:?} contains no graphical primitive \
+                 (polyline/rectangle/circle/arc/text). Symbol will render blank."
+            ));
+        }
 
         let lengths = pin_lengths(lib_sym);
-        assert!(
-            !lengths.is_empty(),
-            "V3: {name}: lib_symbol {lib_id:?} has no (pin …) entries"
-        );
+        if lengths.is_empty() {
+            defects.push(format!(
+                "V3: {name}: lib_symbol {lib_id:?} has no (pin …) entries"
+            ));
+        }
         // Power-symbol anchor pins are intentionally length-0 — the
         // pin IS the anchor coordinate (matches KiCad's stock
-        // power.kicad_sym). Only assert positive lengths on
+        // power.kicad_sym). Only require positive lengths on
         // non-power library symbols.
         if !lib_id.starts_with("power:") {
             for (i, len) in lengths.iter().enumerate() {
-                assert!(
-                    *len > 0.0,
-                    "V3: {name}: lib_symbol {lib_id:?} pin #{i} has length {len} (must be > 0)"
-                );
+                if *len <= 0.0 {
+                    defects.push(format!(
+                        "V3: {name}: lib_symbol {lib_id:?} pin #{i} has length {len} (must be > 0)"
+                    ));
+                }
             }
         }
     }
+    defects
 }
 
 fn run_v4(name: &str) {
@@ -521,29 +550,46 @@ fn as_f64(v: &Value) -> Option<f64> {
 
 // --- per-fixture tests ---------------------------------------------------
 
-// V1 — visual sanity. Fails on the current emitter: lib_symbols are
-// stubs (no graphical primitives, length-0 pins) so eeschema renders
-// blanks. Fix per CLAUDE.md § Visual quality invariants V1/V3 —
-// inline lib_symbols verbatim from the source library.
+// V1 — visual sanity: every placed symbol contributes real strokes to
+// the rendered SVG. The failure this exists to catch is a `lib_symbols`
+// stub (no graphical primitives, length-0 pins) rendering blank in
+// eeschema.
+//
+// One enumerating verifier over all eighteen fixtures, replacing five
+// single-fixture `v1_*` tests. Two reasons, and the second is the point
+// of ADR-23 D11's "what is still blind" note: (a) V1 is **Tier 0**, and
+// a Tier-0 gate that grades five of eighteen fixtures is not a gate;
+// (b) the blind-cell lint's premise is *enumeration*, so a
+// single-fixture verifier is structurally outside it and could stay
+// silent forever. Collect-then-assert, recording every fixture's number
+// before the single assertion, per D2/D10.
 #[test]
-fn v1_rc_lowpass() {
-    run_v1("rc_lowpass");
-}
-#[test]
-fn v1_common_emitter() {
-    run_v1("common_emitter");
-}
-#[test]
-fn v1_multivibrator() {
-    run_v1("multivibrator");
-}
-#[test]
-fn v1_diff_pair() {
-    run_v1("diff_pair");
-}
-#[test]
-fn v1_opamp_inverting() {
-    run_v1("opamp_inverting");
+fn v1_symbols_render_visible_ink_across_fixtures() {
+    if skip_if_no_kicad_cli() {
+        return;
+    }
+    let mut failures: Vec<String> = Vec::new();
+    for name in FIXTURES {
+        let (paths, want, components) = v1_ink(name);
+        // Clamped at zero: the metric is the *shortfall*, so extra ink
+        // (a placer that routes more wire) cannot masquerade as a
+        // Tier-0 improvement, and 0 is the healthy value on both arms.
+        let deficit = want.saturating_sub(paths);
+        common::scoreboard::record_count("t0.v1_ink_deficit", name, deficit);
+        if deficit > 0 {
+            failures.push(format!(
+                "{name}.svg has {paths} non-text paths; expected ≥ {want} \
+                 (≈4 per non-power component, {components} components) — \
+                 short by {deficit}. Symbols are likely rendering blank."
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "V1 visual: {} fixture(s) below the glyph-ink floor:\n  {}",
+        failures.len(),
+        failures.join("\n  "),
+    );
 }
 
 // V2 — ERC clean (errors only). Flat fixtures pass today: their only
@@ -579,31 +625,29 @@ fn v2_opamp_inverting() {
     run_v2("opamp_inverting");
 }
 
-// V3 — lib_symbols inlined verbatim with full graphics + non-zero pin
-// lengths. Fails today: the emitter writes minimal stubs with
-// `length 0` pins and no body. Fix per CLAUDE.md § Visual quality
-// invariants V3 — copy the resolved Library's symbol body
-// (graphical primitives, sub-symbol units, pins-with-length) into
-// every (lib_symbols (symbol …)) block.
+// V3 — every `lib_id` an instance references resolves to a populated
+// `(lib_symbols …)` entry: graphical primitives present, pins present,
+// non-zero pin length on non-power symbols. See `v3_defects` for the
+// scope caveat (this is the renderability proxy, not the byte-equality
+// check `docs/invariants.md` describes).
+//
+// Enumerating for the same two reasons as V1 above: Tier 0 graded on
+// five of eighteen fixtures is not a gate, and a single-fixture verifier
+// is invisible to the blind-cell lint.
 #[test]
-fn v3_rc_lowpass() {
-    run_v3("rc_lowpass");
-}
-#[test]
-fn v3_common_emitter() {
-    run_v3("common_emitter");
-}
-#[test]
-fn v3_multivibrator() {
-    run_v3("multivibrator");
-}
-#[test]
-fn v3_diff_pair() {
-    run_v3("diff_pair");
-}
-#[test]
-fn v3_opamp_inverting() {
-    run_v3("opamp_inverting");
+fn v3_lib_symbols_are_populated_across_fixtures() {
+    let mut failures: Vec<String> = Vec::new();
+    for name in FIXTURES {
+        let defects = v3_defects(name);
+        common::scoreboard::record_count("t0.v3_lib_symbol_defects", name, defects.len());
+        failures.extend(defects);
+    }
+    assert!(
+        failures.is_empty(),
+        "V3: {} lib_symbols defect(s):\n  {}",
+        failures.len(),
+        failures.join("\n  "),
+    );
 }
 
 // V4 — wires + label budget. Fails today: the emitter connects nets
