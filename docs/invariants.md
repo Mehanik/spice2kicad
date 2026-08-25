@@ -1418,3 +1418,67 @@ invariant here.
   the suite is a conventional rail-to-rail BJT — so the decline path is
   graded only by synthetic arms until an analog switch or a
   transmission gate joins the benchmark.
+- **D2 / D3 — port-terminal label direction** (readability metric,
+  **informational**, ADR-28). A `*@port` terminal — and any one-pin
+  interface net — is drawn as a `(global_label …)` whose rotation
+  decides how the marker reads. Two disjoint counts over one
+  population, every top-level `(global_label …)`:
+
+  **`port.label_vertical`** counts terminals at rotation 90 or 270.
+  KiCad's parser maps the file angle onto a spin style and
+  `SCH_LABEL_BASE::SetSpinStyle` (`../kicad-source/eeschema/
+  sch_label.cpp:395`) turns 90 (`UP`) and 270 (`BOTTOM`) into the *same*
+  `ANGLE_VERTICAL` text angle, differing only in which side of the
+  anchor the tag hangs. There is therefore no "readable vertical"
+  option to prefer: either way the reader tilts their head at a
+  terminal sitting on a horizontal signal path. `port.labels` is the
+  denominator.
+
+  **`port.label_backwards`** counts *horizontal* terminals whose
+  arrowhead travels leftward — an `input` at rotation 0, or an `output`
+  at 180. `SCH_GLOBALLABEL::CreateGraphicShape` (`sch_label.cpp:2146`)
+  builds the tag outline back from the anchor along the reading
+  direction and points one end: the anchor end for `L_INPUT`, the far
+  end for `L_OUTPUT`. So `input`@180 and `output`@0 both draw an arrow
+  travelling rightward — with the sheet's left-to-right flow (F3/F5,
+  and the placer's X = signal depth) — while `input`@0 and `output`@180
+  both draw one against it. `port.directed` is the denominator.
+
+  **`backwards` is graded only where the source declares a direction**
+  (`*@port`), and never for `bidirectional`. The emitted `(shape …)`
+  token is a *default* everywhere else: `label_specs` stamps
+  `(shape input)` on every undeclared one-pin interface net, so
+  `common_emitter`'s `out` — the circuit's output — is emitted as an
+  input tag. Grading direction off that token grades the emitter's
+  default rather than the drawing, and would have scored both
+  `terminal-series` arms' repair of that very terminal (270 → 0) as a
+  *new* violation. Verticality needs no direction, so D1 grades the
+  whole population.
+
+  The two counts are disjoint — a vertical terminal is blamed once,
+  under D1 — for the reason A1/A2 are disjoint: the repairs differ. A
+  vertical terminal is a *placement* defect (the anchor pin faces up or
+  down); a backwards one is an *anchor / rotation* choice inside
+  `label_specs`.
+
+  Motivating report: *"Both VIN and VOUT as well as capacitors connected
+  to it should be horisontal. This is common issue for many circuits."*
+  Nine terminals across six fixtures are drawn on end under the shipping
+  default. Metrics A/B/C are **provably blind** to it — byte-identical
+  across the two `terminal-series` challenger arms on all 18 fixtures —
+  so the ADR-23 aggregate ranked the arm that leaves a terminal vertical
+  (and turns a second, correct one sideways) *above* the arm that
+  repairs every one it reaches.
+
+  Verifier: `crates/spice2kicad/tests/readability_metrics.rs`, with
+  `port_label_direction_ranks_the_divider_arm_above_terminal_series` as
+  the acceptance test,
+  `port_label_metric_counts_a_known_synthetic_terminal_set` as the
+  non-vacuity control, and
+  `port_direction_is_graded_only_where_the_source_declares_it` as the
+  falsifiability guard on the declared-only restriction. **No budget
+  literal**, same reasoning as A. Flagged and not previously noticed:
+  `opamp_inverting`'s `in` at 270 (a ninth vertical, outside the six
+  fixtures named in the report) and `sallen_key_lpf`'s `out` at 180 —
+  the suite's only `backwards` cell, and one no challenger arm was
+  built to reach.

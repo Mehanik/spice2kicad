@@ -530,6 +530,40 @@ const METRICS: &[Metric] = &[
         0.0,
         "devices whose DC facing resolved — the denominator for device.* (informational)",
     ),
+    // ADR-28 metric D. `chain.*` and `stack.*` are provably blind to a
+    // port terminal drawn on end: they are byte-identical across the two
+    // `terminal-series` arms on all 18 fixtures, and the aggregate
+    // therefore ranked the arm that leaves a port label vertical ABOVE
+    // the arm that repairs every one of them. Registered informational
+    // at birth for the same reason as A/B/C — the ambiguities in ADR-28
+    // are open, and a metric that can be wrong about a correct drawing
+    // must not be able to reject one.
+    m(
+        "port.label_vertical",
+        Tier::Info,
+        0.0,
+        "port terminals whose label reads across the signal path (informational)",
+    ),
+    m(
+        "port.label_backwards",
+        Tier::Info,
+        0.0,
+        "declared port terminals whose arrow travels leftward (informational)",
+    ),
+    m(
+        "port.labels",
+        Tier::Info,
+        0.0,
+        "port terminal labels measured — the denominator for port.label_vertical \
+         (informational)",
+    ),
+    m(
+        "port.directed",
+        Tier::Info,
+        0.0,
+        "declared input/output terminals — the denominator for port.label_backwards \
+         (informational)",
+    ),
 ];
 
 /// Weight applied to the Tier-1 total in the single-scalar aggregate.
@@ -1993,6 +2027,17 @@ const BLIND_CELL_EXEMPT: &[(&str, &str, &str)] = &[
          does grade — the inverted COUNT — is already recorded per fixture by \
          `readability_metrics_are_reported_for_every_fixture` under \
          `device.facing_inverted`.",
+    ),
+    (
+        "readability_metrics.rs",
+        "port_label_direction_ranks_the_divider_arm_above_terminal_series",
+        "a specimen RANKING over two transcribed, non-`master` placer arms (ADR-28's \
+         second amendment). Its own scalar is the frozen arms' totals, which no \
+         challenger can move — it grades the metric's arithmetic, not the drawing. \
+         The live loop it does run only re-reads the shipping default's per-fixture \
+         values, every one of which `readability_metrics_are_reported_for_every_fixture` \
+         already records under `port.label_vertical` / `port.label_backwards`; a second \
+         id would count the same terminals twice.",
     ),
     (
         "roundtrip_connectivity.rs",

@@ -1,4 +1,4 @@
-//! **The three things a human reads first** (ADR-28, informational).
+//! **The four things a human reads first** (ADR-28, informational).
 //!
 //! # Why this file exists
 //!
@@ -20,7 +20,7 @@
 //! measures is invisible to the ratchets AND to the scoreboard (ADR-23
 //! "Known limits"), so the fix is a measurement, not a weight.
 //!
-//! Three are added here, all computed from the **emitted `.kicad_sch`
+//! Four are added here, all computed from the **emitted `.kicad_sch`
 //! geometry** so they grade any placer, present or future, rather than
 //! restating one placer's internals.
 //!
@@ -145,6 +145,43 @@
 //! everywhere". Declining is a real answer here — a floating pass
 //! transistor, a tie, or two axes that disagree all report nothing
 //! rather than guessing.
+//! # E — port-terminal label direction (`port.label_vertical`,
+//! `port.label_backwards`)
+//!
+//! A `*@port` terminal — or any one-pin interface net — is drawn as a
+//! `(global_label …)`, and its rotation decides how the marker reads.
+//! The owner's report: *"Both VIN and VOUT as well as capacitors
+//! connected to it should be horisontal. This is common issue for many
+//! circuits."* Nine of the suite's terminals are currently drawn on end.
+//!
+//! A/B/C are all blind to it — provably: they are byte-identical across
+//! the two `terminal-series` challenger arms on all 18 fixtures, and the
+//! ADR-23 aggregate consequently ranked the arm that leaves a terminal
+//! vertical (and turns a second correct one sideways) ABOVE the arm that
+//! repairs every one it reaches. The instrument preferred the visibly
+//! worse drawing, one level down from the inversion this ADR opened with.
+//!
+//! Two disjoint counts over one population — every top-level
+//! `(global_label …)`:
+//!
+//! * **`port.label_vertical`** — rotation 90 or 270. KiCad maps both to
+//!   `ANGLE_VERTICAL` (`sch_label.cpp:395`), differing only in which side
+//!   of the anchor the tag hangs, so there is no readable vertical
+//!   option to prefer: either way the reader tilts their head at a
+//!   terminal on a horizontal signal path.
+//! * **`port.label_backwards`** — a horizontal terminal whose arrowhead
+//!   travels *leftward*: an `input` at 0 or an `output` at 180. The
+//!   arrow's direction is `CreateGraphicShape`'s
+//!   (`sch_label.cpp:2146`), which points the anchor end for `L_INPUT`
+//!   and the far end for `L_OUTPUT`; leftward is against the project's
+//!   own left-to-right flow convention.
+//!
+//! `backwards` grades only terminals the SOURCE declares with `*@port`,
+//! because the emitted `(shape …)` token is a default everywhere else —
+//! `common_emitter`'s `out` is stamped `(shape input)`. See
+//! [`port_label_metrics`] for the full argument and
+//! `port_direction_is_graded_only_where_the_source_declares_it` for the
+//! assertion that keeps it honest.
 //!
 //! # Informational at birth
 //!
@@ -176,7 +213,7 @@ use common::spice_to_kicad;
 use kicad_symbols::{Library, Orientation, Rotation};
 use lexpr::Value;
 use spice_diagnostics::FileId;
-use spice_resolve::ElementKind;
+use spice_resolve::{ElementKind, PortDir};
 
 fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
@@ -312,6 +349,24 @@ struct Elem {
     is_sheet: bool,
 }
 
+/// One emitted top-level `(global_label …)`: the marker KiCad draws
+/// where a net leaves the sheet. Metric D's whole population.
+#[derive(Debug, Clone)]
+struct PortLabel {
+    net: String,
+    /// The emitted `(shape …)` token, as written.
+    shape: String,
+    /// The emitted `(at … rot)` angle, one of 0/90/180/270.
+    rot: u16,
+    /// `Some(dir)` iff the SOURCE declares `*@port <net>=<dir>`.
+    ///
+    /// Read from the netlist, never inferred from `shape`: the emitter
+    /// stamps `(shape input)` on every *undeclared* one-pin interface
+    /// net, semantic outputs included, so the token is a default there
+    /// rather than a statement. See [`port_label_metrics`].
+    declared: Option<PortDir>,
+}
+
 #[derive(Debug)]
 struct Fixture {
     name: String,
@@ -323,6 +378,8 @@ struct Fixture {
     /// rail, not merely that it is one, and a negative supply is a rail
     /// that belongs at the BOTTOM (the same distinction V14 keys off).
     down_rails: HashSet<String>,
+    /// Top-level `(global_label …)` terminals, in emitted order.
+    labels: Vec<PortLabel>,
 }
 
 /// The canonical *ground / negative supply* names — the down half of
@@ -579,6 +636,7 @@ fn load_arm(name: &str, extra: &[&str]) -> Fixture {
             down_rails.insert(net.clone());
         }
     }
+    let labels = terminal_labels(&root, &resolved.ports);
 
     Fixture {
         name: name.to_string(),
@@ -586,7 +644,42 @@ fn load_arm(name: &str, extra: &[&str]) -> Fixture {
         elements,
         rail_nets,
         down_rails,
+        labels,
     }
+}
+
+/// Every top-level `(global_label …)`, tagged with the direction the
+/// SOURCE declares for its net (if any).
+///
+/// In this emitter that set is exactly the sheet's boundary terminals:
+/// rails are drawn as power glyphs, internal nets get plain
+/// `(label …)`, and a hierarchical `(sheet …)` port is joined by wires
+/// rather than by a co-located global label (`schematic.rs`'s
+/// `dangling_pin_labels`).
+fn terminal_labels(sheet: &Value, ports: &[spice_resolve::PortSpec]) -> Vec<PortLabel> {
+    let declared: HashMap<&str, PortDir> = ports.iter().map(|p| (p.net.as_str(), p.dir)).collect();
+    let mut labels = Vec::new();
+    for gl in children(sheet, "global_label") {
+        let Some(net) = list_iter(gl).nth(1).and_then(as_str) else {
+            continue;
+        };
+        let shape = find_child(gl, "shape")
+            .and_then(|s| list_iter(s).nth(1).and_then(as_str))
+            .unwrap_or("input")
+            .to_string();
+        let angle = find_child(gl, "at")
+            .and_then(|a| list_iter(a).nth(3).and_then(as_f64))
+            .unwrap_or(0.0);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let rot = ((angle.round() as i64).rem_euclid(360)) as u16;
+        labels.push(PortLabel {
+            net: net.to_string(),
+            shape,
+            rot,
+            declared: declared.get(net).copied(),
+        });
+    }
+    labels
 }
 
 fn load(name: &str) -> Fixture {
@@ -1210,6 +1303,104 @@ fn compactness_metrics(f: &Fixture) -> (usize, usize, Vec<String>) {
     (stranded, total, detail)
 }
 
+// --- D: port-terminal label direction ------------------------------------
+
+/// Metric D, in two disjoint counts over one population: every top-level
+/// `(global_label …)` the emitter draws.
+///
+/// Returns `(vertical, backwards, labels, directed, detail)`.
+///
+/// # What a rotation means, read off the renderer
+///
+/// KiCad's parser maps the file angle straight onto a spin style
+/// (`sch_io_kicad_sexpr_parser.cpp:4653`) and `SetSpinStyle`
+/// (`sch_label.cpp:395`) turns that into a text angle plus a
+/// justification:
+///
+/// | rot | spin   | text angle        | justify | tag sits |
+/// | --: | ------ | ----------------- | ------- | -------- |
+/// |   0 | RIGHT  | `ANGLE_HORIZONTAL`| left    | right of the anchor |
+/// |  90 | UP     | `ANGLE_VERTICAL`  | left    | above    |
+/// | 180 | LEFT   | `ANGLE_HORIZONTAL`| right   | left of the anchor  |
+/// | 270 | BOTTOM | `ANGLE_VERTICAL`  | right   | below    |
+///
+/// Two consequences, and both are the metric:
+///
+/// **90 and 270 are the same glyph rotation.** Both set
+/// `ANGLE_VERTICAL`; they differ only in which side of the anchor the
+/// tag hangs. So there is no "readable vertical" option to prefer — a
+/// terminal at either angle asks the reader to tilt their head, on a
+/// sheet whose signal path runs horizontally. That is `vertical`.
+///
+/// **0 and 180 are the same glyph rotation too**, and differ in which
+/// way the tag's arrowhead points.
+/// `SCH_GLOBALLABEL::CreateGraphicShape` (`sch_label.cpp:2146`) builds
+/// the outline from the anchor backwards along the reading direction and
+/// then points ONE end: `L_INPUT` points the end at the anchor,
+/// `L_OUTPUT` points the far end. So an `input` at 180 and an `output`
+/// at 0 both draw an arrow travelling **rightward**, and an `input` at 0
+/// or an `output` at 180 both draw one travelling **leftward** — the
+/// signal entering from the right edge, or leaving by the left. Against
+/// the project's own left-to-right flow convention (F3/F5, and the
+/// placer's X = signal depth) that is a terminal drawn against the
+/// stream. That is `backwards`.
+///
+/// # Why `backwards` is graded only on DECLARED ports
+///
+/// The `(shape …)` token is not a measurement unless the source made a
+/// statement. `label_specs` stamps `shape: "input"` on every undeclared
+/// one-pin interface net whatever its real direction — `common_emitter`'s
+/// `out` is emitted `(shape input)` — so grading direction there grades
+/// the emitter's default, not the drawing. Concretely: both challenger
+/// arms move that `out` marker from 270 to 0, which is a repair, and a
+/// rule that read the defaulted token would score the repair as a NEW
+/// backwards violation. So `backwards` reads `declared`, which comes
+/// from the netlist's `*@port`, and `bidirectional` is exempt because it
+/// asserts no direction.
+///
+/// `vertical` needs no direction, so it grades the whole population.
+///
+/// The two counts are **disjoint**: a vertical label is counted once,
+/// under `vertical`, and is never also backwards. That is ADR-28
+/// ambiguity 5's rule — one element, one blame — and it is what
+/// separates an axis defect (repair: the placer, by turning the terminal
+/// pin) from a direction defect (repair: the anchor/rotation chooser in
+/// `label_specs`).
+fn port_label_metrics(f: &Fixture) -> (usize, usize, usize, usize, Vec<String>) {
+    let (mut vertical, mut backwards, mut directed) = (0usize, 0usize, 0usize);
+    let mut detail = Vec::new();
+    for l in &f.labels {
+        let dir = match l.declared {
+            Some(d @ (PortDir::Input | PortDir::Output)) => {
+                directed += 1;
+                Some(d)
+            }
+            _ => None,
+        };
+        if l.rot == 90 || l.rot == 270 {
+            vertical += 1;
+            detail.push(format!(
+                "`{}` ({}) at {}: vertical — reads across the signal path",
+                l.net, l.shape, l.rot
+            ));
+            continue;
+        }
+        let flow_rightward = match dir {
+            Some(PortDir::Input) => l.rot == 180,
+            Some(PortDir::Output) => l.rot == 0,
+            _ => true,
+        };
+        if !flow_rightward {
+            backwards += 1;
+            detail.push(format!(
+                "`{}` ({}) at {}: backwards — arrow travels leftward",
+                l.net, l.shape, l.rot
+            ));
+        }
+    }
+    (vertical, backwards, f.labels.len(), directed, detail)
+}
+
 // --- the fixtures --------------------------------------------------------
 
 // --- D: device facing (F2) -----------------------------------------------
@@ -1393,7 +1584,7 @@ fn readability_metrics_are_reported_for_every_fixture() {
     let dump = std::env::var("S2K_READABILITY_DUMP").is_ok();
     if dump {
         println!(
-            "{:<24} {:>10} {:>10} {:>8} {:>10} {:>6} {:>10} {:>6} {:>8} {:>8}",
+            "{:<24} {:>10} {:>10} {:>8} {:>10} {:>6} {:>10} {:>6} {:>8} {:>8} {:>9} {:>10} {:>7} {:>9}",
             "fixture",
             "chain.axis",
             "chain.rev",
@@ -1403,7 +1594,11 @@ fn readability_metrics_are_reported_for_every_fixture() {
             "stack.sbs",
             "pairs",
             "face.inv",
-            "face.res"
+            "face.res",
+            "port.vert",
+            "port.backw",
+            "labels",
+            "directed"
         );
     }
     let mut measured = 0usize;
@@ -1413,6 +1608,7 @@ fn readability_metrics_are_reported_for_every_fixture() {
         let (strand, strand_n, strand_detail) = compactness_metrics(&f);
         let (sbs, pairs, stack_detail) = stacking_metrics(&f);
         let (finv, fres, facing_detail) = facing_metrics(&f);
+        let (pvert, pback, plabels, pdirected, port_detail) = port_label_metrics(&f);
         common::scoreboard::record_count("chain.axis", name, axis);
         common::scoreboard::record_count("chain.reversal", name, rev);
         common::scoreboard::record_count("chain.members", name, members);
@@ -1422,10 +1618,14 @@ fn readability_metrics_are_reported_for_every_fixture() {
         common::scoreboard::record_count("stack.pairs", name, pairs);
         common::scoreboard::record_count("device.facing_inverted", name, finv);
         common::scoreboard::record_count("device.facing_resolved", name, fres);
+        common::scoreboard::record_count("port.label_vertical", name, pvert);
+        common::scoreboard::record_count("port.label_backwards", name, pback);
+        common::scoreboard::record_count("port.labels", name, plabels);
+        common::scoreboard::record_count("port.directed", name, pdirected);
         measured += 1;
         if dump {
             println!(
-                "{:<24} {axis:>10} {rev:>10} {members:>8} {strand:>10} {strand_n:>6} {sbs:>10} {pairs:>6} {finv:>8} {fres:>8}",
+                "{:<24} {axis:>10} {rev:>10} {members:>8} {strand:>10} {strand_n:>6} {sbs:>10} {pairs:>6} {finv:>8} {fres:>8} {pvert:>9} {pback:>10} {plabels:>7} {pdirected:>9}",
                 f.name
             );
             for d in chain_detail
@@ -1433,6 +1633,7 @@ fn readability_metrics_are_reported_for_every_fixture() {
                 .chain(strand_detail.iter())
                 .chain(stack_detail.iter())
                 .chain(facing_detail.iter())
+                .chain(port_detail.iter())
             {
                 println!("      {d}");
             }
@@ -1922,6 +2123,7 @@ fn synthetic(elements: Vec<Elem>, pins: Vec<BodyPin>, rails: &[&str]) -> Fixture
         elements,
         rail_nets,
         down_rails,
+        labels: Vec::new(),
     }
 }
 
@@ -2314,4 +2516,286 @@ fn stacking_metric_counts_a_known_synthetic_divider() {
          to stack — that is metric A's business, and demanding both would be a \
          contradiction"
     );
+}
+
+// --- metric D: acceptance ranking, control arm, discriminator ------------
+
+/// The `*@port` declarations the SOURCE makes, resolved live from the
+/// `.cir`.
+///
+/// The transcribed arms below freeze only each terminal's *rotation* —
+/// the one quantity the two placers actually differ in. The direction
+/// half of every transcribed label is re-derived from the fixture on
+/// every run, so a change to a fixture's `*@port` lines cannot leave an
+/// arm silently stale.
+fn declared_ports(name: &str) -> HashMap<String, PortDir> {
+    let spice_src =
+        std::fs::read_to_string(fixtures_dir().join(format!("{name}.cir"))).expect("read cir");
+    let parsed = spice_parser::parse(&spice_src, FileId(0)).expect("parse spice");
+    let library = load_test_library();
+    let resolved = spice_resolve::resolve(&parsed.netlist, &library).expect("resolve spice");
+    resolved
+        .ports
+        .iter()
+        .map(|p| (p.net.clone(), p.dir))
+        .collect()
+}
+
+/// A labels-only fixture: metric D reads nothing else.
+fn labels_only(name: &str, rows: &[(&str, u16)]) -> Fixture {
+    let declared = declared_ports(name);
+    Fixture {
+        name: name.to_string(),
+        pins: Vec::new(),
+        elements: Vec::new(),
+        rail_nets: HashSet::new(),
+        down_rails: HashSet::new(),
+        labels: rows
+            .iter()
+            .map(|&(net, rot)| {
+                let dir = declared.get(net).copied();
+                PortLabel {
+                    net: net.to_string(),
+                    shape: match dir {
+                        Some(PortDir::Output) => "output",
+                        Some(PortDir::Bidir) => "bidirectional",
+                        // `label_specs` stamps `input` on every
+                        // undeclared one-pin interface net.
+                        Some(PortDir::Input) | None => "input",
+                    }
+                    .to_string(),
+                    rot,
+                    declared: dir,
+                }
+            })
+            .collect(),
+    }
+}
+
+/// Sum metric D over a whole transcribed arm: `(vertical, backwards)`.
+fn score_arm(arm: &[(&str, &[(&str, u16)])]) -> (usize, usize) {
+    let mut v = 0;
+    let mut b = 0;
+    for &(name, rows) in arm {
+        let (vert, back, _, _, _) = port_label_metrics(&labels_only(name, rows));
+        v += vert;
+        b += back;
+    }
+    (v, b)
+}
+
+/// `--placer=terminal-series`, transcribed from its emitted
+/// `.kicad_sch` files (branch `feat/f1-terminal-series`, `ef3a6d9`).
+///
+/// It repairs six of the nine vertical terminals the shipping default
+/// draws and **breaks a seventh**: `common_emitter`'s `in` goes 180 → 90.
+const ARM_TERMINAL_SERIES: &[(&str, &[(&str, u16)])] = &[
+    ("cascode_amp", &[("in", 180), ("out", 0)]),
+    ("common_emitter", &[("in", 90), ("out", 0)]),
+    ("diff_pair", &[("in1", 180), ("in2", 0)]),
+    ("lc_ladder_lpf", &[("out", 0)]),
+    ("named_rails", &[("in", 180)]),
+    ("opamp_definition_level", &[("in1", 180), ("in2", 180)]),
+    ("opamp_inverting", &[("in", 180)]),
+    ("opamp_inverting_real", &[("in", 180)]),
+    (
+        "port_shapes",
+        &[("nb", 180), ("ni", 180), ("no", 90), ("src", 90)],
+    ),
+    ("rc_lowpass", &[("in", 180)]),
+    ("rc_lowpass_ports", &[("in", 180), ("out", 0)]),
+    ("rc_phase_shift", &[("in", 180), ("out", 0)]),
+    ("sallen_key_driven", &[("out", 0)]),
+    ("sallen_key_lpf", &[("in", 180), ("out", 0)]),
+    ("shunt_feedback_amp", &[("in", 180), ("out", 0)]),
+    ("two_stage_amp", &[("in", 90), ("out", 0)]),
+    ("wien_bridge_osc", &[("out", 0)]),
+];
+
+/// `--placer=terminal-series-divider`, transcribed the same way. It
+/// repairs every one of the seven reachable verticals and breaks none;
+/// the two it leaves are `port_shapes`' `no` / `src`, which neither arm
+/// reaches.
+const ARM_TERMINAL_SERIES_DIVIDER: &[(&str, &[(&str, u16)])] = &[
+    ("cascode_amp", &[("in", 180), ("out", 0)]),
+    ("common_emitter", &[("in", 180), ("out", 0)]),
+    ("diff_pair", &[("in1", 180), ("in2", 0)]),
+    ("lc_ladder_lpf", &[("out", 0)]),
+    ("named_rails", &[("in", 180)]),
+    ("opamp_definition_level", &[("in1", 180), ("in2", 180)]),
+    ("opamp_inverting", &[("in", 180)]),
+    ("opamp_inverting_real", &[("in", 180)]),
+    (
+        "port_shapes",
+        &[("nb", 180), ("ni", 180), ("no", 90), ("src", 90)],
+    ),
+    ("rc_lowpass", &[("in", 180)]),
+    ("rc_lowpass_ports", &[("in", 180), ("out", 0)]),
+    ("rc_phase_shift", &[("in", 180), ("out", 0)]),
+    ("sallen_key_driven", &[("out", 0)]),
+    ("sallen_key_lpf", &[("in", 180), ("out", 0)]),
+    ("shunt_feedback_amp", &[("in", 180), ("out", 0)]),
+    ("two_stage_amp", &[("in", 180), ("out", 0)]),
+    ("wien_bridge_osc", &[("out", 0)]),
+];
+
+/// **The acceptance test for metric D.**
+///
+/// Two challenger arms exist for the port-terminal defect, and the
+/// registered metrics cannot tell them apart: `chain.*` and `stack.*` are
+/// byte-identical across both on all 18 fixtures, so the ADR-23 aggregate
+/// judged them on wirelength-ish Tier-2 residue and made
+/// `terminal-series` — the arm that leaves one terminal vertical that the
+/// other repairs, and breaks a second one that was already correct —
+/// PROMOTABLE, while ranking `terminal-series-divider` below it. The
+/// owner reads the second arm as strictly better. A metric that does not
+/// reproduce that order is measuring the wrong thing.
+///
+/// Asserted **strictly**, and for ADR-28 metric C's reason: a tie here is
+/// exactly the failure mode the metric exists to close. Strictness is
+/// safe because both arms are **transcribed** rather than converted —
+/// neither placer is on `master`, and freezing them means this assertion
+/// is a fact about the metric's arithmetic, not a gate on any placer.
+/// The shipping default is converted live and only *printed*, never
+/// asserted, so repairing it can never fail this test.
+#[test]
+fn port_label_direction_ranks_the_divider_arm_above_terminal_series() {
+    let (series_v, series_b) = score_arm(ARM_TERMINAL_SERIES);
+    let (divider_v, divider_b) = score_arm(ARM_TERMINAL_SERIES_DIVIDER);
+
+    let mut live_v = 0;
+    let mut live_b = 0;
+    for name in FIXTURES {
+        let (v, b, _, _, _) = port_label_metrics(&load(name));
+        live_v += v;
+        live_b += b;
+    }
+    println!(
+        "port.label_vertical / backwards, summed over the suite:\n  \
+         shipping default        {live_v} / {live_b}   (printed, never asserted)\n  \
+         terminal-series         {series_v} / {series_b}\n  \
+         terminal-series-divider {divider_v} / {divider_b}"
+    );
+
+    assert!(
+        (divider_v, divider_b) < (series_v, series_b),
+        "metric D must rank `terminal-series-divider` strictly above \
+         `terminal-series`: divider ({divider_v}, {divider_b}) vs series \
+         ({series_v}, {series_b})"
+    );
+    // Non-vacuity of the ranking itself: the arm the owner rejects must
+    // actually carry violations, or the comparison above is 0 < 0.
+    assert!(
+        series_v > 0,
+        "the rejected arm must score at least one vertical terminal"
+    );
+}
+
+/// Metric D's non-vacuity control arm: hand-written terminals whose right
+/// answer is obvious, so the counts cannot silently degenerate to
+/// "always 0" and the two counts are shown to be disjoint.
+#[test]
+fn port_label_metric_counts_a_known_synthetic_terminal_set() {
+    // `port_shapes` declares ni=input, no=output, nb=bidir; `src` is an
+    // undeclared one-pin interface net.
+    let clean = labels_only(
+        "port_shapes",
+        &[("ni", 180), ("no", 0), ("nb", 180), ("src", 180)],
+    );
+    assert_eq!(
+        {
+            let (v, b, n, d, _) = port_label_metrics(&clean);
+            (v, b, n, d)
+        },
+        (0, 0, 4, 2),
+        "input at 180 and output at 0 both travel rightward; bidir asserts \
+         no direction; the undeclared net is not direction-graded"
+    );
+
+    // Every terminal turned a quarter turn: all four vertical, none
+    // charged a direction defect on top (the counts are disjoint).
+    let vertical = labels_only(
+        "port_shapes",
+        &[("ni", 270), ("no", 90), ("nb", 90), ("src", 270)],
+    );
+    assert_eq!(
+        {
+            let (v, b, ..) = port_label_metrics(&vertical);
+            (v, b)
+        },
+        (4, 0),
+        "90 and 270 are the same ANGLE_VERTICAL glyph rotation, and a \
+         vertical terminal is blamed once"
+    );
+
+    // Horizontal but pointing upstream: the input's arrow now travels
+    // leftward, the output's likewise. `nb` and `src` stay unblamed.
+    let backwards = labels_only(
+        "port_shapes",
+        &[("ni", 0), ("no", 180), ("nb", 0), ("src", 0)],
+    );
+    assert_eq!(
+        {
+            let (v, b, ..) = port_label_metrics(&backwards);
+            (v, b)
+        },
+        (0, 2),
+        "an input at 0 and an output at 180 both draw an arrow travelling \
+         leftward, against the sheet's left-to-right flow"
+    );
+}
+
+/// **The discriminator**, and the premise the `backwards` definition
+/// rests on: the emitted `(shape …)` token is a *default* wherever the
+/// source declares nothing.
+///
+/// `common_emitter`'s `out` is the schematic's output — and the emitter
+/// stamps it `(shape input)`, because `label_specs` gives every
+/// undeclared one-pin interface net that token. Grading direction off
+/// the token would therefore call the arms' repair of that very terminal
+/// (270 → 0) a NEW backwards violation. So `backwards` reads the
+/// netlist's `*@port`, and this test fails the day the emitter learns to
+/// infer a direction — at which point the restriction should be revisited
+/// rather than kept out of habit.
+///
+/// Both halves are properties of `label_specs`, not of placement, so
+/// neither moves when a placer changes.
+#[test]
+fn port_direction_is_graded_only_where_the_source_declares_it() {
+    let ce = load("common_emitter");
+    let out = ce
+        .labels
+        .iter()
+        .find(|l| l.net == "out")
+        .expect("common_emitter draws an `out` terminal");
+    assert_eq!(
+        out.shape, "input",
+        "the emitter defaults an undeclared interface terminal to `input` \
+         even when the net is the circuit's output"
+    );
+    assert!(
+        out.declared.is_none(),
+        "`common_emitter` declares no `*@port`, so `out` carries no direction"
+    );
+
+    // A declared terminal, by contrast, is graded — and the fixture that
+    // proves it is the one the suite currently gets wrong.
+    let sk = load("sallen_key_lpf");
+    let sk_out = sk
+        .labels
+        .iter()
+        .find(|l| l.net == "out")
+        .expect("sallen_key_lpf draws an `out` terminal");
+    assert_eq!(
+        sk_out.declared,
+        Some(PortDir::Output),
+        "`sallen_key_lpf` declares `*@port out=output`"
+    );
+    assert_eq!(sk_out.shape, "output");
+
+    // Same rotation, opposite verdict, purely because one is declared.
+    let graded = labels_only("sallen_key_lpf", &[("out", 180)]);
+    let ungraded = labels_only("common_emitter", &[("out", 180)]);
+    assert_eq!(port_label_metrics(&graded).1, 1);
+    assert_eq!(port_label_metrics(&ungraded).1, 0);
 }

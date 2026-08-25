@@ -6930,12 +6930,15 @@ would have to be settled *before* attempting. Ship the dots, re-ask.
 
 **Status:** landed, **informational**. **Amended 2026-08-24** — a third
 metric was added after metric A was found blind to the defect described
-under "The amendment" below. Three metrics, seven registered metric ids,
-one verifier (`crates/spice2kicad/tests/readability_metrics.rs`).
-**A fourth metric, `device.facing_inverted`, joined the same verifier
-under ADR-29** (device facing); it is documented there, reuses this
-ADR's DC graph, and is informational on the same terms. Purely
-additive, at birth and at the amendment: `baseline_lock`'s diff is
+under "The amendment" below. **Amended again 2026-08-25** — a fourth
+metric was added after all three were found blind to *port-terminal
+direction*; see "The second amendment". **A fifth,
+`device.facing_inverted`, joined the same verifier under ADR-29**
+(device facing); it is documented there, reuses this ADR's DC graph,
+and is informational on the same terms. Five metrics, thirteen
+registered metric ids, one verifier
+(`crates/spice2kicad/tests/readability_metrics.rs`). Purely additive,
+at birth and at both amendments: `baseline_lock`'s diff is
 EMPTY, no budget literal moved, no existing verifier changed. No metric
 here is a ratchet, and none carries aggregate weight in the ADR-23
 promotion rule.
@@ -6955,16 +6958,21 @@ something the owner, on sight, called damage:
    better on 4 of 18 fixtures**.
 
 Every one of those is a true statement about the metric that made it.
+And a fourth, added at the second amendment: the aggregate scored the
+challenger arm that leaves a port terminal drawn on end — and turns a
+correct one sideways — above the arm that repairs every one it reaches.
+
 The common cause is not a weighting: **no registered metric measures
-axis consistency, orientation uniformity, or device stacking**, which is
+axis consistency, orientation uniformity, device stacking, or the
+direction a port terminal reads**, which is
 what a reader picks up before reading a single refdes. ADR-23's own
 "Known limits" says it plainly — a property no verifier measures is
 invisible to the aggregate exactly as it is invisible to the ratchets —
 and the promotion's "two blind cells" post-mortem says what an unmeasured
 cell costs in practice. So the fix is a *measurement*, not a coefficient.
 
-Both metrics read the emitted `.kicad_sch` and re-derive their structure
-from the netlist. Neither imports a classification from `spice-layout`,
+All four metrics read the emitted `.kicad_sch` and re-derive their
+structure from the netlist. Neither imports a classification from `spice-layout`,
 following the `flow_geometry.rs` precedent: a metric that borrows the
 placer's own model can only restate it, never falsify it.
 
@@ -7210,36 +7218,196 @@ one dominant hop does not. That is the same finding ADR-17 recorded from
 the other side — spacing *along* the flow is slack, structure *across*
 it is meaning.
 
+### The second amendment — metric D, port-terminal label direction (`port.label_vertical`, `port.label_backwards`)
+
+The first amendment closed a hole in metric A. This one closes a hole in
+**all three**, and it was found the same way — by a graded challenger run
+whose verdict the owner rejected on sight.
+
+The report: *"Both VIN and VOUT as well as capacitors connected to it
+should be horisontal. This is common issue for many circuits."* A port
+terminal drawn on end emits a `(global_label …)` at 90 or 270; it reads
+across the signal path instead of along it. **Nine terminals across six
+of the eighteen fixtures** are drawn that way under the shipping
+`flow-seed-v4`.
+
+Two challenger arms exist for it (branch `feat/f1-terminal-series`,
+`ef3a6d9`, not merged at the time of writing):
+
+| arm | verticals repaired | verticals broken | ADR-23 verdict |
+| --- | ---: | ---: | --- |
+| `terminal-series` | 6 of 9 | 1 (`common_emitter` `in`, 180 → 90) | T1 +0.00, T2 −82.37 → **PROMOTABLE** |
+| `terminal-series-divider` | 7 of 9 | 0 | T1 +2.00, T2 −38.03 → not promotable |
+
+**The instrument preferred the visibly worse drawing.** And not by a
+weighting: `chain.axis`, `chain.reversal`, `chain.members`,
+`chain.stranded`, `chain.run_members`, `stack.side_by_side` and
+`stack.pairs` are **byte-identical across both arms on all eighteen
+fixtures**, so ADR-28's own three metrics are provably blind here and the
+verdict fell out of Tier-2 wirelength residue. That blindness was
+re-measured rather than taken on report: this verifier was run against
+both arms live (`git archive` of `ef3a6d9` into a throwaway tree with its
+own target dir, `S2K_PLACER=<arm> S2K_READABILITY_DUMP=1`), and the seven
+`chain.*` / `stack.*` columns are identical to the shipping default's on
+every fixture while only the four `port.*` columns move. The same run
+reproduces the transcribed arms below exactly — 4 and 2 — so the frozen
+tables are checked against live conversions, not merely asserted. That is this ADR's opening
+finding, one level down and against the instrument this ADR itself
+added — which is the strongest available argument that the answer is
+another *measurement*, not another coefficient.
+
+The independent witness agrees with the owner:
+`flow_geometry::series_discriminator_separates_stub_from_series_on_common_emitter`
+fails under `terminal-series` and passes under
+`terminal-series-divider`.
+
+#### What a rotation means, read off the renderer rather than assumed
+
+The convention was stated to the implementing agent as "input should read
+180, output 0, and 90/270 is always wrong". Checked against KiCad 9's
+source and against the emitted files, that is **correct, and its usual
+justification is not**. It is not that a 180° label reads right-to-left:
+KiCad never draws upside-down text.
+
+`sch_io_kicad_sexpr_parser.cpp:4653` maps the file angle straight onto a
+spin style, and `SCH_LABEL_BASE::SetSpinStyle` (`sch_label.cpp:395`)
+turns that into a text angle plus a justification:
+
+| rot | spin | text angle | justify | tag sits |
+| --: | --- | --- | --- | --- |
+| 0 | `RIGHT` | `ANGLE_HORIZONTAL` | left | right of the anchor |
+| 90 | `UP` | `ANGLE_VERTICAL` | left | above |
+| 180 | `LEFT` | `ANGLE_HORIZONTAL` | right | left of the anchor |
+| 270 | `BOTTOM` | `ANGLE_VERTICAL` | right | below |
+
+So 0 and 180 are the *same* glyph rotation, and so are 90 and 270. Two
+things follow, and they are the two counts:
+
+* **90 and 270 are one defect, not two variants.** Both set
+  `ANGLE_VERTICAL`; they differ only in which side of the anchor the tag
+  hangs. There is no readable vertical alternative to prefer — either way
+  the reader turns their head at a terminal on a horizontal signal path.
+* **0 versus 180 is about the arrowhead, not the text.**
+  `SCH_GLOBALLABEL::CreateGraphicShape` (`sch_label.cpp:2146`) builds the
+  tag outline back from the anchor along the reading direction, then
+  points ONE end: the anchor end for `L_INPUT`, the far end for
+  `L_OUTPUT`. So `input`@180 and `output`@0 both draw an arrow travelling
+  **rightward** — signal entering from the left edge, or leaving by the
+  right — and `input`@0 and `output`@180 both draw one travelling
+  **leftward**. Against the project's own left-to-right convention (F3 /
+  F5, and the placer's X = signal depth) the leftward pair is a terminal
+  drawn against the stream.
+
+`port.label_vertical` counts the first. `port.label_backwards` counts the
+second. `port.labels` and `port.directed` are the denominators.
+
+#### `backwards` is graded only where the SOURCE declares a direction
+
+This is the one substantive restriction, and it is not conservatism —
+the alternative is measurably wrong.
+
+The emitted `(shape …)` token is a **default** wherever no `*@port`
+names the net: `label_specs` stamps `(shape input)` on every undeclared
+one-pin interface net, whatever its real direction. `common_emitter`'s
+`out` — the circuit's output — is emitted as an `input` tag. Grading
+direction off that token therefore grades the emitter's default rather
+than the drawing, and the cost is concrete: **both challenger arms move
+that `out` terminal from 270 to 0, and a token-reading rule would score
+the repair as a NEW backwards violation.** Summed over the suite, the
+naive rule reads 2 / 2 / 2 across default / series / divider — it sees no
+improvement at all where the owner sees the whole fix.
+
+So `backwards` reads `resolved.ports`, the netlist's own `*@port`
+declarations, and `bidirectional` is exempt because it asserts no
+direction. `vertical` needs no direction and grades the whole
+population. `port_direction_is_graded_only_where_the_source_declares_it`
+pins the premise: it asserts that `common_emitter`'s `out` really is
+emitted `(shape input)` with no declaration, so the day the emitter
+learns to infer a direction, the restriction is forced back onto the
+table rather than surviving out of habit.
+
+The counts are **disjoint** — a vertical terminal is never also charged
+as backwards — for ambiguity 5's reason, and here the two repairs are
+genuinely different code: a vertical terminal is a *placement* defect
+(the anchor pin faces up or down, which is what both challenger arms
+change), while a backwards one is an anchor / rotation choice inside
+`label_specs`.
+
+#### The acceptance ranking
+
+| arm | `port.label_vertical` | `port.label_backwards` |
+| --- | ---: | ---: |
+| shipping default `flow-seed-v4` | 9 | 1 |
+| `terminal-series` | 4 | 0 |
+| `terminal-series-divider` | **2** | 0 |
+
+**Reproduced.** The divider arm is strictly better, matching the owner
+and the `flow_geometry` witness. The separation comes entirely from
+`vertical`: the arms tie at 0 on `backwards`, because
+`sallen_key_lpf`'s `out` — the suite's only backwards cell — is repaired
+by both.
+
+`port_label_direction_ranks_the_divider_arm_above_terminal_series`
+asserts it **strictly**, on metric C's precedent and for its reason: a
+tie is the exact failure being closed. Strictness is safe because both
+arms are **transcribed** from their emitted `.kicad_sch` rather than
+converted — neither placer is on `master` — so the assertion is a fact
+about the metric's arithmetic, not a gate on any placer. Only the
+*rotations* are frozen; each transcribed terminal's direction is
+re-resolved from the fixture's `.cir` on every run, so a change to a
+fixture's `*@port` lines cannot leave an arm silently stale. The
+shipping default is converted live and **printed, never asserted** — so
+repairing it can never fail this test.
+
+#### What the new columns flag that nobody had named
+
+* **`opamp_inverting` `in` at 270** — a ninth vertical terminal, outside
+  the six fixtures the report named. It is repaired by both arms.
+* **`sallen_key_lpf` `out` at 180** — the suite's only `backwards` cell,
+  and the only one of the ten defects that is *not* an axis defect. It
+  is a declared `output` whose arrow points back into the circuit. Both
+  arms happen to fix it while fixing the axis, so nothing in the suite
+  currently exercises `backwards` in isolation; that is why its
+  promotion criteria below ask for a second cell.
+* **`diff_pair` `in2` at 0** is deliberately *not* flagged, and it is the
+  clearest illustration of the declared-only rule. It is an undeclared
+  interface label on the right-hand input of a symmetric pair, drawn
+  pointing off the right edge — arguably the textbook drawing. A
+  token-reading rule would call it a defect; ambiguity 15 records the
+  alternative.
+
 ### The measured table
 
 Whole fixture set, `readability_metrics.rs` with
 `S2K_READABILITY_DUMP=1` under the shipping default placer. `A` =
 `chain.axis`, `R` = `chain.reversal`, `M` = `chain.members`,
 `St` = `chain.stranded`, `N` = `chain.run_members`,
-`S` = `stack.side_by_side`, `P` = `stack.pairs`. The `St`/`N` columns
-are the 2026-08-24 amendment; every other column is unchanged from the
-original measurement.
+`S` = `stack.side_by_side`, `P` = `stack.pairs`,
+`Pv` = `port.label_vertical`, `Pb` = `port.label_backwards`,
+`L` = `port.labels`, `D` = `port.directed`. The `St`/`N` columns are the
+2026-08-24 amendment and the four `P*`/`L`/`D` columns the 2026-08-25
+one; every other column is unchanged from the original measurement.
 
-| fixture | A | R | M | St | N | S | P | note |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| rc_lowpass | 0 | 0 | 0 | 0 | 0 | 0 | 0 | |
-| rc_lowpass_ports | 0 | 0 | 0 | 0 | 0 | 0 | 0 | |
-| common_emitter | 0 | 0 | 0 | 0 | 0 | 0 | 3 | RC/Q1, Q1/RE, RB1/RB2 all stacked |
-| multivibrator | 0 | 0 | 0 | 0 | 0 | 0 | 2 | |
-| diff_pair | 0 | 0 | 0 | 0 | 0 | 0 | 2 | Q1/Q2 correctly NOT a pair |
-| opamp_inverting | 0 | 0 | 0 | 0 | 0 | 0 | 0 | |
-| opamp_inverting_real | 0 | 0 | 0 | 0 | 0 | 0 | 0 | |
-| **port_shapes** | 0 | 0 | 3 | **2** | 4 | 0 | 0 | two stacks of two, one 41.91 mm jump — A and R see nothing |
-| opamp_definition_level | 0 | 0 | 0 | 0 | 0 | 0 | 0 | |
-| named_rails | 0 | 0 | 0 | 0 | 0 | 0 | 0 | |
-| rc_phase_shift | 0 | 0 | 4 | 0 | 4 | 0 | 2 | `R1→R2→R3→CIN` horizontal, one direction, runs 12.70/7.62/7.62 |
-| two_stage_amp | 0 | 0 | 0 | 0 | 0 | 0 | 6 | |
-| **cascode_amp** | 0 | 0 | 0 | 0 | 0 | **1** | 5 | `Q1/Q2` side by side — champion scores **0** |
-| **lc_ladder_lpf** | **2** | **1** | 4 | **1** | 5 | 0 | 0 | `RS→L1→L2→L3` at four rotations; `L2..L3` run 45.72 > body 40.64 |
-| sallen_key_lpf | 0 | 0 | 0 | 0 | 0 | 0 | 0 | |
-| **wien_bridge_osc** | 0 | 1 | 2 | **1** | 2 | 0 | 0 | `RS`/`CS` opposed AND 35.56 mm apart against a 15.24 mm body |
-| sallen_key_driven | 0 | 0 | 0 | 0 | 0 | 0 | 0 | |
-| shunt_feedback_amp | 0 | 0 | 0 | 0 | 0 | 1 | 2 | `RB`/`RF` — see the ambiguities below |
+| fixture | A | R | M | St | N | S | P | Pv | Pb | L | D | note |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| rc_lowpass | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 0 | |
+| rc_lowpass_ports | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 2 | 2 | both terminals correct — the reference drawing |
+| **common_emitter** | 0 | 0 | 0 | 0 | 0 | 0 | 3 | **1** | 0 | 2 | 0 | `out` at 270; RC/Q1, Q1/RE, RB1/RB2 all stacked |
+| multivibrator | 0 | 0 | 0 | 0 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | no terminal labels at all |
+| diff_pair | 0 | 0 | 0 | 0 | 0 | 0 | 2 | 0 | 0 | 2 | 0 | Q1/Q2 correctly NOT a pair; `in2` at 0 correctly NOT flagged |
+| **opamp_inverting** | 0 | 0 | 0 | 0 | 0 | 0 | 0 | **1** | 0 | 1 | 0 | `in` at 270 — the ninth vertical, unreported |
+| **opamp_inverting_real** | 0 | 0 | 0 | 0 | 0 | 0 | 0 | **1** | 0 | 1 | 0 | `in` at 270 |
+| **port_shapes** | 0 | 0 | 3 | **2** | 4 | 0 | 0 | **2** | 0 | 4 | 2 | two stacks of two, one 41.91 mm jump — A and R see nothing; `no`/`src` at 90, reached by neither arm |
+| opamp_definition_level | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 2 | 0 | |
+| named_rails | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 0 | |
+| rc_phase_shift | 0 | 0 | 4 | 0 | 4 | 0 | 2 | 0 | 0 | 2 | 2 | `R1→R2→R3→CIN` horizontal, one direction, runs 12.70/7.62/7.62 |
+| **two_stage_amp** | 0 | 0 | 0 | 0 | 0 | 0 | 6 | **2** | 0 | 2 | 2 | both terminals at 90 |
+| **cascode_amp** | 0 | 0 | 0 | 0 | 0 | **1** | 5 | **1** | 0 | 2 | 2 | `Q1/Q2` side by side — champion scores **0**; `out` at 270 |
+| **lc_ladder_lpf** | **2** | **1** | 4 | **1** | 5 | 0 | 0 | 0 | 0 | 1 | 1 | `RS→L1→L2→L3` at four rotations; `L2..L3` run 45.72 > body 40.64 |
+| **sallen_key_lpf** | 0 | 0 | 0 | 0 | 0 | 0 | 0 | **1** | **1** | 2 | 2 | `in` at 270 AND `out` at 180 — the suite's only `backwards` cell |
+| **wien_bridge_osc** | 0 | 1 | 2 | **1** | 2 | 0 | 0 | 0 | 0 | 1 | 1 | `RS`/`CS` opposed AND 35.56 mm apart against a 15.24 mm body |
+| sallen_key_driven | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 1 | |
+| shunt_feedback_amp | 0 | 0 | 0 | 0 | 0 | 1 | 2 | 0 | 0 | 2 | 2 | `RB`/`RF` — see the ambiguities below |
 
 **What the new column flags that nobody had named.** Two cells beyond
 the `port_shapes` specimen:
@@ -7256,6 +7424,13 @@ the `port_shapes` specimen:
   a second, independent witness to the same defect A already names, and
   it is repaired by the same change.
 
+**Metric D covers six fixtures the other three read as clean** —
+`common_emitter`, `opamp_inverting`, `opamp_inverting_real`,
+`two_stage_amp`, `cascode_amp` and `sallen_key_lpf` — which is the
+strongest sign yet that the suite's blind cells are the binding
+constraint, not the weighting. Ten defects on ten terminals, on eighteen
+drawings that scored eight defects between them before.
+
 **Champion vs the shipping default, across all 18 fixtures × 5 metrics:
 exactly ONE cell differs**, `stack.side_by_side / cascode_amp`, champion
 0 → flow-seed 1. `lc_ladder_lpf` is byte-identical between the two
@@ -7270,7 +7445,7 @@ close a named gap, they do not close the gap.
 
 ### Informational at birth, and what would promote each
 
-All three are `Tier::Info` in `tests/scoreboard.rs`: printed per
+All four are `Tier::Info` in `tests/scoreboard.rs`: printed per
 fixture, zero weight in the `(T1, T2)` aggregate, no per-fixture budget
 literal. That
 follows the project's own precedents — Q6's balance CoV and ADR-23 D8's
@@ -7332,7 +7507,19 @@ four devices are one current path, so draw them in one run" is close to
 a yes/no fact — but its threshold is a judgement about spacing, which
 argues for Tier 2 rather than Tier 1 when it gets there.
 
-None of the three may become a **weighted** term in `cost.rs`. That is the V16
+**What would justify promoting metric D.** (a) Its ambiguities below
+(13–15) are closed — in particular, a fixture whose signal path genuinely
+runs vertically exists and the metric is shown to grade its terminals
+correctly, or D1 is taught to read the path's own axis; and (b) a second
+`backwards` cell exists, so D2 is not a single-terminal statement, and
+the placer reaches 0 on both counts with the default placer. D1 is the
+most nearly *categorical* of the four — "this terminal reads across the
+signal path" is a yes/no geometric fact with one correct answer — which
+by CLAUDE.md's constraints-vs-costs decision rule argues for **Tier 1**
+when it gets there, and for a per-fixture zero-slack literal exactly like
+F5. D2 is equally categorical but currently one cell wide.
+
+None of the four may become a **weighted** term in `cost.rs`. That is the V16
 doctrine applied to a new metric: subordination by coefficient is not
 subordination, and a tunable term at a safe weight does nothing (the
 Attempt-A failure). If either graduates, it graduates as a per-fixture
@@ -7451,6 +7638,48 @@ wrong reason never expires.
     *Alternative:* cap the threshold at some multiple of the median link
     run. Not chosen — a median is meaningless on the two-member chains
     ambiguity 1 deliberately admits.
+
+13. **A circuit whose signal path genuinely runs vertically (metric D).**
+    D1 counts every terminal at 90/270 as a defect, on the project's
+    left-to-right flow convention. A drawing that deliberately runs its
+    signal down the page would be graded wrong end to end. No fixture
+    does — every one of the eighteen is a left-to-right flow, and F3/F5
+    already assume it — so the case is unmeasured rather than
+    mis-measured. *Alternative:* derive each terminal's expected axis
+    from the drawn axis of the elements on its own net, so a vertical
+    path asks for vertical terminals. Not chosen: it would make the
+    metric agree with whatever the placer did, which is the failure mode
+    "a metric that borrows the placer's own model can only restate it"
+    exists to prevent.
+
+14. **A terminal that must be vertical to clear an obstacle
+    (metric D).** `label_specs` picks a rotation via
+    `global_label_rotation_avoiding`, which will turn a terminal
+    perpendicular rather than let its text overlap a body or a property
+    (V13, Tier 1). D1 charges the result anyway, and does not know
+    whether the placer *could* have offered a horizontal pin. That is
+    deliberate — the defect is real on the sheet either way, and the
+    repair is upstream in placement — but it means a D1 cell can name a
+    terminal the label pass had no better option for. It is also the
+    main reason D1 is informational. *Alternative:* re-run the rotation
+    picker and only charge terminals that had a clean horizontal
+    candidate. Rejected: it imports the emitter's obstacle model into
+    the grader, so the metric would stop being falsifiable against the
+    emitter.
+
+15. **An undeclared interface terminal's direction (metric D).** Not
+    graded, and the argument is in the second amendment above:
+    `(shape input)` is a default on those nets, so the token states
+    nothing. The cost is a genuine blind spot — `diff_pair`'s `in2`, an
+    undeclared right-hand input drawn pointing off the right edge, is
+    invisible to D2 whichever way it points. *Alternative:* infer each
+    interface net's direction from signal flow and grade it. Rejected
+    twice over: it drags the placer's own flow model into the metric
+    (ambiguity 13's objection), and measured on the challenger arms the
+    token-reading version of it reads 2 / 2 / 2 — it scores the arms'
+    repair of `common_emitter`'s `out` as a *new* violation and sees no
+    improvement at all. The honest fix is to declare `*@port` on those
+    fixtures, at which point D2 grades them for free.
 
 ### One aggregator change, and why it is not a behaviour change
 
