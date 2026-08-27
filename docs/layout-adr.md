@@ -8084,3 +8084,119 @@ built as a challenger on purpose: the default path is byte-identical, so
 there is nothing to lose by waiting and one thing to gain — the decline
 set is untested by the benchmark (above), and a promotion would put a
 predicate with an ungraded branch on the shipping path.
+
+## ADR-30 — The y-sign defect is real, the correction is not promotable, and 77% of the reason is one fixture
+
+**Status:** measured 2026-08-27. `y-sign` registered as a challenger
+(`d3397cd`), graded, **NOT promoted**. The default path is
+byte-identical; nothing about the shipping output changed.
+
+### The defect
+
+`PlacedElement::world_pin_mm` returns `(ox + p.x, oy + p.y)`. Every
+other consumer of pin geometry in the tree computes `oy - p.y`: the
+emitter's `pin_world`, `refine`, `kicad_symbols`' pin text bboxes,
+`sheets`, and — load-bearing — **the SA's own V11 and V5 accept-gates**
+in `anneal.rs`. The library frame's y grows up, the emitted schematic's
+grows down, so the conversion is a negation about the symbol origin.
+`world_pin_mm` instead applies a per-element mirror about each symbol's
+own origin row, and has since the foundation commit `2fc3b72`.
+
+So the SA has always minimised a cost computed in one frame while
+gating its moves in another. This is not a judgement call: it is a
+sign error, and the two frames disagree by construction.
+
+Which terms it actually reaches (recorded on `cost::breakdown_with`,
+by inspection, not assumption):
+
+* **affected** — `hpwl`, `crossings`, `net_bbox_crossings`,
+  `rail_direction`, and the `place` half of `constraint_violation`
+* **unaffected, read x only** — `signal_flow`, `rail_stub_alignment`
+* **unaffected, read `origin.to_mm()` and never a pin** — `overlap`,
+  the `align` half of `constraint_violation`, `band_misalignment`,
+  `soft_y_residual`, `layer_order`, `band_inversion`
+
+That is a narrower blast radius than "the entire SA cost", which is how
+the defect was first described in this session. Correct the description
+when citing it.
+
+### The verdict
+
+`flow-seed-v4` vs `y-sign`, both arms collected over 24 files / 2444
+rows, all 18 fixtures:
+
+| | Δ (challenger − champion) |
+| --- | --- |
+| Tier 0 | **clean both sides, nothing regressed** |
+| Tier 1 | **+0.00** |
+| Tier 2 | **+39.70** |
+
+**NOT promotable** — Tier 1 fails to strictly improve, Tier 2 is worse.
+
+### Why the result is not "the correction is wrong"
+
+**Tier 1's +0.00 is not stasis, it is a sideways trade.** Real movement
+in both directions cancels exactly:
+
+* `v14.glyph_body` **−3** — `sallen_key_lpf` 1→0, `wien_bridge_osc`
+  2→0. This is **issue [3]**, the power-glyph-over-foreign-body defect
+  that ADR-13 mis-diagnosed as a glyph-orientation problem and ADR-14
+  closed only for `common_emitter`, by reserving glyph footprints. The
+  y-sign correction closes three more of them for free.
+* `v13.1_label_body` +1, `v13.7_label_pintext` +1,
+  `v13.glyph_neighbour_value` +1 — three new label overlaps.
+
+**It also repairs two of the owner's own reported defects**, both
+invisible to the aggregate because their metrics are informational:
+
+* `device.facing_inverted` on `two_stage_amp` **1 → 0** — the "Q2
+  orientation is wrong, C should look up, E down" report.
+* `chain.reversal` on `wien_bridge_osc` **1 → 0** — the reversed
+  `RS`/`CS` pair.
+
+### The finding that makes this actionable
+
+**77% of the Tier-2 regression is a single fixture.** `named_rails`:
+
+| metric | champion | y-sign | Δ |
+| --- | --- | --- | --- |
+| `detour` | 1.0769 | 1.3333 | **+25.64** |
+| `v16.bends` | 1 | 6 | **+5.00** |
+| `v16.bend_gap` (info) | 0 | 5 | — |
+| `q5` | 2 | 3 | +1.00 |
+| `v13.9_foreign_over_glyph` | 1 | 0 | −1.00 |
+| `f6` | 4 | 3 | −1.00 |
+
+`25.64 + 5.00 = 30.64` of `+39.70`. Its `bend_gap` going 0 → 5 says
+precisely what happened: `named_rails` routed at the provable bend
+lower bound under the champion and is now five bends above it.
+
+Elsewhere the correction is frequently *better*: `detour` on
+`sallen_key_lpf` **−17.19** and `cascode_amp` **−9.19**, `f6` **−11.00**
+across the suite, `q5` **−2.00**.
+
+### Conclusion, and what must NOT be concluded
+
+The correct reading is **not** "the frame was fine". It is that the
+SA weights, the seed and the idioms have co-evolved with the sign error
+for the project's entire history — every one of the ~165 ratchet
+literals was calibrated on output produced in the mixed frame. Fixing
+the frame *in isolation* invalidates that co-adaptation, and the damage
+concentrates where the co-adaptation was load-bearing.
+
+Two things follow:
+
+1. **Do not "fix" this by reverting the analysis.** The sign error is
+   a fact about the code, independent of whether correcting it scores
+   well today. Leave `y-sign` registered.
+2. **The correction must land bundled with a re-tuning of the terms
+   that co-adapted to the flipped frame**, not alone — and
+   `named_rails` is the cheapest possible probe for that work, because
+   it carries three quarters of the cost in one 6-element circuit with
+   a provable bend bound to measure against.
+
+This is the same shape as the ADR-17 retirement and as MEMORY's
+"benchmark is the binding constraint": an aggregate calibrated on the
+incumbent's own output cannot, on its own, tell a correction from a
+regression. Here it ranked the arm that leaves two reported visual
+defects in place above the arm that repairs them.
