@@ -6183,33 +6183,70 @@ that does not gate. The asymmetry is deliberate — Tier 0 gets cells on
 the strength of *being* Tier 0, Tier 1 and 2 get them on the strength of
 being able to move.
 
-#### The cells were made to fire
+#### The cells were made to fire — and one of them would not
 
 A cell that reads 0 everywhere is indistinguishable from a blind one at
 the sample taken — the D11 finding, one level down — so each new cell was
 driven off zero by breaking the property it grades, on the real fixtures,
-before being trusted. None of these mutations is committed.
+before being trusted. **None of these mutations is committed**, and each
+was reverted in the same script that applied it.
 
-* **V1 and V3, together.** `lib_symbol_inline`
-  (`crates/kicad-emitter/src/schematic.rs`) was made to emit a bare
-  `(symbol "<lib_id>")` stub instead of the captured body — the exact
-  regression V1 and V3 were written against. `t0.v3_lib_symbol_defects`
-  went to 1–4 per fixture on all eighteen and `t0.v1_ink_deficit` to
-  16–64, and both verifiers failed with the readable defect list.
-* **V8.** The `*@symbol … for=X1` block directive was removed from
-  `tests/fixtures/opamp_inverting_real.cir`, so the resolver lowered X1
-  back to a hierarchical sheet. `t0.v8_subckt_symbol` went 0 → 4 on that
-  fixture (missing instance, wrong refdes set, phantom `(sheet …)`, stray
-  `OPAMP.kicad_sch`) and stayed 0 on `opamp_definition_level`, which is
-  the discrimination the cell has to make.
-* **V7.** `V7_AXIS_TOLERANCE_MM` was tightened from 1.27 mm to 0.001 mm.
-  `v7.x_symmetry` went 0 → 3 and `v7.y_alignment` 0 → 4. Weaker evidence
-  than the other three, and labelled as such: it proves the count is
-  computed from the emitted geometry and is not pinned to zero, but it
-  perturbs the verifier's own threshold rather than the drawing.
-  `v7.orientation` could not be driven off zero this way — it is a
-  two-clause boolean on Q1/Q2's poses with no threshold to move, and no
-  registered placer produces a non-mirrored `multivibrator`.
+* **V3 — fires, strongly.** `lib_symbol_inline`
+  (`crates/kicad-emitter/src/schematic.rs`) was made to strip every
+  graphical primitive (`polyline`/`rectangle`/`circle`/`arc`/`bezier`)
+  from each `lib_symbols` body while leaving pins and properties intact.
+  `t0.v3_lib_symbol_defects` went **0 → 3–8 on all eighteen fixtures**
+  and the verifier failed with the readable list.
+* **V8 — fires, and discriminates.** The `*@symbol … for=X1` block
+  directive was deleted from `tests/fixtures/opamp_inverting_real.cir`,
+  so the resolver lowered X1 back to a hierarchical sheet.
+  `t0.v8_subckt_symbol` went **0 → 4** on that fixture (missing
+  instance, wrong refdes set, phantom `(sheet …)`, stray
+  `OPAMP.kicad_sch` — all four printed) and **stayed 0** on
+  `opamp_definition_level`, which is the discrimination the cell exists
+  to make.
+* **V7 — all three fire.** The tolerance route did *not* work:
+  tightening `V7_AXIS_TOLERANCE_MM` from 1.27 mm to 0.001 mm changed
+  nothing, because the placer's mirror is **exact** (it pins
+  `R.x = axis_sum − L.x`, `R.y = L.y`). Declaring a pairing that is not a
+  mirror pair (`RC1↔C2`, `RB1↔RC2`, `C1↔RB2`) moved `v7.x_symmetry`
+  **0 → 3** and `v7.y_alignment` **0 → 3**; pointing the orientation
+  clause at `RC1`/`RB1` — two elements from *different* pairs — moved
+  `v7.orientation` **0 → 1**. Weaker evidence than V3's and V8's, and
+  labelled as such: it perturbs what the verifier is told to compare,
+  not the drawing.
+* **V1 — could NOT be driven off zero, and this is the honest finding.**
+  Under the same strip-every-primitive mutation, the non-text SVG path
+  count drops on every fixture (`rc_lowpass` 17 → 12, `two_stage_amp`
+  162 → 119, `cascode_amp` 120 → 91 — body graphics are 25–35% of the
+  ink), so the cell's input is live and measured. But the *clamped
+  shortfall* stayed **0 on all eighteen**, because the ≥4-non-text-paths-
+  per-component floor carries 1.9–4.2× headroom on an intact drawing and
+  still 1.4–2.9× with every body stripped: pin stems, wires and junction
+  dots alone clear it. The one mutation that does collapse the ink below
+  the floor — a bare `(symbol "<lib_id>")` stub, which also removes the
+  pins — never reaches the verifier: `emit_root`'s ADR-22 net-partition
+  certificate refuses the conversion outright (`error: emitted schematic
+  does not match the source netlist`, 12 of 20 `visual_quality` tests
+  failing, **no V1 cell recorded** — `t0.convert_fail` catches it
+  instead).
+
+  So **`t0.v1_ink_deficit` is a real but BLUNT Tier-0 cell**, and it must
+  not be read as tight coverage of V1. Two things follow, both worth
+  writing down rather than quietly fixing:
+
+  1. V1's original failure mode — the emitter writing stubs — is today
+     intercepted one gate earlier, by a Tier-0 mechanism (ADR-22) that
+     did not exist when V1's verifier was written. That is coverage
+     moving, not coverage lost.
+  2. Making the cell sharper means changing what V1 *measures* (a
+     body-ink fraction, or per-symbol attribution the KiCad SVG export
+     does not provide), not tightening a constant. Raising the floor from
+     4 to 8 paths/component would fail `port_shapes` (31 paths, 4
+     components) on a correct drawing, so there is no free tightening
+     available. Admitting a new metric definition for it is exactly what
+     `docs/invariants.md` V16 warns against doing on a hunch; it needs
+     its own evidence first.
 
 #### What this does not change
 
