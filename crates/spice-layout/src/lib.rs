@@ -134,11 +134,36 @@ impl PlacedElement {
     /// declared pin order.
     #[must_use]
     pub fn world_pin_mm(&self, symbol: &Symbol) -> Vec<(String, f64, f64)> {
+        self.world_pin_mm_in(symbol, Placer::default())
+    }
+
+    /// [`Self::world_pin_mm`] under a specific registered placer
+    /// (ADR-23 seam).
+    ///
+    /// # The frame this converts into
+    ///
+    /// [`Symbol::pins_in`] returns pins in the **library** frame, whose
+    /// `y` grows *upward*. The emitted schematic's `y` grows
+    /// *downward*, and the conversion is a negation about the symbol
+    /// origin: `world = (ox + p.x, oy - p.y)`. Every other consumer in
+    /// the tree computes exactly that — `kicad_emitter::schematic`'s
+    /// `pin_world`, `kicad_emitter::refine`,
+    /// `kicad_symbols::Symbol::pin_text_bboxes`, [`crate::sheets`], and
+    /// [`crate::solver::anneal`]'s own V11 and V5 accept-gates.
+    ///
+    /// This function computes `oy + p.y` — a *per-element* mirror about
+    /// each symbol's own origin row — and has since the foundation
+    /// commit `2fc3b72`. [`Placer::YSign`] is the challenger that
+    /// corrects it; the default keeps the historical frame so the
+    /// shipping output stays byte-identical.
+    #[must_use]
+    pub fn world_pin_mm_in(&self, symbol: &Symbol, placer: Placer) -> Vec<(String, f64, f64)> {
         let (ox, oy) = self.origin.to_mm();
+        let y_sign = if placer.page_frame_pin_y() { -1.0 } else { 1.0 };
         symbol
             .pins_in(self.orientation)
             .into_iter()
-            .map(|p| (p.number, ox + p.x, oy + p.y))
+            .map(|p| (p.number, ox + p.x, oy + y_sign * p.y))
             .collect()
     }
 }
@@ -633,6 +658,7 @@ pub fn place_with_hint(
         &checked,
         library,
         sym_plan.as_ref().zip(sym_axis),
+        opts.placer,
     );
     // Series-on-signal-path elements go horizontal (upstream pin left)
     // with their downstream shunts re-columned to drop straight beneath
@@ -650,7 +676,7 @@ pub fn place_with_hint(
         &allowed,
         &checked,
     );
-    pick_orientations(&mut placement, &pinned, &checked, &allowed);
+    pick_orientations(&mut placement, &pinned, &checked, &allowed, opts.placer);
 
     // Uncoupled repeated channels (a dual opamp, a stereo pair) are
     // seeded into congruent rows by `place_seed`/`pack_rows`: identical
@@ -841,6 +867,10 @@ fn apply_position_idioms(placement: &mut Placement, pinned: &mut [bool], checked
 /// on a generated `place=above` scenario. Scoring through the shared
 /// function means a future relation gaining a new residual term is
 /// honoured here for free.
+// One `&mut`, five read-only masks/refs and the ADR-23 placer seam.
+// Bundling them into a struct would hide which are read and which are
+// written, for no call-site benefit at a single call site.
+#[allow(clippy::too_many_arguments)]
 fn apply_rail_stub_columns(
     placement: &mut Placement,
     pinned: &[bool],
@@ -849,6 +879,7 @@ fn apply_rail_stub_columns(
     checked: &CheckedNetlist,
     library: &Library,
     symmetry: Option<(&symmetry::SymmetryPlan, i32)>,
+    variant: Placer,
 ) {
     let stubs = idioms::detect_rail_stubs(checked);
     if stubs.is_empty() {
@@ -890,7 +921,7 @@ fn apply_rail_stub_columns(
     }
 
     let before = placement.clone();
-    let residual_before = cost::constraint_residual(placement, checked, library);
+    let residual_before = cost::constraint_residual(placement, checked, library, variant);
     let overlaps_before =
         legalize::immovable_overlap_count(placement, checked, library, user_pinned);
     // Elements this pass released from their V7 pin (see `x_locked`).
@@ -906,7 +937,7 @@ fn apply_rail_stub_columns(
     if let Some((plan, axis)) = symmetry {
         symmetry::remirror(placement, plan, user_pinned, axis);
     }
-    let residual_after = cost::constraint_residual(placement, checked, library);
+    let residual_after = cost::constraint_residual(placement, checked, library, variant);
     let overlaps_after =
         legalize::immovable_overlap_count(placement, checked, library, user_pinned);
     // Strictly-worse only: an exactly-equal residual (the common case,
@@ -1142,7 +1173,18 @@ fn pick_orientations(
     pinned: &[bool],
     checked: &CheckedNetlist,
     allowed: &[Vec<Orientation>],
+    variant: Placer,
 ) {
+    // ADR-23 seam (F3): library pin `y` grows up, the page's grows
+    // down. Under `--placer=y-sign` the scorer converts into the page
+    // frame the SA's own V5 gate and every verifier measure in; every
+    // other registered placer keeps the historical `oy + p.y`. See
+    // `PlacedElement::world_pin_mm_in`.
+    let y_sign = if variant.page_frame_pin_y() {
+        -1.0
+    } else {
+        1.0
+    };
     let n = placement.elements.len();
     if n == 0 {
         return;
@@ -1241,9 +1283,9 @@ fn pick_orientations(
                         continue;
                     };
                     let xi = ox_i + p_i.x;
-                    let yi = oy_i + p_i.y;
+                    let yi = oy_i + y_sign * p_i.y;
                     let xj = ox_j + p_j.x;
-                    let yj = oy_j + p_j.y;
+                    let yj = oy_j + y_sign * p_j.y;
                     score += (xi - xj).abs() + (yi - yj).abs();
                 }
                 // Convert to integer (mm * 1000) for stable comparison
@@ -1539,7 +1581,8 @@ fn pack_rows(
         | Placer::DividerRailsStrict
         | Placer::FacingTrigger
         | Placer::TerminalSeries
-        | Placer::TerminalSeriesDivider => shift.last().copied().unwrap_or(0) / 2,
+        | Placer::TerminalSeriesDivider
+        | Placer::YSign => shift.last().copied().unwrap_or(0) / 2,
         Placer::M4YDatum => 0,
     };
     for (i, pe) in placed.iter_mut().enumerate() {
@@ -1702,7 +1745,8 @@ fn place_seed(
         | Placer::DividerRailsStrict
         | Placer::FacingTrigger
         | Placer::TerminalSeries
-        | Placer::TerminalSeriesDivider => {
+        | Placer::TerminalSeriesDivider
+        | Placer::YSign => {
             let n_i32 = i32::try_from(n).unwrap_or(i32::MAX);
             let y_top: i32 = 0;
             let y_bot: i32 = (n_i32 + 4) * Y_RANK_STRIDE;
@@ -1856,7 +1900,7 @@ fn place_seed(
     let mut placement = Placement { elements: placed };
     let mut pinned = vec![false; n];
 
-    apply_user_constraints(&mut placement, &mut pinned, checked)?;
+    apply_user_constraints(&mut placement, &mut pinned, checked, variant)?;
 
     Ok((placement, pinned))
 }
@@ -1878,6 +1922,7 @@ fn apply_user_constraints(
     placement: &mut Placement,
     pinned: &mut [bool],
     checked: &CheckedNetlist,
+    variant: Placer,
 ) -> Result<(), Vec<Diagnostic>> {
     // Rail-pin screen-vertical preferences, for the align stride's
     // power-glyph reach reservation (ADR-14 Option A).
@@ -2052,6 +2097,7 @@ fn apply_user_constraints(
                 &elements[a_idx].symbol,
                 placed[b_idx].orientation,
                 &elements[b_idx].symbol,
+                variant,
             );
             placed[b_idx].origin = new_origin;
             fixed[b_idx] = true;
@@ -2103,9 +2149,36 @@ fn solve_place(
     a_symbol: &Symbol,
     b_orient: Orientation,
     b_symbol: &Symbol,
+    variant: Placer,
 ) -> GridPoint {
-    let a_pins = pin_offsets_grid(a_symbol, a_orient);
-    let b_pins = pin_offsets_grid(b_symbol, b_orient);
+    // ADR-23 seam (F3). `pin_offsets_grid` returns **library**-frame
+    // offsets, whose `y` grows UP; `a_origin.y` is a **page**-frame
+    // coordinate, whose `y` grows DOWN. The arms below add the two
+    // directly and pick "topmost" as min library `y`, both of which are
+    // correct only in the flipped frame. Under `--placer=y-sign` the
+    // offsets are negated into the page frame first, so "topmost" is
+    // genuinely the min page `y` and the compensation carries the right
+    // sign.
+    //
+    // **The DIRECTION is unaffected either way**: every arm still shifts
+    // `b` by `±CELL_H` on the correct side of `a`, so `above` has always
+    // emitted `b` at smaller page `y` (`tests/place_direction.rs` pins
+    // this). What the flip corrupts is the pin-offset *compensation* —
+    // and only for a symbol whose pins are **not** y-symmetric about its
+    // origin, because for a symmetric one `min(lib_y) == -max(lib_y)`
+    // makes the two expressions algebraically identical. Every fixture
+    // exercising `place` today uses `Device:R`, which is symmetric, so
+    // no shipping output moves; a `place=above` onto a transistor or an
+    // opamp does.
+    let flip = if variant.page_frame_pin_y() { -1 } else { 1 };
+    let a_pins: Vec<(i32, i32)> = pin_offsets_grid(a_symbol, a_orient)
+        .into_iter()
+        .map(|(x, y)| (x, flip * y))
+        .collect();
+    let b_pins: Vec<(i32, i32)> = pin_offsets_grid(b_symbol, b_orient)
+        .into_iter()
+        .map(|(x, y)| (x, flip * y))
+        .collect();
 
     match relation {
         Relation::RightOf => {

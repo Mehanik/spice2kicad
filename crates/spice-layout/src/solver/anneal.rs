@@ -141,7 +141,7 @@ pub(super) fn refine(
     let glyph_prefs = crate::net_class::vertical_prefs(checked);
 
     let weights = CostWeights::DEFAULT;
-    let mut current_breakdown = cost::breakdown(&seed, checked, library);
+    let mut current_breakdown = cost::breakdown_with(&seed, checked, library, opts.placer);
     let mut current_cost = cost::total(&current_breakdown, &weights);
     // V11 hard constraint at the placer stage: the number of distinct
     // foreign-net pin coincidences must never *increase* across an
@@ -267,7 +267,7 @@ pub(super) fn refine(
 
         let saved = apply_move(&mut seed, &proposal);
 
-        let trial_breakdown = cost::breakdown(&seed, checked, library);
+        let trial_breakdown = cost::breakdown_with(&seed, checked, library, opts.placer);
         let trial_cost = cost::total(&trial_breakdown, &weights);
         let delta = trial_cost - current_cost;
         // Cost-based Metropolis acceptance (RNG consumed exactly as
@@ -388,7 +388,7 @@ pub(super) fn refine(
         "spice-layout SA done: best cost {:.3} (started {:.3})",
         best_cost,
         cost::total(
-            &cost::breakdown(&best, checked, library),
+            &cost::breakdown_with(&best, checked, library, opts.placer),
             &CostWeights::DEFAULT,
         )
     );

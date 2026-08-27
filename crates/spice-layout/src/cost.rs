@@ -54,6 +54,7 @@ use spice_resolve::{Axis, Relation, ResolvedElement};
 use crate::bands::{Band, BandAssignment, assign_y_bands};
 use crate::layers::assign_x_layers;
 use crate::net_class::{NetClass, VertPref, classify_nets};
+use crate::placer::Placer;
 use crate::{CELL_H, CELL_W, GridPoint, Placement};
 
 // ---------------------------------------------------------------------------
@@ -178,14 +179,40 @@ pub fn breakdown(
     checked: &CheckedNetlist,
     library: &Library,
 ) -> CostBreakdown {
-    let pin_world = collect_pin_world(placement, &checked.elements, library);
+    breakdown_with(placement, checked, library, Placer::default())
+}
+
+/// [`breakdown`] under a specific registered placer (ADR-23 seam).
+///
+/// The only thing `placer` selects here is the **frame** the pin
+/// geometry is expressed in — see
+/// [`crate::PlacedElement::world_pin_mm_in`] and [`Placer::YSign`].
+/// Which terms that reaches:
+///
+/// * **Affected** (read pin `y`): [`hpwl`], [`crossings`],
+///   [`net_bbox_crossings`], [`rail_direction`], and the `place` half of
+///   [`constraint_violation`].
+/// * **Unaffected** (read pin `x` only, by inspection):
+///   [`signal_flow`], [`rail_stub_alignment`].
+/// * **Unaffected** (read `origin.to_mm()` directly, never a pin):
+///   [`overlap`], the `align` half of [`constraint_violation`],
+///   [`band_misalignment`], [`soft_y_residual`], [`layer_order`],
+///   [`band_inversion`].
+#[must_use]
+pub fn breakdown_with(
+    placement: &Placement,
+    checked: &CheckedNetlist,
+    library: &Library,
+    placer: Placer,
+) -> CostBreakdown {
+    let pin_world = collect_pin_world(placement, &checked.elements, library, placer);
     let nets = build_nets(&checked.elements, &pin_world);
 
     CostBreakdown {
         hpwl: hpwl(&nets),
         overlap: overlap(placement, checked),
         crossings: crossings(&nets),
-        constraint_violation: constraint_violation(placement, checked, library),
+        constraint_violation: constraint_violation(placement, checked, library, placer),
         rail_direction: rail_direction(checked, &pin_world),
         signal_flow: signal_flow(&checked.elements, &pin_world, &checked.subckts),
         band_misalignment: band_misalignment(placement, checked, None),
@@ -227,6 +254,7 @@ fn collect_pin_world(
     placement: &Placement,
     elements: &[ResolvedElement],
     library: &Library,
+    placer: Placer,
 ) -> PinWorld {
     placement
         .elements
@@ -239,7 +267,7 @@ fn collect_pin_world(
                 || library.lookup(&pe.lib_id).cloned().expect("symbol in lib"),
                 |re| re.symbol.clone(),
             );
-            pe.world_pin_mm(&symbol)
+            pe.world_pin_mm_in(&symbol, placer)
         })
         .collect()
 }
@@ -420,11 +448,17 @@ pub(crate) fn constraint_residual(
     placement: &Placement,
     checked: &CheckedNetlist,
     library: &Library,
+    placer: Placer,
 ) -> f64 {
-    constraint_violation(placement, checked, library)
+    constraint_violation(placement, checked, library, placer)
 }
 
-fn constraint_violation(placement: &Placement, checked: &CheckedNetlist, library: &Library) -> f64 {
+fn constraint_violation(
+    placement: &Placement,
+    checked: &CheckedNetlist,
+    library: &Library,
+    placer: Placer,
+) -> f64 {
     let mut total = 0.0;
 
     let refdes_to_index: HashMap<&str, usize> = placement
@@ -494,8 +528,8 @@ fn constraint_violation(placement: &Placement, checked: &CheckedNetlist, library
                 |re| re.symbol.clone(),
             );
 
-        let target_pins = target.world_pin_mm(&target_sym);
-        let anchor_pins = anchor.world_pin_mm(&anchor_sym);
+        let target_pins = target.world_pin_mm_in(&target_sym, placer);
+        let anchor_pins = anchor.world_pin_mm_in(&anchor_sym, placer);
 
         total += place_residual(spec.relation, &anchor_pins, &target_pins);
     }
@@ -549,6 +583,16 @@ fn place_residual(
         // Y grows DOWNWARD: "topmost" is MIN y, "bottommost" is MAX y.
         // These arms once had the sign backwards, matching the same
         // inversion in `solve_place`; both were fixed together.
+        //
+        // **That statement is true of the page frame, and the pins
+        // reaching here are only IN the page frame under
+        // `--placer=y-sign`** (F3). On every other registered placer
+        // `world_pin_mm` hands this function `oy + p.y`, a per-element
+        // mirror, so `pick_pin`'s "topmost" selects the pin at the
+        // symbol's *bottom*. The DIRECTION survives either way — the
+        // hinge still pushes the target to smaller y for `Above` — but
+        // the pin choice, and hence the residual's zero point, does not.
+        // See `Placer::YSign`.
         Relation::Above => {
             // target above anchor: target's bottommost pin at-or-above
             // (smaller y than) the anchor's topmost pin.
@@ -1262,8 +1306,9 @@ pub fn net_bbox_crossings_for(
     placement: &Placement,
     checked: &CheckedNetlist,
     library: &Library,
+    placer: Placer,
 ) -> f64 {
-    let pin_world = collect_pin_world(placement, &checked.elements, library);
+    let pin_world = collect_pin_world(placement, &checked.elements, library, placer);
     let nets = build_nets(&checked.elements, &pin_world);
     net_bbox_crossings(&nets)
 }
@@ -1495,7 +1540,12 @@ mod tests {
         let placement = manual_placement(&checked, &[(0, 0), (0, 5), (100, 0), (100, 5)]);
         let nets = build_nets(
             &checked.elements,
-            &collect_pin_world(&placement, &checked.elements, fixture_library()),
+            &collect_pin_world(
+                &placement,
+                &checked.elements,
+                fixture_library(),
+                Placer::default(),
+            ),
         );
         let count = net_bbox_crossings(&nets);
         assert!(
@@ -1521,7 +1571,12 @@ mod tests {
         let placement = manual_placement(&checked, &[(0, 0), (10, 10), (0, 10), (10, 0)]);
         let nets = build_nets(
             &checked.elements,
-            &collect_pin_world(&placement, &checked.elements, fixture_library()),
+            &collect_pin_world(
+                &placement,
+                &checked.elements,
+                fixture_library(),
+                Placer::default(),
+            ),
         );
         let count = net_bbox_crossings(&nets);
         assert!(

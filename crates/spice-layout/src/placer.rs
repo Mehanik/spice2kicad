@@ -359,6 +359,44 @@ pub enum Placer {
     /// (`two_stage_amp` gets both), so a single arm's aggregate could not
     /// say which half paid for which.
     TerminalSeriesDivider,
+    /// **Page-frame pin Y in the placement cost frame (F3)** —
+    /// [`Placer::FlowSeedV4`] with [`crate::PlacedElement::world_pin_mm`]
+    /// and the two other library-frame→page-frame conversions inside the
+    /// placer corrected to the *page* frame every other consumer uses.
+    ///
+    /// A KiCad library symbol's pin `y` grows **upward**; the emitted
+    /// schematic's `y` grows **downward**, and the conversion is a
+    /// negation about the symbol origin — `world = (ox + p.x, oy - p.y)`.
+    /// That is what `kicad_emitter::schematic`'s `pin_world`,
+    /// `kicad_emitter::refine`, `kicad_symbols::Symbol::pin_text_bboxes`,
+    /// `crate::sheets` and `crate::solver::anneal`'s own V11 / V5 gates
+    /// all compute. [`crate::PlacedElement::world_pin_mm`] instead
+    /// computes `oy + p.y`, and has since the foundation commit.
+    ///
+    /// It is **not** a global flip, which would be an isometry and
+    /// therefore invisible to a distance-based objective. It is a
+    /// *per-element* mirror about that element's own origin row, so each
+    /// symbol's pin set is reflected independently. For a y-symmetric
+    /// two-pin part (`Device:R` upright) the reflection maps the pin
+    /// *positions* onto themselves but **swaps which pin number sits at
+    /// which end** — so the SA believes a bias resistor's supply pin is
+    /// the one nearest ground.
+    ///
+    /// Affected: `cost::hpwl`, `cost::crossings`,
+    /// `cost::net_bbox_crossings`, `cost::rail_direction`, and the
+    /// `place` half of `cost::constraint_violation`; the V5 seed scorer
+    /// in `pick_orientations`; and the pin-offset compensation in
+    /// `solve_place`. Unaffected by inspection (x-only):
+    /// `cost::signal_flow`, `cost::rail_stub_alignment`,
+    /// `idioms::world_pin_x_of`.
+    ///
+    /// The SA therefore minimises an objective stated in one frame while
+    /// its own accept-gates (`v11_coincident_pin_count`,
+    /// `pin_outward_misalignment`) and every downstream verifier measure
+    /// the other. This arm makes the two agree; the scoreboard grades
+    /// whether the ~165 budgets tuned against the mismatched objective
+    /// are better or worse off for it.
+    YSign,
 }
 
 impl Placer {
@@ -379,6 +417,7 @@ impl Placer {
         Self::FacingTrigger,
         Self::TerminalSeries,
         Self::TerminalSeriesDivider,
+        Self::YSign,
     ];
 
     /// The name accepted by `--placer` and printed by the scoreboard.
@@ -399,6 +438,7 @@ impl Placer {
             Self::FacingTrigger => "facing-trigger",
             Self::TerminalSeries => "terminal-series",
             Self::TerminalSeriesDivider => "terminal-series-divider",
+            Self::YSign => "y-sign",
         }
     }
 
@@ -452,6 +492,11 @@ impl Placer {
                 "terminal-series plus the divider-node case: orient onto the \
                  divider column instead of declining, never re-column it"
             }
+
+            Self::YSign => {
+                "flow-seed-v4 with the placer cost frame's pin Y sign \
+                 corrected to the page frame the emitter measures in"
+            }
         }
     }
 
@@ -499,6 +544,7 @@ impl Placer {
                 | Self::FacingTrigger
                 | Self::TerminalSeries
                 | Self::TerminalSeriesDivider
+                | Self::YSign
         )
     }
 
@@ -534,6 +580,7 @@ impl Placer {
                 | Self::FacingTrigger
                 | Self::TerminalSeries
                 | Self::TerminalSeriesDivider
+                | Self::YSign
         )
     }
 
@@ -607,6 +654,21 @@ impl Placer {
     #[must_use]
     pub fn divider_node_series(self) -> bool {
         matches!(self, Self::TerminalSeriesDivider)
+    }
+
+    /// F3: does the placer convert a library-frame pin `y` into the
+    /// **page** frame (`oy - p.y`) — the frame the emitter, the router,
+    /// the SA's own V11 / V5 gates and every verifier measure in —
+    /// instead of the `oy + p.y` [`crate::PlacedElement::world_pin_mm`]
+    /// has computed since the foundation commit?
+    ///
+    /// See [`Self::YSign`] for what the mismatch costs and which cost
+    /// terms it reaches. Gating it on one accessor is the whole
+    /// byte-identity argument for the shipping output; `baseline_lock`
+    /// is the empirical half.
+    #[must_use]
+    pub fn page_frame_pin_y(self) -> bool {
+        matches!(self, Self::YSign)
     }
 
     /// Look a placer up by the name `--placer` accepts.
@@ -778,6 +840,31 @@ mod tests {
             assert!(!p.sa_rotate_v5_gate(), "{}", p.name());
             assert!(!p.rail_gated_dividers(), "{}", p.name());
         }
+    }
+
+    /// The page-frame pin-Y correction is **dead on the default path**
+    /// and on both control arms: it is gated on one accessor and nothing
+    /// else, which is the whole byte-identity argument for the shipping
+    /// output (`baseline_lock` is the empirical half).
+    #[test]
+    fn the_page_frame_pin_y_is_off_by_default() {
+        assert!(!Placer::default().page_frame_pin_y());
+        assert!(!Placer::FlowSeedV4.page_frame_pin_y());
+        assert!(!Placer::FlowSeed.page_frame_pin_y());
+        assert!(!Placer::Champion.page_frame_pin_y());
+        assert!(!Placer::FacingTrigger.page_frame_pin_y());
+        assert!(!Placer::DividerRails.page_frame_pin_y());
+        assert!(Placer::YSign.page_frame_pin_y());
+        // It composes ON `flow-seed-v4` and changes nothing else, so an
+        // A/B against the default isolates the frame correction.
+        assert!(Placer::YSign.unified_roots());
+        assert!(Placer::YSign.flow_seed_layering());
+        assert!(!Placer::YSign.rail_gated_dividers());
+        assert!(!Placer::YSign.unified_depth_roots());
+        assert!(!Placer::YSign.sa_rotate_v5_gate());
+        assert!(!Placer::YSign.facing_inverted_trigger());
+        assert!(!Placer::YSign.m3_signed_gate());
+        assert!(!Placer::YSign.m5_element_streams());
     }
 
     #[test]
