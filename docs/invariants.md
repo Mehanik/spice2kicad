@@ -1,4 +1,4 @@
-# Visual quality invariants (V1–V16, plus flow metrics)
+# Visual quality invariants (V1–V17, plus flow metrics)
 
 Project-level acceptance criteria for any emitted `.kicad_sch`. These
 are not part of the user-facing annotation language (`docs/annotation-spec.md`);
@@ -1218,6 +1218,111 @@ invariant here.
   budget; there the raw counter double-counts a single ink crossing whose
   runs `cleanup.rs` had split into several `(wire …)` segments — i.e. the
   exact re-segmentation sensitivity the ink graph exists to remove.
+
+- **V17 — Directional symbols read left-to-right.** An amplifier,
+  comparator, buffer or logic gate has an intrinsic reading direction:
+  inputs on the left, output on the right. Drawing one mirrored is
+  electrically identical and visually wrong — the owner's report that
+  opened this invariant was "why did the op-amp get mirrored? It looks
+  wrong. I don't think we should ever mirror op-amps left-right, or
+  rotate it output to look left."
+
+  **The rule.** A symbol carrying **at least one `Output` pin and at
+  least one `Input` pin** must be posed so the **mean world `x` of its
+  output pins is strictly greater than the mean world `x` of its input
+  pins**. Stated on KiCad pin *electrical types*, so it is structural,
+  not pattern-matched: it covers comparators, buffers, gates and any
+  `.subckt` mapped to a directional symbol with no topology matching and
+  no named special case (CLAUDE.md principle 9). There is deliberately no
+  "OPAMP" anywhere in the rule or its verifier.
+
+  **Why V14 cannot see this.** V14 constrains the *vertical* axis (V+ up,
+  V− down). A KiCad `(mirror y)` flips only `x`, so a mirrored opamp
+  still has V+ up and V− down and is **V14-legal**. Before V17 no
+  constraint anywhere in the tree governed a directional device's
+  horizontal axis, so the SA mirrored one freely whenever it shortened a
+  wire. The two are orthogonal by construction, which is why V17 is a
+  separate invariant rather than a clause of V14.
+
+  **Tie and degenerate cases, decided here.**
+
+  - *Neither group present, or only one.* **Exempt.** A symbol with
+    inputs but no outputs — `Device:Q_NPN_BCE` is exactly this, one
+    `input` base and two `passive` pins — carries no left-to-right
+    reading direction, and mirroring a BJT is a legitimate and common
+    drawing choice. Same for outputs with no inputs (a source or
+    oscillator block).
+  - *Mean, not extreme.* "The input side" of an amplifier is a *cluster*
+    (an opamp has two inputs at one `x`; a gate has `n`), so the group
+    statistic is the arithmetic mean of each group's transformed pin `x`.
+    A strict `max(input x) < min(output x)` separation test is equivalent
+    on a clean symbol but becomes **unsatisfiable** for any symbol
+    carrying one off-side pin (an enable input drawn on the bottom edge,
+    whose `x` sits mid-body) — and an unsatisfiable hard filter degrades
+    to its vacuous fallback, losing the constraint entirely rather than
+    merely relaxing it. The mean is also invariant to how many pins each
+    group has, which is what "the input side" and "the output side" mean.
+  - *Multiple outputs.* Covered by the same mean (a comparator drawing
+    `Q` and `Q̄` on the right scores their average).
+  - *Equal means — a tie — is a VIOLATION.* The inequality is strict. A
+    pose whose two group means coincide (a 90°/270° rotation of a
+    horizontally-drawn amplifier, whose output then points down) has no
+    left-to-right reading at all, which is precisely what the invariant
+    asserts. A symbol whose *library* drawing stacks its two groups
+    vertically at identity therefore satisfies V17 in no pose; the hard
+    filter's empty-set fallback (below) returns the full eight, so it is
+    exempt in practice rather than infeasible.
+
+  **Tier 1, and a hard candidate filter — not a cost.** V17 is a
+  categorical yes/no geometric fact with one correct answer, and Tier 1
+  (a reader flags a backwards amplifier on sight; it is not electrical
+  incorrectness), so CLAUDE.md's constraints-vs-costs decision rule makes
+  it a **hard filter on the orientation candidate space**, exactly like
+  V14. `spice_layout::orient::allowed_orientations` intersects the V17
+  survivors with the V14 survivors, and every stage that can reorient an
+  element reads that one set:
+
+  1. `pick_orientations` (the V5 seed chooser) scores only over it;
+  2. the SA's `Proposal::Rotate` **and** `Proposal::MirrorY` are
+     force-rejected when the resulting pose leaves it — `reorients()`
+     covers both variants, which matters because every observed V17
+     violation is a *mirror*, not a rotation;
+  3. layout phase 4.5 (`kicad-emitter/src/refine.rs`) trials only poses
+     from the same set.
+
+  That is CLAUDE.md's **consistency requirement** discharged. There is
+  deliberately **no V17 weight in `cost.rs`**, for the reason the
+  `power_pin_outward` post-mortem records: a tunable term at a safe
+  weight does nothing.
+
+  *Precedence when the two filters conflict.* If the V14∩V17 intersection
+  is empty but the V14 set is not, **V14 wins** and V17 relaxes — V14
+  carries a documented escape (the detached-glyph stub) where V17 has
+  none, so relaxing V17 loses less. If the V14 set is itself empty the
+  existing all-eight fallback stands. Neither branch is reached by any
+  fixture today: the only directional symbol in the suite
+  (`Amplifier_Operational:OPAMP`) has a non-empty intersection of exactly
+  one pose, `Orientation::IDENTITY`.
+
+  **Verifier.**
+  `crates/spice2kicad/tests/placement_quality.rs::directional_symbols_read_left_to_right_across_fixtures`
+  grades all eighteen fixtures on the **emitted** geometry (instance
+  `(at …)` + `(mirror …)` composed with library pin `x`), reports the
+  per-fixture count as the Tier-1 scoreboard cell `v17.signal_direction`,
+  and asserts a zero-slack `SIGNAL_DIRECTION_BUDGETS` table. Measured
+  high-water marks on `master` at `492db04`, default placer — **6
+  directional symbol instances across 5 fixtures, 2 backwards**:
+
+  | fixture                  | directional | backwards |
+  | ------------------------ | ----------- | --------- |
+  | `opamp_definition_level` | 2           | 0         |
+  | `opamp_inverting_real`   | 1           | **1**     |
+  | `sallen_key_driven`      | 1           | 0         |
+  | `sallen_key_lpf`         | 1           | **1**     |
+  | `wien_bridge_osc`        | 1           | 0         |
+
+  Both offenders are `rot 0` + `(mirror y)`. Standard ratchet policy
+  applies: these literals only ever go **down**. See ADR-32.
 
 - **F6 — rail-stub lateral run** (flow metric, Tier 2). A rail stub —
   a two-terminal element with exactly one rail pin — does not pass a

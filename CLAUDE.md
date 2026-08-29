@@ -112,7 +112,7 @@ crates/
   spice2kicad/       CLI binary (clap)
 docs/
   annotation-spec.md   The annotation language. Authoritative.
-  invariants.md        Visual-quality invariant definitions (V1–V16).
+  invariants.md        Visual-quality invariant definitions (V1–V17).
 examples/
   rc_lowpass.cir
 ```
@@ -515,6 +515,7 @@ Attempt-A failure (a tunable term that at safe weights does nothing).
 | V6 bands/layers          | soft seed + soft cost terms          |
 | V7 symmetry              | soft (mirror move, deferred)         |
 | V16 wire rectilinearity  | soft: routing-aware refine, final key only (d) |
+| V17 signal direction     | hard candidate filter (f)            |
 
 *Notes on the table.* (a) **V5 is not an SA cost term** — `cost.rs`
 has no `pin_facing`/orientation term. V5 is enforced in two non-SA
@@ -554,7 +555,20 @@ reconstructs the whole net partition from the final ink
 (`kicad_emitter::connectivity`) and refuses on any mismatch with the
 source netlist's partition. **If you add a router pass, you do not
 need to add an escalation for it** — but do keep its warning accurate,
-since the warning is now the *explanation* rather than the *gate*.
+since the warning is now the *explanation* rather than the *gate*. (f)
+**V17 is a hard candidate filter, like V14, and for the same reason**: it
+is Tier 1 and categorical ("this symbol's output pins lie right of its
+input pins"), so the constraints-vs-costs decision rule admits nothing
+else. `orient::allowed_orientations` intersects the V17 survivors with
+the V14 survivors and every reorienting stage reads that one set —
+`pick_orientations`, the SA's `Proposal::Rotate` **and**
+`Proposal::MirrorY` (both covered by `Proposal::reorients`, which
+matters: every observed V17 violation is a mirror, not a rotation), and
+phase 4.5. There is deliberately **no V17 weight in `cost.rs`**, for the
+`power_pin_outward` reason. V14 wins if the intersection empties — it has
+a documented escape (the detached glyph) and V17 has none — and the
+all-eight fallback stands if V14's own set empties. See
+`docs/invariants.md` V17 and ADR-32.
 
 ## Visual quality invariants
 
@@ -572,7 +586,7 @@ a one-line summary table below.
 
 ### Invariant tiers (priority ordering)
 
-V1–V16 are **not** a flat list of interchangeable budgets. Past
+V1–V17 are **not** a flat list of interchangeable budgets. Past
 fixes failed because nothing forbade *loosening one fixture's
 budget to tighten another's*, or regressing one aesthetic
 invariant to satisfy a different one. Trade-offs need a defined
@@ -596,7 +610,8 @@ tiers are strictly ordered.
   glyphs / Steiner trees), **V12** (no wires through foreign
   bodies), **V13** (labels don't overlap bodies / text / foreign
   wires), **V14** (power-glyph orientation), **V15** (content lands
-  within the page's usable area). Note V12's own text calls it
+  within the page's usable area), **V17** (directional symbols read
+  left-to-right). Note V12's own text calls it
   "quality" — it is tiered here as Tier 1 because a wire spearing a
   body is a legibility defect a reader flags on sight, not a
   pure-aesthetic refinement.
@@ -796,6 +811,7 @@ Summary (full definitions + verifiers: `docs/invariants.md`):
 | V14       | Power-glyph orientation: GND down, VCC up (rot 0)               | 1    |
 | V15       | Content lands within the page's usable area (A4)                | 1    |
 | V16       | Wire rectilinearity: bend (B) + branch (J) counts on the ink    | 2    |
+| V17       | Directional symbols read left-to-right (inputs left, output right) | 1 |
 
 Full definitions + verifiers: `docs/invariants.md`.
 

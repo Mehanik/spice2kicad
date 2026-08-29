@@ -3006,3 +3006,143 @@ fn pwr_flags_sit_on_existing_drawn_geometry() {
         failures.join("\n  "),
     );
 }
+
+// --- V17: directional-symbol reading direction ---------------------------
+
+/// Per-fixture ratchet for V17 (directional symbols drawn backwards).
+///
+/// Zero-slack high-water marks measured on `master` at `492db04` with
+/// the default placer, read from the emitted sheets. Standard ratchet
+/// policy (CLAUDE.md § "Budgets are ratchets, not knobs"): these
+/// literals only ever go **down**.
+///
+/// Both non-zero entries are the same defect: an `Amplifier_Operational:OPAMP`
+/// emitted at `rot 0` with `(mirror y)`, which is V14-legal (a `(mirror y)`
+/// flips only `x`, so V+ still faces up) and therefore invisible to every
+/// existing candidate filter. See `docs/invariants.md` V17 and ADR-32.
+const SIGNAL_DIRECTION_BUDGETS: &[(&str, usize)] = &[
+    ("opamp_inverting_real", 1),
+    ("sallen_key_lpf", 1),
+];
+
+fn signal_direction_budget(fixture: &str) -> usize {
+    SIGNAL_DIRECTION_BUDGETS
+        .iter()
+        .find(|(n, _)| *n == fixture)
+        .map_or(0, |(_, b)| *b)
+}
+
+/// Split a placed symbol's pins into the `Input` and `Output` groups V17
+/// reads, in the **world** frame.
+///
+/// Returns `None` — i.e. the symbol is **exempt** — unless BOTH groups
+/// are non-empty. A symbol carrying only inputs (`Device:Q_NPN_BCE`: one
+/// `input` base, two `passive`) or only outputs carries no left-to-right
+/// reading direction, and mirroring it is a legitimate drawing choice.
+///
+/// The returned pair is `(mean input x, mean output x)`. The **mean** is
+/// the right statistic here, not the extreme: "the input side" of an
+/// amplifier is a *cluster* (an opamp has two at one x, a gate has n),
+/// and a strict max-input < min-output separation test would be
+/// unsatisfiable for any symbol with one off-side pin — collapsing the
+/// constraint to its vacuous fallback instead of merely relaxing it.
+fn directional_pin_means(
+    library: &Library,
+    sym: &Value,
+) -> Option<(String, String, f64, f64, Orientation)> {
+    let (refdes, lib_id) = placed_symbol_refdes_and_lib_id(sym)?;
+    if refdes.starts_with("#PWR") || refdes.starts_with("#FLG") || lib_id.starts_with("power:") {
+        return None;
+    }
+    let (ox, _oy, orient) = placed_symbol_pose(sym)?;
+    let lib_sym = library.lookup(&lib_id)?;
+    let pins = lib_sym.pins_in(orient);
+    let mut ins: Vec<f64> = Vec::new();
+    let mut outs: Vec<f64> = Vec::new();
+    for tp in &pins {
+        match tp.electrical {
+            kicad_symbols::PinElectrical::Input => ins.push(ox + tp.x),
+            kicad_symbols::PinElectrical::Output => outs.push(ox + tp.x),
+            _ => {}
+        }
+    }
+    if ins.is_empty() || outs.is_empty() {
+        return None;
+    }
+    #[allow(clippy::cast_precision_loss)] // pin counts are tiny
+    let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+    Some((refdes, lib_id, mean(&ins), mean(&outs), orient))
+}
+
+/// **V17 — directional symbols read left-to-right.** An amplifier,
+/// comparator, buffer or gate has an intrinsic reading direction: inputs
+/// on the left, output on the right. Mirroring it across `y` is
+/// electrically identical and visually wrong, and V14 cannot see it —
+/// V14 constrains the *vertical* axis, and a `(mirror y)` flips only
+/// `x`, so a mirrored opamp still has V+ up and V− down.
+///
+/// The rule, stated structurally with no topology matching and no named
+/// symbol (CLAUDE.md principle 9): a symbol carrying **at least one
+/// `Output` pin and at least one `Input` pin** must be posed so the mean
+/// world `x` of its output pins is **strictly greater** than the mean
+/// world `x` of its input pins. Symbols lacking either group are exempt.
+///
+/// The inequality is strict, so a pose in which the two means coincide —
+/// a 90°/270° rotation of a horizontally-drawn amplifier — counts as a
+/// violation: it establishes no left-to-right reading at all, which is
+/// exactly what the invariant asserts.
+///
+/// Measured on the emitted geometry, so it grades whatever the placer,
+/// the SA and phase 4.5 between them produced.
+#[test]
+fn directional_symbols_read_left_to_right_across_fixtures() {
+    let library = load_test_library();
+    // Collect-then-assert, not fail-fast: a challenger arm has to report
+    // EVERY fixture's cell to the scoreboard sink even when an early
+    // fixture trips its ratchet (ADR-23 D9 — a verifier that stops
+    // recording mid-loop leaves blind cells the aggregate scores as 0).
+    let mut failures: Vec<String> = Vec::new();
+    for (name, path) in fixtures() {
+        let tmp = tempdir(name);
+        let sch = common::spice_to_kicad(&path, &tmp).expect("spice2kicad");
+        let root = parse_sch(&sch);
+
+        let mut backwards = 0usize;
+        let mut detail: Vec<String> = Vec::new();
+        for sym in children(&root, "symbol") {
+            let Some((refdes, lib_id, mean_in, mean_out, orient)) =
+                directional_pin_means(&library, sym)
+            else {
+                continue;
+            };
+            if mean_out <= mean_in + f64::EPSILON {
+                backwards += 1;
+                detail.push(format!(
+                    "{refdes} ({lib_id}) at {orient:?}: mean output x {mean_out:.2} is not right \
+                     of mean input x {mean_in:.2}"
+                ));
+            }
+        }
+
+        common::scoreboard::record_count("v17.signal_direction", name, backwards);
+        let budget = signal_direction_budget(name);
+        if backwards > budget {
+            failures.push(format!(
+                "{name}: {backwards} directional symbol(s) drawn backwards, above the zero-slack \
+                 ratchet budget {budget}:\n    {}",
+                detail.join("\n    "),
+            ));
+        } else if backwards < budget {
+            eprintln!(
+                "V17 {name}: {backwards} backwards directional symbol(s); you may lower the \
+                 SIGNAL_DIRECTION_BUDGETS literal to {backwards}"
+            );
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "V17 directional symbols drawn backwards (budgets only ratchet DOWN — diagnose the \
+         geometry, do not raise the literal):\n  {}",
+        failures.join("\n  "),
+    );
+}
