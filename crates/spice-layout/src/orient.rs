@@ -363,6 +363,10 @@ mod tests {
     }
 
     fn allowed_str(src: &str) -> (Vec<String>, Vec<Vec<Orientation>>) {
+        allowed_str_with(src, Placer::default())
+    }
+
+    fn allowed_str_with(src: &str, placer: Placer) -> (Vec<String>, Vec<Vec<Orientation>>) {
         let file_id = FileId(0);
         let parsed = spice_parser::parse(src, file_id)
             .expect("parse failed")
@@ -370,8 +374,21 @@ mod tests {
         let resolved = spice_resolve::resolve(&parsed, fixture_library()).expect("resolve failed");
         let (checked, _warns) = check(resolved).expect("policy check failed");
         let refdes = checked.elements.iter().map(|e| e.refdes.clone()).collect();
-        (refdes, allowed_orientations(&checked, Placer::default()))
+        (refdes, allowed_orientations(&checked, placer))
     }
+
+    /// The opamp source used by the V14 and V17 orientation tests.
+    const OPAMP_SRC: &str = "test\n\
+        *@symbol Amplifier_Operational:OPAMP for=X1 pinmap=1:3,2:2,3:1,4:8,5:4\n\
+        VCC vcc 0 DC 15 ;@ power=+15V\n\
+        VEE vee 0 DC -15 ;@ power=-15V\n\
+        .subckt OPAMP inp inn out vcc vee\n\
+        E1 out 0 inp inn 1e5\n\
+        .ends\n\
+        RIN in inv 1k\n\
+        RF inv out 10k\n\
+        X1 0 inv out vcc vee OPAMP\n\
+        .end\n";
 
     fn idx_of(refdes: &[String], r: &str) -> usize {
         refdes.iter().position(|x| x == r).expect("refdes present")
@@ -487,5 +504,63 @@ mod tests {
         );
         // And R180 is excluded (would put V+ down, V- up).
         assert!(allowed[i].iter().all(|o| o.rotation != Rotation::R180));
+    }
+
+    /// V14 is blind to the mirror: the pose the owner objected to —
+    /// `rot 0` + `(mirror y)` — survives the default placer's filter,
+    /// because a `(mirror y)` flips only `x` and leaves V+ up / V− down.
+    /// This is the defect V17 exists to close, asserted rather than
+    /// assumed.
+    #[test]
+    fn the_default_filter_still_admits_a_mirrored_opamp() {
+        let (refdes, allowed) = allowed_str(OPAMP_SRC);
+        let i = idx_of(&refdes, "X1");
+        assert!(
+            allowed[i].iter().any(|o| o.mirror_y),
+            "V14 alone should still admit a mirrored opamp: {:?}",
+            allowed[i]
+        );
+    }
+
+    /// Under `--placer=signal-direction` the V17 narrowing removes every
+    /// mirrored pose, leaving the opamp with exactly one candidate.
+    ///
+    /// This is also the evidence that the SA's **MirrorY** proposal is
+    /// gated, not just its rotate: `solver::anneal` force-rejects any
+    /// proposal whose result is outside `allowed[idx]`, and
+    /// `Proposal::reorients()` returns the index for `MirrorY` as well as
+    /// `Rotate`. With no mirrored pose in the set, no mirror can survive.
+    #[test]
+    fn signal_direction_excludes_every_mirrored_opamp_pose() {
+        let (refdes, allowed) = allowed_str_with(OPAMP_SRC, Placer::SignalDirection);
+        let i = idx_of(&refdes, "X1");
+        assert_eq!(
+            allowed[i],
+            vec![Orientation::IDENTITY],
+            "V14 ∩ V17 should leave the opamp exactly one pose"
+        );
+        assert!(allowed[i].iter().all(|o| !o.mirror_y));
+    }
+
+    /// V17 exempts a symbol lacking one of the two pin groups.
+    /// `Device:Q_NPN_BCE` carries one `input` (the base) and two
+    /// `passive` pins, so it has no left-to-right reading direction and
+    /// mirroring it is a legitimate drawing choice. Its allowed set must
+    /// be **identical** under both placers.
+    #[test]
+    fn signal_direction_is_inert_for_a_symbol_with_no_output_pin() {
+        let src = "test\n\
+            *@symbol Device:Q_NPN_BCE for=Q1\n\
+            VCC vcc 0 DC 12 ;@ power=vcc\n\
+            RC vcc c 4k7\n\
+            RB vcc b 100k\n\
+            RE e 0 1k\n\
+            Q1 c b e QGENERIC\n\
+            .end\n";
+        let (refdes, base) = allowed_str_with(src, Placer::default());
+        let (_, narrowed) = allowed_str_with(src, Placer::SignalDirection);
+        let i = idx_of(&refdes, "Q1");
+        assert_eq!(base[i], narrowed[i]);
+        assert!(base[i].iter().any(|o| o.mirror_y), "{:?}", base[i]);
     }
 }

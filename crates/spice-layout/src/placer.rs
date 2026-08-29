@@ -589,6 +589,7 @@ impl Placer {
                 | Self::TerminalSeries
                 | Self::TerminalSeriesDivider
                 | Self::YSign
+                | Self::SignalDirection
         )
     }
 
@@ -625,6 +626,7 @@ impl Placer {
                 | Self::TerminalSeries
                 | Self::TerminalSeriesDivider
                 | Self::YSign
+                | Self::SignalDirection
         )
     }
 
