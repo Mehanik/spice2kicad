@@ -77,7 +77,7 @@ struct V14Check {
 fn v14_violations(checked: &CheckedNetlist, library: &Library, opts: &LayoutOptions) -> V14Check {
     let placement = place_with(checked.clone(), library, opts).expect("placement");
     let prefs = vertical_prefs(checked);
-    let allowed = allowed_orientations(checked);
+    let allowed = allowed_orientations(checked, opts.placer);
     let mut out = Vec::new();
     let mut governed = 0_usize;
     for (idx, (el, placed)) in checked.elements.iter().zip(&placement.elements).enumerate() {

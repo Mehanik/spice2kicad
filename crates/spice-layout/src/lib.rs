@@ -608,7 +608,7 @@ pub fn place_with_hint(
     // is hard at *every* stage that can move an element (CLAUDE.md
     // "consistency requirement"). Computed here, before the idioms, for
     // exactly that reason.
-    let allowed = orient::allowed_orientations(&checked);
+    let allowed = orient::allowed_orientations(&checked, opts.placer);
     // Pins owed to a user directive or a cache hint — the audit below
     // exempts them, because their orientation is the caller's data, not
     // a choice any seed pass made.
@@ -1056,7 +1056,7 @@ pub fn refinement_meta(
 ) -> Result<RefinementMeta, Vec<Diagnostic>> {
     let (mut placement, mut pinned) = place_seed(checked, placer)?;
     apply_hint(&mut placement, &mut pinned, hint);
-    let allowed = orient::allowed_orientations(checked);
+    let allowed = orient::allowed_orientations(checked, placer);
     let externally_pinned = pinned.clone();
     if let Some(plan) = symmetry::detect_pairs(checked) {
         symmetry::apply(&mut placement, &mut pinned, &plan);
@@ -1582,7 +1582,8 @@ fn pack_rows(
         | Placer::FacingTrigger
         | Placer::TerminalSeries
         | Placer::TerminalSeriesDivider
-        | Placer::YSign => shift.last().copied().unwrap_or(0) / 2,
+        | Placer::YSign
+        | Placer::SignalDirection => shift.last().copied().unwrap_or(0) / 2,
         Placer::M4YDatum => 0,
     };
     for (i, pe) in placed.iter_mut().enumerate() {
@@ -1746,7 +1747,8 @@ fn place_seed(
         | Placer::FacingTrigger
         | Placer::TerminalSeries
         | Placer::TerminalSeriesDivider
-        | Placer::YSign => {
+        | Placer::YSign
+        | Placer::SignalDirection => {
             let n_i32 = i32::try_from(n).unwrap_or(i32::MAX);
             let y_top: i32 = 0;
             let y_bot: i32 = (n_i32 + 4) * Y_RANK_STRIDE;

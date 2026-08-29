@@ -1,5 +1,5 @@
-//! V14 power-glyph-orientation hard constraint: the per-element
-//! allowed-orientation set.
+//! The per-element allowed-orientation set: the V14 power-glyph
+//! constraint and the V17 signal-direction constraint, one hard filter.
 //!
 //! V14 says a VCC/positive-rail pin must face screen-**up** and a
 //! GND/negative-rail pin must face screen-**down**. This is a
@@ -18,11 +18,24 @@
 //! sideways by every orientation (an empty filtered set) fall back to
 //! all eight — the rails decoration stub then covers the glyph (V14's
 //! documented detached-glyph fallback).
+//!
+//! **V17 (`--placer=signal-direction`) is the second filter here, and it
+//! is orthogonal to V14 by construction.** V14 constrains the *vertical*
+//! axis; a KiCad `(mirror y)` flips only `x`, so a mirrored opamp still
+//! has V+ up and V− down and is V14-legal. Nothing in the tree governed a
+//! directional device's *horizontal* axis, so the SA mirrored one freely
+//! whenever it shortened a wire — `opamp_inverting_real` and
+//! `sallen_key_lpf` both ship a `rot 0` + `mirror y` opamp on the default
+//! placer. [`satisfies_signal_direction`] is that missing filter: a symbol
+//! carrying at least one `Output` pin *and* at least one `Input` pin must
+//! be posed with its outputs right of its inputs. See `docs/invariants.md`
+//! V17 and ADR-32.
 
-use kicad_symbols::Orientation;
+use kicad_symbols::{Orientation, PinElectrical};
 use spice_policy::CheckedNetlist;
 
 use crate::net_class::{VertPref, vertical_prefs};
+use crate::placer::Placer;
 
 /// Screen-vertical facing of a transformed pin angle.
 ///
@@ -91,7 +104,70 @@ fn satisfies_v14(
     true
 }
 
-/// Per-element allowed-orientation set for the V14 hard constraint.
+/// Mean symbol-frame `x` of an element's `Input` pins and of its
+/// `Output` pins, in `orient` — or `None` when the element is **exempt**
+/// from V17 because one of the two groups is empty.
+///
+/// Symbol-frame `x` is the right quantity even though V17 is stated in
+/// world coordinates: the element's origin is the same for every
+/// candidate orientation, so `origin.x + p.x` and `p.x` order the
+/// candidates identically.
+///
+/// **Why the mean and not an extreme.** "The input side" of an amplifier
+/// is a *cluster* — an opamp has two inputs at one `x`, a gate has `n` —
+/// so the group statistic must be insensitive to how many pins each group
+/// has. A strict `max(input x) < min(output x)` separation test agrees
+/// with the mean on a clean symbol, but becomes **unsatisfiable** for any
+/// symbol carrying one off-side pin (an enable input drawn on the bottom
+/// edge, whose `x` sits mid-body); an unsatisfiable hard filter degrades
+/// to the empty-set fallback below and loses the constraint entirely
+/// rather than merely relaxing it.
+fn directional_pin_means(
+    elem: &spice_resolve::ResolvedElement,
+    orient: Orientation,
+) -> Option<(f64, f64)> {
+    let pins = elem.symbol.pins_in(orient);
+    let mut ins: Vec<f64> = Vec::new();
+    let mut outs: Vec<f64> = Vec::new();
+    for p in &pins {
+        match p.electrical {
+            PinElectrical::Input => ins.push(p.x),
+            PinElectrical::Output => outs.push(p.x),
+            _ => {}
+        }
+    }
+    if ins.is_empty() || outs.is_empty() {
+        // Exempt: the symbol carries no left-to-right reading direction.
+        // `Device:Q_NPN_BCE` is exactly this case — one `input` base and
+        // two `passive` pins — and mirroring a BJT is a legitimate and
+        // common drawing choice, so V17 must not touch it.
+        return None;
+    }
+    #[allow(clippy::cast_precision_loss)] // pin counts are tiny
+    let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+    Some((mean(&ins), mean(&outs)))
+}
+
+/// True when `orient` satisfies V17: the element's output pins lie to the
+/// **right** of its input pins. Elements lacking either pin group are
+/// exempt and trivially satisfy it.
+///
+/// The inequality is **strict**, so a pose whose two group means coincide
+/// — a 90°/270° rotation of a horizontally-drawn amplifier, whose output
+/// then points down — is a violation. Such a pose establishes no
+/// left-to-right reading at all, which is exactly what V17 asserts.
+fn satisfies_signal_direction(
+    elem: &spice_resolve::ResolvedElement,
+    orient: Orientation,
+) -> bool {
+    match directional_pin_means(elem, orient) {
+        None => true,
+        Some((mean_in, mean_out)) => mean_out > mean_in + f64::EPSILON,
+    }
+}
+
+/// Per-element allowed-orientation set for the V14 and V17 hard
+/// constraints.
 ///
 /// `result[i]` is the subset of [`Orientation::ALL`] permitted for
 /// `checked.elements[i]`. Guarantees:
@@ -104,16 +180,53 @@ fn satisfies_v14(
 ///      negative-supply source whose vee and ground pins both want
 ///      screen-down has no ideal orientation; the rails decoration stub
 ///      then offsets the glyph one cell out).
+///
+///   Then, under `--placer=signal-direction` only, that set is narrowed
+///   again to the poses satisfying V17 ([`satisfies_signal_direction`]),
+///   and **the narrowing is dropped if it would empty the set**.
 /// * Order within each set follows [`Orientation::ALL`], so callers'
 ///   deterministic tie-breaks are preserved.
+///
+/// **Precedence when the two conflict.** V14 is applied first and V17
+/// relaxes into it, never the other way round: V14 carries a documented
+/// escape for an infeasible element (the detached-glyph stub) where V17
+/// has none, so relaxing V17 loses less. Neither fallback branch is
+/// reached by any fixture today — the suite's one directional symbol
+/// (`Amplifier_Operational:OPAMP`) has a V14 ∩ V17 intersection of
+/// exactly one pose, [`Orientation::IDENTITY`].
 #[must_use]
-pub fn allowed_orientations(checked: &CheckedNetlist) -> Vec<Vec<Orientation>> {
+pub fn allowed_orientations(checked: &CheckedNetlist, placer: Placer) -> Vec<Vec<Orientation>> {
     let prefs = vertical_prefs(checked);
     checked
         .elements
         .iter()
         .map(|elem| {
-            // The ≤2-terminal exemption is scoped to elements for which
+            let v14_set = v14_allowed(elem, &prefs);
+            if !placer.signal_direction_filter() {
+                return v14_set;
+            }
+            let directed: Vec<Orientation> = v14_set
+                .iter()
+                .copied()
+                .filter(|&o| satisfies_signal_direction(elem, o))
+                .collect();
+            if directed.is_empty() { v14_set } else { directed }
+        })
+        .collect()
+}
+
+/// The V14 half of [`allowed_orientations`], for one element.
+///
+/// Split out of the closure so the V17 narrowing composes onto the
+/// *whole* V14 result — including its `<= 2`-terminal exemption. Folding
+/// V17 in beside that early return instead would let a two-pin
+/// directional part (a buffer with one `input` and one `output` and no
+/// rail pin) take the exemption and escape V17 entirely.
+fn v14_allowed(
+    elem: &spice_resolve::ResolvedElement,
+    prefs: &std::collections::HashMap<String, VertPref>,
+) -> Vec<Orientation> {
+    // The ≤2-terminal exemption is scoped to elements for which
             // V14 carries no orientation information:
             //
             //   * A 2-pin *power source* (`VCC vcc 0`, `VEE vee 0`): its
@@ -143,7 +256,7 @@ pub fn allowed_orientations(checked: &CheckedNetlist) -> Vec<Vec<Orientation>> {
             let filtered: Vec<Orientation> = Orientation::ALL
                 .iter()
                 .copied()
-                .filter(|&o| satisfies_v14(elem, &prefs, o))
+                .filter(|&o| satisfies_v14(elem, prefs, o))
                 .collect();
             if filtered.is_empty() {
                 // No V14-ideal orientation (e.g. a negative-supply
@@ -154,8 +267,6 @@ pub fn allowed_orientations(checked: &CheckedNetlist) -> Vec<Vec<Orientation>> {
             } else {
                 filtered
             }
-        })
-        .collect()
 }
 
 /// Audit the V14 **consistency requirement** over the seed idioms.
@@ -259,7 +370,7 @@ mod tests {
         let resolved = spice_resolve::resolve(&parsed, fixture_library()).expect("resolve failed");
         let (checked, _warns) = check(resolved).expect("policy check failed");
         let refdes = checked.elements.iter().map(|e| e.refdes.clone()).collect();
-        (refdes, allowed_orientations(&checked))
+        (refdes, allowed_orientations(&checked, Placer::default()))
     }
 
     fn idx_of(refdes: &[String], r: &str) -> usize {

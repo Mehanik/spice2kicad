@@ -397,6 +397,44 @@ pub enum Placer {
     /// whether the ~165 budgets tuned against the mismatched objective
     /// are better or worse off for it.
     YSign,
+    /// **V17 signal-direction filter** — [`Placer::FlowSeedV4`] plus a
+    /// second hard candidate filter in
+    /// [`crate::orient::allowed_orientations`]: a symbol carrying at
+    /// least one `Output` pin **and** at least one `Input` pin must be
+    /// posed with its output pins to the **right** of its input pins.
+    ///
+    /// An amplifier symbol has an intrinsic left-to-right reading
+    /// direction, and nothing in the tree enforced it. V14 cannot: it
+    /// constrains the *vertical* axis, and a KiCad `(mirror y)` flips
+    /// only `x`, so a mirrored opamp still has V+ up and V− down and is
+    /// **V14-legal**. With the horizontal axis unconstrained the SA
+    /// mirrors a directional device freely whenever it shortens a wire —
+    /// on the default placer `opamp_inverting_real` and `sallen_key_lpf`
+    /// both ship a `rot 0` + `mirror y` opamp, and under
+    /// [`Placer::YSign`] it is `opamp_inverting_real`,
+    /// `sallen_key_driven` and `wien_bridge_osc`.
+    ///
+    /// The rule is stated on KiCad pin **electrical types**, so it is
+    /// structural rather than pattern-matched (CLAUDE.md principle 9): it
+    /// covers comparators, buffers, gates and any `.subckt` mapped to a
+    /// directional symbol, with no named special case. A symbol lacking
+    /// either pin group is exempt — `Device:Q_NPN_BCE` carries one
+    /// `input` base and two `passive` pins, and mirroring a BJT is a
+    /// legitimate drawing choice.
+    ///
+    /// It is a **hard candidate filter**, not a `cost.rs` weight: V17 is
+    /// Tier 1 and categorical, which is exactly the constraints-vs-costs
+    /// decision rule's hard case, and a tunable term at a safe weight is
+    /// the recorded `power_pin_outward` failure. Because the filter lives
+    /// in `allowed_orientations`, every stage that can reorient an
+    /// element is bound by it: [`crate::pick_orientations`], the SA's
+    /// `Proposal::Rotate` **and** `Proposal::MirrorY` (both reached
+    /// through `Proposal::reorients`, which is what matters here — every
+    /// observed violation is a mirror), and layout phase 4.5. That is the
+    /// consistency requirement discharged at all three seams.
+    ///
+    /// See `docs/invariants.md` V17 and ADR-32.
+    SignalDirection,
 }
 
 impl Placer {
@@ -418,6 +456,7 @@ impl Placer {
         Self::TerminalSeries,
         Self::TerminalSeriesDivider,
         Self::YSign,
+        Self::SignalDirection,
     ];
 
     /// The name accepted by `--placer` and printed by the scoreboard.
@@ -439,6 +478,7 @@ impl Placer {
             Self::TerminalSeries => "terminal-series",
             Self::TerminalSeriesDivider => "terminal-series-divider",
             Self::YSign => "y-sign",
+            Self::SignalDirection => "signal-direction",
         }
     }
 
@@ -496,6 +536,10 @@ impl Placer {
             Self::YSign => {
                 "flow-seed-v4 with the placer cost frame's pin Y sign \
                  corrected to the page frame the emitter measures in"
+            }
+            Self::SignalDirection => {
+                "flow-seed-v4 plus the V17 hard filter: a symbol with both \
+                 input and output pins is posed output-to-the-right"
             }
         }
     }
@@ -669,6 +713,22 @@ impl Placer {
     #[must_use]
     pub fn page_frame_pin_y(self) -> bool {
         matches!(self, Self::YSign)
+    }
+
+    /// V17: does [`crate::orient::allowed_orientations`] narrow each
+    /// element's V14 set again to the poses that draw a directional
+    /// symbol's **output** pins right of its **input** pins?
+    ///
+    /// Gating the whole invariant on this one accessor is the entire
+    /// byte-identity argument for the shipping output — the filter is
+    /// unreachable unless it returns `true`, so no default-path candidate
+    /// set can change. `baseline_lock` is the empirical half.
+    ///
+    /// See [`Self::SignalDirection`] for why V14 could not catch this and
+    /// why it must be a hard filter rather than a `cost.rs` weight.
+    #[must_use]
+    pub fn signal_direction_filter(self) -> bool {
+        matches!(self, Self::SignalDirection)
     }
 
     /// Look a placer up by the name `--placer` accepts.
@@ -865,6 +925,33 @@ mod tests {
         assert!(!Placer::YSign.facing_inverted_trigger());
         assert!(!Placer::YSign.m3_signed_gate());
         assert!(!Placer::YSign.m5_element_streams());
+    }
+
+    /// The V17 signal-direction filter is **dead on the default path**
+    /// and on both control arms: it is gated on one accessor and nothing
+    /// else, which is the whole byte-identity argument for the shipping
+    /// output (`baseline_lock` is the empirical half).
+    #[test]
+    fn the_signal_direction_filter_is_off_by_default() {
+        assert!(!Placer::default().signal_direction_filter());
+        assert!(!Placer::FlowSeedV4.signal_direction_filter());
+        assert!(!Placer::FlowSeed.signal_direction_filter());
+        assert!(!Placer::Champion.signal_direction_filter());
+        assert!(!Placer::YSign.signal_direction_filter());
+        assert!(!Placer::FacingTrigger.signal_direction_filter());
+        assert!(Placer::SignalDirection.signal_direction_filter());
+        // It composes ON `flow-seed-v4` and changes nothing else, so an
+        // A/B against the default isolates the V17 filter.
+        assert!(Placer::SignalDirection.unified_roots());
+        assert!(Placer::SignalDirection.flow_seed_layering());
+        assert!(!Placer::SignalDirection.page_frame_pin_y());
+        assert!(!Placer::SignalDirection.rail_gated_dividers());
+        assert!(!Placer::SignalDirection.unified_depth_roots());
+        assert!(!Placer::SignalDirection.sa_rotate_v5_gate());
+        assert!(!Placer::SignalDirection.facing_inverted_trigger());
+        assert!(!Placer::SignalDirection.terminal_net_series());
+        assert!(!Placer::SignalDirection.m3_signed_gate());
+        assert!(!Placer::SignalDirection.m5_element_streams());
     }
 
     #[test]

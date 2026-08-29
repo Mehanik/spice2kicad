@@ -2516,7 +2516,7 @@ RB vcc out 100k
 .end
 ";
         let checked = checked_of(src);
-        let allowed = crate::orient::allowed_orientations(&checked);
+        let allowed = crate::orient::allowed_orientations(&checked, Placer::default());
         let idx = |r: &str| {
             checked
                 .elements
