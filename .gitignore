@@ -21,3 +21,4 @@ Cargo.lock.bak
 *-erc.rpt
 erc.rpt
 /out-review/
+.claude/worktrees/

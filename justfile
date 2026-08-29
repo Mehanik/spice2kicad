@@ -50,6 +50,28 @@ scoreboard-run placer="champion" out="target/scoreboard":
       S2K_SCOREBOARD_DIR="$PWD/{{out}}/{{placer}}" \
       cargo test --workspace --no-fail-fast -- --test-threads=${RUST_TEST_THREADS:-2}'
 
+# Collect ONE placer over k SA seeds (ADR-32). Each seed lands in its own
+# sink under {{out}}/{{placer}}/seed-N, so the single-seed `scoreboard`
+# recipe still works against {{out}}/{{placer}}/seed-1 unchanged.
+#
+# Why this exists: `scoreboard-run` takes one draw from a stochastic
+# optimiser. ADR-31 measured sd = 1.57 bends on `named_rails` where the
+# recorded arm-to-arm "regression" was +5 -- i.e. the instrument could
+# not distinguish a real effect from a lucky pair of draws, and one ADR
+# had to be retracted because of it. k = 9 resolves a 1-bend effect at
+# that spread (SE = sd/sqrt(k) ~ 0.5).
+#
+# Cost is linear: one full suite run per seed, ~8-12 min each.
+scoreboard-run-multi placer="flow-seed-v4" k="9" out="target/scoreboard":
+    rm -rf {{out}}/{{placer}}
+    for s in $(seq 1 {{k}}); do       mkdir -p {{out}}/{{placer}}/seed-$s;       bash -c "ulimit -v ${RUST_TEST_MAX_VSZ_KB:-8388608} &&         S2K_PLACER={{placer}}         S2K_SA_SEED=$s         S2K_SCOREBOARD_DIR=\"$PWD/{{out}}/{{placer}}/seed-$s\"         cargo test --workspace --no-fail-fast -- --test-threads=${RUST_TEST_THREADS:-2}"         > {{out}}/{{placer}}/seed-$s.log 2>&1 || true;       echo "  seed $s done";     done
+
+# Compare two multi-seed collections: per-cell mean +/- sd, Welch t, and
+# which cells clear |t| > 2. Cells whose spread swamps their difference
+# are reported as UNRESOLVED rather than as a result.
+scoreboard-multi champion="flow-seed-v4" challenger="y-sign" out="target/scoreboard":
+    python3 scripts/scoreboard_multi.py {{out}}/{{champion}} {{out}}/{{challenger}} {{champion}} {{challenger}}
+
 # Print the fixture x metric table, the tier-weighted aggregate, and the
 # promotion verdict for two previously collected runs.
 scoreboard champion="champion" challenger="m4-ydatum" out="target/scoreboard":

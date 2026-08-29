@@ -600,12 +600,31 @@ fn split_suffix(s: &str) -> (&str, &str) {
 /// (ADR-23). Unknown names are rejected by the CLI, not silently
 /// ignored.
 pub fn placer_args() -> Vec<String> {
-    match std::env::var("S2K_PLACER") {
+    let mut args = match std::env::var("S2K_PLACER") {
         Ok(name) if !name.trim().is_empty() => {
             vec!["--placer".to_string(), name.trim().to_string()]
         }
         _ => Vec::new(),
+    };
+    // ADR-32: the SA seed, for multi-seed scoreboard collection.
+    //
+    // The scoreboard reads ONE draw from a stochastic optimiser per arm,
+    // and on V16 / detour the seed-to-seed spread exceeds the typical
+    // arm-to-arm difference (ADR-31 measured sd = 1.57 bends on
+    // `named_rails` against a +5 "regression" that was a coincidence of
+    // draws). Varying this across k collections is what turns a
+    // difference into an effect.
+    //
+    // Unset on the normal `cargo test` path, so the ratchets keep seeing
+    // exactly one deterministic placement — they are correctly
+    // single-sample and nothing here changes them.
+    if let Ok(seed) = std::env::var("S2K_SA_SEED") {
+        if !seed.trim().is_empty() {
+            args.push("--sa-seed".to_string());
+            args.push(seed.trim().to_string());
+        }
     }
+    args
 }
 
 /// Run `spice2kicad` against a fixture, return the path to the .kicad_sch.

@@ -8360,3 +8360,85 @@ different clothes.
   emitted sheets via the suite's own `common::ink::measure`
   (`#[ignore]`d), so a hand conversion or seed sweep is graded by the
   project's counter rather than a re-derivation.
+
+## ADR-32 — Multi-seed scoreboard: telling an effect from a draw
+
+**Status:** built 2026-08-30. Collection recipe, aggregator and the
+`S2K_SA_SEED` seam. **Additive and inert by default** — unset the env
+var and every existing path behaves exactly as before.
+
+### Why
+
+ADR-31 established that the ADR-23 scoreboard reads **one draw per arm**
+from a stochastic optimiser, and that on V16 / detour the seed-to-seed
+spread exceeds the typical arm-to-arm difference. The cost was concrete:
+ADR-30 built a whole prescription ("77% of the loss is `named_rails`,
+make it the probe for a bundled re-tuning") on a `+5` bend difference
+that a 20-seed sweep showed to be `+0.20 ± noise`, t = 0.43. That ADR's
+attribution had to be retracted.
+
+The ratchets are **correctly** single-sample: they run one deterministic
+placement and ask "did this change break what we shipped?". Nothing here
+touches them. The scoreboard asks a different question — "is B better
+than A?" — of a random variable, and that question needs a sample.
+
+### What was built
+
+* **`S2K_SA_SEED`**, threaded through `common::placer_args` (the one
+  place the suite passes placer flags) to the existing `--sa-seed` CLI
+  flag from ADR-31. Unset on the normal `cargo test` path, so the
+  ratchets keep seeing exactly one deterministic placement.
+* **`just scoreboard-run-multi <placer> <k>`** — k full collections, one
+  per seed, into `<out>/<placer>/seed-N/`. The single-seed `scoreboard`
+  recipe still works against `seed-1` unchanged.
+* **`scripts/scoreboard_multi.py`** — reads k sinks per arm and reports
+  per cell: champion mean ± sd, challenger mean ± sd, delta, Welch t.
+
+### The classification, which is the actual point
+
+Every cell lands in exactly one of:
+
+* **EFFECT** — `|t| > 2`. The difference clears its own spread.
+* **INERT** — `sd = 0` on **both** arms. The delta is a *measurement*,
+  not a sample. ADR-31 found 7 of 18 fixtures seed-inert on V16, so this
+  class is large and genuinely informative.
+* **UNRESOLVED** — `|t| <= 2`. The spread swamps the difference.
+* **PARTIAL** — not measured on every seed of both arms, so the two
+  means are over different populations. Not compared at all.
+
+**An INERT zero is evidence of no change. An UNRESOLVED zero is an
+absence of evidence.** The single-sample scoreboard could not tell those
+apart, and reporting them identically is precisely how ADR-30 happened.
+
+### Sizing k
+
+From ADR-31's 20-seed sweep, sd ≈ 1.57 bends on `named_rails`.
+`SE = sd/√k`, so k = 9 gives SE ≈ 0.52 — enough to resolve a 1-bend
+effect. Default k = 9. Cost is linear: one full suite run per seed,
+~8-12 min each, so a two-arm comparison is a few hours. That is the
+price of an instrument that can distinguish a fix from a coincidence.
+
+### What this does NOT do
+
+**It issues no promotion verdict.** ADR-23's rule is stated over the
+single-sample aggregate, and changing that rule is an owner decision,
+not a side effect of building a measuring tool. `just scoreboard` still
+gives the verdict; this says whether the verdict rests on anything.
+
+Deliberately unresolved, and left for the owner: whether ADR-23's
+promotion rule should be *restated* over multi-seed means, and if so
+whether T1/T2 should carry error bars. Building the measurement first
+and re-opening the rule separately is the same discipline the ratchets
+already follow.
+
+### A finding that fell out of the smoke test
+
+At k = 3, `device.facing_inverted` on `two_stage_amp` reads
+**0.333 ± 0.577** on the shipping default: Q2 is drawn inverted on one
+seed in three. The owner reported that defect from a single rendering,
+and ADR-30 recorded `y-sign` as *repairing* it (1 → 0) — also from one
+rendering. Both readings are draws of a coin flip. The defect is real
+but **intermittent**, which changes what fixing it means: a hard
+orientation constraint (the ADR-32-adjacent V17 work) is the right
+shape, and a cost tweak that happens to land 0 on the shipped seed is
+not a fix at all.
