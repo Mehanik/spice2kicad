@@ -1322,7 +1322,7 @@ invariant here.
   | `wien_bridge_osc`        | 1           | 0         |
 
   Both offenders are `rot 0` + `(mirror y)`. Standard ratchet policy
-  applies: these literals only ever go **down**. See ADR-32.
+  applies: these literals only ever go **down**. See ADR-33.
 
 - **F6 — rail-stub lateral run** (flow metric, Tier 2). A rail stub —
   a two-terminal element with exactly one rail pin — does not pass a

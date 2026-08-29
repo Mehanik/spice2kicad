@@ -29,7 +29,7 @@
 //! placer. [`satisfies_signal_direction`] is that missing filter: a symbol
 //! carrying at least one `Output` pin *and* at least one `Input` pin must
 //! be posed with its outputs right of its inputs. See `docs/invariants.md`
-//! V17 and ADR-32.
+//! V17 and ADR-33.
 
 use kicad_symbols::{Orientation, PinElectrical};
 use spice_policy::CheckedNetlist;
@@ -156,10 +156,7 @@ fn directional_pin_means(
 /// — a 90°/270° rotation of a horizontally-drawn amplifier, whose output
 /// then points down — is a violation. Such a pose establishes no
 /// left-to-right reading at all, which is exactly what V17 asserts.
-fn satisfies_signal_direction(
-    elem: &spice_resolve::ResolvedElement,
-    orient: Orientation,
-) -> bool {
+fn satisfies_signal_direction(elem: &spice_resolve::ResolvedElement, orient: Orientation) -> bool {
     match directional_pin_means(elem, orient) {
         None => true,
         Some((mean_in, mean_out)) => mean_out > mean_in + f64::EPSILON,
@@ -210,7 +207,11 @@ pub fn allowed_orientations(checked: &CheckedNetlist, placer: Placer) -> Vec<Vec
                 .copied()
                 .filter(|&o| satisfies_signal_direction(elem, o))
                 .collect();
-            if directed.is_empty() { v14_set } else { directed }
+            if directed.is_empty() {
+                v14_set
+            } else {
+                directed
+            }
         })
         .collect()
 }
@@ -227,46 +228,46 @@ fn v14_allowed(
     prefs: &std::collections::HashMap<String, VertPref>,
 ) -> Vec<Orientation> {
     // The ≤2-terminal exemption is scoped to elements for which
-            // V14 carries no orientation information:
-            //
-            //   * A 2-pin *power source* (`VCC vcc 0`, `VEE vee 0`): its
-            //     body is replaced by a rail glyph entirely placed and
-            //     oriented by the rails decoration stub (V14's documented
-            //     detached-glyph fallback). Locking the source body's
-            //     orientation reshuffles the layout for zero V14 benefit.
-            //   * A 2-pin element with *no rail pin at all* (a pure
-            //     signal element like `CIN in b`): nothing to orient
-            //     against a rail, so all eight survive trivially anyway —
-            //     `satisfies_v14` would return `true` for every
-            //     orientation, but short-circuiting keeps the seed
-            //     candidate set the full eight (matching prior behaviour
-            //     exactly, so signal-only placement is byte-identical).
-            //
-            // A 2-pin *rail consumer* (`RC vcc c`, `R1 vcc b`) is NOT
-            // exempt: one pin is a real rail pin whose V14 facing applies
-            // (rail pin out toward its band → glyph on the body exterior),
-            // and its signal pin is then forced opposite, toward the Mid
-            // band where its neighbour lives. It must flow into the
-            // `satisfies_v14` filter below so the rail pin faces its band.
-            let is_power_source = matches!(elem.role, spice_resolve::ElementRole::Power(_));
-            let has_rail_pin = elem.nodes.iter().any(|n| prefs.contains_key(n));
-            if elem.nodes.len() <= 2 && (is_power_source || !has_rail_pin) {
-                return Orientation::ALL.to_vec();
-            }
-            let filtered: Vec<Orientation> = Orientation::ALL
-                .iter()
-                .copied()
-                .filter(|&o| satisfies_v14(elem, prefs, o))
-                .collect();
-            if filtered.is_empty() {
-                // No V14-ideal orientation (e.g. a negative-supply
-                // source whose vee and ground pins both want
-                // screen-down). Fall back to the full eight — the rails
-                // decoration stub offsets the glyph.
-                Orientation::ALL.to_vec()
-            } else {
-                filtered
-            }
+    // V14 carries no orientation information:
+    //
+    //   * A 2-pin *power source* (`VCC vcc 0`, `VEE vee 0`): its
+    //     body is replaced by a rail glyph entirely placed and
+    //     oriented by the rails decoration stub (V14's documented
+    //     detached-glyph fallback). Locking the source body's
+    //     orientation reshuffles the layout for zero V14 benefit.
+    //   * A 2-pin element with *no rail pin at all* (a pure
+    //     signal element like `CIN in b`): nothing to orient
+    //     against a rail, so all eight survive trivially anyway —
+    //     `satisfies_v14` would return `true` for every
+    //     orientation, but short-circuiting keeps the seed
+    //     candidate set the full eight (matching prior behaviour
+    //     exactly, so signal-only placement is byte-identical).
+    //
+    // A 2-pin *rail consumer* (`RC vcc c`, `R1 vcc b`) is NOT
+    // exempt: one pin is a real rail pin whose V14 facing applies
+    // (rail pin out toward its band → glyph on the body exterior),
+    // and its signal pin is then forced opposite, toward the Mid
+    // band where its neighbour lives. It must flow into the
+    // `satisfies_v14` filter below so the rail pin faces its band.
+    let is_power_source = matches!(elem.role, spice_resolve::ElementRole::Power(_));
+    let has_rail_pin = elem.nodes.iter().any(|n| prefs.contains_key(n));
+    if elem.nodes.len() <= 2 && (is_power_source || !has_rail_pin) {
+        return Orientation::ALL.to_vec();
+    }
+    let filtered: Vec<Orientation> = Orientation::ALL
+        .iter()
+        .copied()
+        .filter(|&o| satisfies_v14(elem, prefs, o))
+        .collect();
+    if filtered.is_empty() {
+        // No V14-ideal orientation (e.g. a negative-supply
+        // source whose vee and ground pins both want
+        // screen-down). Fall back to the full eight — the rails
+        // decoration stub offsets the glyph.
+        Orientation::ALL.to_vec()
+    } else {
+        filtered
+    }
 }
 
 /// Audit the V14 **consistency requirement** over the seed idioms.

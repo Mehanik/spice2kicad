@@ -8439,6 +8439,265 @@ seed in three. The owner reported that defect from a single rendering,
 and ADR-30 recorded `y-sign` as *repairing* it (1 → 0) — also from one
 rendering. Both readings are draws of a coin flip. The defect is real
 but **intermittent**, which changes what fixing it means: a hard
-orientation constraint (the ADR-32-adjacent V17 work) is the right
+orientation constraint (the ADR-33 V17 work) is the right
 shape, and a cost tweak that happens to land 0 on the shipped seed is
 not a fix at all.
+## ADR-33 — V17: a mirrored amplifier is V14-legal, because V14 constrains the other axis
+
+**Status:** measured 2026-08-29 on `492db04`. Invariant **V17 added**
+(Tier 1) with its verifier and scoreboard cell; the enforcement is
+registered as the ADR-23 challenger `signal-direction` and is **dead on
+the default path**. Promotion is an owner decision and is NOT taken here.
+
+### The report
+
+> "Why on `sallen_key_driven` did the op-amp get mirrored? It looks
+> wrong. I don't think we should ever mirror op-amps left-right, or
+> rotate it output to look left."
+
+An amplifier symbol has an intrinsic reading direction — inputs on the
+left, output on the right. Mirroring it across `y` is electrically
+identical and visually wrong.
+
+### Why nothing in the tree could see it
+
+`orient::allowed_orientations` filtered the orientation candidate set on
+`satisfies_v14` **and nothing else**. V14 is a claim about the
+**vertical** axis: a V+ pin must face screen-up, a V− / GND pin
+screen-down. A KiCad `(mirror y)` maps `x -> -x` and leaves `y`
+untouched, so a mirrored opamp still has V+ up and V− down and is
+**V14-legal**. The default filter admits it — asserted, not assumed, by
+`orient::tests::the_default_filter_still_admits_a_mirrored_opamp`.
+
+No constraint anywhere governed a directional device's **horizontal**
+axis. The SA's `Proposal::MirrorY` is proposed only for elements whose
+allowed set is a strict subset of the eight — which is exactly the
+rail-bearing active devices, i.e. exactly the opamps — so the one move
+that produces this defect was aimed at the one part class that suffers
+from it, with nothing to reject the result. It mirrors whenever HPWL
+pays.
+
+This is a *third* instance of a pattern this file already records twice
+(ADR-25's pin-reach hole, ADR-22's mechanism-vs-consequence refusal):
+**a guard is silent about the axis it does not measure.** V14's own
+doc comment says "power-glyph orientation", and everyone downstream read
+that as "orientation".
+
+### The rule
+
+> A symbol carrying **at least one `Output` pin and at least one
+> `Input` pin** must be posed so the **mean world `x` of its output
+> pins is strictly greater than the mean world `x` of its input pins**.
+
+Stated on KiCad pin **electrical types**, so it is structural rather
+than pattern-matched (CLAUDE.md principle 9): it covers comparators,
+buffers, gates and any `.subckt` mapped to a directional symbol, with no
+named special case. The word "OPAMP" appears nowhere in the rule, the
+filter or the verifier.
+
+Tie and degenerate cases, decided (full text in `docs/invariants.md`
+V17):
+
+* **Either group empty -> exempt.** `Device:Q_NPN_BCE` carries one
+  `input` (the base) and two `passive` pins; it has no left-to-right
+  reading direction and mirroring a BJT is a legitimate drawing choice.
+  Asserted by
+  `orient::tests::signal_direction_is_inert_for_a_symbol_with_no_output_pin`,
+  which requires the BJT's allowed set to be *identical* under both
+  placers.
+* **Mean, not extreme.** A strict `max(input x) < min(output x)`
+  separation agrees with the mean on a clean symbol but is
+  **unsatisfiable** for any symbol with one off-side pin (an enable
+  input on the bottom edge, whose `x` is mid-body) — and an
+  unsatisfiable hard filter degrades to its vacuous fallback, losing the
+  constraint entirely instead of merely relaxing it. The mean is also
+  invariant to how many pins each group has, which is what "the input
+  side" means.
+* **Multiple outputs** fold into the same mean.
+* **Equal means is a VIOLATION.** The inequality is strict. A pose whose
+  two means coincide — a 90°/270° rotation, output pointing down — has
+  no left-to-right reading at all, which is what the invariant asserts.
+
+### Enforcement: a hard candidate filter, at every reorienting seam
+
+V17 is Tier 1 and categorical, which is precisely the
+constraints-vs-costs decision rule's hard case. There is deliberately
+**no V17 weight in `cost.rs`** — the `power_pin_outward` post-mortem
+already records what a tunable term does at a safe weight.
+
+`allowed_orientations` gained a `Placer` argument and, under
+`signal-direction`, narrows each element's V14 survivor set again. That
+single seam discharges the consistency requirement, because every stage
+that can reorient an element reads the same set:
+
+| stage | how it reads `allowed` |
+| --- | --- |
+| `pick_orientations` (`lib.rs`) | scores only over `allowed[i]` |
+| SA rotate (`solver/anneal.rs`) | `v14_infeasible` force-reject via `proposal.reorients()` |
+| SA **mirror-Y** (same gate) | **same** — `Proposal::reorients()` returns the index for `MirrorY` as well as `Rotate` |
+| phase 4.5 (`kicad-emitter/src/refine.rs`) | `distinct_orientations(&meta.allowed[i], …)` on both its single-element and joint-product paths |
+
+The mirror row is the load-bearing one: **every observed V17 violation
+is a mirror, not a rotation**, so a filter that gated rotation alone
+would have left the defect fully intact.
+`orient::tests::signal_direction_excludes_every_mirrored_opamp_pose`
+asserts the opamp's set is `[IDENTITY]` under the challenger, which is
+what makes the SA's mirror gate bite.
+
+Phase 4.5 is *offender-gated* (it only looks at V5/V12 offenders), so it
+cannot be relied on to *repair* a V17 violation. It does not need to:
+the filter runs upstream at the seed and the SA, so no element can reach
+phase 4.5 in a V17-violating pose, and phase 4.5 selects only from the
+same set, so it cannot introduce one.
+
+`v14_allowed` is split out of the closure so the narrowing composes onto
+the **whole** V14 result including its `<= 2`-terminal exemption; folding
+V17 in beside that early return would let a two-pin directional part (a
+buffer with one input, one output and no rail pin) take the exemption
+and escape V17.
+
+**Precedence when the two filters conflict:** V14 first, V17 relaxes
+into it. V14 carries a documented escape for an infeasible element (the
+detached-glyph stub) and V17 has none, so relaxing V17 loses less.
+Neither fallback branch is reached today: `Amplifier_Operational:OPAMP`
+has a V14 ∩ V17 intersection of exactly one pose, `IDENTITY`.
+
+**Blast radius, and why it is this small.** The SA proposes mirror-Y only
+for `mirror_eligible` = elements whose allowed set is already `< 8`. The
+opamp's V14 set is 2 (`R0`, `R0+mirror`) and its V14 ∩ V17 set is 1, so
+membership of `mirror_eligible` is **unchanged** — the arm's only
+behavioural difference is that the opamp's mirror proposals are now
+force-rejected, and the reject happens *after* the Metropolis draw, so
+the RNG stream is preserved exactly as the V14 gate already arranges.
+
+### What the defect actually is: not two fixtures, a distribution
+
+The shipped seed reports 2 backwards instances of 6. That is one draw.
+Over SA seeds 1..8 (`--sa-seed`, the ADR-31 instrument), `flow-seed-v4`
+reads **3, 4, 2, 2, 2, 2, 2, 2** — mean 2.375, range 2..4 — and every one
+of the five opamp-bearing fixtures is backwards in at least one draw.
+`signal-direction` reads **0 on all eight**, as a hard filter must. That
+seed-stability is the check that the filter is not leaking; the champion
+side is the evidence that "two fixtures" understates the class.
+
+
+### The grading
+
+`just scoreboard-run flow-seed-v4`, `just scoreboard-run signal-direction`,
+`just scoreboard flow-seed-v4 signal-direction`, all eighteen fixtures,
+both arms collected on this tree.
+
+Only cells that moved (the other ~2400 are identical):
+
+| metric | fixture | `flow-seed-v4` | `signal-direction` | Δ |
+| --- | --- | --- | --- | --- |
+| `v14.glyph_body` | `sallen_key_lpf` | 1 | 0 | **−1.00** |
+| `v13.9_foreign_over_glyph` | `opamp_inverting_real` | 0 | 1 | +1.00 |
+| `v13.9_foreign_over_glyph` | `sallen_key_driven` | 1 | 0 | −1.00 |
+| `v13.9_foreign_over_glyph` | `sallen_key_lpf` | 0 | 1 | +1.00 |
+| **`v17.signal_direction`** | `opamp_inverting_real` | **1** | **0** | **−1.00** |
+| **`v17.signal_direction`** | `sallen_key_lpf` | **1** | **0** | **−1.00** |
+| `v5` | `sallen_key_lpf` | 3 | 5 | +2.00 |
+| `v16.bends` | `opamp_inverting_real` | 6 | 7 | +1.00 |
+| `v16.bends` | `sallen_key_driven` | 12 | 9 | −3.00 |
+| `v16.bends` | `sallen_key_lpf` | 12 | 8 | −4.00 |
+| `v16.branches` | `opamp_inverting_real` | 1 | 0 | −1.00 |
+| `crossings` | `sallen_key_driven` | 0 | 1 | +1.00 |
+| `crossings` | `sallen_key_lpf` | 1 | 2 | +1.00 |
+| `detour` | `opamp_inverting_real` | 1.2326 | 1.1860 | −4.65 |
+| `detour` | `sallen_key_driven` | 1.1600 | 1.2062 | +4.62 |
+| `detour` | `sallen_key_lpf` | 1.3019 | 1.0426 | **−25.93** |
+| `q5` | `sallen_key_driven` | 5 | 0 | −5.00 |
+| `f3` | `sallen_key_lpf` | 0 | 1 | +1.00 |
+| `f5` | `sallen_key_lpf` | 2 | 0 | −2.00 |
+| `f6` | `sallen_key_driven` | 13 | 3 | −10.00 |
+
+```
+Tier 0 (per-fixture hard, never aggregated):
+  champion   : clean
+  challenger : clean
+  regressed  : none (no Tier-0 cell is worse than the champion)
+
+Aggregate (lower is better; Δ = challenger − champion):
+  Tier 1 total Δ = -2.00 points
+  Tier 2 total Δ = -44.97 points
+
+VERDICT: challenger `signal-direction` is PROMOTABLE against `flow-seed-v4`.
+```
+
+**Exactly three fixtures move** — `opamp_inverting_real`,
+`sallen_key_driven`, `sallen_key_lpf` — and fifteen of eighteen are
+unchanged on every cell. That is the containment argument the filter's
+narrowness predicts: only a sheet carrying a directional symbol whose
+mirror the SA would otherwise have accepted can move at all.
+
+### The Tier-2 −44.97 is a sample, not an effect (ADR-31 applied)
+
+The scoreboard reads **one SA draw per arm**, and ADR-31 measured that on
+V16 and detour the seed-to-seed spread exceeds the arm-to-arm difference.
+So the two headline Tier-2 movers were re-derived over SA seeds 1…8 on
+each of the three moved fixtures, both arms — 48 conversions per metric.
+
+V16 bends, via `tests/ink_dump.rs` (the suite's own `common::ink::measure`):
+
+| fixture | champion B (8 seeds) | challenger B (8 seeds) | Δ of means | t |
+| --- | --- | --- | --- | --- |
+| `sallen_key_lpf` | mean 9.50, sd 1.51 | mean 9.75, sd 1.49 | **+0.25** | +0.33 |
+| `sallen_key_driven` | mean 10.62, sd 2.00 | mean 9.25, sd 2.38 | **−1.38** | −1.25 |
+| `opamp_inverting_real` | mean 6.12, sd 1.81 | mean 6.62, sd 2.67 | **+0.50** | +0.44 |
+
+Detour, via `detour_dump` — a new `#[ignore]`d instrument added here that
+calls the ratchet's own `wire_detour`, so this is the project's number and
+not a re-derivation. Validated before use by reproducing **all six**
+scoreboard detour cells exactly (1.3019 / 1.0426 / 1.1600 / 1.2062 /
+1.2326 / 1.1860):
+
+| fixture | champion detour | challenger detour | Δ of means | t |
+| --- | --- | --- | --- | --- |
+| `sallen_key_lpf` | mean 1.1228, sd 0.0297 | mean 1.1287, sd 0.0407 | **+0.60 pts** | +0.34 |
+| `sallen_key_driven` | mean 1.1332, sd 0.0601 | mean 1.1460, sd 0.0497 | **+1.27 pts** | +0.46 |
+| `opamp_inverting_real` | mean 1.1861, sd 0.0698 | mean 1.1845, sd 0.0852 | **−0.16 pts** | −0.04 |
+
+Every one is indistinguishable from zero, and the sign of the *aggregate*
+detour effect is if anything the wrong way. The −25.93 headline is the
+shipped seed drawing `sallen_key_lpf`'s champion at **1.3019 — worse than
+any of its own eight draws** (max 1.169) — and its challenger at **1.0426,
+better than any of its own eight** (min 1.078). That is ADR-30's
+coincidence reproduced on a different arm, and it is the second time the
+instrument has manufactured a ~26-point Tier-2 story out of one draw.
+
+**So the honest reading of the verdict is:**
+
+* **Tier 0** — clean on both sides, nothing regressed. Real.
+* **Tier 1 = −2.00** — and **all of it is the V17 cell**, which is
+  seed-*stable* by construction: over the same eight seeds the champion
+  reads **3, 4, 2, 2, 2, 2, 2, 2** backwards instances and the challenger
+  reads **0** at every one. The other two Tier-1 cells that moved
+  (`v14.glyph_body` −1, `v13.9_foreign_over_glyph` +1) cancel, are
+  single-sample, and were **not** re-derived across seeds — if they are
+  noise the Tier-1 total is still −2.00, because V17 alone supplies it.
+* **Tier 2 = −44.97** — **not supported.** Treat it as ~0. The promotion
+  rule reads T1 first and T1 improves on the one metric that is not a
+  sample, so the verdict itself survives the retraction; the *magnitude*
+  does not.
+
+### What is NOT claimed
+
+* No baseline regeneration. The default path is byte-identical (19 emitted
+  sheets `diff`-identical between a binary built at `492db04` and this
+  tree, both `--placer flow-seed-v4 --no-layout-cache`), so ADR-16's
+  protocol rule 2 does not bind and `baseline_lock` is untouched and green.
+  On a promotion it would bind, and the per-fixture V16 table above shows
+  `opamp_inverting_real` B 6→7 — a rise that the multi-seed check above
+  says is noise (t = +0.44), and that the owner would have to accept or
+  reject at that point.
+* **Promotion is not taken.** ADR-23 is explicit that the scoreboard
+  prints evidence and promotion is an owner decision. The arm stays
+  registered and dead on the default path.
+
+### Instruments left behind
+
+* `crates/spice2kicad/tests/placement_quality.rs::detour_dump` —
+  `#[ignore]`d; the detour counterpart of ADR-31's `ink_dump`, calling the
+  ratchet's own `wire_detour` so a seed sweep is graded by the project's
+  definition rather than a copy of it.

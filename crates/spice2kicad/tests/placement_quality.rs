@@ -3019,11 +3019,9 @@ fn pwr_flags_sit_on_existing_drawn_geometry() {
 /// Both non-zero entries are the same defect: an `Amplifier_Operational:OPAMP`
 /// emitted at `rot 0` with `(mirror y)`, which is V14-legal (a `(mirror y)`
 /// flips only `x`, so V+ still faces up) and therefore invisible to every
-/// existing candidate filter. See `docs/invariants.md` V17 and ADR-32.
-const SIGNAL_DIRECTION_BUDGETS: &[(&str, usize)] = &[
-    ("opamp_inverting_real", 1),
-    ("sallen_key_lpf", 1),
-];
+/// existing candidate filter. See `docs/invariants.md` V17 and ADR-33.
+const SIGNAL_DIRECTION_BUDGETS: &[(&str, usize)] =
+    &[("opamp_inverting_real", 1), ("sallen_key_lpf", 1)];
 
 fn signal_direction_budget(fixture: &str) -> usize {
     SIGNAL_DIRECTION_BUDGETS
@@ -3145,4 +3143,36 @@ fn directional_symbols_read_left_to_right_across_fixtures() {
          geometry, do not raise the literal):\n  {}",
         failures.join("\n  "),
     );
+}
+
+/// **Wire-detour instrument** for hand conversions — ADR-31's `ink_dump`
+/// pattern, for the other Tier-2 gradient the scoreboard reports.
+///
+/// `#[ignore]`d: an *instrument*, not a gate. The detour ratchet grades
+/// the sheets the suite converts for itself; this one grades sheets a
+/// hand conversion left behind, which is what a placer A/B or an SA seed
+/// sweep produces. It calls the SAME [`wire_detour`] the ratchet asserts
+/// on, so the number is the project's own rather than a re-derivation —
+/// which is exactly why ADR-31 had to validate its re-implementation
+/// against two recorded values before it could be trusted.
+///
+/// Set `S2K_DETOUR_PAIRS` to a `:`-separated list of
+/// `<fixture>=<emitted .kicad_sch>` entries and run with `--ignored
+/// --nocapture`.
+#[test]
+#[ignore = "instrument, not a gate"]
+fn detour_dump() {
+    let pairs = std::env::var("S2K_DETOUR_PAIRS")
+        .expect("set S2K_DETOUR_PAIRS to `:`-separated <fixture>=<sheet> entries");
+    for entry in pairs.split(':').filter(|e| !e.is_empty()) {
+        let Some((fixture, path)) = entry.split_once('=') else {
+            println!("{entry}: ERROR expected <fixture>=<sheet>");
+            continue;
+        };
+        let cir = fixtures_dir().join(format!("{fixture}.cir"));
+        let root = parse_sch(Path::new(path));
+        let (wire, ideal) = wire_detour(&cir, &root);
+        let ratio = if ideal > 0.0 { wire / ideal } else { 0.0 };
+        println!("{path}: detour={ratio:.4} wire={wire:.2} ideal={ideal:.2}");
+    }
 }

@@ -373,7 +373,7 @@ const METRICS: &[Metric] = &[
         1.0,
         "V15: content or instance anchors outside the A4 usable area",
     ),
-    // V17, registered 2026-08-29 with the invariant itself (ADR-32). A
+    // V17, registered 2026-08-29 with the invariant itself (ADR-33). A
     // directional symbol drawn backwards is a Tier-1 readability defect
     // V14 is structurally blind to: V14 constrains the vertical axis and
     // a `(mirror y)` flips only x, so a mirrored opamp is V14-legal.

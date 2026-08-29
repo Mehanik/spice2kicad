@@ -433,7 +433,7 @@ pub enum Placer {
     /// observed violation is a mirror), and layout phase 4.5. That is the
     /// consistency requirement discharged at all three seams.
     ///
-    /// See `docs/invariants.md` V17 and ADR-32.
+    /// See `docs/invariants.md` V17 and ADR-33.
     SignalDirection,
 }
 

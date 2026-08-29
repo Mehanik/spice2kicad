@@ -568,7 +568,7 @@ phase 4.5. There is deliberately **no V17 weight in `cost.rs`**, for the
 `power_pin_outward` reason. V14 wins if the intersection empties — it has
 a documented escape (the detached glyph) and V17 has none — and the
 all-eight fallback stands if V14's own set empties. See
-`docs/invariants.md` V17 and ADR-32.
+`docs/invariants.md` V17 and ADR-33.
 
 ## Visual quality invariants
 
