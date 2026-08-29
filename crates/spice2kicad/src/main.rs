@@ -56,6 +56,20 @@ struct Cli {
     #[arg(long)]
     refine_iterations: Option<u32>,
 
+    /// PRNG seed for the SA refiner. Same seed → same placement.
+    ///
+    /// This exists as a **measurement instrument**, not a tuning knob.
+    /// The SA's output on a fixture is a draw from a distribution, and
+    /// the scoreboard reads exactly one draw per arm — so a
+    /// champion-vs-challenger difference on a single fixture can be
+    /// entirely sampling noise. ADR-31 measured that on `named_rails`:
+    /// over 20 seeds the two arms' V16 bend distributions are
+    /// indistinguishable (3.50 vs 3.70, t = 0.43) while the one shipped
+    /// seed reads 1 vs 6. Re-derive any single-fixture claim across
+    /// several seeds before treating it as an effect.
+    #[arg(long)]
+    sa_seed: Option<u64>,
+
     /// Which registered placement engine to run (ADR-23).
     ///
     /// `flow-seed-v4` (the default since the second ADR-23 promotion,
@@ -250,6 +264,10 @@ fn emit_schematic_target(
         refine_iterations: cli.refine_iterations.unwrap_or(200),
         placer: cli.placer,
         ..LayoutOptions::default()
+    };
+    let opts = LayoutOptions {
+        seed: cli.sa_seed.unwrap_or(opts.seed),
+        ..opts
     };
     if cli.placer != spice_layout::Placer::default() {
         eprintln!(

@@ -8200,3 +8200,163 @@ This is the same shape as the ADR-17 retirement and as MEMORY's
 incumbent's own output cannot, on its own, tell a correction from a
 regression. Here it ranked the arm that leaves two reported visual
 defects in place above the arm that repairs them.
+
+## ADR-31 — `named_rails` did not regress under `y-sign`: the scoreboard reads one SA sample per arm
+
+**Status:** measured 2026-08-29 on `600d246`. **No placer variant
+built.** ADR-30's `named_rails` attribution is **retracted**; its
+`y-sign` verdict (not promotable on the ADR-23 rule as written) stands
+unchanged, because that rule reads the same single sample.
+
+### What was asked
+
+ADR-30 recorded that 77% of `y-sign`'s +39.70 Tier-2 loss sits on one
+6-element fixture (`detour` +25.64, `v16.bends` +5.00 = 30.64 of 39.70)
+and proposed `named_rails` as the cheapest probe for the bundled
+re-tuning the correction was said to need. This is that probe.
+
+### (a) What moves
+
+`flow-seed-v4` → `y-sign` on `named_rails`, emitted geometry
+(`--no-layout-cache`, fresh out-dir, debug binary, both arms):
+
+| | champion | `y-sign` |
+| --- | --- | --- |
+| `RPU` | (38.10, 35.56) rot 0 mirror y | (38.10, 35.56) rot 0 **no mirror** |
+| `RPD` | (35.56, 45.72) | (35.56, **39.37**) |
+| `RIN` | (38.10, 46.99) rot 180 | (**40.64**, **41.91**) rot 180 |
+| `CL`  | (43.18, 52.07) mirror y | (**44.45**, **49.53**) no mirror |
+
+Both arms honour the fixture's stated convention (RPU up to `+5V`, RPD
+and CL down). What differs is the Y of the four `out` pins: the
+champion lands three of them on one row so the Steiner trunk is a
+single horizontal run (B = 1); the challenger spreads them over four
+rows (35.56 / 38.10 / 39.37 / 45.72) and the trunk snakes (B = 6).
+
+### (b) Which stage — measured, three-point ablation
+
+| ablation | champion B | `y-sign` B | placements equal? |
+| --- | --- | --- | --- |
+| `--no-refine` (no SA, no phase 4.5) | 4 | 2 | no — `RIN` seed rot 0 vs 180 only |
+| `--refine-iterations 0` (seed + 4.5) | 2 | 2 | **yes, identical** |
+| default (seed + SA + 4.5) | **1** | **6** | no |
+
+The seed differs in exactly one *orientation* (`RIN`, from
+`pick_orientations`' frame-sensitive V5 scorer), and phase 4.5 converges
+both arms onto the same pose — after it, the two placements are
+**element-for-element identical**. **The SA is the whole divergence.**
+From that one shared input the champion improves 2 → 1 and the
+challenger degrades 2 → 6.
+
+### (c) The mechanism, demonstrated
+
+Cross-scoring both final layouts in *the same* (corrected, page) frame —
+`cargo test -p spice-layout --test ysign_probe -- --ignored --nocapture`:
+
+| | champion's layout | `y-sign`'s layout | Δ, weighted |
+| --- | --- | --- | --- |
+| `rail_direction` (w 200) | 670.97 | 237.10 | **−86 774** |
+| `band_inversion` (w 100) | 46.77 | 12.90 | −3 387 |
+| `soft_y_residual` (w 50) | 196.37 | 162.50 | −1 694 |
+| `overlap` (w 200) | 0.00 | 5.16 | +1 032 |
+| `rail_stub_alignment` (w 50) | 32.26 | 46.77 | +726 |
+| `hpwl` (w 1) | 46.99 | 44.45 | −3 |
+| **total** | **150 353** | **60 254** | **−90 099** |
+
+So this is **not a search failure**: in the corrected frame the
+objective *prefers* the badly-routing layout, by 2.5×, and **96.3% of
+that preference is the single weight-200 `rail_direction` term**. Its
+largest contributor is a *phantom*: `VPOS`, a `;@ power=`-tagged source
+the emitter never draws, pays 627 of the champion layout's 671 because
+the frame correction reveals its pose as rail-inverted.
+
+That is the honest mechanism for the *shipped sample*. It is also not
+the finding, because of (d).
+
+### (d) Verdict: none of (a)/(b)/(c) — the difference is sampling noise
+
+The SA's output is a draw from a distribution and the scoreboard reads
+**one** draw per arm. `--sa-seed` (added here as the instrument) over
+seeds 1…20, `named_rails`, both arms. B is the suite's own
+`common::ink::measure`, read through `tests/ink_dump.rs`. `detour` is a
+re-implementation of `placement_quality::wire_detour` for this fixture's
+one routed component, validated by reproducing **both** of ADR-30's
+recorded values exactly (1.0769 and 1.3333) before any sweep was run:
+
+| metric | champion | `y-sign` | Δ of means | t |
+| --- | --- | --- | --- | --- |
+| `v16.bends` | mean 3.50, sd 1.57, range 0–6 | mean 3.70, sd 1.38, range 1–6 | **+0.20** | +0.43 |
+| `detour` | mean 1.1769, sd 0.136 | mean 1.1739, sd 0.083 | **−0.0030** | −0.08 |
+
+Both are indistinguishable from zero. The shipped seed
+(`0xC0FF_EE42`) draws the champion in the best **3 of 20** of its own
+bend distribution (B = 1) and the challenger in the worst **2 of 20** of
+its (B = 6); on detour it draws the challenger's **single worst of 20**
+(1 of 20 at-or-above 1.3333). ADR-30's 30.64 is that coincidence, not an
+effect.
+
+Suite-wide, same 8 seeds per arm, V16 B summed over all 18 fixtures:
+
+* **Δ at the shipped seed: +12.** Δ of the 8-seed means: **+0.50.**
+* **Seven fixtures are seed-inert in both arms** (`diff_pair`,
+  `lc_ladder_lpf`, `multivibrator`, `opamp_definition_level`,
+  `port_shapes`, `rc_lowpass`, `rc_lowpass_ports`): sd = 0, so their
+  shipped-seed Δ (all `+0`) is a real measurement, not a sample.
+* On the eleven the SA does move, sample sd runs 0.99–4.89 bends and
+  **only one fixture's Δ of means clears |t| > 2** —
+  `shunt_feedback_amp` at **t = −2.58**, i.e. the one arguably real V16
+  effect in the suite is the challenger being **3.50 bends better**. The
+  shipped seed reports that fixture as `+1`, the wrong sign.
+  `named_rails` itself is t = **+0.16**.
+
+So the answer is **not** (a) one contained interaction, **not** (b) a
+multi-term re-tune, and **not** (c) a property of the fixture. It is a
+property of the **instrument**: a one-sample-per-arm comparison of a
+stochastic optimiser, on metrics whose seed-to-seed spread exceeds the
+arm-to-arm difference.
+
+**No `y-sign-v2` was built, deliberately.** Tuning any term until
+`named_rails` returns B = 1 would be fitting one RNG draw; the sweep
+above shows B = 1 is reachable from the challenger arm by changing
+*nothing but the seed* (seed 12), and by changing nothing but the
+`rail_direction` weight (w = 20). Both are the same over-fit wearing
+different clothes.
+
+### What this does and does not change
+
+* **ADR-30's defect analysis stands.** `world_pin_mm` really is a sign
+  error — that is a fact about the code, not a measurement. Its reported
+  *benefits* (three `v14.glyph_body` violations closed,
+  `two_stage_amp`'s Q2 and `wien_bridge_osc`'s RS/CS repaired) were
+  **not** re-derived across seeds here and are single-sample on the same
+  instrument; treat them as unconfirmed in the same way, in the same
+  direction. All three fixtures involved (`sallen_key_lpf`,
+  `wien_bridge_osc`, `two_stage_amp`) are among the eleven the SA *does*
+  move seed-to-seed on V16, so seed-inertness is not available as an
+  argument for them either; V14's own seed spread is simply unmeasured.
+* **ADR-30's `named_rails` section is retracted.** The bundled
+  re-tuning it prescribes is not motivated by this evidence.
+* **The ADR-23 verdict is unchanged and still correct as a procedure:**
+  T1 +0.00 fails "strictly improves" whatever the noise is. What changes
+  is the *reason* — `y-sign` is not promotable because the aggregate
+  cannot resolve it, not because it is worse.
+* **Open, and NOT fixed here: the scoreboard is single-sample.** Making
+  it average over k seeds multiplies collection time by k (8–12 min per
+  arm today) and would need the ratchets left alone, since they are
+  per-fixture single-sample by design and that is correct for them —
+  a ratchet asks "did *this* build regress", not "is this placer
+  better". Sizing k, and whether the T1/T2 aggregate should carry an
+  error bar at all, is an owner decision. Until then, **read any
+  single-fixture scoreboard delta as one sample**, and re-derive it
+  across seeds before calling it an effect.
+
+### Instruments left behind
+
+* `spice2kicad --sa-seed <u64>` — overrides the SA PRNG seed. Dead on
+  the default path; `baseline_lock` unmoved.
+* `crates/spice-layout/tests/ysign_probe.rs` — cross-scores a fixture's
+  seed and final placements in **both** pin frames (`#[ignore]`d).
+* `crates/spice2kicad/tests/ink_dump.rs` — V16 B / J for arbitrary
+  emitted sheets via the suite's own `common::ink::measure`
+  (`#[ignore]`d), so a hand conversion or seed sweep is graded by the
+  project's counter rather than a re-derivation.
