@@ -435,6 +435,48 @@ pub enum Placer {
     ///
     /// See `docs/invariants.md` V17 and ADR-33.
     SignalDirection,
+    /// **The composed readability arm** — [`Placer::FlowSeedV4`] plus
+    /// *all four* of the built, registered, individually-measured
+    /// mechanisms that each service one of the owner's reported
+    /// readability defects, and nothing else:
+    ///
+    /// | constituent arm | accessor | owner defect |
+    /// | --- | --- | --- |
+    /// | [`Placer::SignalDirection`] | [`Self::signal_direction_filter`] | opamps drawn mirrored, output facing left |
+    /// | [`Placer::TerminalSeriesDivider`] | [`Self::terminal_net_series`] + [`Self::divider_node_series`] | VIN / VOUT terminals drawn on end |
+    /// | [`Placer::DividerRailsStrict`] | [`Self::rail_gated_dividers`] + [`Self::divider_tap_must_be_unloaded`] | `port_shapes`' split chain — the `detect_dividers` degree-2 over-match that pins a plain series chain vertically |
+    /// | [`Placer::FacingTrigger`] | [`Self::facing_inverted_trigger`] | `two_stage_amp` `Q2` drawn upside down |
+    ///
+    /// **Why a composition needs its own registration.** Each arm was
+    /// graded alone against `flow-seed-v4`, and three of the four were
+    /// *individually* PROMOTABLE or blocked on a single cell. None of
+    /// that says what they do together: the placer is a globally-coupled
+    /// optimiser, so four filters and constructions that are separately
+    /// contained can still interact. ADR-23's instrument grades a *whole
+    /// placer*, so the composition has to be one.
+    ///
+    /// **Why the interaction is expected to be positive, and where.**
+    /// ADR-23 D12 closes on the one prediction this arm exists to test:
+    /// `terminal-series-divider` cannot reach `port_shapes`' two
+    /// remaining vertical terminals because `detect_dividers`' degree-2
+    /// over-match pins all four members of its plain series chain
+    /// *before* `apply_series_horizontal` runs at all. The rail gate is
+    /// strictly upstream of that, so composing the two should unblock
+    /// terminals neither arm reaches alone.
+    ///
+    /// **`y-sign` is deliberately NOT a constituent.** ADR-30 and ADR-31
+    /// leave it unresolved — the correction is real, its Tier-2 cost was
+    /// attributed to `named_rails` on a `+5` bend difference a 20-seed
+    /// sweep reduced to `+0.20 ± noise`, and ADR-30's own prescription is
+    /// that it must land *bundled with a re-tuning*, not alone. Folding
+    /// an unresolved arm into a composition would confound the
+    /// attribution of everything else in it.
+    ///
+    /// Every constituent is gated on its own accessor and nothing else,
+    /// so this variant adds **no new mechanism** — only a name under
+    /// which the four can be graded jointly. It is dead on the default
+    /// path; `baseline_lock` is the empirical half.
+    ReadableV1,
 }
 
 impl Placer {
@@ -457,6 +499,7 @@ impl Placer {
         Self::TerminalSeriesDivider,
         Self::YSign,
         Self::SignalDirection,
+        Self::ReadableV1,
     ];
 
     /// The name accepted by `--placer` and printed by the scoreboard.
@@ -479,6 +522,7 @@ impl Placer {
             Self::TerminalSeriesDivider => "terminal-series-divider",
             Self::YSign => "y-sign",
             Self::SignalDirection => "signal-direction",
+            Self::ReadableV1 => "readable-v1",
         }
     }
 
@@ -541,6 +585,11 @@ impl Placer {
                 "flow-seed-v4 plus the V17 hard filter: a symbol with both \
                  input and output pins is posed output-to-the-right"
             }
+            Self::ReadableV1 => {
+                "flow-seed-v4 plus all four registered readability arms: \
+                 signal-direction + terminal-series-divider + \
+                 divider-rails-strict + facing-trigger (no y-sign)"
+            }
         }
     }
 
@@ -590,6 +639,7 @@ impl Placer {
                 | Self::TerminalSeriesDivider
                 | Self::YSign
                 | Self::SignalDirection
+                | Self::ReadableV1
         )
     }
 
@@ -627,6 +677,7 @@ impl Placer {
                 | Self::TerminalSeriesDivider
                 | Self::YSign
                 | Self::SignalDirection
+                | Self::ReadableV1
         )
     }
 
@@ -641,7 +692,10 @@ impl Placer {
     /// bias divider (under-match). See [`Self::DividerRails`].
     #[must_use]
     pub fn rail_gated_dividers(self) -> bool {
-        matches!(self, Self::DividerRails | Self::DividerRailsStrict)
+        matches!(
+            self,
+            Self::DividerRails | Self::DividerRailsStrict | Self::ReadableV1
+        )
     }
 
     /// Rail-gated divider idiom, conservative reading: is the shipping
@@ -651,7 +705,7 @@ impl Placer {
     /// This is the attribution arm — see [`Self::DividerRailsStrict`].
     #[must_use]
     pub fn divider_tap_must_be_unloaded(self) -> bool {
-        matches!(self, Self::DividerRailsStrict)
+        matches!(self, Self::DividerRailsStrict | Self::ReadableV1)
     }
 
     /// Orientation-churn stage 2: does the SA's V5 never-increase gate
@@ -673,7 +727,7 @@ impl Placer {
     /// on `(severed, coincident, v11, v13, v12, v5, bends)`.
     #[must_use]
     pub fn facing_inverted_trigger(self) -> bool {
-        matches!(self, Self::FacingTrigger)
+        matches!(self, Self::FacingTrigger | Self::ReadableV1)
     }
 
     /// F1 case (a): does [`crate::idioms::apply_series_horizontal`] accept
@@ -687,7 +741,10 @@ impl Placer {
     /// measured what an orientation-only change costs.
     #[must_use]
     pub fn terminal_net_series(self) -> bool {
-        matches!(self, Self::TerminalSeries | Self::TerminalSeriesDivider)
+        matches!(
+            self,
+            Self::TerminalSeries | Self::TerminalSeriesDivider | Self::ReadableV1
+        )
     }
 
     /// F1 case (b): does that same pass **orient without re-columning**
@@ -699,7 +756,7 @@ impl Placer {
     /// never moved.
     #[must_use]
     pub fn divider_node_series(self) -> bool {
-        matches!(self, Self::TerminalSeriesDivider)
+        matches!(self, Self::TerminalSeriesDivider | Self::ReadableV1)
     }
 
     /// F3: does the placer convert a library-frame pin `y` into the
@@ -730,7 +787,7 @@ impl Placer {
     /// why it must be a hard filter rather than a `cost.rs` weight.
     #[must_use]
     pub fn signal_direction_filter(self) -> bool {
-        matches!(self, Self::SignalDirection)
+        matches!(self, Self::SignalDirection | Self::ReadableV1)
     }
 
     /// Look a placer up by the name `--placer` accepts.
@@ -954,6 +1011,82 @@ mod tests {
         assert!(!Placer::SignalDirection.terminal_net_series());
         assert!(!Placer::SignalDirection.m3_signed_gate());
         assert!(!Placer::SignalDirection.m5_element_streams());
+    }
+
+    /// The composed readability arm is exactly the OR of its four
+    /// constituents — every one of their accessors true, every other
+    /// registered mechanism false — and every one of them is false on
+    /// the default placer.
+    ///
+    /// The second half is the whole byte-identity argument for the
+    /// shipping output: the composition adds no new mechanism, so if
+    /// each constituent is unreachable by default then so is the
+    /// composition. `baseline_lock` is the empirical half.
+    #[test]
+    fn readable_v1_is_exactly_its_four_constituents_and_off_by_default() {
+        type Acc = (&'static str, fn(Placer) -> bool);
+        // The four arms' accessors, and the arm each belongs to.
+        let constituents: &[Acc] = &[
+            ("signal_direction_filter", Placer::signal_direction_filter),
+            ("terminal_net_series", Placer::terminal_net_series),
+            ("divider_node_series", Placer::divider_node_series),
+            ("rail_gated_dividers", Placer::rail_gated_dividers),
+            (
+                "divider_tap_must_be_unloaded",
+                Placer::divider_tap_must_be_unloaded,
+            ),
+            ("facing_inverted_trigger", Placer::facing_inverted_trigger),
+        ];
+        for &(name, f) in constituents {
+            assert!(f(Placer::ReadableV1), "readable-v1 must enable {name}");
+            assert!(!f(Placer::default()), "the default must not enable {name}");
+            assert!(
+                !f(Placer::FlowSeed) && !f(Placer::Champion),
+                "control arm must not enable {name}"
+            );
+        }
+        // It composes ON `flow-seed-v4`, so the A/B against the default
+        // isolates the four arms and nothing else.
+        assert!(Placer::ReadableV1.unified_roots());
+        assert!(Placer::ReadableV1.flow_seed_layering());
+        // …and nothing beyond them. `y-sign` in particular is left OUT:
+        // ADR-30 / ADR-31 leave it unresolved and its own prescription is
+        // that it must land bundled with a re-tuning, so folding it in
+        // would confound the attribution of everything else here.
+        let excluded: &[Acc] = &[
+            ("page_frame_pin_y", Placer::page_frame_pin_y),
+            ("unified_depth_roots", Placer::unified_depth_roots),
+            ("sa_rotate_v5_gate", Placer::sa_rotate_v5_gate),
+            ("m3_signed_gate", Placer::m3_signed_gate),
+            ("m3_property_text", Placer::m3_property_text),
+            ("m3_signed_legalize", Placer::m3_signed_legalize),
+            ("m5_element_streams", Placer::m5_element_streams),
+        ];
+        for &(name, f) in excluded {
+            assert!(!f(Placer::ReadableV1), "readable-v1 must NOT enable {name}");
+        }
+        assert_eq!(Placer::from_name("readable-v1"), Some(Placer::ReadableV1));
+    }
+
+    /// Each constituent arm stays registered and runnable on its own.
+    /// The composition is graded against them for attribution — ADR-23
+    /// D12's prediction is that `divider-rails` unblocks vertical
+    /// terminals `terminal-series-divider` alone cannot reach — and an
+    /// A/B needs both sides to exist.
+    #[test]
+    fn every_constituent_arm_stays_separately_registered() {
+        for name in [
+            "signal-direction",
+            "terminal-series-divider",
+            "terminal-series",
+            "divider-rails-strict",
+            "divider-rails",
+            "facing-trigger",
+        ] {
+            let p = Placer::from_name(name).unwrap_or_else(|| panic!("{name} is unregistered"));
+            assert_ne!(p, Placer::ReadableV1);
+            assert!(Placer::ALL.contains(&p));
+        }
     }
 
     #[test]
