@@ -493,6 +493,34 @@ shipped. When you add or read a guard in `refine.rs`, check its geometry
 against the verifier it claims to mirror — the old one's doc comment
 claimed the mirror it did not implement.
 
+**Pin text is graded Tier-1 at budget 0 and modelled by NO placement
+stage.** `world_extent` (`lib.rs`) unions body bbox ∪ pin *endpoints* ∪
+the Reference/Value property band. Pin *name/number* text is absent:
+`kicad_symbols::Symbol::pin_text_bboxes` exists, but only the emitter and
+phase 4.5 consume it — grep `spice-layout` and the only hits are
+doc-comment cross-references. Meanwhile `v13.5_prop_pintext` and
+`v13.7_label_pintext` are zero-budget Tier-1 ratchets.
+
+So placement routinely poses an element into a spot that is legal by
+every geometry it can see, and decoration then has nowhere to put a
+label or a property field. **Both of the blockers hit in Aug 2026 are
+this one gap**: ADR-34's vertical-terminal wall (every horizontal label
+pose collides with pin text — 1.435 mm² against 0.000 for vertical), and
+`terminal-series-divider`'s entire real Tier-1 cost
+(`v13.5_prop_pintext / common_emitter` 0 → 2).
+
+**The lawful consequence is NOT to reserve pin text in the placer.** That
+is the decoration-reservation program, measured dead four times — see
+ADR-14's post-mortem (the honest directional AABB is a strict *subset* of
+the symmetric halo, so a faithfulness fix can only free space) and
+ADR-19 M3 ("dead as specified"). Expect instead that **every reorienting
+pass will keep tripping `v13.5` / `v13.7`** until either (a) it poses the
+anchor pin into an empty half-plane — which is what the
+`terminal-series-divider` construction does, and why it repairs the
+vertical terminals reservation could not — or (b) the emitter-side
+`nudge_property_text` candidate set covers the boxed-in case. Reach for
+(a) or (b); do not reach for reservation.
+
 **V14 is a hard constraint (Tier 1, categorical), not a cost.** The
 orientation candidate set for any element bearing a power/ground pin is
 *filtered* to those placing VCC-pins up / GND-pins down; both
