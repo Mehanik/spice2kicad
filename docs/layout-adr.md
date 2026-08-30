@@ -8779,3 +8779,51 @@ the failure CLAUDE.md already forbids — *"never gate a change on a
 hand-picked subset of suites"* — and it was committed anyway, by
 choosing two binaries for speed. A subset run is not a fast version of
 the suite; it is a different and weaker claim.
+
+### Amendment (2026-08-30): the "what would fix it" pointer above is WRONG
+
+The diagnosis stands — these terminals are vertical because every
+horizontal pose collides with pin text, and the rotation chooser is
+blameless. **The prescription does not.** ADR-34 concluded the fix is a
+reserved label footprint (`label_geom`); an architecture review rejected
+that on two independent grounds.
+
+**1. Reservation is measured dead four times, and the fourth produced a
+proof rather than a measurement.** The honest directional AABB is a
+strict *subset* of the symmetric halo, so a faithfulness fix can only
+*free* space — and the freed space is exactly where unreserved
+decoration lands. ADR-14's post-mortem states it: *"the gap is not an
+unreserved class: it is the mirrored copy of a reach that does not
+exist."* ADR-19 M3 reproduced it from the opposite side and concedes
+"M3 is dead as specified." The only untried variant is the one ADR-14
+flags UNTRIED-NOT-ENDORSED, and nothing motivates paying for it.
+
+**2. The room does not have to come from reservation.** ADR-34 attacked
+*rotation at frozen placement* — the single configuration in which only
+reservation could help — and correctly found no move. But the anchor
+pin's facing is not frozen: **re-pose the terminal element so its anchor
+faces horizontally, and the label extends into the empty half-plane, so
+the pin-text collision never forms.** ADR-28's second amendment already
+says this outright: *"a vertical terminal is a placement defect (the
+anchor pin faces up or down, which is what both challenger arms
+change)."*
+
+That mechanism is built, registered and measured: **`terminal-series-divider`
+repairs every reachable vertical terminal and breaks none** (D12), where
+`terminal-series` alone repairs five and breaks a sixth. Its only real
+Tier-1 cost is `v13.5_prop_pintext / common_emitter` 0 → 2 — property
+text, which `schematic.rs::nudge_property_text` already models and
+already has a least-overlap fallback for, i.e. an emitter-side
+decoration repair guarded by an existing zero-slack ratchet, not a
+placement-model change.
+
+**So the owner's vertical-terminal complaint is NOT open pending a
+revived `label_geom`.** It is serviced by promoting the composed
+challenger. D12 closed with *"until [a port-label metric] exists this
+comparison cannot be settled by the scoreboard"* — ADR-28's second
+amendment has since added `port.label_vertical` / `port.label_backwards`,
+so it can now be settled.
+
+Leave `archive/adr14-directional-plus-label` and master's two forward
+references (`footprint.rs`, `anneal.rs`) as they are: they document a
+contingency honestly. Do not revive `label_geom` for this.
