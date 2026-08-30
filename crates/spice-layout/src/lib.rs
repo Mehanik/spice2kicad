@@ -1022,6 +1022,23 @@ pub struct RefinementMeta {
     /// V5 seed chooser and the SA refiner). The refinement phase may only
     /// pick orientations from this set — it never widens V14.
     pub allowed: Vec<Vec<Orientation>>,
+    /// Per-element **Tier-0 repair** orientation set: the V14 set alone,
+    /// *before* the V17 signal-direction narrowing that produced
+    /// [`Self::allowed`]. See
+    /// [`orient::allowed_and_repair_orientations`] for the full rationale
+    /// (ADR-37).
+    ///
+    /// Phase 4.5 reads this **only** while `tier0(baseline) != (0, 0, 0)`
+    /// — i.e. only on a placement the CLI would otherwise refuse to
+    /// ship — and may accept a pose that is in `repair_allowed[i]` but
+    /// not in `allowed[i]` **only** on a strict improvement of the Tier-0
+    /// prefix `(severed, coincident, v11)`. Never on `(v13, v12, v5,
+    /// bends)`.
+    ///
+    /// On every placer that does not arm the V17 filter — which is every
+    /// shipping path — this is *element-wise equal* to
+    /// [`Self::allowed`], so the widening is structurally inert there.
+    pub repair_allowed: Vec<Vec<Orientation>>,
     /// Per-element **DC facing** (F2): `Some((hi, lo))` names the SPICE
     /// terminal indices whose drawn order must be *`hi` above `lo`*, for
     /// a Q / M / J device whose DC-potential rank resolved. See
@@ -1056,7 +1073,7 @@ pub fn refinement_meta(
 ) -> Result<RefinementMeta, Vec<Diagnostic>> {
     let (mut placement, mut pinned) = place_seed(checked, placer)?;
     apply_hint(&mut placement, &mut pinned, hint);
-    let allowed = orient::allowed_orientations(checked, placer);
+    let (allowed, repair_allowed) = orient::allowed_and_repair_orientations(checked, placer);
     let externally_pinned = pinned.clone();
     if let Some(plan) = symmetry::detect_pairs(checked) {
         symmetry::apply(&mut placement, &mut pinned, &plan);
@@ -1118,6 +1135,7 @@ pub fn refinement_meta(
     Ok(RefinementMeta {
         pinned,
         allowed,
+        repair_allowed,
         facing,
     })
 }

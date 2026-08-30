@@ -17,12 +17,25 @@
 //!
 //! The pass is greedy and deterministic (no clock / RNG, stable iteration
 //! order), iterating to a fixed point under a small cap. For each at-risk,
-//! non-pinned, non-symmetry element it trial-routes each V14-allowed
+//! non-pinned, non-symmetry element it trial-routes each allowed
 //! orientation (reusing `spice_layout::orient::allowed_orientations` — it
 //! never widens V14) and keeps a candidate ONLY if it *strictly* improves the
 //! lexicographic objective
 //! `(severed, coincident, V11, V13, V12, V5, bends)` — Tier-0 keys first —
 //! without increasing symbol-body overlap or foreign-body (V12) crossings.
+//!
+//! **The one widening, and its three scopes (ADR-37).** Every pose a hard
+//! candidate filter removes is a pose this phase's Tier-0 repair cannot
+//! use, so two individually-sound filters can compose into an infeasible
+//! repair space — measured on `sallen_key_lpf` at SA seed 1 under
+//! `--placer=readable-v1`, where the conversion was refused outright. So
+//! **while `tier0(baseline) != (0, 0, 0)` only**, the search set widens
+//! from `meta.allowed` (V14 ∩ V17) to `meta.repair_allowed` (V14 alone),
+//! and a pose outside `meta.allowed` is accepted **only** on a strict
+//! improvement of the Tier-0 prefix — never on `(v13, v12, v5, bends)`.
+//! V14 is never widened: it keeps its own detached-glyph escape. On every
+//! placer that does not arm the V17 filter the two sets are equal, so this
+//! is structurally inert on the shipping path.
 //!
 //! **Ordering contract for the objective** (`docs/invariants.md` V16): V16
 //! bends are the FINAL key and must stay there. They may appear in the
@@ -77,11 +90,13 @@ const MAX_ACTIVE: usize = 4;
 /// Refine element orientations to minimise the router's *real* V5
 /// (first-segment-outward) count, in place.
 ///
-/// `meta` carries the same `pinned` mask and V14-`allowed` orientation
+/// `meta` carries the same `pinned` mask and `allowed` orientation
 /// sets the placer used (see [`spice_layout::refinement_meta`]). Pinned
 /// elements (user `align`/`place`, V7 symmetry, position-stability hint)
 /// are never touched; every candidate orientation comes from the
-/// element's V14-allowed set, so the phase honours V14 by construction.
+/// element's V14 set, so the phase honours V14 by construction — the
+/// Tier-0 repair widening documented at the module head relaxes V17 and
+/// never V14.
 ///
 /// Acceptance is conservative: a candidate is taken only if it strictly
 /// reduces total real V5 violations AND does not increase the V11
@@ -244,6 +259,32 @@ fn tier0(m: &Measure) -> (usize, usize, usize) {
     (m.severed, m.coincident, m.v11)
 }
 
+/// **ADR-37 — may a pose that left the ordinary candidate set be taken?**
+///
+/// `escaped` is true for a candidate drawn from `RefinementMeta::
+/// repair_allowed` (the V14 set) that is *not* in `RefinementMeta::
+/// allowed` (V14 ∩ V17). Such a pose is admissible **only** on a strict
+/// improvement of the [`tier0`] prefix — never on `(v13, v12, v5,
+/// bends)`, which is exactly what makes this a Tier-0-*state*-conditional
+/// lift rather than a relaxation of V17.
+///
+/// Read alongside [`accepts`], which the candidate must ALSO satisfy:
+/// this is a second, narrower gate stacked on top, never a bypass of the
+/// first.
+///
+/// Three properties follow, and they are the whole safety argument:
+///
+/// * it has **no tuning parameter**, so it cannot be set to a value that
+///   quietly does nothing (the `power_pin_outward` failure mode);
+/// * it is **unreachable while the placement is Tier-0 clean**, because
+///   `tier0(m) < (0, 0, 0)` is false for `usize` counts and the callers
+///   do not even widen the search set in that regime; and
+/// * every firing is graded afterwards by V17's own verifier on the
+///   **emitted** geometry, so the price is measured, not asserted.
+fn escape_permitted(escaped: bool, baseline: &Measure, m: &Measure) -> bool {
+    !escaped || tier0(m) < tier0(baseline)
+}
+
 /// Is there nothing left for this phase to chase? True only when every
 /// count the objective can act on is zero — Tier 0 included, so a
 /// severed or shorted placement is never mistaken for a finished one.
@@ -404,8 +445,32 @@ fn greedy_descent(
             }
 
             let current = placement.elements[i].orientation;
+            // **The Tier-0 escape hatch (ADR-37).** In repair mode the
+            // candidate set widens from `allowed` (V14 ∩ V17) to
+            // `repair_allowed` (V14 alone). Every pose a hard candidate
+            // filter removes is a pose this repair cannot use, and on
+            // `sallen_key_lpf` at SA seed 1 under `--placer=readable-v1`
+            // the V17 narrowing removed *exactly* the pose that
+            // reconnects the severed `out` net, so the CLI refused the
+            // conversion outright.
+            //
+            // The widening is scoped three ways, and all three matter:
+            //   * only while `tier0(baseline) != (0, 0, 0)` — a
+            //     placement the CLI would otherwise refuse to ship;
+            //   * only for V17, never V14 (V14 keeps its own documented
+            //     detached-glyph escape, so it needs none here); and
+            //   * a pose outside `allowed` is accepted only on a strict
+            //     Tier-0 improvement, checked below — never on
+            //     `(v13, v12, v5, bends)`.
+            // On any placer that does not arm the V17 filter
+            // `repair_allowed[i] == allowed[i]`, so this is inert.
+            let search_set = if tier0_repair {
+                meta.repair_allowed.get(i).unwrap_or(allowed)
+            } else {
+                allowed
+            };
             let candidates = distinct_orientations(
-                allowed,
+                search_set,
                 current,
                 library.lookup(&placement.elements[i].lib_id),
             );
@@ -414,6 +479,10 @@ fn greedy_descent(
                 if cand == current {
                     continue;
                 }
+                // A pose outside the ordinary allowed set buys nothing
+                // but a Tier-0 repair. Checked before the trial route,
+                // so the escape costs nothing on the normal path.
+                let escaped = !allowed.contains(&cand);
                 placement.elements[i].orientation = cand;
                 // Routing-free half first: three of the seven objective
                 // keys need no router, and any one of them can prove
@@ -463,6 +532,9 @@ fn greedy_descent(
                 // below. Bends can therefore never buy a wire through a
                 // body or across a label. Moving them earlier would make
                 // that trade reachable — don't.
+                if !escape_permitted(escaped, baseline, &m) {
+                    continue;
+                }
                 if accepts(baseline, &m) {
                     let take = match &best {
                         None => true,
@@ -475,6 +547,12 @@ fn greedy_descent(
             }
 
             if let Some((orient, m)) = best {
+                if !allowed.contains(&orient) {
+                    log::info!(
+                        "refine: tier0 repair used a V17-excluded pose for {}",
+                        placement.elements[i].refdes
+                    );
+                }
                 placement.elements[i].orientation = orient;
                 *baseline = m;
                 improved_this_sweep = true;
@@ -527,6 +605,12 @@ fn joint_search(
     cache: &mut MeasureCache,
 ) {
     let n = placement.elements.len();
+
+    // **The Tier-0 escape hatch (ADR-37)** — the same widening
+    // `greedy_descent` applies, under the same three scopes. See the
+    // comment on its gate; the only difference here is that a
+    // *combination* escapes when ANY of its per-element poses does.
+    let tier0_repair = tier0(baseline) != (0, 0, 0);
 
     // Offending element indices (non-pinned, V14-allowed known).
     let movable = |i: usize| {
@@ -597,7 +681,12 @@ fn joint_search(
         .iter()
         .map(|&i| {
             let symbol = library.lookup(&placement.elements[i].lib_id);
-            distinct_orientations(&meta.allowed[i], placement.elements[i].orientation, symbol)
+            let search_set = if tier0_repair {
+                meta.repair_allowed.get(i).unwrap_or(&meta.allowed[i])
+            } else {
+                &meta.allowed[i]
+            };
+            distinct_orientations(search_set, placement.elements[i].orientation, symbol)
         })
         .collect();
 
@@ -629,11 +718,18 @@ fn joint_search(
         // only skip combinations `accepts` would refuse, so the
         // enumeration's outcome is unchanged. See [`pruned`].
         let candidate = cache.candidate(placement, library, baseline);
+        // A combination containing any pose outside that element's
+        // ordinary `allowed` set buys nothing but a Tier-0 repair.
+        let escaped = active
+            .iter()
+            .enumerate()
+            .any(|(k, &i)| !meta.allowed[i].contains(&cand[k][counter[k]]));
         // Same lexicographic (V13, V12, V5, bends) objective as
         // `greedy_descent` — Tier-1 counts lead, Tier-2 V5 next, V16
         // bends last. See the ordering contract documented on that
         // function's acceptance gate: bends must stay the FINAL key.
         if let Some(m) = candidate
+            && escape_permitted(escaped, baseline, &m)
             && accepts(baseline, &m)
         {
             let take = match &best {
@@ -684,6 +780,12 @@ fn joint_search(
     }
     if let Some((orients, m)) = best {
         for (idx, &i) in active.iter().enumerate() {
+            if !meta.allowed[i].contains(&orients[idx]) {
+                log::info!(
+                    "refine: tier0 repair used a V17-excluded pose for {}",
+                    placement.elements[i].refdes
+                );
+            }
             placement.elements[i].orientation = orients[idx];
         }
         *baseline = m;
@@ -1492,7 +1594,7 @@ mod tests {
 /// untradeable downward *and* seekable upward — see [`accepts`].
 #[cfg(test)]
 mod severed_guard_tests {
-    use super::{Measure, accepts, measure, refine_orientations};
+    use super::{Measure, accepts, escape_permitted, measure, refine_orientations};
     use kicad_symbols::{Library, Orientation, Rotation};
     use spice_layout::{LayoutOptions, Placement, RefinementMeta};
 
@@ -1565,6 +1667,76 @@ mod severed_guard_tests {
             "Tier-0: a candidate that disconnects a net must never be accepted, \
              no matter how much V13/V12/V5/bends improve"
         );
+    }
+
+    /// **ADR-37 — a V17-excluded pose buys a Tier-0 repair and nothing
+    /// else.**
+    ///
+    /// Phase 4.5's Tier-0 repair mode widens each element's candidate set
+    /// from `allowed` (V14 ∩ V17) to `repair_allowed` (V14 alone), because
+    /// every pose a hard candidate filter removes is a pose the repair
+    /// cannot use — measured on `sallen_key_lpf` at SA seed 1 under
+    /// `--placer=readable-v1`, where V17 had removed *exactly* the pose
+    /// that reconnects the severed `out` net and the CLI refused the
+    /// conversion.
+    ///
+    /// The widening is not a relaxation of V17: [`escape_permitted`] is a
+    /// second gate stacked on [`accepts`], and it passes a pose outside
+    /// `allowed` **only** on a strict improvement of the Tier-0 prefix.
+    /// Both halves are asserted here, because only the pair is the
+    /// contract — "accepted for a Tier-0 repair" is worthless if
+    /// "rejected for a Tier-1/2 gain" does not also hold.
+    #[test]
+    fn a_v17_excluded_pose_buys_a_tier0_repair_and_nothing_else() {
+        // A Tier-0-broken baseline: one severed net, with Tier-1/2 slack
+        // above it. Repair mode is armed exactly here.
+        let baseline = m(3, 1, 2, 8, 1);
+
+        // (a) A candidate that improves ONLY `(v13, v12, v5, bends)` and
+        // leaves the severance in place. `accepts` takes it — that is the
+        // control, and it is why the escape gate has to be separate.
+        let tier1_only = m(1, 0, 0, 4, 1);
+        assert!(
+            accepts(&baseline, &tier1_only),
+            "control: the ordinary predicate accepts this candidate"
+        );
+        assert!(
+            escape_permitted(false, &baseline, &tier1_only),
+            "control: an in-`allowed` pose is unaffected by the escape gate"
+        );
+        assert!(
+            !escape_permitted(true, &baseline, &tier1_only),
+            "ADR-37: a V17-excluded pose must NOT be reachable on a \
+             (v13, v12, v5, bends) gain — that would relax V17 outright"
+        );
+
+        // (b) The same escape, on a candidate that strictly repairs
+        // Tier 0. Accepted — and note it costs V13, V12, V5 and bends,
+        // which is CLAUDE.md ordering rule 1 read in the direction it
+        // points: pay Tier 1 to recover Tier 0.
+        let tier0_repair = m(5, 2, 3, 12, 0);
+        assert!(
+            escape_permitted(true, &baseline, &tier0_repair),
+            "ADR-37: a strict Tier-0 improvement is what the escape exists for"
+        );
+        assert!(
+            accepts(&baseline, &tier0_repair),
+            "and the ordinary predicate agrees, via its own Tier-0 exemption"
+        );
+
+        // (c) Tier-0 must improve STRICTLY. An equal Tier-0 prefix is not
+        // an improvement however far the rest falls.
+        let tier0_equal = m(0, 0, 0, 0, 1);
+        assert!(
+            !escape_permitted(true, &baseline, &tier0_equal),
+            "ADR-37: `<`, not `<=` — an unchanged Tier-0 prefix buys nothing"
+        );
+
+        // (d) And a Tier-0 *regression* is refused by both gates, so the
+        // escape can never be a route around the leading keys.
+        let tier0_worse = m(0, 0, 0, 0, 2);
+        assert!(!escape_permitted(true, &baseline, &tier0_worse));
+        assert!(!accepts(&baseline, &tier0_worse));
     }
 
     /// `severed` is the LEADING key of the objective, and a Tier-0

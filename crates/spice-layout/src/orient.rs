@@ -193,6 +193,48 @@ fn satisfies_signal_direction(elem: &spice_resolve::ResolvedElement, orient: Ori
 /// exactly one pose, [`Orientation::IDENTITY`].
 #[must_use]
 pub fn allowed_orientations(checked: &CheckedNetlist, placer: Placer) -> Vec<Vec<Orientation>> {
+    allowed_and_repair_orientations(checked, placer).0
+}
+
+/// [`allowed_orientations`] together with the **Tier-0 repair set** it was
+/// narrowed from.
+///
+/// Returns `(allowed, repair_allowed)`, both indexed by element:
+///
+/// * `allowed[i]` is exactly what [`allowed_orientations`] returns — the
+///   V14 set, then narrowed by V17 when the placer arms that filter. It
+///   binds every ordinary stage: the V5 seed chooser, the SA rotate /
+///   mirror moves, and phase 4.5's normal search.
+/// * `repair_allowed[i]` is the **V14 set alone**, before any V17
+///   narrowing. It is `allowed[i]` itself on every placer that does not
+///   arm the V17 filter, which is every shipping path today.
+///
+/// **Why the wider set exists (ADR-37).** V17 is a hard *candidate
+/// filter*, and every pose a hard filter removes is a pose phase 4.5's
+/// Tier-0 repair cannot use. On `sallen_key_lpf` at SA seed 1 under
+/// `--placer=readable-v1` that composed with the divider construction's
+/// extra pinning to make the repair space empty: the placement arrived
+/// with one severed net, the pose that reconnects it is `X1` mirrored,
+/// V17 had removed exactly that pose, and the CLI refused the conversion
+/// on ADR-22's net-partition certificate.
+///
+/// So phase 4.5 — and *only* phase 4.5, and *only* while it is repairing
+/// an already-Tier-0-broken placement — may select from `repair_allowed`,
+/// accepting a pose outside `allowed` on a strict improvement of the
+/// Tier-0 prefix and on nothing else. This is the same precedence this
+/// module already declares for the static conflict ("V14 wins and V17
+/// relaxes, because V14 carries a documented escape and V17 has none"),
+/// extended from *static* infeasibility (an empty V14 ∩ V17) to *dynamic*
+/// infeasibility (no V17-legal pose reconnects the net) — a fact only the
+/// router can establish, which is why it lives at phase 4.5.
+///
+/// **V14 is not in the wider set and never becomes liftable**: it keeps
+/// its own detached-glyph escape, so nothing here needs to relax it.
+#[must_use]
+pub fn allowed_and_repair_orientations(
+    checked: &CheckedNetlist,
+    placer: Placer,
+) -> (Vec<Vec<Orientation>>, Vec<Vec<Orientation>>) {
     let prefs = vertical_prefs(checked);
     checked
         .elements
@@ -200,7 +242,7 @@ pub fn allowed_orientations(checked: &CheckedNetlist, placer: Placer) -> Vec<Vec
         .map(|elem| {
             let v14_set = v14_allowed(elem, &prefs);
             if !placer.signal_direction_filter() {
-                return v14_set;
+                return (v14_set.clone(), v14_set);
             }
             let directed: Vec<Orientation> = v14_set
                 .iter()
@@ -208,12 +250,12 @@ pub fn allowed_orientations(checked: &CheckedNetlist, placer: Placer) -> Vec<Vec
                 .filter(|&o| satisfies_signal_direction(elem, o))
                 .collect();
             if directed.is_empty() {
-                v14_set
+                (v14_set.clone(), v14_set)
             } else {
-                directed
+                (directed, v14_set)
             }
         })
-        .collect()
+        .unzip()
 }
 
 /// The V14 half of [`allowed_orientations`], for one element.
@@ -376,6 +418,18 @@ mod tests {
         let (checked, _warns) = check(resolved).expect("policy check failed");
         let refdes = checked.elements.iter().map(|e| e.refdes.clone()).collect();
         (refdes, allowed_orientations(&checked, placer))
+    }
+
+    /// As [`allowed_str_with`], returning BOTH sets
+    /// (`allowed`, `repair_allowed`).
+    fn repair_str_with(
+        src: &str,
+        placer: Placer,
+    ) -> (Vec<Vec<Orientation>>, Vec<Vec<Orientation>>) {
+        let parsed = spice_parser::parse(src, FileId(0)).expect("parse").netlist;
+        let resolved = spice_resolve::resolve(&parsed, fixture_library()).expect("resolve failed");
+        let (checked, _w) = check(resolved).expect("policy check failed");
+        allowed_and_repair_orientations(&checked, placer)
     }
 
     /// The opamp source used by the V14 and V17 orientation tests.
@@ -541,6 +595,63 @@ mod tests {
             "V14 ∩ V17 should leave the opamp exactly one pose"
         );
         assert!(allowed[i].iter().all(|o| !o.mirror_y));
+    }
+
+    /// **ADR-37 — the Tier-0 repair set is exactly V14, and it equals
+    /// `allowed` on every placer that does not arm the V17 filter.**
+    ///
+    /// Both halves are the safety argument for the phase-4.5 widening:
+    /// the second is why the shipping path is *structurally* inert (no
+    /// widened set exists to select from), and the first is why the
+    /// widening cannot relax V14 — the repair set is the V14 survivors,
+    /// not the full eight.
+    #[test]
+    fn the_repair_set_is_v14_and_matches_allowed_off_the_v17_filter() {
+        for placer in [
+            Placer::FlowSeedV4,
+            Placer::FlowSeed,
+            Placer::Champion,
+            Placer::TerminalSeriesDivider,
+            Placer::FacingTrigger,
+        ] {
+            let (refdes, _) = allowed_str_with(OPAMP_SRC, placer);
+            let (allowed, repair) = repair_str_with(OPAMP_SRC, placer);
+            assert_eq!(
+                allowed,
+                repair,
+                "{}: `repair_allowed` must equal `allowed` when V17 is off",
+                placer.name()
+            );
+            // And on this fixture V14 is a strict filter, so equality is
+            // not the trivial "both are all eight".
+            let i = idx_of(&refdes, "X1");
+            assert!(allowed[i].len() < 8, "{:?}", allowed[i]);
+        }
+
+        // Under the V17 filter the two diverge on exactly the mirrored
+        // poses V17 removes — and the repair set is still V14-filtered.
+        let (refdes, _) = allowed_str_with(OPAMP_SRC, Placer::SignalDirection);
+        let (allowed, repair) = repair_str_with(OPAMP_SRC, Placer::SignalDirection);
+        let i = idx_of(&refdes, "X1");
+        assert_eq!(allowed[i], vec![Orientation::IDENTITY]);
+        assert!(
+            repair[i].len() > allowed[i].len(),
+            "the repair set must be strictly wider here: {:?}",
+            repair[i]
+        );
+        assert!(
+            repair[i].iter().any(|o| o.mirror_y),
+            "and it must contain the mirrored pose V17 removed: {:?}",
+            repair[i]
+        );
+        // V14 is NOT lifted: no 90/270 rotation and no R180 survives,
+        // exactly as `opamp_identity_is_v14_feasible` asserts for
+        // `allowed`.
+        assert!(
+            repair[i].iter().all(|o| o.rotation == Rotation::R0),
+            "the repair set must still be V14-filtered: {:?}",
+            repair[i]
+        );
     }
 
     /// V17 exempts a symbol lacking one of the two pin groups.
