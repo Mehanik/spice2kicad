@@ -3064,6 +3064,7 @@ fn property_offset_candidates(base_dy: f64) -> Vec<(f64, f64)> {
     // widen monotonically so the chosen anchor stays "least
     // surprising". Within each vertical row the horizontal offset
     // sweeps near→far, both sides.
+    //
     let vertical = [base_dy, base_dy * 2.0, base_dy * 3.0, base_dy * 4.0];
     let horizontal = [2.54_f64, -2.54, 5.08, -5.08, 7.62, -7.62];
     let mut out = vec![(2.54_f64, base_dy)];
@@ -3083,6 +3084,49 @@ fn property_offset_candidates(base_dy: f64) -> Vec<(f64, f64)> {
     // fixture that was already clean is byte-identical.
     for &vy in &vertical {
         for &hx in &horizontal {
+            out.push((hx, -vy));
+        }
+    }
+    // FINAL resort: the same rows again at a horizontal reach of
+    // 10.16 mm — far enough that a field which reads *back across its
+    // own body* can clear it.
+    //
+    // Why it is needed. A field's text reads *away* from its anchor in
+    // the direction `field_render_rotation` reports, so on a Y-mirrored
+    // symbol the box extends LEFT from the anchor, back over the
+    // symbol. Escaping the body on that side costs
+    // `half-body + text width`, and a value string like `QGENERIC` is
+    // 9.37 mm wide on its own — past the 7.62 mm the sweep above
+    // reaches. Every candidate straddled the body, so the pass fell
+    // through to its least-overlap fallback and *shipped* a collision
+    // the V13(5) ratchet grades at zero (measured under
+    // `--placer=terminal-series-divider`: `common_emitter` `Q1.Value`
+    // over its own `B` pin text, twice; and on the shipping default,
+    // `multivibrator` `Q2.Value`).
+    //
+    // Why it is appended rather than folded into `horizontal`. Folding
+    // it in would insert it *inside* every vertical row, so a symbol
+    // that already had a clean anchor further down the ladder would
+    // silently move to the new nearer-vertical/further-horizontal one —
+    // measured: 15 anchors across 9 of 18 fixtures, all of them already
+    // collision-free. Appending keeps the existing rule (a fixture that
+    // was already clean is byte-identical) and rescues only the
+    // genuinely boxed-in case.
+    //
+    // Why it stops at 10.16. [`property_nudge_reserve_mm`] is the max
+    // reach over this very list, and it sizes the square each symbol
+    // reserves in the *content bbox* — which sets the page frame and
+    // therefore translates every symbol on the sheet. The vertical
+    // ladder already reaches 10.16, so matching it leaves that square
+    // bit-identical and a wider sweep cannot pan a sheet.
+    let wide = [10.16_f64, -10.16];
+    for &vy in &vertical {
+        for &hx in &wide {
+            out.push((hx, vy));
+        }
+    }
+    for &vy in &vertical {
+        for &hx in &wide {
             out.push((hx, -vy));
         }
     }
@@ -4756,6 +4800,73 @@ mod tests {
                 power_rail: None,
             }],
         }
+    }
+
+    /// The horizontal sweep must reach far enough for a field that
+    /// reads *back across its own body* to escape it, and no further.
+    ///
+    /// The first half is what the `common_emitter` `Q1.Value` ↔ own-pin-
+    /// text collision was: `field_render_rotation` sends a Y-mirrored
+    /// symbol's text leftward from the anchor, so escaping the body on
+    /// that side costs `half-body + text width` — and `QGENERIC` alone
+    /// is 9.37 mm wide, past the sweep's old 7.62 mm limit. Every
+    /// candidate straddled the body and the pass shipped its
+    /// least-overlap fallback.
+    ///
+    /// The second half is the reason it stops at 10.16 rather than
+    /// going wider: [`property_nudge_reserve_mm`] is the max reach over
+    /// this same list and sizes the per-symbol square in the content
+    /// bbox, which sets the page frame. The vertical ladder already
+    /// reaches 10.16, so matching it leaves the reserve — and therefore
+    /// every sheet's translation — bit-identical.
+    #[test]
+    fn the_property_sweep_reaches_a_full_value_string_without_growing_the_reserve() {
+        let cands = super::property_offset_candidates(2.54);
+        let horizontal_reach = cands.iter().fold(0.0_f64, |a, &(dx, _)| a.max(dx.abs()));
+        let vertical_reach = cands.iter().fold(0.0_f64, |a, &(_, dy)| a.max(dy.abs()));
+        assert!(
+            (horizontal_reach - 10.16).abs() < 1e-9,
+            "horizontal reach is {horizontal_reach}, expected 10.16"
+        );
+        // Wide enough to clear a real value string read back across the
+        // body: `QGENERIC` at the default 1.27 mm text size.
+        let qgeneric = kicad_symbols::text_metrics::text_width("QGENERIC", 1.27);
+        assert!(
+            horizontal_reach > qgeneric - 2.54,
+            "sweep reach {horizontal_reach} cannot clear a {qgeneric} mm value string"
+        );
+        // And the reserve is unchanged: the square is the max over BOTH
+        // axes, and the vertical ladder already owns 10.16.
+        assert!((vertical_reach - 10.16).abs() < 1e-9);
+        assert!(
+            (super::property_nudge_reserve_mm() - 10.16).abs() < 1e-9,
+            "the content-bbox reserve moved; every sheet would pan"
+        );
+        // The default anchor is still first, so a clean fixture is
+        // byte-identical.
+        assert_eq!(cands[0], (2.54, 2.54));
+        // And the wide column is APPENDED, never folded into the
+        // horizontal sweep: every 10.16 candidate ranks after every
+        // narrower one, so a symbol that already had a clean anchor
+        // cannot be pulled onto a new nearer-vertical row. Folding it in
+        // instead moved 15 already-collision-free anchors across 9 of
+        // the 18 fixtures.
+        let first_wide = cands
+            .iter()
+            .position(|&(dx, _)| dx.abs() > 7.62)
+            .expect("a wide candidate exists");
+        assert!(
+            cands[..first_wide]
+                .iter()
+                .all(|&(dx, _)| dx.abs() <= 7.62 + 1e-9),
+            "the wide column is not a suffix of the candidate list"
+        );
+        assert!(
+            cands[first_wide..]
+                .iter()
+                .all(|&(dx, _)| dx.abs() > 7.62 - 1e-9),
+            "a narrow candidate ranks after a wide one"
+        );
     }
 
     #[test]
