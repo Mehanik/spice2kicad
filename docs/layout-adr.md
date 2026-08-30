@@ -8827,3 +8827,477 @@ so it can now be settled.
 Leave `archive/adr14-directional-plus-label` and master's two forward
 references (`footprint.rs`, `anneal.rs`) as they are: they document a
 contingency honestly. Do not revive `label_geom` for this.
+
+## ADR-35 — Tier-0 and Tier-1 invariants fail on ~1 SA seed in 20, on the *shipping default*, and one-seed ratchets cannot see it
+
+**Status:** measured 2026-08-31. **No code change.** This records a
+robustness property of the **shipping default placer** that no gate in
+the suite can currently observe, the negative result about hard
+orientation filters that surfaced it, and a *proposal* — not a decision —
+about what it implies for the ratchets.
+
+### The finding, stated about the champion because that is where it lives
+
+`--placer=flow-seed-v4` — the shipping default, no challenger involved —
+fails the **zero-budget Tier-1 V12 gate** on some SA seeds. Swept over 85
+seeds (10…94), all 18 fixtures, champion only: **4 failures, one seed in
+21.**
+
+| seed | fixture | wires through a foreign body |
+| ---: | --- | ---: |
+| 12 | `opamp_inverting` (`RF`) | 4 |
+| 32 | `cascode_amp` (`Q1`) | 5 |
+| 70 | `named_rails` (`RPD`, `RPU`) | 6 |
+| 86 | `cascode_amp` (`Q1`) | 3 |
+
+It is not one invariant and not one fixture. The **Tier-0**
+`t0.cross_net_overlap` gate — cross-net collinear wire overlap, a latent
+V11 short — behaves the same way: over seeds 10…34 the champion produces
+one on `cascode_amp` (seed 17) and one on `sallen_key_driven` (seed 34).
+Six champion incidents across five fixtures and two invariants, none of
+them at the shipped draw (`0xC0FF_EE42`) and none in seeds 1…9. Seeds 12
+and 32 were independently reproduced on tree `d27775f`, which predates
+every commit in this round, so it is not recent.
+
+**`v12`'s budget is 0 and its comment says "every fixture routes clean,
+and must stay that way".** What the suite establishes is *every fixture
+routes clean at one RNG draw*. Those are different claims, and the gap is
+about 5 % of the seed space.
+
+The V12 failure is the router's documented budgeted fallback giving up —
+`obstacle: net index 4 has 4 segment(s) crossing a symbol body after 6
+outer passes` — on a placement it cannot escape. Per CLAUDE.md's own
+table V12 is "hard with budgeted-fallback (logs)", so the fallback firing
+is by design; what is new is that on the shipping placer it fires at a
+measurable rate, silently, and the ratchet's zero budget reads as proof
+that it never does.
+
+### How it was found, and the framing that had to be corrected
+
+It surfaced as an apparent *challenger* regression. A k = 9 multi-seed
+collection (the ADR-32 instrument) reported the only Tier-0/1 cell in the
+suite where the champion is `sd = 0` clean and a challenger is sometimes
+worse:
+
+```
+v12 / sallen_key_lpf   flow-seed-v4    : 0 0 0 0 0 0 0 0 0
+                       signal-direction: 0 5 0 0 0 0 0 0 0   <- seed 2
+```
+
+read at the time as *"`signal-direction` carries a latent Tier-1
+regression"*. Widening the sweep inverts it:
+
+| arm | seeds swept | V12-failing seeds |
+| --- | ---: | --- |
+| `flow-seed-v4` (shipping default) | 85 (10…94) | **4** — 12, 32, 70, 86 |
+| `signal-direction` | 15 (10…24) | 1 — seed 12, the **identical** 4 crossings on the same fixture: inherited from the champion, not added |
+| `readable-v1` (ADR-36's composition) | 35 (10…44) | 2 — seeds 41, 42; **clean at seed 12, where the champion fails** |
+
+Comparable rates on every arm **including the default**. The champion's
+"deterministically clean" reading is a property of the **window**, not of
+the champion: fifteen more seeds and it fails too.
+
+> **`sd = 0` over k seeds is evidence of inertness only within those k
+> seeds.**
+
+For a rare event — one seed in twenty — a nine-seed window reports
+`sd = 0` for an arm that is not inert at all, and does so on *both*
+sides, so the comparison invents a champion property that does not exist
+and charges the difference to whichever arm drew the bad seed. Where a
+cell's difference is a **rare failure** rather than a shift in a
+distribution, the honest statement is a rate over a wide sweep, not a
+t-statistic over nine. ADR-32 remains the right instrument for the
+distributional case it was built for; this is the case it does not cover,
+and the two are easy to confuse because they print the same column.
+
+### The transferable negative result: a filter that rejects without re-placing
+
+The seed-2 case is worth keeping for its mechanism, which predicts the
+behaviour of *any* future hard filter added at the same seam.
+
+At seed 2 the champion draws `sallen_key_lpf`'s `X1` at
+`(76.2, 45.72) rot 0 (mirror y)`. Under `signal-direction` it is at
+**exactly the same coordinates**, un-mirrored. That is not a coincidence:
+ADR-33 records that the V17 reject happens *after* the Metropolis draw,
+precisely so the RNG stream is preserved — and the position trajectory
+comes with it. So the filter removes a pose **without moving the
+element**, and the element is left at a position the SA chose while the
+now-forbidden pose was still available. The opamp's inputs and output
+swap sides in place, and the router cannot get out of the triangle.
+
+> **A filter that rejects a pose without re-placing the element leaves it
+> somewhere chosen for the pose it can no longer have.**
+
+That is ADR-15's Stage-5 hazard — *"making the orientation choice hard
+does not make it good — it makes it permanent"* — one level down, and it
+is a *general* prediction about the `allowed_orientations` seam, not a
+fact about V17. The same argument says V14 has always had this shape and
+has escaped it only because its filter is applied to a candidate set the
+seed chooser already scores against the same geometry.
+
+The corollary is the useful half: **the repair is a position, and a
+composition can supply it.** `readable-v1` — V17 plus three
+placement-changing arms — is V12 clean at seed 2 because
+`terminal-series-divider` and `divider-rails-strict` *move* `X1`, from
+`(76.2, 45.72)` to `(86.36, 36.83)`. It also repairs the champion's own
+seed-12 failure. The pose half and the position half are separable, and
+arms built for unrelated reasons happened to supply the missing one.
+
+### What this implies for the ratchets — a proposal, not a decision
+
+The per-fixture zero-slack ratchets are **not** wrong and nothing above
+weakens them. But their guarantee has never been written down precisely,
+and the two readings differ:
+
+* **What they do establish** — and this is the job they were built for —
+  *change detection*. Same fixture, same seed, before vs after: a real
+  regression still moves the number, which is exactly what CLAUDE.md's
+  "did this change break what we shipped?" asks.
+* **What they do NOT establish:** that an invariant *holds*. A budget of
+  0 that passes is one sample from a distribution over SA seeds. For V12
+  that distribution has ~5 % mass on "violated" (4 of 85 measured), and
+  `t0.cross_net_overlap` has its own.
+
+Which suggests, but does not decide:
+
+1. Record the distinction in CLAUDE.md's ratchet section — one sentence,
+   because contributors currently read "budget 0, every fixture routes
+   clean" as a universal claim, and the `v12` comment says so in as many
+   words.
+2. Consider a **seed sweep for the Tier-0 and Tier-1 invariants only**,
+   as a separate slow job rather than on the `cargo test` path: those are
+   the tiers CLAUDE.md calls inviolable and categorical, and they are
+   exactly the ones for which "holds at one draw" is the wrong claim.
+   Tier 2 is a quality gradient and is correctly single-sample.
+3. Decide what a Tier-1 failure at a non-shipped seed *is*. It is not a
+   regression (nothing changed) and it is not acceptable either. The
+   honest options are a recorded rate that ratchets down, or a repair to
+   the router's fallback so the rate is structurally 0.
+
+**All three are owner decisions** and none is taken here. Cost is the
+reason to decide rather than default: a k-seed Tier-0/1 sweep is k full
+conversions of every fixture, and this ADR's own evidence is 135 of them.
+
+### Reproducing it
+
+No new code. The V12 verifier honours ADR-32's `S2K_PLACER` /
+`S2K_SA_SEED` seam, so
+
+```sh
+S2K_PLACER=flow-seed-v4 S2K_SA_SEED=12 cargo test -p spice2kicad \
+  --test electrical_safety v12_wires_do_not_cross_foreign_symbol_bodies
+```
+
+fails on the shipping default, today, with nothing patched.
+
+## ADR-36 — `readable-v1`: the four readability arms composed; every reported defect repaired, and one emergent Tier-0 failure that blocks it
+
+**Status:** built and graded 2026-08-31 on `4e1700e`. One emitter-side
+decoration repair landed on the default path; one new ADR-23 challenger
+(`--placer=readable-v1`) registered and **dead on the default path**.
+Graded single-sample **PROMOTABLE** and multi-seed strongly positive —
+and **NOT recommended for promotion**, because it introduces a rare
+emergent **Tier-0** failure the champion does not have. Promotion is an
+owner decision either way (ADR-23 D4); this ADR recommends *against*.
+
+### The situation this closes
+
+Five owner-reported readability defects had four built, registered,
+individually-measured fixes and **none of them shipped**. Every one was a
+`--placer` challenger dead on the default path, and every one composed on
+`flow-seed-v4`:
+
+| arm | owner defect | standing verdict |
+| --- | --- | --- |
+| `signal-direction` (V17, ADR-33) | opamps drawn mirrored, output facing left | PROMOTABLE (T1 −2.00; its T2 −44.97 is one SA draw) |
+| `terminal-series-divider` (ADR-23 D12) | vertical VIN / VOUT terminals | T1 **+2.00** → blocked |
+| `divider-rails-strict` | `port_shapes`' split chain | registered, ungraded against the default |
+| `facing-trigger` (ADR-29) | `two_stage_amp` `Q2` upside down | PROMOTABLE (T1 +0.00, T2 −6.55) |
+
+The bottleneck was integration, not mechanism. This round adds **no new
+placement mechanism**: one emitter decoration repair, and one name under
+which the existing four can be graded together.
+
+### 1. The blocker was a decoration defect, and it is fixed
+
+ADR-23 D12 records that `terminal-series-divider`'s entire Tier-1 cost is
+three cells and that only one is genuine: `v13.5_prop_pintext /
+common_emitter` **0 → 2**. Re-verified here — the other two
+(`v14.glyph_body / sallen_key_lpf` −1, `v13.9_foreign_over_glyph /
+sallen_key_lpf` +1) net to zero and are already produced by case (a)
+alone.
+
+**What it was.** `nudge_property_text` picks an anchor from
+`property_offset_candidates`, whose horizontal sweep stopped at 7.62 mm.
+A field's text reads *away* from its anchor in the direction
+`field_render_rotation` reports, so on a **Y-mirrored** symbol the box
+extends LEFT — back across the symbol's own body. Escaping the body on
+that side costs `half-body + text width`, and `QGENERIC` alone is 9.37 mm
+wide. Instrumenting the pass on `common_emitter` `Q1.Value` under the
+divider arm shows **all 49 candidates dirty**: the five that clear every
+wire all overlap the body (6.4–10.9 mm²) *and* Q1's own pin text
+(3.1–6.1 mm²), and every body-clear candidate crosses a wire. The
+least-overlap fallback then shipped the collision the V13(5) ratchet
+grades at zero. **The chooser was right and its candidate set was too
+small** — the same shape as ADR-34's finding one level down (there the
+*rotation* chooser was blameless; here the *anchor* chooser is).
+
+**The repair.** A 10.16 mm column **appended** to the candidate list.
+Both bounds are load-bearing:
+
+* *Appended, not folded into `horizontal`.* Folding it in inserts it
+  inside every vertical row, so a symbol that already had a clean anchor
+  further down the ladder silently migrates to the new nearer-vertical /
+  further-horizontal one — measured: 15 anchors across 9 of 18 fixtures,
+  every one already collision-free. Appending keeps the rule the
+  surrounding code already states.
+* *It stops at 10.16.* `property_nudge_reserve_mm` is the max reach over
+  this same list and sizes the square each symbol reserves in the
+  **content bbox**, which sets the page frame and translates every symbol
+  on the sheet. The vertical ladder already reaches 10.16, so matching it
+  leaves the reserve bit-identical.
+
+**What it cost.** Measured with the pass's own `overlap_cost` over all 18
+fixtures × 248 property anchors: **1 → 0** anchors chosen with a residual
+collision (`multivibrator` `Q2.Value`, 0.5837 mm²). Exactly one fixture's
+bytes change, and on it every symbol pose, wire, junction and label is
+identical, so `baseline_lock` is untouched. Under
+`terminal-series-divider`, `v13.5_prop_pintext / common_emitter` is
+**2 → 0**. Suite: 76 binaries, 864 passed, 0 failed, 12 ignored.
+
+### 2. The composition
+
+`--placer=readable-v1` ORs the four arms' accessors and nothing else:
+`signal_direction_filter`, `terminal_net_series` + `divider_node_series`,
+`rail_gated_dividers` + `divider_tap_must_be_unloaded`, and
+`facing_inverted_trigger`.
+
+A composition needs its own registration because ADR-23's instrument
+grades a **whole placer**. Four filters and constructions that are
+separately contained can still interact — and this one does, in both
+directions (§5 and §6).
+
+**`y-sign` is deliberately excluded.** ADR-30 / ADR-31 leave it
+unresolved and ADR-30's own prescription is that the correction must land
+*bundled with a re-tuning*. Folding an unresolved arm in would confound
+the attribution of the other four.
+
+Default-path byte-identity is measured, not argued: all 18 fixtures
+`cmp`-identical between a binary with this commit's `spice-layout`
+reverted and one with it applied, both `--placer flow-seed-v4
+--no-layout-cache`. `baseline_lock` untouched; suite 76 / 866 / 0 / 12.
+
+### 3. Both gradings
+
+**Single-sample (ADR-23's rule as written).** Four arms collected on this
+tree, whole suite each side, 2480 rows / 1335 pairs per sink, **zero
+value conflicts** on every one.
+
+```
+Tier 0   champion : clean     challenger : clean     regressed : none
+Tier 1 total Δ = -2.00 points
+Tier 2 total Δ = -35.46 points
+VERDICT: challenger `readable-v1` is PROMOTABLE against `flow-seed-v4`.
+```
+
+`v13.5_prop_pintext` does not appear on any fixture — the blocker repair
+showing up as an absence. Without it the Tier-1 total would be `+0.00`
+and ADR-23's rule requires Tier 1 to *strictly improve*. All of the
+−2.00 is the V17 cell; `v14.glyph_body` −1 and `v13.9_foreign_over_glyph`
++1 cancel.
+
+**Multi-seed (ADR-32, k = 9 both arms, collected on this tree).** 29
+EFFECT cells (|t| > 2), 949 INERT (934 unchanged), 81 UNRESOLVED, 276
+PARTIAL. The composition is better on **25** of the 29 effects and worse on 4:
+
+| cell | champion | `readable-v1` | t |
+| --- | --- | --- | ---: |
+| `port.label_vertical` / `two_stage_amp` | 1.667 ± 0.500 | **0.000 ± 0.000** | −10.00 |
+| `port.label_vertical` / `common_emitter` | 1.444 ± 0.527 | **0.000 ± 0.000** | −8.22 |
+| `port.label_vertical` / `opamp_inverting_real` | 0.889 ± 0.601 | **0.000 ± 0.000** | −4.44 |
+| `port.label_vertical` / `rc_phase_shift`, `cascode_amp`, `opamp_inverting` | 0.556 / 0.444 / 0.444 | **0.000 ± 0.000** | −3.16 / −2.53 / −2.53 |
+| `v17.signal_direction` / `opamp_inverting_real` | 0.778 ± 0.441 | **0.000 ± 0.000** | −5.29 |
+| `f5` / `common_emitter`, `two_stage_amp`, `opamp_inverting`, `rc_phase_shift`, `cascode_amp` | 1.889 … 0.778 | **0.000 ± 0.000** | −17.0 … −3.41 |
+| `v16.bends` / `two_stage_amp` | 17.667 ± 2.291 | **12.778 ± 2.224** | −4.59 |
+| `v16.bends` / `cascode_amp` | 16.556 ± 4.035 | **12.333 ± 2.291** | −2.73 |
+| `v16.bends` / `common_emitter` | 8.333 ± 2.646 | **5.444 ± 1.878** | −2.67 |
+| `v5` / `two_stage_amp` | 0.889 ± 0.601 | 2.000 ± 0.866 | **+3.16** |
+| `v16.branches` / `common_emitter` | 2.333 ± 0.707 | 3.111 ± 0.601 | **+2.51** |
+| `q3` / `two_stage_amp` | 3.667 ± 1.118 | 4.889 ± 1.054 | **+2.39** |
+| `detour` / `opamp_definition_level` | 1.073 ± 0.000 | 1.091 ± 0.000 | (deterministic) |
+
+Every `port.label_vertical` cell reaches **0.000 ± 0.000** — the owner's
+defect is repaired *by construction*, not on a lucky draw, which is the
+one thing a single sample could never have shown.
+
+**Where the two gradings disagree, and the multi-seed is the truth about
+the world.** The single sample's two worst cells are
+`detour / common_emitter` +37.50 points and `v16.bends / common_emitter`
+4 → 9. Over nine seeds `v16.bends / common_emitter` reads
+**8.333 → 5.444, challenger better, t = −2.67**, and detour reads
+1.132 ± 0.144 → **1.048 ± 0.030**, also better. Both single-sample
+"regressions" are draw artefacts — the *third* time this file has
+recorded a ~25–40 point Tier-2 story manufactured out of one draw
+(ADR-30, ADR-33, here). The single-sample verdict is the rule **as
+currently written**; the multi-seed reading is what is true. They happen
+to agree on the verdict here, and disagree on every magnitude in it.
+
+### 4. Attribution against the single arms
+
+**vs `terminal-series-divider`: exactly one fixture moves.**
+`T1 +0.00, T2 +2.57` → NOT promotable against it on the aggregate. Every
+moved cell is on `port_shapes`: `port.label_vertical` **2 → 0**, `f5`
+−3, `chain.stranded` 2 → 1, against `v5` +1, `v16.bends` +2, `q3` +1,
+`f3` +1, `detour` +0.57. **Nothing on the other seventeen fixtures moves
+at all.**
+
+That is **ADR-23 D12's closing prediction confirmed exactly**: the
+divider arm cannot reach `port_shapes`' last two vertical terminals
+because `detect_dividers`' degree-2 over-match pins its plain series
+chain before `apply_series_horizontal` runs, and `divider-rails-strict`
+is strictly upstream of that. Composing them unblocks the two terminals
+neither reaches alone, without touching anything else.
+
+**It also says something uncomfortable.** On the shipped seed,
+`signal-direction` and `facing-trigger` are *inert on top of*
+`terminal-series-divider`: neither `v17.signal_direction` nor
+`device.facing_inverted` appears in that diff, because the divider arm's
+own placement already lands both at 0 (verified directly — no mirrored
+opamp anywhere, `two_stage_amp` `Q2` at `rot 0`). But that is one draw.
+Over nine seeds `v17.signal_direction` is `0.778 ± 0.441` on the champion
+and `0.000 ± 0.000` on the composition, and ADR-33 measured 3, 4, 2, 2,
+2, 2, 2, 2 backwards opamps over seeds 1…8. **A construction that
+happens to land clean is not the same object as a filter that cannot land
+dirty**, and the single-sample scoreboard cannot tell them apart.
+
+**vs `signal-direction`:** `T1 +0.00, T2 +9.51` → NOT promotable against
+it, and **the whole +9.51 is one cell** — `detour / common_emitter`
+1.0536 → 1.4286, +37.50 on its own, with the rest of the suite netting
+−28. That cell is the draw artefact §3 retracts. Meanwhile
+`signal-direction` leaves 8 of the 9 vertical terminals and `Q2` exactly
+as it found them. This is D12's finding reproduced one level up: **the
+instrument again ranks the arm that fixes fewer of the reported defects
+above the arm that fixes all of them**, because seven of the eight
+repairs are graded `Tier::Info` at weight 0. That is not a reason to
+re-weight `port.label_vertical` — ADR-28 registered it informational on
+purpose, and a metric that can be wrong about a correct drawing must not
+be able to reject one. It is a reason to state the disagreement rather
+than launder it through an aggregate.
+
+### 5. The owner's defects, verified by inspection
+
+Conversions of all 18 fixtures under both arms, read off the emitted
+`.kicad_sch` rather than off a metric:
+
+| defect | `flow-seed-v4` | `readable-v1` |
+| --- | --- | --- |
+| mirrored / rotated opamps | **2** (`opamp_inverting_real` `X1`, `sallen_key_lpf` `X1`, both `rot 0 mirror y`) | **0** |
+| vertical port labels | **9** across 7 fixtures (`cascode_amp` out, `common_emitter` out, `opamp_inverting` in, `opamp_inverting_real` in, `port_shapes` no + src, `sallen_key_lpf` in, `two_stage_amp` in + out) | **0** |
+| `two_stage_amp` `Q2` | `(at 83.82 60.96 180) (mirror y)` — C below E | `(at 80.01 66.04 0)` — upright |
+| `two_stage_amp` terminals | `in` @90, `out` @90 | `in` @180, `out` @0 — horizontal **and** direction-correct |
+
+Nine repaired, **none broken**. The count of 9 matches the registered
+`port.label_vertical` exactly, so the hand check and the metric agree.
+
+### 6. Why it is not recommended for promotion: an emergent Tier-0 failure
+
+Over the identical k = 9 window the composition introduces **three
+Tier-0 incidents the champion does not have**:
+
+| cell | champion (seeds 1…9) | `readable-v1` (seeds 1…9) |
+| --- | --- | --- |
+| `t0.convert_fail` / `sallen_key_lpf` | `0 0 0 0 0 0 0 0 0` | **`1` 0 0 0 0 0 0 0 0** |
+| `t0.cross_net_overlap` / `two_stage_amp` | `0 0 0 0 0 0 0 0 0` | `0 **2** 0 0 0 0 0 0 0` |
+| `t0.cross_net_overlap` / `cascode_amp` | `0 0 0 0 0 0 0 0 0` | `0 0 0 0 0 0 0 0 **1**` |
+
+(`t0.sym_overlap / wien_bridge_osc` is 1 at seed 9 on **both** arms — a
+champion property the composition merely reproduces. `v12` is identically
+0 on both arms at every one of the nine seeds, so the ADR-35 concern does
+**not** fire for the composition.)
+
+The `cross_net_overlap` pair is the ADR-35 pattern again and should not
+be over-read: sweeping seeds 10…34 the **champion** produces one on
+`cascode_amp` (seed 17) and one on `sallen_key_driven` (seed 34), against
+the composition's one (seed 15). Comparable rates, arm-independent.
+
+**`t0.convert_fail` is different, and it is the blocker.** At SA seed 1
+`readable-v1` cannot convert `sallen_key_lpf` at all: `emit_root`'s
+ADR-22 net-partition certificate refuses, correctly, and no file is
+written —
+
+```
+error: V11 correctness invariant (Tier 0): the emitted geometry does not
+reconstruct the source net partition (1 finding(s)): SPLIT: source net
+"out" reconstructs as 2 disconnected islands
+[["out@(53.34,36.83)", "out@(50.80,26.67)"], ["out@(43.18,46.99)"]]
+```
+
+Swept over seeds 1…30 × 18 fixtures × 4 arms (2160 conversions),
+**exactly one refusal exists in the whole matrix, and it is this one**:
+
+| arm | refusals in 30 seeds × 18 fixtures |
+| --- | ---: |
+| `flow-seed-v4` | 0 |
+| `terminal-series-divider` | 0 |
+| `signal-direction` | 0 |
+| `readable-v1` | **1** (seed 1, `sallen_key_lpf`) |
+
+So it is **emergent**: no constituent arm produces it alone, at that seed
+or any other in the sweep, and the champion produces none. Unlike the
+V12 and `cross_net_overlap` fragilities of ADR-35, this one has no
+champion counterpart to attribute it to.
+
+It does **not** occur at the shipped draw — every fixture converts, and
+the single-sample grading above is clean — so promoting would not break
+today's output. But CLAUDE.md's tier rule is unambiguous: *"Tier 0 is a
+hard gate, never traded for any lower-tier gain"*, and shipping a placer
+with a 1-in-30 latent conversion failure that only the composition
+produces is trading a Tier-0 risk for Tier-1/2 gains. The safety net
+holding (the emitter refuses rather than emitting a shorted netlist) is
+what makes this recoverable, not what makes it acceptable.
+
+**Recommendation: diagnose the seed-1 severance first.** It is one
+fixture, one seed, fully reproducible in one command, and the ADR-35
+mechanism suggests where to look — the composition's constructions move
+`X1` a long way, so the `out` net's Steiner tree is being built across a
+geometry no single arm produces. That is a bounded investigation, and it
+is the only thing standing between this work and a promotion the aggregate
+already supports.
+
+### 7. The ADR-16 table
+
+Rule 2 of the baseline protocol requires per-fixture V16 (B, J)
+non-increasing on any change that regenerates the baseline. Read on the
+**single draw** the protocol is stated over, `readable-v1` raises B on
+four fixtures (`common_emitter` 4 → 9, `opamp_definition_level` 6 → 10,
+`port_shapes` 4 → 6, `cascode_amp` 13 → 14) and J on one (`two_stage_amp`
+5 → 6), so **it does not satisfy ADR-16 rule 2 as written**.
+
+Read over nine seeds the picture reverses on the two large ones:
+
+| fixture | B champion | B `readable-v1` | verdict |
+| --- | --- | --- | --- |
+| `two_stage_amp` | 17.667 ± 2.291 | **12.778 ± 2.224** | better, t = −4.59 |
+| `cascode_amp` | 16.556 ± 4.035 | **12.333 ± 2.291** | better, t = −2.73 |
+| `common_emitter` | 8.333 ± 2.646 | **5.444 ± 1.878** | better, t = −2.67 |
+| `wien_bridge_osc` | 12.556 ± 2.297 | 10.500 ± 1.927 | better, unresolved |
+| `rc_phase_shift` | 10.444 ± 3.206 | 9.556 ± 1.740 | better, unresolved |
+| `shunt_feedback_amp` | 10.000 ± 3.162 | 8.875 ± 3.871 | better, unresolved |
+| `sallen_key_lpf` | 9.556 ± 1.424 | 9.000 ± 0.000 | better, unresolved |
+| `opamp_inverting_real` | 6.111 ± 1.691 | 5.667 ± 1.803 | better, unresolved |
+| `opamp_inverting` | 5.333 ± 1.225 | 5.000 ± 0.000 | better, unresolved |
+| `named_rails`, `sallen_key_driven` | — | — | unchanged / unresolved |
+| **`opamp_definition_level`** | 6.000 ± 0.000 | **10.000 ± 0.000** | **worse, deterministic** |
+| **`port_shapes`** | 4.000 ± 0.000 | **6.000 ± 0.000** | **worse, deterministic** |
+
+Nine fixtures better, two worse, and **both of the worse ones are `sd = 0`
+on both arms** — genuine, deterministic, not draws. `port_shapes`' +2 is
+the price of un-pinning its over-matched divider chain (§4) and it buys
+that fixture's two vertical terminals; `opamp_definition_level`'s +4 is
+unexplained and is the one Tier-2 regression in this work that a
+promotion review should weigh on its own.
+
+`common_emitter`'s single-draw B 4 → 9 — the number that would have
+dominated a commit-message table — is a draw artefact, and this is the
+concrete case for stating ADR-16 rule 2 over seed *means* rather than one
+sample. That restatement is an owner decision and is not taken here.
