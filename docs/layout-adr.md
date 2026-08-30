@@ -8701,3 +8701,81 @@ instrument has manufactured a ~26-point Tier-2 story out of one draw.
   `#[ignore]`d; the detour counterpart of ADR-31's `ink_dump`, calling the
   ratchet's own `wire_detour` so a seed sweep is graded by the project's
   definition rather than a copy of it.
+
+## ADR-34 — Vertical port terminals are pin-text collisions, not a bad tie-break
+
+**Status:** attempted and **REVERTED** 2026-08-30. Nothing landed. The
+owner's report — *"Both VIN and VOUT ... should be horisontal. This is
+common issue for many circuits."* — is **not** fixable by label rotation
+choice, and this records why so it is not retried.
+
+### The attempt
+
+`global_label_rotation_avoiding` derives a terminal's preferred pose
+from its **anchor pin's angle** (a fact about a neighbouring symbol, not
+about the terminal), then falls back through: pass 1 fully clean, pass 2
+clean of bodies/properties, pass 3 least summed overlap area. Nine of
+the suite's terminals come out vertical.
+
+Two changes were tried:
+
+1. Derive the preferred pose from the terminal's **direction**
+   (`output` → 0, else 180) and order candidates so both horizontals are
+   exhausted before either vertical. **Byte-identical on all eighteen
+   fixtures** — a pure no-op.
+2. Add a pass accepting a horizontal pose whose **body** overlap is
+   negligible relative to the label's own footprint.
+
+Change 2 moved `port.label_vertical` 9 → 1 and `port.label_backwards`
+0 → 3.
+
+### Why it was reverted
+
+`v13_labels_clear_pin_text` — a **zero-budget Tier-1 ratchet** — fails
+with three new overlaps: `common_emitter` `out` over `COUT.pintext1`,
+`two_stage_amp` `in` over `CIN.pintext0`, `cascode_amp` `out` over
+`COUT.pintext1`.
+
+The instrumented pose scores say it plainly. `two_stage_amp`'s `in`:
+
+| pose | body mm² | **pin text mm²** |
+| --- | --- | --- |
+| rot 180 (direction-correct horizontal) | 0.047 | **1.435** |
+| rot 0 (backwards horizontal) | 0.479 | 0.279 |
+| rot 90 (vertical, chosen) | 0.005 | **0.000** |
+
+**The chooser is right and the attempt was wrong.** These terminals are
+vertical because every horizontal pose collides with *pin text*, which
+V13 grades at budget 0. Change 2 tested only the body column and was
+blind to the column that actually decides. Trading a Tier-1 V13 ratchet
+for a Tier-Info direction metric is forbidden outright by the ordering
+rule ("never introduce a Tier-1 regression to improve a Tier-2 metric").
+
+### What would actually fix it
+
+Not rotation — **room**. The label needs a footprint reserved during
+placement so the neighbouring pin text is not where the terminal has to
+go. That is placement-side net-label geometry: `label_geom.rs`, which
+exists only on `archive/adr14-directional-plus-label` and which master
+already forward-references (`footprint.rs`'s "Known residual",
+`anneal.rs`'s "once `label_geom` lands"). CLAUDE.md's ADR-17 salvage
+records the same precondition from the other direction: *"a complete
+decoration reservation is a precondition for any compaction attempt,
+not its successor."* This is a third independent arrival at that
+conclusion.
+
+### The methodology failure, recorded because it nearly shipped
+
+The first measurement ran `readability_metrics` + `visual_quality` only
+and reported **"no `v13.*` cell moves"**. `v13_labels_clear_pin_text`
+lives in `electrical_safety.rs` and never executed. On that false
+reading, a horizontal-only experiment was taken as *refuting* the
+(correct) hypothesis that horizontal costs V13 — so the bad measurement
+did not merely miss a regression, it inverted a conclusion and redirected
+the whole investigation.
+
+Only `cargo test --workspace --no-fail-fast` caught it. This is exactly
+the failure CLAUDE.md already forbids — *"never gate a change on a
+hand-picked subset of suites"* — and it was committed anyway, by
+choosing two binaries for speed. A subset run is not a fast version of
+the suite; it is a different and weaker claim.
