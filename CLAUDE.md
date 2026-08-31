@@ -480,6 +480,42 @@ seed-time + weight-0 soft cost at refine-time is a bug. (Detailed
 Attempt-A / Attempt-B post-mortem: see `docs/layout-adr.md`
 post-mortems.)
 
+**Escape-hatch requirement (ADR-37).** Every pose a hard candidate
+filter removes is a pose phase 4.5's **Tier-0 repair** cannot use. That
+repair is the only stage that can answer a severed net or a pin-on-pin
+short with a reorientation, and it selects from the same filtered set
+every other stage reads — so two individually-sound filters can compose
+into an *infeasible repair space*, and the conversion is refused outright
+by ADR-22's certificate. This is not hypothetical: V14 ∩ V17 plus the
+`terminal-series-divider` construction's extra pinning did exactly that
+to `sallen_key_lpf` at SA seed 1 under `--placer=readable-v1`.
+
+So **a hard orientation filter must name its Tier-0 escape when it is
+added.** Two forms are acceptable:
+
+- *Its own documented mechanism.* V14's is the detached-glyph stub: when
+  the filter empties, the glyph is drawn separately and the constraint
+  is satisfied off-body. V14 therefore needs nothing from phase 4.5 and
+  is **never** liftable there.
+- *Registration as liftable in phase 4.5's Tier-0 repair mode.* V17's
+  form: `RefinementMeta::repair_allowed` carries the pre-narrowing set,
+  and `refine::escape_permitted` admits a pose outside the ordinary set
+  **only** on a strict improvement of the Tier-0 prefix
+  `(severed, coincident, v11)` — never on `(v13, v12, v5, bends)`.
+
+A filter with **neither** is a latent conversion failure: it will be
+inert until the day some other change hands phase 4.5 a Tier-0-broken
+placement whose only repair it forbids, and then the converter simply
+refuses. Note what this lift is and is not. A Tier-0-*state*-conditional
+lift is categorically different from a weight-conditional one — it has no
+tuning parameter, so it cannot be set to a value that quietly does
+nothing (the `power_pin_outward` failure mode); it is unreachable while
+the placement is Tier-0 clean; and every firing is graded afterwards by
+the lifted invariant's own verifier on emitted geometry, so the price is
+measured rather than asserted. It is still a Tier-1 cost, and paying it
+is CLAUDE.md ordering rule 1 read in the direction it points: a Tier-1
+defect strictly dominates a failed conversion.
+
 **Measurement half of the same rule (ADR-25).** A guard that protects a
 postcondition MUST be evaluated over the **same geometry the
 postcondition is stated in**. A guard measuring a strict subset of it is
@@ -595,8 +631,14 @@ matters: every observed V17 violation is a mirror, not a rotation), and
 phase 4.5. There is deliberately **no V17 weight in `cost.rs`**, for the
 `power_pin_outward` reason. V14 wins if the intersection empties — it has
 a documented escape (the detached glyph) and V17 has none — and the
-all-eight fallback stands if V14's own set empties. See
-`docs/invariants.md` V17 and ADR-33.
+all-eight fallback stands if V14's own set empties. **One stage may step
+outside that set: phase 4.5's Tier-0 repair (ADR-37)** — while
+`(severed, coincident, v11) != (0, 0, 0)` it searches
+`RefinementMeta::repair_allowed` (the V14 set, pre-V17) and takes a
+V17-excluded pose only on a strict Tier-0 improvement. That is V17's
+registered Tier-0 escape under the escape-hatch requirement above; V14
+is never lifted there, because it has its own. See `docs/invariants.md`
+V17, ADR-33 and ADR-37.
 
 ## Visual quality invariants
 

@@ -1295,6 +1295,29 @@ invariant here.
   `power_pin_outward` post-mortem records: a tunable term at a safe
   weight does nothing.
 
+  **The one seam where the sets are NOT the same, and why (ADR-37).**
+  Stage 3 above reads a *second* set while — and only while — the
+  placement it received is already Tier-0 broken
+  (`(severed, coincident, v11) != (0, 0, 0)`). Every pose a hard filter
+  removes is a pose phase 4.5's Tier-0 repair cannot use, and composing
+  V14 ∩ V17 with the `terminal-series-divider` construction's extra
+  pinning left `sallen_key_lpf` at SA seed 1 with no V17-legal pose that
+  reconnects its severed `out` net; ADR-22's certificate refused the
+  conversion outright. So `RefinementMeta::repair_allowed` carries the
+  **V14 set before the V17 narrowing**, phase 4.5 searches it in that
+  regime, and `refine::escape_permitted` admits a pose outside `allowed`
+  **only** on a strict improvement of the Tier-0 prefix — never on
+  `(v13, v12, v5, bends)`. This is the *static* precedence below
+  ("V14 wins and V17 relaxes") extended to *dynamic* infeasibility, which
+  only the router can establish. It is V17's registered Tier-0 escape
+  under CLAUDE.md's **escape-hatch requirement**; V14 is never lifted
+  there because it has its own (the detached glyph). On every placer that
+  does not arm the V17 filter the two sets are element-wise equal, so the
+  seam does not exist on the shipping path — measured, not argued: 18/18
+  fixtures byte-identical. When it *does* fire the resulting V17
+  violation is counted by the verifier below like any other, so the price
+  is graded on emitted geometry rather than asserted.
+
   *Precedence when the two filters conflict.* If the V14∩V17 intersection
   is empty but the V14 set is not, **V14 wins** and V17 relaxes — V14
   carries a documented escape (the detached-glyph stub) where V17 has

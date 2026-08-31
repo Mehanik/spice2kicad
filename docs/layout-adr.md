@@ -9264,6 +9264,19 @@ geometry no single arm produces. That is a bounded investigation, and it
 is the only thing standing between this work and a promotion the aggregate
 already supports.
 
+> **RESOLVED by ADR-37 (2026-08-31).** The guess above is wrong in its
+> detail and right in its scope. The severance is not a Steiner-tree
+> geometry no single arm produces: `terminal-series-divider` produces the
+> *same* severed placement alone, and phase 4.5 repairs it by re-posing
+> `X1`. What the composition adds is the V17 *filter*, which removes
+> exactly that repair pose from the candidate set phase 4.5 selects
+> from — so the arm that creates the damage and the arm that forbids the
+> repair are different arms, and neither is faulty alone. ADR-37 gives
+> V17 a Tier-0 escape at phase 4.5, the refusal count over the same 30 ×
+> 18 × 4 matrix goes **1 → 0**, and CLAUDE.md gains an **escape-hatch
+> requirement** so the next hard filter has to declare one. This blocker
+> is closed; §7 and the rest of §6 are not.
+
 ### 7. The ADR-16 table
 
 Rule 2 of the baseline protocol requires per-fixture V16 (B, J)
@@ -9301,3 +9314,227 @@ promotion review should weigh on its own.
 dominated a commit-message table — is a draw artefact, and this is the
 concrete case for stating ADR-16 rule 2 over seed *means* rather than one
 sample. That restatement is an owner decision and is not taken here.
+
+## ADR-37 — Every hard filter owes phase 4.5 a Tier-0 escape; V17 pays it
+
+**Status:** built and measured 2026-08-31 on `292ea1c`
+(branch `adr35-readable-v1`). One behaviour change, reachable **only**
+under `--placer=readable-v1` / `--placer=signal-direction`; the default
+path is byte-identical on all 18 fixtures. `readable-v1` is **still not
+promoted** — that stays an owner decision, and this ADR does not ask for
+it. What it removes is the *blocker* ADR-36 §6 identified.
+
+### The defect
+
+ADR-36 graded `readable-v1` PROMOTABLE on the aggregate and recommended
+**against** promotion, on one finding: at SA seed 1 the composition
+cannot convert `sallen_key_lpf` at all. ADR-22's net-partition
+certificate refuses, correctly, and no file is written —
+
+```
+error: V11 correctness invariant (Tier 0): the emitted geometry does not
+reconstruct the source net partition (1 finding(s)): SPLIT: source net
+"out" reconstructs as 2 disconnected islands
+```
+
+Over 30 seeds × 18 fixtures × 4 arms that was the **only** refusal in the
+matrix, and it was emergent: no constituent arm produces it alone.
+
+### The mechanism
+
+Phase 4.5's `baseline severed` → `final severed` on `sallen_key_lpf` at
+seed 1, read straight off `RUST_LOG=kicad_emitter=debug`:
+
+| arm | baseline | final | |
+| --- | ---: | ---: | --- |
+| `flow-seed-v4` | 0 | 0 | never broken |
+| `terminal-series-divider` | **1** | **0** | phase 4.5 REPAIRS it |
+| `signal-direction` (V17) | 0 | 0 | never broken |
+| `readable-v1` | **1** | **1** | repair BLOCKED → refusal |
+
+The two arms are different *kinds* of object, and that is the whole
+story.
+
+`terminal-series-divider` is a **construction**. It pins elements
+(movable 5/9 → 3/9 on this fixture) and at this seed hands phase 4.5 a
+placement the router cannot fully join. Phase 4.5 is built to answer
+exactly that: `severed` is the leading Tier-0 key of its acceptance
+tuple, so the phase actively *seeks* the repair rather than merely
+avoiding a worsening (ADR-20). On that arm alone it finds one — it
+re-poses `X1` and `severed` goes 1 → 0.
+
+`signal-direction` is a **filter**. It narrows
+`orient::allowed_orientations`, and phase 4.5 selects only from that
+narrowed set. The pose that reconnects the net is `X1` at
+`rot 0 + (mirror y)` — which is precisely the pose V17 exists to
+forbid. V17 removes the repair, and nothing else in the pipeline can
+supply one, because only the router knows the net is severed and only
+phase 4.5 can act on what the router knows.
+
+So the general form, which is the durable finding here:
+
+> **Every pose a hard candidate filter removes is a pose phase 4.5's
+> Tier-0 repair cannot use.** Two individually-sound filters can
+> therefore compose into an *infeasible repair space*, and the failure
+> surfaces not as a bad drawing but as a refused conversion.
+
+Both filters were correct in isolation and both remain correct. The
+defect is in the *composition*, and no amount of testing either arm
+alone can find it — which is why this class needs a rule, not a patch.
+
+### The ruling: a Tier-0-*state*-conditional lift is not a knob
+
+The fix relaxes a hard Tier-1 filter, which this file has repeatedly
+recorded as the wrong move (`power_pin_outward`, Attempt A / Attempt B).
+The distinction that makes it right here is **what the lift is
+conditioned on**.
+
+A *weight*-conditional relaxation — a soft cost term, a coefficient, a
+budget with headroom — is unsound for a categorical property because the
+condition is a free parameter: at a safe value it does nothing, at an
+effective value it fires where it should not, and nothing in the type
+system says which you have. That is the `power_pin_outward` failure
+verbatim.
+
+A **Tier-0-state**-conditional lift is a different object:
+
+1. **No tuning parameter.** The condition is
+   `tier0(baseline) != (0, 0, 0)` — a measured fact about the placement
+   in hand, not a number anyone chose. It cannot be set to a value that
+   quietly does nothing.
+2. **Unreachable on a Tier-0-clean placement.** Counts are `usize`, so
+   `tier0(m) < (0, 0, 0)` is false by construction; and the callers do
+   not even widen the search set in that regime, so the widened poses are
+   never measured, never cached, never compared.
+3. **Bounded by the Tier-0 prefix alone.** `escape_permitted` admits an
+   escaped pose only on a strict improvement of
+   `(severed, coincident, v11)` — never on `(v13, v12, v5, bends)`. The
+   lift buys a correctness repair and cannot be spent on anything else.
+4. **Graded, not asserted.** Every firing produces a sheet the V17
+   verifier measures on emitted geometry and reports as
+   `v17.signal_direction`. The price appears in the same ratchet table
+   as every other V17 violation.
+
+And paying it is CLAUDE.md ordering rule 1 read in the direction it
+actually points. "Never trade a Tier-0 violation for any Tier-1/2 gain"
+forbids *giving Tier 0 away*; it therefore **mandates** paying Tier 1 to
+recover it. ADR-20 made exactly this argument for putting `severed` in
+the tuple instead of leaving it a floor. This is the same argument one
+level out: a Tier-1 defect strictly dominates a failed conversion.
+
+**V14 is not liftable and does not become so.** It carries its own
+documented escape — the detached-glyph stub — so an empty V14 set is
+already handled without phase 4.5's help. The repair set is the **V14
+set**, not the full eight, and
+`orient::tests::the_repair_set_is_v14_and_matches_allowed_off_the_v17_filter`
+asserts that no 90/270 rotation and no R180 enters it. This is the
+*static* precedence `orient.rs` and `docs/invariants.md` already declare
+("V14 wins and V17 relaxes, because V14 has a documented escape and V17
+has none") extended to **dynamic** infeasibility — no V17-legal pose
+reconnects the net — which only the router can establish, which is why
+it must live at phase 4.5 (ADR-11).
+
+### Implementation
+
+Three edits, no new cost weight, no ratchet literal touched.
+
+1. `orient::allowed_and_repair_orientations` returns
+   `(allowed, repair_allowed)`. `repair_allowed` is the value
+   `allowed_orientations` already computed *before* the V17 narrowing —
+   nothing new is derived. `allowed_orientations` is now its `.0`.
+2. `RefinementMeta` carries `repair_allowed`.
+3. `refine.rs`: in the **already-existing** Tier-0 repair mode
+   (`let tier0_repair = tier0(baseline) != (0, 0, 0);`, which predates
+   this ADR), `greedy_descent` and `joint_search` enumerate
+   `distinct_orientations(repair_allowed[i], …)`; a candidate whose pose
+   is outside `allowed[i]` passes `escape_permitted` only on a strict
+   Tier-0 improvement, checked *before* the trial route so the escape
+   costs the normal path nothing. One `log::info!` per escaped pose.
+
+The scope is deliberately narrow: **the V17 narrowing only**, in
+**repair mode only**, on a **strict Tier-0 improvement only**.
+
+### Measurements
+
+**(a) The reproducer converts.** `--placer readable-v1 --sa-seed 1
+--no-layout-cache`, `sallen_key_lpf`: exit **0**,
+`baseline severed=1 … → final severed=0`, and
+
+```
+refine: tier0 repair used a V17-excluded pose for X1
+```
+
+The repair pose is `X1` at `(at 83.82 36.83 0) (mirror y)` — `rot 0`,
+`mirror_y`. It is **the same pose `terminal-series-divider` reaches
+unaided**, which is the direct confirmation of the mechanism: the pose
+was always in the V14 set and always the right answer; V17 was the only
+thing standing between the placement and it.
+
+**(b) Default-path byte-identity, measured.** All 18 fixtures
+`cmp`-identical under `--placer flow-seed-v4 --no-layout-cache`,
+before-binary vs after-binary: `identical=18 differs=0`. `baseline_lock`
+untouched. This is structural rather than lucky — off the V17 filter
+`repair_allowed == allowed` element-wise, asserted by
+`orient::tests::the_repair_set_is_v14_and_matches_allowed_off_the_v17_filter`
+over five placers.
+
+**Repair mode's reachability was measured, not assumed** — and the
+assumption would have been wrong. Sweeping all 18 fixtures under the
+default placer at the shipped seed, `common_emitter` arrives at phase 4.5
+with `baseline v11 = 1`, so **repair mode already fires on the shipping
+path**. It is inert there only because the two sets are equal. Had the
+widening been anything other than a no-op off the V17 filter, this is the
+fixture it would have moved.
+
+**(c) The unit test.**
+`refine::severed_guard_tests::a_v17_excluded_pose_buys_a_tier0_repair_and_nothing_else`
+asserts all four corners against a Tier-0-broken baseline: a
+`(v13, v12, v5, bends)`-only gain is **rejected** for an escaped pose and
+accepted for an in-set one (the control that makes the first assertion
+mean something); a strict Tier-0 repair is **accepted**; an *equal*
+Tier-0 prefix is rejected (`<`, not `<=`); and a Tier-0 regression is
+refused by both gates.
+
+**(d) The ADR-36 matrix, re-run.** 4 arms × 30 seeds × 18 fixtures =
+**2160 conversions**.
+
+MATRIX_PLACEHOLDER
+
+**(e) What V17 costs, at the one seed where it fires.** Measured with
+V17's own verifier through the scoreboard sink, all 18 fixtures:
+
+| arm, seed 1 | `v17.signal_direction`, total | where |
+| --- | ---: | --- |
+| `flow-seed-v4` (shipping default) | **3** | `opamp_inverting_real` 1, `sallen_key_driven` 1, `sallen_key_lpf` 1 |
+| `readable-v1`, before this change | — | **conversion refused; no sheet exists** |
+| `readable-v1`, after | **1** | `sallen_key_lpf` 1 |
+| `readable-v1`, shipped seed | **0** | — |
+
+This was predicted before it was measured, and the prediction is worth
+recording because it is the honest shape of the trade: `sallen_key_lpf`'s
+`X1` has a V14 ∩ V17 set of **exactly one pose** (`IDENTITY`), so *any*
+repair pose violates V17. The seed-1 sheet emits `v17 = 1`, and that is
+the price of not refusing the conversion.
+
+It is worth noting how small that price is next to the alternative. Even
+at its worst seed the composition-with-escape emits **one** backwards
+amplifier where the shipping default emits **three**; at the shipped seed
+it emits none. The change does not make `readable-v1` worse on V17 at any
+seed — it makes it *exist* at the one seed where it did not.
+
+No ratchet literal moved. `SIGNAL_DIRECTION_BUDGETS` is graded on the
+default placer at the shipped seed, where every count is unchanged.
+
+### What this does not settle
+
+`readable-v1` is **not promoted** here, and this ADR takes no position on
+whether it should be. ADR-36's other reservations stand untouched: the
+`t0.cross_net_overlap` incidents (which it argues are arm-independent at
+comparable rates), `opamp_definition_level`'s unexplained deterministic
+B 6 → 10, and the fact that the single-sample and multi-seed gradings
+agree on the verdict while disagreeing on every magnitude in it.
+
+What is settled is that ADR-36 §6's blocker — *"a 1-in-30 latent
+conversion failure that only the composition produces"* — no longer
+exists, and that the class of defect it belonged to now has a rule
+(CLAUDE.md, **Escape-hatch requirement**) rather than a patch.
