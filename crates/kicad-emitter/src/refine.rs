@@ -464,6 +464,18 @@ fn greedy_descent(
             //     `(v13, v12, v5, bends)`.
             // On any placer that does not arm the V17 filter
             // `repair_allowed[i] == allowed[i]`, so this is inert.
+            //
+            // The widening cannot *hide* an in-set candidate behind an
+            // escaped one, which is the non-obvious hazard.
+            // [`distinct_orientations`] keeps the FIRST member of each
+            // pin-geometry class, and the narrow set is a subsequence of
+            // the wide one — so in principle an excluded pose could
+            // become the representative of a class whose included member
+            // would have been accepted. It cannot: the class key is
+            // `(number, x, y, angle)` per pin, and V17 is a function of
+            // exactly those pin `x` values and electrical types, so two
+            // orientations in one class have the *same* V17 status.
+            // An excluded and an included pose are never class-mates.
             let search_set = if tier0_repair {
                 meta.repair_allowed.get(i).unwrap_or(allowed)
             } else {
@@ -681,6 +693,8 @@ fn joint_search(
         .iter()
         .map(|&i| {
             let symbol = library.lookup(&placement.elements[i].lib_id);
+            // Same widening, same three scopes, and the same
+            // class-representative argument as `greedy_descent`.
             let search_set = if tier0_repair {
                 meta.repair_allowed.get(i).unwrap_or(&meta.allowed[i])
             } else {

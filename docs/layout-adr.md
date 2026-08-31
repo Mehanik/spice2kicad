@@ -9454,6 +9454,20 @@ Three edits, no new cost weight, no ratchet literal touched.
 The scope is deliberately narrow: **the V17 narrowing only**, in
 **repair mode only**, on a **strict Tier-0 improvement only**.
 
+**One non-obvious hazard, ruled out rather than hoped away.**
+`distinct_orientations` collapses a candidate set to one representative
+per *pin-geometry class* and keeps the **first** member it meets; the
+narrow set is a subsequence of the wide one, so in principle widening
+could promote an escaped pose to representative of a class whose
+*included* member would have been accepted — silently losing a candidate
+in repair mode. It cannot happen. The class key is
+`(number, x, y, angle)` per pin, and V17 is a function of exactly those
+pin `x` values and their electrical types, so **two orientations in one
+geometry class have the same V17 status** and an excluded pose is never a
+class-mate of an included one. (The same argument is why V14 status is
+class-invariant, which the pre-existing collapse already relied on
+without saying so.)
+
 ### Measurements
 
 **(a) The reproducer converts.** `--placer readable-v1 --sa-seed 1
@@ -9498,7 +9512,55 @@ refused by both gates.
 **(d) The ADR-36 matrix, re-run.** 4 arms × 30 seeds × 18 fixtures =
 **2160 conversions**.
 
-MATRIX_PLACEHOLDER
+| arm | refusals, 30 seeds × 18 fixtures | escaped poses accepted |
+| --- | ---: | ---: |
+| `flow-seed-v4` | 0 | 0 |
+| `terminal-series-divider` | 0 | 0 |
+| `signal-direction` | 0 | 0 |
+| `readable-v1` | **0** (was **1**) | **1** |
+
+**The escape fires exactly once in 2160 conversions**, and it is the cell
+the diagnosis named: `readable-v1`, seed 1, `sallen_key_lpf`,
+`base = (1, 0, 0) → fin = (0, 0, 0)`. Nothing else in the matrix takes an
+escaped pose, on any arm, at any seed. That is the surgical-scope claim
+made as a measurement rather than an argument: 2159 of 2160 conversions
+run a code path that is bit-identical to the one before this change, and
+the 2160th goes from *refused* to *converted*.
+
+**Nothing regressed, and the sweep says more than that.** Repair mode
+itself is common — it arms whenever phase 4.5 receives a Tier-0-dirty
+placement, which happens on **34 of 540** conversions under the shipping
+default:
+
+| arm | Tier-0-dirty baselines | Tier-0-dirty finals |
+| --- | ---: | ---: |
+| `flow-seed-v4` | 34 / 540 | **0** |
+| `terminal-series-divider` | 9 / 540 | **0** |
+| `signal-direction` | 34 / 540 | **0** |
+| `readable-v1` | 9 / 540 | **0** |
+
+Under `flow-seed-v4` those 34 spread over eight fixtures — `two_stage_amp`
+10/30 seeds, `common_emitter` 6, `cascode_amp` / `sallen_key_lpf` /
+`wien_bridge_osc` 4 each, `rc_phase_shift` 3, `opamp_inverting_real` 2,
+`shunt_feedback_amp` 1. **Every one of them ends Tier-0 clean.** Two
+consequences worth stating:
+
+* Phase 4.5's Tier-0 repair is not a rare emergency path — it is load-
+  bearing on one conversion in sixteen of the *shipping* placer, and it
+  succeeds every time. Which is exactly why removing a pose from it is
+  dangerous, and why the escape-hatch requirement is a rule rather than a
+  note.
+* The falsifier "repair mode fires and the sheet is still not Tier-0
+  clean" has **zero** occurrences. The strict-improvement gate is not
+  letting a half-repair through.
+
+*Scope of this instrument.* It reads conversion exit status (the
+`t0.convert_fail` cell) and phase 4.5's own `(severed, coincident, v11)`
+tuple off the debug log — not the full scoreboard Tier-0 cell set
+(`t0.cross_net_overlap`, `t0.sym_overlap`), which needs the verifier
+harness. It does not need to: with the escape accepted in exactly one
+cell, every other conversion in the matrix is provably byte-unchanged, so
+no other Tier-0 cell can have moved.
 
 **(e) What V17 costs, at the one seed where it fires.** Measured with
 V17's own verifier through the scoreboard sink, all 18 fixtures:
