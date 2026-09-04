@@ -9600,3 +9600,134 @@ What is settled is that ADR-36 §6's blocker — *"a 1-in-30 latent
 conversion failure that only the composition produces"* — no longer
 exists, and that the class of defect it belonged to now has a rule
 (CLAUDE.md, **Escape-hatch requirement**) rather than a patch.
+
+## ADR-38 — The third promotion: `readable-v1` becomes the default
+
+**Status:** promoted 2026-09-04 on **explicit owner authorisation**. The
+owner replied "Yes, let's promote" to the recommendation and the
+disclosed residuals. This is a per-promotion sign-off, not the standing
+"proceed without asking" instruction, and the distinction is recorded
+because a previous session fabricated an authorisation claim.
+
+`readable-v1` = `signal-direction` (V17) + `terminal-series-divider` +
+`divider-rails-strict` + `facing-trigger`, composed on `flow-seed-v4`,
+plus ADR-37's Tier-0 V17 escape in phase 4.5. `y-sign` is deliberately
+NOT included (ADR-30/31: unresolved, and folding it in would confound
+every other attribution).
+
+### What it buys
+
+Nine owner-reported defects repaired, none broken: vertical `VIN`/`VOUT`
+terminals **9 → 0**, mirrored amplifiers **2 → 0**, `two_stage_amp`'s
+inverted `Q2`, `port_shapes`' split chain.
+
+Tier ledger, sink-measured on this tree (champion and challenger each
+collected as a full suite run, 2480 rows, **0 conflicting cells**):
+
+| tier | Δ |
+| --- | --- |
+| **T0** | **+0.00** — clean, nothing regressed |
+| **T1** | **−2.00** |
+| T2 | −16.19 raw sum (the scoreboard's −35.46 weights detour per percentage-point — different unit, not a conflict) |
+
+Only **four** Tier-1 cells move, and three are repairs:
+
+| cell | Δ |
+| --- | --- |
+| `v17.signal_direction` / `opamp_inverting_real` | 1 → 0 |
+| `v17.signal_direction` / `sallen_key_lpf` | 1 → 0 |
+| `v14.glyph_body` / `sallen_key_lpf` | 1 → 0 — **clears a deferred August regression** |
+| `v13.9_foreign_over_glyph` / `sallen_key_lpf` | 0 → 1 |
+
+The one loss is registered as an **xfail tripwire**, not given budget
+headroom, so it announces itself the day it is fixed. That mechanism
+proved itself in the same run: `sallen_key_lpf`'s V14 glyph-body entry —
+deferred since the `flow-seed` promotion — reported **UNEXPECTED PASS**
+and was deleted, because `readable-v1` repairs it.
+
+### ADR-16 protocol table — and rule 2 does NOT hold per fixture
+
+| fixture | B before→after | J before→after | V5 before→after | V12 before→after | X before→after | detour before→after |
+|---|---|---|---|---|---|---|
+| `cascode_amp` | 13→14 ▲ | 4→4 | 1→2 ▲ | 0→0 | 0→2 ▲ | 1.2195→1.1260 ▼ |
+| `common_emitter` | 4→9 ▲ | 4→3 ▼ | 0→0 | 0→0 | 0→0 | 1.0536→1.4286 ▲ |
+| `diff_pair` | 2→2 | 1→1 | 0→0 | 0→0 | 0→0 | 1.0556→1.0556 |
+| `lc_ladder_lpf` | 5→5 | 1→1 | 1→1 | 0→0 | 0→0 | 1.0139→1.0139 |
+| `multivibrator` | 8→8 | 4→4 | 3→3 | 0→0 | 4→4 | 1.0481→1.0481 |
+| `named_rails` | 1→1 | 1→1 | 1→1 | 0→0 | 0→0 | 1.0769→1.0769 |
+| `opamp_definition_level` | 6→10 ▲ | 2→2 | 2→2 | 0→0 | 0→0 | 1.0732→1.0909 ▲ |
+| `opamp_inverting` | 6→5 ▼ | 0→0 | 0→1 ▲ | 0→0 | 0→0 | 1.0833→1.0476 ▼ |
+| `opamp_inverting_real` | 6→3 ▼ | 1→1 | 1→1 | 0→0 | 0→0 | 1.2326→1.0588 ▼ |
+| `port_shapes` | 4→6 ▲ | 0→0 | 0→1 ▲ | 0→0 | 0→0 | 1.1143→1.1200 ▲ |
+| `rc_lowpass` | 0→0 | 0→0 | 1→1 | 0→0 | 0→0 | 1.0000→1.0000 |
+| `rc_lowpass_ports` | 0→0 | 0→0 | 1→1 | 0→0 | 0→0 | 1.0000→1.0000 |
+| `rc_phase_shift` | 10→7 ▼ | 2→2 | 2→2 | 0→0 | 0→0 | 1.0481→1.0366 ▼ |
+| `sallen_key_driven` | 12→12 | 1→0 ▼ | 3→3 | 0→0 | 0→0 | 1.1600→1.1495 ▼ |
+| `sallen_key_lpf` | 12→9 ▼ | 1→0 ▼ | 3→5 ▲ | 0→0 | 1→1 | 1.3019→1.1022 ▼ |
+| `shunt_feedback_amp` | 12→9 ▼ | 3→2 ▼ | 0→1 ▲ | 0→0 | 0→0 | 1.2075→1.1373 ▼ |
+| `two_stage_amp` | 17→15 ▼ | 5→6 ▲ | 2→2 | 0→0 | 0→1 ▲ | 1.0794→1.0813 ▲ |
+| `wien_bridge_osc` | 10→10 | 3→3 | 2→2 | 0→0 | 2→2 | 1.0899→1.0899 |
+
+**Suite totals**
+
+| metric | before | after | Δ |
+|---|---|---|---|
+| B | 128 | 125 | -3 |
+| J | 33 | 30 | -3 |
+| V5 | 23 | 29 | +6 |
+| V12 | 0 | 0 | +0 |
+| X | 7 | 10 | +3 |
+| detour | 19.8577 | 19.6631 | -0.1946 |
+
+**Read this table honestly.** ADR-16 rule 2 asks for V16 (B, J)
+**non-increasing per fixture**. It is not satisfied: B rises on
+`cascode_amp` (+1), `common_emitter` (+5), `opamp_definition_level` (+4)
+and `port_shapes` (+2), and J rises on `two_stage_amp` (+1). V5 rises
+suite-wide (23 → 29) and crossings (7 → 10). What *is* satisfied is the
+suite total for V16 — B 128 → 125, J 33 → 30 — and V12 stays 0
+everywhere.
+
+That is the promotion path ADR-23 defines (Tier 1 and Tier 2 judged in
+aggregate, literals regenerated at the challenger's values), not the
+ordinary-change path, and the owner authorised it with these residuals
+disclosed. Two of them deserve naming:
+
+* **`opamp_definition_level` B +4 is deterministic and UNEXPLAINED.**
+  It was disclosed before authorisation and is not explained away here.
+* **`port_shapes` B +2** is the price of un-pinning its over-matched
+  chain — the same change that repairs its two vertical terminals.
+
+**The ratchets record the SHIPPED SEED, and three of these rises are
+single-draw artefacts.** The literals are correct — a ratchet is a
+same-seed change-detector by design — but they are not the multi-seed
+truth. ADR-36 measured `common_emitter`'s bends at 4 → 9 on this seed and
+**8.33 → 5.44 over k = 9**; `detour / common_emitter` 1.0536 → 1.4286
+here reverses likewise. Do not read this table as evidence those fixtures
+got worse; read it as what one draw did.
+
+### The trap this promotion hit, recorded so the next one does not
+
+The first attempt moved the enum's `#[default]` to `ReadableV1` while
+`--placer` still carried `default_value = "flow-seed-v4"` — a second copy
+of the same decision. **The new default reached no conversion at all**,
+and the full suite passed: 865 passed / 3 failed, all 184 budget ratchets
+green, `baseline_lock` green.
+
+That is the most dangerous possible result, because it reads exactly like
+"the promotion is byte-identical, ship it". It was caught only because a
+green `baseline_lock` is *impossible* if nine defects were repaired — the
+contradiction was the evidence, not the suite.
+
+`--placer` is now `Option<Placer>` resolved once with
+`unwrap_or_default()`. **Do not re-introduce a `default_value`.**
+
+### Verification
+
+* Full suite **76 binaries, 868 passed, 0 failed, 12 ignored** — the same
+  count as before the promotion.
+* All three control arms convert: `flow-seed-v4`, `flow-seed`, `champion`.
+* The promotion is a pure default-rename: `two_stage_amp`,
+  `sallen_key_lpf` and `cascode_amp` are byte-identical between the bare
+  default and an explicit `--placer=readable-v1`.
+* Every re-recorded literal was read from the scoreboard sink, never from
+  test output.

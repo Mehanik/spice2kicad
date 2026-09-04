@@ -100,8 +100,8 @@ crates/
                      symmetry → hierarchical sheets; `roots.rs` is the
                      one signal-flow root policy both the layering and
                      the flow idioms read; `placer.rs` is the ADR-23 name
-                     registry (default `flow-seed-v4`, control arms
-                     `flow-seed` and `champion`)
+                     registry (default `readable-v1`, control arms
+                     `flow-seed-v4`, `flow-seed` and `champion`)
   spice-route/       Steiner routing, power glyphs, PWR_FLAG, conflict /
                      obstacle resolution
   kicad-emitter/     placed model → KiCad S-expressions; phase-4.5
@@ -297,9 +297,14 @@ For full grammar, examples, and diagnostics, see
   from spec §5 sits between the parser and the emitter.
 
   **What X means, and where the roots come from.** The shipping placer
-  is `--placer=flow-seed-v4`, promoted to the default on 2026-08-24
-  (ADR-23 § "The second promotion", landed under the owner's standing "proceed without asking" instruction, on the scoreboard's
-  table). Under it **X measures depth along the DC signal path**: the X
+  is `--placer=readable-v1`, promoted to the default on 2026-09-04
+  (ADR-38, owner-authorised) — the four readability arms composed on
+  `flow-seed-v4`. It changes ORIENTATION and pinning, not the X layering,
+  so everything below still describes what X means: `readable-v1`
+  inherits it unchanged from `flow-seed-v4`, the 2026-08-24 default
+  (ADR-23 § "The second promotion", landed under the owner's standing
+  "proceed without asking" instruction, on the scoreboard's table).
+  Under that layering **X measures depth along the DC signal path**: the X
   layering roots at *signal-flow sources only*, demotes rail stubs
   (Power **or** Ground, signal degree ≤ 1) to **followers** assigned
   after the BFS, and orders each bucket by neighbour barycenter.
@@ -338,12 +343,23 @@ For full grammar, examples, and diagnostics, see
   it is the cheapest check on any future root change: if a third fixture
   moves, the containment argument is wrong.
 
-  **Both superseded defaults stay registered as control arms** and must
-  remain runnable: `--placer flow-seed` (the 2026-08-18 default) is the
-  arm for the root-policy promotion, `--placer champion` (the original)
-  the arm for the one before it. A/B against a *specific* previous
-  architecture is the only way to attribute a future regression to a
-  particular promotion rather than to the change under test.
+  **All three superseded defaults stay registered as control arms** and
+  must remain runnable: `--placer flow-seed-v4` (the 2026-08-24 default)
+  is the arm for the `readable-v1` promotion, `--placer flow-seed` (the
+  2026-08-18 default) the arm for the root-policy promotion, and
+  `--placer champion` (the original) the arm for the one before it.
+  A/B against a *specific* previous architecture is the only way to
+  attribute a future regression to a particular promotion rather than to
+  the change under test.
+
+  **`--placer` carries no `default_value`, on purpose.** It is
+  `Option<Placer>`, resolved once with `unwrap_or_default()`. The flag
+  used to duplicate the shipping-placer decision as a string, and the
+  2026-09-04 promotion moved the enum's `#[default]` while that string
+  stayed put — so the new default reached no conversion, and the WHOLE
+  SUITE PASSED, `baseline_lock` included. A green suite after a promotion
+  is equally consistent with "byte-identical" and "it did not happen";
+  do not re-introduce a second source of truth.
   `spice_layout::layers::assign_x_layers` (the variant-free entry point)
   is deliberately still pinned to the champion policy — it is a fixed
   *reference* layering for `cost::layer_order` and the Q3 verifier, not
@@ -821,13 +837,15 @@ make sideways trades *within* a tier. On promotion, `baseline_lock` and
 every literal are regenerated at the challenger's values and the
 zero-slack regime resumes.
 
-It has now issued **two** promotions — `flow-seed` (2026-08-18) and
-`flow-seed-v4` (2026-08-24). When you re-record literals after one, read
-the measured values from the **scoreboard sink**, never from test output:
-several budgets only fail on excess and print their "you may lower this
-to N" hint through `eprintln!`, which cargo swallows on a *passing* test.
-Both promotions hit that trap; the first left an agent reporting "V16
-unchanged" when B had improved 19 → 10.
+It has now issued **three** promotions — `flow-seed` (2026-08-18),
+`flow-seed-v4` (2026-08-24) and `readable-v1` (2026-09-04). When you
+re-record literals after one, read the measured values from the
+**scoreboard sink**, never from test output: several budgets only fail on
+excess and print their "you may lower this to N" hint through
+`eprintln!`, which cargo swallows on a *passing* test. The first two
+promotions hit that trap; the first left an agent reporting "V16
+unchanged" when B had improved 19 → 10. The third read every literal
+from the sink for exactly this reason.
 
 **The scoreboard is NOT a licence to bypass a ratchet.** It applies to
 whole-placer comparisons only — a registered `--placer` variant graded

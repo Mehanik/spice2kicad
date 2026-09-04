@@ -167,16 +167,14 @@ const XFAIL: &[(&str, &str, &str)] = &[
     // neither verifier reported to the measurement sink. Both now do
     // (`v13.9_foreign_over_glyph`, `p11.cache_out_of_step`), so no
     // future placer comparison can be blind to them in the same way.
-    (
-        "no_power_glyph_foreign_body_overlap_across_fixtures",
-        "sallen_key_lpf",
-        "TIER-1 REGRESSION introduced by the ADR-23 flow-seed promotion: #PWR4's GND glyph (host \
-         X1) now clips C1's body (0 -> 1). This one WAS visible on the scoreboard — it is the \
-         single +1.00 Tier-1 cell in the promotion's table, weighed against -2.00 and accepted by \
-         the owner. Same deferred issue-[3] class `wien_bridge_osc` carries directly below (ADR-14 \
-         known scope limit: the SA reserves the glyph footprint hard only for oversized-involving \
-         pairs, and X1's opamp triangle is the oversized body here)",
-    ),
+    // `no_power_glyph_foreign_body_overlap_across_fixtures[sallen_key_lpf]`
+    // was registered here as a deferred Tier-1 regression from the
+    // flow-seed promotion (#PWR4's GND glyph clipping C1's body, 0 -> 1).
+    // The 2026-09-04 promotion of `readable-v1` REPAIRS it — sink-measured
+    // `v14.glyph_body / sallen_key_lpf` 1 -> 0 — and the tripwire
+    // announced it as an UNEXPECTED PASS, which is the whole reason it
+    // was registered as a tripwire rather than given budget headroom.
+    // Entry deleted so the fixture is graded again.
     (
         "no_foreign_label_or_wire_over_power_glyph_body",
         "named_rails",
