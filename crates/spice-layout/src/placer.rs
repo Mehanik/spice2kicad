@@ -223,7 +223,6 @@ pub enum Placer {
     /// owner called "completely mad" under the old default (`RS`/`L1`/
     /// `L2`/`L3` at rotations 180/90/0/270) and which now emits the
     /// textbook ladder: all four at rot 90 on one line at y = 35.56.
-    #[default]
     FlowSeedV4,
     /// **Rail-gated divider idiom** — [`Placer::FlowSeedV4`] plus a
     /// `detect_dividers` predicate that matches an actual voltage
@@ -476,13 +475,33 @@ pub enum Placer {
     /// so this variant adds **no new mechanism** — only a name under
     /// which the four can be graded jointly. It is dead on the default
     /// path; `baseline_lock` is the empirical half.
+    ///
+    /// **Promoted to the default 2026-09-04** on explicit owner
+    /// authorisation ("Yes, let's promote", in reply to the
+    /// recommendation and the disclosed residuals). Graded per ADR-23:
+    /// Tier 0 clean on both sides with conversion refusals 0/2160 —
+    /// equal to the champion, after ADR-37's Tier-0 escape closed the
+    /// one `sallen_key_lpf` refusal at SA seed 1 — Tier 1 -2.00,
+    /// Tier 2 -35.46. Multi-seed (ADR-32, k = 9): 29 EFFECT cells, 25
+    /// of them better, and every `port.label_vertical` cell at
+    /// 0.000 +/- 0.000.
+    ///
+    /// It repairs nine owner-reported defects and breaks none: vertical
+    /// `VIN`/`VOUT` terminals 9 -> 0, mirrored amplifiers 2 -> 0,
+    /// `two_stage_amp`'s inverted `Q2`, and `port_shapes`' split chain.
+    /// Two fixtures regress deterministically on V16 bends and both are
+    /// disclosed rather than explained away: `port_shapes` +2 (the price
+    /// of un-pinning its over-matched chain) and
+    /// `opamp_definition_level` +4, which is **unexplained**.
+    #[default]
     ReadableV1,
 }
 
 impl Placer {
-    /// Every registered placer, the default first and the two retained
-    /// control arms next.
+    /// Every registered placer, the default first and the three
+    /// retained control arms next.
     pub const ALL: &'static [Self] = &[
+        Self::ReadableV1,
         Self::FlowSeedV4,
         Self::FlowSeed,
         Self::Champion,
@@ -499,7 +518,6 @@ impl Placer {
         Self::TerminalSeriesDivider,
         Self::YSign,
         Self::SignalDirection,
-        Self::ReadableV1,
     ];
 
     /// The name accepted by `--placer` and printed by the scoreboard.
@@ -812,9 +830,9 @@ mod tests {
     use super::Placer;
 
     #[test]
-    fn default_is_the_unified_roots_placer() {
-        assert_eq!(Placer::default(), Placer::FlowSeedV4);
-        assert_eq!(Placer::default().name(), "flow-seed-v4");
+    fn default_is_the_composed_readability_placer() {
+        assert_eq!(Placer::default(), Placer::ReadableV1);
+        assert_eq!(Placer::default().name(), "readable-v1");
     }
 
     /// Neither promotion retired its predecessor. ADR-23's promotion
@@ -824,17 +842,28 @@ mod tests {
     /// under test. `flow-seed` is the arm for the 2026-08-24 root-policy
     /// promotion; `champion` is the arm for the 2026-08-18 one.
     #[test]
-    fn both_control_arms_stay_registered() {
+    fn all_control_arms_stay_registered() {
         assert_eq!(Placer::from_name("champion"), Some(Placer::Champion));
         assert!(Placer::ALL.contains(&Placer::Champion));
         assert_eq!(Placer::from_name("flow-seed"), Some(Placer::FlowSeed));
         assert!(Placer::ALL.contains(&Placer::FlowSeed));
-        // Both must be genuinely *different* from the default, or the
+        // The 2026-09-04 promotion added a THIRD superseded default.
+        // `flow-seed-v4` is the arm that attributes a future regression
+        // to the `readable-v1` promotion rather than to the change under
+        // test; retiring it would make that A/B impossible.
+        assert_eq!(Placer::from_name("flow-seed-v4"), Some(Placer::FlowSeedV4));
+        assert!(Placer::ALL.contains(&Placer::FlowSeedV4));
+        // Each must be genuinely *different* from the default, or the
         // A/B they exist for would be vacuous.
         assert_ne!(Placer::default(), Placer::FlowSeed);
         assert_ne!(Placer::default(), Placer::Champion);
+        assert_ne!(Placer::default(), Placer::FlowSeedV4);
         assert!(!Placer::FlowSeed.unified_roots());
         assert!(!Placer::Champion.flow_seed_layering());
+        // The distinguishing mechanism: the new default composes four
+        // readability arms that `flow-seed-v4` has none of.
+        assert!(!Placer::FlowSeedV4.page_frame_pin_y() && !Placer::FlowSeedV4.terminal_net_series());
+        assert!(Placer::default().terminal_net_series());
     }
 
     #[test]
@@ -894,8 +923,8 @@ mod tests {
     /// else, which is the whole byte-identity argument for the shipping
     /// output (`baseline_lock` is the empirical half).
     #[test]
-    fn the_rail_gated_divider_idiom_is_off_by_default() {
-        assert!(!Placer::default().rail_gated_dividers());
+    fn the_rail_gated_divider_idiom_is_absent_from_the_control_arm() {
+        assert!(!Placer::FlowSeedV4.rail_gated_dividers());
         assert!(!Placer::Champion.rail_gated_dividers());
         assert!(!Placer::FlowSeedV4.rail_gated_dividers());
         assert!(Placer::DividerRails.rail_gated_dividers());
@@ -905,7 +934,7 @@ mod tests {
         // predicate accepted.
         assert!(Placer::DividerRailsStrict.divider_tap_must_be_unloaded());
         assert!(!Placer::DividerRails.divider_tap_must_be_unloaded());
-        assert!(!Placer::default().divider_tap_must_be_unloaded());
+        assert!(!Placer::FlowSeedV4.divider_tap_must_be_unloaded());
         // It composes ON `flow-seed-v4`, so an A/B against that arm
         // isolates the divider predicate and nothing else.
         assert!(Placer::DividerRails.unified_roots());
@@ -919,8 +948,8 @@ mod tests {
     /// nothing else, which is the whole byte-identity argument for the
     /// shipping output (`baseline_lock` is the empirical half).
     #[test]
-    fn the_facing_inverted_trigger_is_off_by_default() {
-        assert!(!Placer::default().facing_inverted_trigger());
+    fn the_facing_inverted_trigger_is_absent_from_the_control_arm() {
+        assert!(!Placer::FlowSeedV4.facing_inverted_trigger());
         assert!(!Placer::FlowSeedV4.facing_inverted_trigger());
         assert!(!Placer::FlowSeed.facing_inverted_trigger());
         assert!(!Placer::Champion.facing_inverted_trigger());
@@ -939,9 +968,9 @@ mod tests {
     /// whole byte-identity argument for the shipping output
     /// (`baseline_lock` is the empirical half).
     #[test]
-    fn the_terminal_series_cases_are_off_by_default() {
-        assert!(!Placer::default().terminal_net_series());
-        assert!(!Placer::default().divider_node_series());
+    fn the_terminal_series_cases_are_absent_from_the_control_arm() {
+        assert!(!Placer::FlowSeedV4.terminal_net_series());
+        assert!(!Placer::FlowSeedV4.divider_node_series());
         assert!(!Placer::FlowSeed.terminal_net_series());
         assert!(!Placer::Champion.terminal_net_series());
         assert!(!Placer::DividerRails.terminal_net_series());
@@ -991,8 +1020,8 @@ mod tests {
     /// else, which is the whole byte-identity argument for the shipping
     /// output (`baseline_lock` is the empirical half).
     #[test]
-    fn the_signal_direction_filter_is_off_by_default() {
-        assert!(!Placer::default().signal_direction_filter());
+    fn the_signal_direction_filter_is_absent_from_the_control_arm() {
+        assert!(!Placer::FlowSeedV4.signal_direction_filter());
         assert!(!Placer::FlowSeedV4.signal_direction_filter());
         assert!(!Placer::FlowSeed.signal_direction_filter());
         assert!(!Placer::Champion.signal_direction_filter());
@@ -1023,7 +1052,7 @@ mod tests {
     /// each constituent is unreachable by default then so is the
     /// composition. `baseline_lock` is the empirical half.
     #[test]
-    fn readable_v1_is_exactly_its_four_constituents_and_off_by_default() {
+    fn readable_v1_is_exactly_its_four_constituents() {
         type Acc = (&'static str, fn(Placer) -> bool);
         // The four arms' accessors, and the arm each belongs to.
         let constituents: &[Acc] = &[
@@ -1039,7 +1068,10 @@ mod tests {
         ];
         for &(name, f) in constituents {
             assert!(f(Placer::ReadableV1), "readable-v1 must enable {name}");
-            assert!(!f(Placer::default()), "the default must not enable {name}");
+            assert!(
+                !f(Placer::FlowSeedV4),
+                "the retained control arm must not enable {name}"
+            );
             assert!(
                 !f(Placer::FlowSeed) && !f(Placer::Champion),
                 "control arm must not enable {name}"
