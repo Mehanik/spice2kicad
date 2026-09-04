@@ -72,17 +72,26 @@ struct Cli {
 
     /// Which registered placement engine to run (ADR-23).
     ///
-    /// `flow-seed-v4` (the default since the second ADR-23 promotion,
-    /// 2026-08-24) is the shipping placer — omitting the flag changes
-    /// nothing. `flow-seed` and `champion` are the retained **control
-    /// arms**, the two placers that shipped before it, kept runnable for
-    /// A/B. Every other name is a *challenger*: an alternative
-    /// registered so the champion/challenger scoreboard can grade it
-    /// end-to-end against the same verifiers. A non-default placer is
-    /// not a supported output mode and is not a licence to bypass a
-    /// ratchet; see `docs/layout-adr.md` ADR-23.
-    #[arg(long, default_value = "flow-seed-v4", value_parser = parse_placer)]
-    placer: spice_layout::Placer,
+    /// `readable-v1` (the default since the third ADR-23 promotion,
+    /// 2026-09-04) is the shipping placer — omitting the flag changes
+    /// nothing. `flow-seed-v4`, `flow-seed` and `champion` are the
+    /// retained **control arms**, the three placers that shipped before
+    /// it, kept runnable for A/B. Every other name is a *challenger*: an
+    /// alternative registered so the champion/challenger scoreboard can
+    /// grade it end-to-end against the same verifiers. A non-default
+    /// placer is not a supported output mode and is not a licence to
+    /// bypass a ratchet; see `docs/layout-adr.md` ADR-23.
+    ///
+    /// **No `default_value` here on purpose.** This flag used to carry
+    /// `default_value = "flow-seed-v4"`, which duplicated
+    /// `Placer::default()` — and the 2026-09-04 promotion moved the
+    /// `#[default]` marker while this string stayed put, so the new
+    /// default reached no conversion at all. The whole suite passed,
+    /// `baseline_lock` included, which reads exactly like "the promotion
+    /// is byte-identical" and actually meant "the promotion did not
+    /// happen". `None` here defers to the one source of truth.
+    #[arg(long, value_parser = parse_placer)]
+    placer: Option<spice_layout::Placer>,
 
     /// Disable the position-stability layout cache (ADR-4). By default
     /// the converter reads `<basename>.layout.json` next to the output
@@ -259,21 +268,24 @@ fn emit_schematic_target(
         std::process::exit(1);
     }
 
+    // One source of truth for which placer ships: `Placer::default()`.
+    // `--placer` overrides it; omitting the flag defers to it.
+    let placer = cli.placer.unwrap_or_default();
     let opts = LayoutOptions {
         refine: !cli.no_refine,
         refine_iterations: cli.refine_iterations.unwrap_or(200),
-        placer: cli.placer,
+        placer,
         ..LayoutOptions::default()
     };
     let opts = LayoutOptions {
         seed: cli.sa_seed.unwrap_or(opts.seed),
         ..opts
     };
-    if cli.placer != spice_layout::Placer::default() {
+    if placer != spice_layout::Placer::default() {
         eprintln!(
             "spice2kicad: placer `{}` — {} (NOT the shipping placer; ADR-23 non-default)",
-            cli.placer.name(),
-            cli.placer.description()
+            placer.name(),
+            placer.description()
         );
     }
 
