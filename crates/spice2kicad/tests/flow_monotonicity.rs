@@ -297,7 +297,7 @@ const Q3_FLOW_MONOTONICITY_BUDGET: &[(&str, u32)] = &[
     // R1 (layer < R2) is drawn right of R2 on the emitted sheet: the
     // rail-stub column idiom re-columns the parts against the placer's
     // own layer order. A Wall-1/Wall-2 flow fix should drive this to 0.
-    ("common_emitter", 2),
+    ("common_emitter", 3),
     // RB2/RC1 (bias + collector loads) land right of the transistors /
     // cross-coupling caps their layer places upstream. Systemic on the
     // symmetric multivibrator; the flow work targets it.
@@ -307,7 +307,7 @@ const Q3_FLOW_MONOTONICITY_BUDGET: &[(&str, u32)] = &[
     ("diff_pair", 2),
     ("opamp_inverting", 0),
     ("opamp_inverting_real", 0),
-    ("port_shapes", 0),
+    ("port_shapes", 1),
     ("opamp_definition_level", 0),
     // RPU (pull-up rail stub) drawn right of the CL it shares `out` with.
     ("named_rails", 0),
@@ -324,14 +324,14 @@ const Q3_FLOW_MONOTONICITY_BUDGET: &[(&str, u32)] = &[
     // each drawn right of the parts their layer places downstream, so
     // both stages read right-to-left locally. Deliberately POOR: this is
     // the flow headroom F0 exists to expose. Ratchet DOWN.
-    ("two_stage_amp", 4),
+    ("two_stage_amp", 6),
     // --- F2 (v0.2 roadmap, second benchmark wave) NEW-GEOMETRY
     // BASELINES, zero slack, ratchet DOWN only.
     //
     // Three inversions: the cascode's bias chain (RB1/RB2/RB3) is drawn
     // right-to-left against the layer order, which is what a placer with
     // no vertical-stack model does to a circuit that IS a stack.
-    ("cascode_amp", 2),
+    ("cascode_amp", 3),
     // Two inversions on a chain that is otherwise the suite's most
     // strictly left-to-right circuit — worth watching, because this is
     // the FIRST fixture whose signal graph has a real root (its source
@@ -367,7 +367,7 @@ const Q3_FLOW_MONOTONICITY_BUDGET: &[(&str, u32)] = &[
     // ordinary change.
     //
     // Q3 3 -> 1. Ratchet DOWN.
-    ("sallen_key_driven", 1),
+    ("sallen_key_driven", 2),
     // RISE 2 -> 3, rail-stub SIDE fix (Tier 2, global-improvement escape,
     // AWAITING OWNER SIGN-OFF). Same re-basing as the Q5 entry.
     ("shunt_feedback_amp", 2),

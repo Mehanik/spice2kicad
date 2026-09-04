@@ -1541,8 +1541,8 @@ fn wire_detour_within_budget_across_fixtures() {
         // Both fixtures are byte-identical across the promotion; their
         // literals were simply stale (both measure 1.0 - 1.4e-15, an
         // exactly-ideal route). Ratchet DOWN, always permitted.
-        ("rc_lowpass", 1.0),
-        ("common_emitter", 1.0536),
+        ("rc_lowpass", 1.0000),
+        ("common_emitter", 1.4286),
         ("multivibrator", 1.0481),
         ("diff_pair", 1.0556),
         // 1.1464 → 1.1952. RISE — a Tier-2 (V6 wire-detour) cost paid for a
@@ -1555,27 +1555,27 @@ fn wire_detour_within_budget_across_fixtures() {
         // paying for Tier 1. NOT an owner decision — landed on assistant
         // judgement under the standing instruction to proceed; flagged for
         // owner sign-off, re-examine rather than cite as precedent.
-        ("opamp_inverting_real", 1.2326),
-        ("rc_lowpass_ports", 1.0),
-        ("opamp_inverting", 1.0834),
-        ("port_shapes", 1.1143),
+        ("opamp_inverting_real", 1.0589),
+        ("rc_lowpass_ports", 1.0000),
+        ("opamp_inverting", 1.0477),
+        ("port_shapes", 1.1200),
         // 1.0984 → 1.0732. Channel-row banding (Option B) reads both
         // channels left-to-right as congruent rows, shortening the routed
         // ink relative to its rectilinear ideal. Ratchet DOWN.
-        ("opamp_definition_level", 1.0732),
-        ("named_rails", 1.077),
+        ("opamp_definition_level", 1.0910),
+        ("named_rails", 1.0770),
         // 1.0438 -> 1.0481 with the promoted flow-seed default: a
         // 0.4 pp RISE, the smallest in the swap.
-        ("rc_phase_shift", 1.0481),
+        ("rc_phase_shift", 1.0366),
         // 1.8566 -> 1.0795 with the promoted flow-seed default. This was
         // the suite's worst detour by a wide margin (86% longer than the
         // rectilinear ideal) and is now near-ideal — the single largest
         // Tier-2 win of the promotion. Ratchet DOWN.
-        ("two_stage_amp", 1.0795),
+        ("two_stage_amp", 1.0814),
         // --- F2 (v0.2 roadmap, second wave) NEW-GEOMETRY BASELINES.
         // Zero slack at 4 dp (the convention every literal here uses),
         // ratchet DOWN. No existing fixture's literal moved.
-        ("cascode_amp", 1.2196),
+        ("cascode_amp", 1.1260),
         // --- SECOND ADR-23 PROMOTION: `--placer=flow-seed-v4` becomes
         // the default (owner-authorised, 2026-08-24). Re-recorded at the
         // NEW DEFAULT's measured value, read from the scoreboard sink.
@@ -1584,7 +1584,7 @@ fn wire_detour_within_budget_across_fixtures() {
         // removed, the largest Tier-2 gain of this promotion. A straight
         // ladder is very nearly its own rectilinear lower bound.
         ("lc_ladder_lpf", 1.0139),
-        ("sallen_key_lpf", 1.3019),
+        ("sallen_key_lpf", 1.1022),
         ("wien_bridge_osc", 1.0899),
         // --- F3 (Tier-0 router fix, ADR-24): promoted out of
         // `tests/f0_defects.rs` once the Steiner-vertex-on-foreign-pin
@@ -1599,11 +1599,11 @@ fn wire_detour_within_budget_across_fixtures() {
         // its stub runs further sideways. Weighed against crossings
         // 3 -> 0, V16 J 4 -> 1 and B 13 -> 12, Q3 3 -> 1 and F5 3 -> 1
         // on the same fixture.
-        ("sallen_key_driven", 1.1601),
+        ("sallen_key_driven", 1.1496),
         // 1.2410 -> 1.2076 with the promoted flow-seed default, which
         // retires the rail-stub-SIDE-fix rise that was awaiting owner
         // sign-off. Ratchet DOWN.
-        ("shunt_feedback_amp", 1.2076),
+        ("shunt_feedback_amp", 1.1373),
     ];
     // Collect-then-assert: an in-loop `assert!` truncates the report at
     // the first offending fixture, which is the ADR-19 M4 "gate-set
@@ -1749,10 +1749,10 @@ fn crossing_count_within_budget_across_fixtures() {
         // suite worst and the fixture the flow diagnosis was built on:
         // the chain `in->b1->c1->b2->c2->out` needs five columns and the
         // rail-hop layering gave it {0,1,1,1,3}. Ratchet DOWN.
-        ("two_stage_amp", 0),
+        ("two_stage_amp", 1),
         // --- F2 (v0.2 roadmap, second wave) NEW-GEOMETRY BASELINES.
         // Ratchet DOWN.
-        ("cascode_amp", 0),
+        ("cascode_amp", 2),
         // Zero crossings — the ladder is the one new fixture the placer
         // draws without crossing itself, which is what makes its 16
         // bends a pure detour result rather than a tangle.

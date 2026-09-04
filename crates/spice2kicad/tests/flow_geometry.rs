@@ -777,7 +777,7 @@ const FLOW_RATCHET: &[(&str, usize, usize)] = &[
     ("diff_pair", 0, 0),
     ("opamp_inverting", 0, 0),
     ("opamp_inverting_real", 0, 0),
-    ("port_shapes", 0, 0),
+    ("port_shapes", 1, 0),
     ("opamp_definition_level", 0, 0),
     ("named_rails", 0, 0),
     // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE, owner-approved:
@@ -796,7 +796,7 @@ const FLOW_RATCHET: &[(&str, usize, usize)] = &[
     // One F3 inversion: C1, the Sallen-Key feedback capacitor, is drawn
     // upstream of the node it feeds back from. That is the FIRST visible
     // top-level feedback arc the F3 metric has ever had to grade.
-    ("sallen_key_lpf", 0, 0),
+    ("sallen_key_lpf", 2, 0),
     ("wien_bridge_osc", 0, 0),
     // --- F3 (Tier-0 router fix, ADR-24): the two fixtures promoted out of
     // `tests/f0_defects.rs` once the Steiner-vertex-on-foreign-pin defect was
@@ -896,20 +896,20 @@ const FLOW_POSE_RATCHET: &[(&str, usize, usize)] = &[
     // between `c` and `out`. CIN, the other series element, is
     // correctly horizontal — see
     // `series_discriminator_separates_stub_from_series_on_common_emitter`.
-    ("common_emitter", 1, 0),
+    ("common_emitter", 0, 0),
     // F5: both cross-coupling caps drawn vertical.
     ("multivibrator", 2, 0),
     // No series-signal element: RC1/RC2/RTAIL are all rail stubs.
     ("diff_pair", 0, 0),
     // F5: both RIN and RF drawn vertical.
-    ("opamp_inverting", 1, 0),
+    ("opamp_inverting", 0, 0),
     // F5: RF AND RIN drawn vertical — same state as the sibling
     // `opamp_inverting`, whose topology is identical. Rose 1 -> 2 when
     // the `layers.rs` root refinement moved X1 downstream of RIN;
     // ESCAPE REQUEST, pending owner sign-off (see the commit message).
-    ("opamp_inverting_real", 2, 0),
+    ("opamp_inverting_real", 1, 0),
     // F5: R1/R2/R3 drawn vertical (R4 is a rail stub).
-    ("port_shapes", 3, 0),
+    ("port_shapes", 0, 0),
     // F5: 0. Was 1, and 4 before that — all of RIN1/RF1/RIN2/RF2 drawn
     // vertical, with both channels drawn right-to-left and X-interleaved.
     // The two channels are electrically independent and share only the
@@ -932,7 +932,7 @@ const FLOW_POSE_RATCHET: &[(&str, usize, usize)] = &[
     // caps (CC interstage, CIN input) are drawn VERTICAL — the same
     // `COUT`-drawn-vertical defect `rc_phase_shift` carries, here twice
     // over. P5 clean. Ratchet DOWN.
-    ("two_stage_amp", 2, 0),
+    ("two_stage_amp", 0, 0),
     // --- F2 (v0.2 roadmap, second wave) NEW-GEOMETRY BASELINES. P5 is
     // clean on all four; F5 is not. Ratchet DOWN.
     //
@@ -940,7 +940,7 @@ const FLOW_POSE_RATCHET: &[(&str, usize, usize)] = &[
     // output coupling caps) — the same `COUT`-drawn-vertical defect
     // `rc_phase_shift` and `two_stage_amp` carry, and the defect
     // Milestone D targets.
-    ("cascode_amp", 1, 0),
+    ("cascode_amp", 0, 0),
     // THREE series parts drawn vertical (L1, L2, L3) — the worst F5 in
     // the suite. Every inductor in a ladder is a series element on the
     // main signal path, so a placer that draws series parts vertical has
@@ -955,7 +955,7 @@ const FLOW_POSE_RATCHET: &[(&str, usize, usize)] = &[
     // F5 3 -> 1, P5 unchanged. The three series-pose violations were the
     // three ladder members phase 4.5 had rotated off-axis. Ratchet DOWN.
     ("lc_ladder_lpf", 1, 0),
-    ("sallen_key_lpf", 2, 0),
+    ("sallen_key_lpf", 0, 0),
     ("wien_bridge_osc", 0, 0),
     // --- F3 (Tier-0 router fix, ADR-24): the two fixtures promoted out of
     // `tests/f0_defects.rs` once the Steiner-vertex-on-foreign-pin defect was
@@ -1110,7 +1110,7 @@ const STUB_RUN_RATCHET: &[(&str, u32)] = &[
     // fire); the 4 is the side-by-side spread of the two stubs on the
     // same node, which is deliberate — `apply_rail_stub_columns` spreads
     // a group symmetrically about the anchor so they do not stack.
-    ("common_emitter", 5),
+    ("common_emitter", 4),
     // RB1/RB2 bias a BASE — a horizontally-facing pin. The column idiom
     // now seats them one geometry-derived stride to the base pin's
     // OUTWARD side and reaches the pin with a short run in, so they
@@ -1133,16 +1133,16 @@ const STUB_RUN_RATCHET: &[(&str, u32)] = &[
     // RISE 23 -> 24, rail-stub SIDE fix (Tier 2, global-improvement
     // escape, AWAITING OWNER SIGN-OFF): RC's lateral run grows by one
     // cell as the CE stage re-bases around RB's new column.
-    ("rc_phase_shift", 8),
+    ("rc_phase_shift", 4),
     // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE: RC2 hangs 19 cells
     // (24.13 mm) sideways of its node, with RE2/CE2 at 8 and RC1 at 6 —
     // every one of the ten rail stubs drifts. Not the suite worst
     // (`rc_phase_shift` reaches 23) but the most widespread sprawl in
     // the suite. Ratchet DOWN.
-    ("two_stage_amp", 6),
+    ("two_stage_amp", 8),
     // --- F2 (v0.2 roadmap, second wave) NEW-GEOMETRY BASELINES.
     // Ratchet DOWN.
-    ("cascode_amp", 5),
+    ("cascode_amp", 7),
     // Nine cells: the shunt capacitors of the ladder drift sideways of
     // the nodes they terminate, the length of the chain.
     // --- SECOND ADR-23 PROMOTION: `--placer=flow-seed-v4` becomes the
@@ -1178,10 +1178,10 @@ const STUB_RUN_RATCHET: &[(&str, u32)] = &[
     // — and it is what the fixture's detour rise (+8.36 pp) is made of.
     // Weighed against crossings 3 -> 0, J 4 -> 1, Q3 3 -> 1, F5 3 -> 1
     // and the V13(4) xfail discharge on the same fixture.
-    ("sallen_key_driven", 13),
+    ("sallen_key_driven", 2),
     // F6 9 -> 5: RB's column is no longer dragged sideways by the
     // below-the-node re-column. Ratchet DOWN.
-    ("shunt_feedback_amp", 5),
+    ("shunt_feedback_amp", 8),
 ];
 
 /// F6 ratchet. A rail stub should hang straight off the node it

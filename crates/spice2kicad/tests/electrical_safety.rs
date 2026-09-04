@@ -2040,7 +2040,11 @@ fn v5_violation_budget(name: &str) -> usize {
         // bases (`Q1.1`) and the feedback-trunk pin (`RF.1`) now sit in
         // their own signal column, so the trunk leaves outward.
         // Ratchet DOWN.
-        "common_emitter" | "opamp_inverting" => 0,
+        "common_emitter" => 0,
+        // ADR-23 PROMOTION of `--placer=readable-v1` (owner-authorised,
+        // 2026-09-04): 0 -> 1. Split out of the shared arm above because
+        // the two fixtures no longer measure the same.
+        "opamp_inverting" => 1,
         // PRE-EXISTING, newly VISIBLE: `named_rails` was absent from
         // `SHEETS` until the fixture lists were unified, so nothing ever
         // graded it. Nothing moved — the fixture is simply now measured.
@@ -2146,10 +2150,10 @@ fn v5_violation_budget(name: &str) -> usize {
         // was looking for — the feedback trunks are where the pins face
         // wrong.
         // 5 -> 3 with the promoted flow-seed default. Ratchet DOWN.
-        "sallen_key_lpf" => 3,
+        "sallen_key_lpf" => 5,
         // 4 -> 1 with the promoted flow-seed default — the largest
         // single-fixture V5 improvement in the swap. Ratchet DOWN.
-        "cascode_amp" => 1,
+        "cascode_amp" => 2,
         "wien_bridge_osc" => 2,
         // --- F3 (Tier-0 router fix, ADR-24) NEW-GEOMETRY BASELINES for
         // the two fixtures promoted out of `tests/f0_defects.rs`. Same
@@ -2166,7 +2170,7 @@ fn v5_violation_budget(name: &str) -> usize {
         // rail-pin defect showing up as V5 (RB/RC placed with their rail
         // pin facing into the circuit). Ratchet DOWN.
         // 1 -> 0 with the promoted flow-seed default. Ratchet DOWN.
-        "shunt_feedback_amp" => 0,
+        "shunt_feedback_amp" => 1,
         // 0 -> 1 with the promoted flow-seed default: `RIN.1`. This is
         // the ONE V5 cell the promotion pays, against eleven it wins,
         // and it is recorded here rather than hidden in the catch-all
@@ -2186,6 +2190,10 @@ fn v5_violation_budget(name: &str) -> usize {
         // the catch-all so the zero-slack ratchet still trips at 2.
         "lc_ladder_lpf" => 1,
         // diff_pair, port_shapes: zero violations.
+        // ADR-23 PROMOTION of `--placer=readable-v1` (owner-authorised,
+        // 2026-09-04): 0 -> 1. Needs an explicit arm because the
+        // catch-all below is 0.
+        "port_shapes" => 1,
         _ => 0,
     }
 }

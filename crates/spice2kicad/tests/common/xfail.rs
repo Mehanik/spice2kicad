@@ -203,6 +203,33 @@ const XFAIL: &[(&str, &str, &str)] = &[
     // number that only ratchets, and `#[ignore]` would drop the whole
     // verifier. A tripwire is the only exclusion that announces itself
     // the day it is fixed.
+    // --- REGRESSION INTRODUCED BY THE THIRD ADR-23 PROMOTION of
+    // `--placer=readable-v1` to the default (owner-authorised,
+    // 2026-09-04, "Yes, let's promote").
+    //
+    // Read as an owner-facing report, like the two blocks below. The
+    // owner authorised a **promotion**, not this specific Tier-1 loss.
+    // It is the single `+1.00` Tier-1 cell on the promotion's ledger:
+    // sink-measured, Tier 1 nets **-2.00** across the suite — this cell
+    // `0 -> 1` against `v14.glyph_body / sallen_key_lpf` `1 -> 0` and
+    // `v17.signal_direction` `1 -> 0` on both `sallen_key_lpf` and
+    // `opamp_inverting_real`. So the same fixture that gains this label
+    // overlap loses a glyph-body overlap and a backwards amplifier.
+    //
+    // Same deferred class as the two entries below, and fixable in the
+    // same place: the label-nudge pass does not treat power-glyph bodies
+    // as obstacles. One fixture, one label; it expires the day that pass
+    // learns about glyphs.
+    (
+        "no_foreign_label_or_wire_over_power_glyph_body",
+        "sallen_key_lpf",
+        "TIER-1 REGRESSION introduced by the ADR-23 readable-v1 promotion: the `N1` net label now \
+         overlaps the `VEE` rail-glyph body (0 -> 1). The promotion's Tier-1 aggregate is -2.00 \
+         and this is its only +1.00 cell; the same fixture's `v14.glyph_body` falls 1 -> 0 and its \
+         `v17.signal_direction` 1 -> 0. Decoration-fixable exactly as this verifier's own budget \
+         doc says — the label-nudge pass does not treat power-glyph bodies as obstacles — so it \
+         is one fixture, one label, and it expires the day that pass learns about glyphs",
+    ),
     (
         "no_foreign_label_or_wire_over_power_glyph_body",
         "sallen_key_driven",

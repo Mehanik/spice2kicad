@@ -248,7 +248,7 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     // moved no v0.1 fixture's (B, J). Ratchet DOWN.
     // B 19 -> 10, rail-stub SIDE fix: RB above `b` removes the fold-back
     // the ladder trunks used to jog around. Ratchet DOWN.
-    ("rc_phase_shift", 10, 2),
+    ("rc_phase_shift", 7, 2),
     // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE. `two_stage_amp` — two
     // cascaded CE stages sharing one rail — is the new worst fixture in
     // the suite on both counts: B = 33 (from 56 raw segments over 45
@@ -257,7 +257,7 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     // ride along with it. Deliberately POOR — this is exactly the Tier-2
     // V16 headroom F0 exists to expose, and promoting the fixture moved
     // no other fixture's (B, J) by a single count. Ratchet DOWN.
-    ("two_stage_amp", 17, 5),
+    ("two_stage_amp", 15, 6),
     // --- F2 (v0.2 roadmap, second benchmark wave) NEW-GEOMETRY
     // BASELINES, zero slack, ratchet DOWN only. Adding them moved no
     // existing fixture's (B, J) by a single count.
@@ -266,7 +266,7 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     // COLUMN (Q2's emitter on Q1's collector, a three-resistor bias
     // ladder) and the placer has no stack model, so every vertical
     // relationship is drawn as a detour.
-    ("cascode_amp", 13, 4),
+    ("cascode_amp", 14, 4),
     // B = 16 on ten graded elements. CORRECTION to the claim in this
     // commit's message and in `docs/v0.2-roadmap.md` § F2 as first
     // written: 1.6 bends/element is the SECOND-worst density in the
@@ -291,7 +291,7 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     // single straight line, and the placer spends 16 bends on it").
     // Ratchet DOWN on both counts.
     ("lc_ladder_lpf", 5, 1),
-    ("sallen_key_lpf", 12, 1),
+    ("sallen_key_lpf", 9, 0),
     // B = 10 on eight graded elements: an oscillator is a pure cycle,
     // and the placer lays it out as if it were a chain, so the loop
     // closes with a long return path.
@@ -308,16 +308,16 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     // ordinary change.
     //
     // B 13 -> 12, J 4 -> 1. Ratchet DOWN on both counts.
-    ("sallen_key_driven", 12, 1),
+    ("sallen_key_driven", 12, 0),
     // B 12 -> 11, rail-stub SIDE fix. Ratchet DOWN.
-    ("shunt_feedback_amp", 12, 3),
+    ("shunt_feedback_amp", 9, 2),
     // B 10 → 4. Phase 4.5's acceptance objective gained the V16
     // ink-graph bend count as its FINAL lexicographic key, after
     // (V13, V12, V5), so the refiner now separates orientations that tie
     // on every higher-tier count by how straight the resulting ink is.
     // COUT lands at rot 0 instead of rot 180 and Q1 unmirrors. V5 is
     // unchanged at 1 and no Tier-0/Tier-1 count moved. Ratchet DOWN.
-    ("common_emitter", 4, 4),
+    ("common_emitter", 9, 3),
     // B 10 -> 8: `RC1`/`RC2` now sit on their transistors' collector
     // columns, so each collector trunk is one straight drop instead of a
     // dog-leg.
@@ -349,9 +349,9 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     // 3-pin net, so J >= k-2 = 1 is its topological floor; the previous
     // J = 0 came from a degenerate collinear layout. ESCAPE REQUEST for
     // the J rise, pending owner sign-off (see the commit message).
-    ("opamp_inverting_real", 6, 1),
-    ("opamp_inverting", 6, 0),
-    ("port_shapes", 4, 0),
+    ("opamp_inverting_real", 3, 1),
+    ("opamp_inverting", 5, 0),
+    ("port_shapes", 6, 0),
     // B 2 → 0 (stale-slack cleanup). The prior mark of 2 described the
     // best layout reachable *then* — R1 at rot 180 putting both `out` pins
     // on one row. The series-horizontal flow construction
@@ -384,7 +384,7 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     // toward the RF-feedback junction) is the documented V5-vs-flow
     // tension, not a defect. No Tier-0 or Tier-1 count moved anywhere;
     // the only approved rises on this fixture are Tier-2 V5 and J.
-    ("opamp_definition_level", 6, 2),
+    ("opamp_definition_level", 10, 2),
 ];
 
 #[test]

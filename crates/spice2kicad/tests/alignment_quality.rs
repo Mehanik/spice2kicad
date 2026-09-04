@@ -321,14 +321,14 @@ const Q5_NEAR_MISS_BUDGET: &[(&str, u32)] = &[
     // "M4 reverted"). The literal was first measured on the M4 tree; the
     // pre-M4 Y datum this restores costs one fewer near-miss here. Ratchets
     // down only.
-    ("common_emitter", 4),
+    ("common_emitter", 3),
     // C1/RC1, C2/RC2 (cross-coupling caps vs collector loads) and the
     // Q/RC collector columns land just off-axis on this symmetric fixture.
     ("multivibrator", 4),
     // Q1/RC1, Q2/RC2 collector columns a hair off their shared axis.
     ("diff_pair", 2),
-    ("opamp_inverting", 1),
-    ("opamp_inverting_real", 3),
+    ("opamp_inverting", 0),
+    ("opamp_inverting_real", 1),
     ("port_shapes", 1),
     // RF1/X1, RF2/X2 feedback resistors sit just off their opamp's axis.
     ("opamp_definition_level", 2),
@@ -341,7 +341,7 @@ const Q5_NEAR_MISS_BUDGET: &[(&str, u32)] = &[
     // (CC/RB3, CE1/RE1, CIN/Q1, CIN/RB1, CIN/RB2, RB1/RB2, RB3/RB4) —
     // the worst in the suite, roughly double `rc_phase_shift`'s 3. Each
     // is a candidate straight drop the router currently jogs.
-    ("two_stage_amp", 5),
+    ("two_stage_amp", 8),
     // --- F2 (v0.2 roadmap, second benchmark wave) NEW-GEOMETRY BASELINES.
     // Recorded at their measured values with zero slack; they ratchet
     // DOWN only. No existing fixture's literal moved.
@@ -363,7 +363,7 @@ const Q5_NEAR_MISS_BUDGET: &[(&str, u32)] = &[
     // and the placer snaps none of them" — it snaps them now. Ratchet
     // DOWN.
     ("lc_ladder_lpf", 1),
-    ("sallen_key_lpf", 3),
+    ("sallen_key_lpf", 2),
     ("wien_bridge_osc", 2),
     // --- F3 (Tier-0 router fix, ADR-24): the two fixtures promoted out of
     // `tests/f0_defects.rs` once the Steiner-vertex-on-foreign-pin defect was
@@ -375,7 +375,7 @@ const Q5_NEAR_MISS_BUDGET: &[(&str, u32)] = &[
     // stage, leaving Q1 a near-miss against CE/COUT/RE/RF. Paid for four
     // Tier-1 xfail expiries (V14 rail-pin on this fixture and
     // `rc_phase_shift`, plus that fixture's V14 [3] and rail ordering).
-    ("shunt_feedback_amp", 4),
+    ("shunt_feedback_amp", 0),
 ];
 
 #[test]
