@@ -567,13 +567,28 @@ mod tests {
     /// This is the defect V17 exists to close, asserted rather than
     /// assumed.
     #[test]
-    fn the_default_filter_still_admits_a_mirrored_opamp() {
-        let (refdes, allowed) = allowed_str(OPAMP_SRC);
+    fn v14_alone_still_admits_a_mirrored_opamp() {
+        // Graded against the retained control arm, not the default. The
+        // 2026-09-04 promotion of `readable-v1` put V17 on the shipping
+        // path, so `Placer::default()` no longer filters by V14 alone —
+        // and this test's whole point is that V14 by itself does NOT
+        // constrain the horizontal axis, which is why a mirrored
+        // amplifier was V14-legal and shipped for months. That claim is
+        // about V14, so it must be measured on a V17-free placer.
+        let (refdes, allowed) = allowed_str_with(OPAMP_SRC, Placer::FlowSeedV4);
         let i = idx_of(&refdes, "X1");
         assert!(
             allowed[i].iter().any(|o| o.mirror_y),
             "V14 alone should still admit a mirrored opamp: {:?}",
             allowed[i]
+        );
+        // ... and the shipping default must NOT, which is the repair.
+        let (refdes_d, allowed_d) = allowed_str(OPAMP_SRC);
+        let j = idx_of(&refdes_d, "X1");
+        assert!(
+            allowed_d[j].iter().all(|o| !o.mirror_y),
+            "the shipping default must exclude every mirrored opamp pose: {:?}",
+            allowed_d[j]
         );
     }
 

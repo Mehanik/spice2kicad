@@ -1880,10 +1880,19 @@ R3 b 0 1k
 .end
 ";
         let checked = checked_of(src);
-        let pairs = detect_dividers(&checked, Placer::default());
+        // Graded against the retained control arm: the greedy
+        // lowest-index pairing is a property of the degree-2 predicate,
+        // which the shipping default no longer uses (it carries
+        // `divider-rails-strict`, whose rail gate declines a chain that
+        // reaches no rail — asserted directly below).
+        let pairs = detect_dividers(&checked, Placer::FlowSeedV4);
         // Greedy lowest-index: tap `a` pairs (R1,R2); R2 is then used,
         // so tap `b` cannot reuse it and (R2,R3) is declined.
         assert_eq!(pairs.len(), 1, "expected exactly one pair, got {pairs:?}");
+        assert!(
+            detect_dividers(&checked, Placer::default()).is_empty(),
+            "the shipping default's rail gate declines this rail-less chain"
+        );
         assert_eq!(
             refdes_pairs(&checked, &pairs),
             vec![("R1".to_string(), "R2".to_string())]
@@ -1979,10 +1988,20 @@ R4 nb  nz 1k
 .end
 ";
         let checked = checked_of(src);
+        // The over-match is the defect this pair of tests was written to
+        // pin down, and the 2026-09-04 promotion of `readable-v1` FIXED
+        // it on the shipping path: the composed default carries
+        // `divider-rails-strict`, so the chain is declined. The
+        // over-match now belongs to the retained control arm, which is
+        // where the regression test for it has to live.
         assert_eq!(
-            detect_dividers(&checked, Placer::default()).len(),
+            detect_dividers(&checked, Placer::FlowSeedV4).len(),
             2,
-            "the shipping predicate over-matches the chain (this is the defect)"
+            "the superseded default over-matched the chain (the original defect)"
+        );
+        assert!(
+            detect_dividers(&checked, Placer::default()).is_empty(),
+            "the shipping default must decline a chain between two Signal nets"
         );
         assert!(
             detect_dividers(&checked, Placer::DividerRails).is_empty(),
