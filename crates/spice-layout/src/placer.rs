@@ -862,7 +862,9 @@ mod tests {
         assert!(!Placer::Champion.flow_seed_layering());
         // The distinguishing mechanism: the new default composes four
         // readability arms that `flow-seed-v4` has none of.
-        assert!(!Placer::FlowSeedV4.page_frame_pin_y() && !Placer::FlowSeedV4.terminal_net_series());
+        assert!(
+            !Placer::FlowSeedV4.page_frame_pin_y() && !Placer::FlowSeedV4.terminal_net_series()
+        );
         assert!(Placer::default().terminal_net_series());
     }
 
