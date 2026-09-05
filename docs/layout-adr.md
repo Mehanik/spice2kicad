@@ -9901,3 +9901,260 @@ reserved against **routing channels**, only against bodies, so the placer
 is free to hang a VEE marker across the one horizontal lane the `out` net
 has. Reserve the channel and the wire never needs the detour. That is a
 placer change with its own blast radius, not a router one.
+## ADR-40 — Y-ORDERING from `dc_rank`: the DC-series column, and why pinning is the whole effect
+
+**Status:** built and graded 2026-09-05, **NOT promoted** (promotion is an
+owner decision under ADR-23). Registered as two `--placer` challengers,
+`dc-series-column` and `dc-series-column-pinned`, both composing on the
+shipping default `readable-v1`. Dead on the default path.
+
+### The mismodelling
+
+An architecture review named a hole of the **same shape as V14/V17** —
+one axis upgraded a generation, the orthogonal one left behind:
+
+> **Y still means "net-class fraction" while X was promoted to "signal
+> depth."** `bands.rs` assigns Y from a five-value class-membership table
+> (0, 1/3, 1/2, 2/3, 1); the convention it serves is *Y proportional to
+> DC potential along the current path*. The tree already contains the
+> correct functional — `dc_rank.rs` — but only phase 4.5's facing trigger
+> consumes it; placement never does.
+
+The owner's `cascode_amp` complaint lives here. Under `readable-v1`, `Q1`
+sits at x = 50.80 and `Q2` at x = 73.66: **22.86 mm apart in X** for two
+devices carrying one current.
+
+### Scope: Y-ORDERING is not Y-SPACING
+
+This is deliberately **not** "Y = potential" as a coordinate model.
+ADR-19's M4 post-mortem is unambiguous that Y-*spacing* changes land in
+chaotic, unattributable basins (`MID_SUBROW_GAP` swept over five values,
+"a chaotic response that has no monotone structure"), and M4 was
+landed-then-reverted leaving master red for six commits. ADR-17's
+retirement adds that global re-basing is intrinsic to *any*
+spacing-derived placement. **The bands are untouched.**
+
+What landed is a **constructive column idiom** in the
+`divider-rails` / `terminal-series` family (`spice-layout/src/dc_column.rs`):
+
+* a **DC-series pair** is ADR-28 metric B's own discriminator, *reused*
+  rather than re-derived — `dc_column::dc_series_pairs` restates it over
+  a `CheckedNetlist`, and
+  `readability_metrics::the_placer_and_metric_b_agree_on_every_fixture`
+  asserts the two implementations return the same pair set on all 22
+  fixtures. The construction and the metric grading it must be the same
+  predicate, or the construction optimises against something else;
+* pairs chain transitively into a **column**. A DC edge has two endpoints
+  and a series net has exactly two DC conductors, so every element is in
+  at most two pairs and every component is a simple path or a cycle. A
+  cycle has no top and is declined;
+* the Y **order** comes from `dc_rank::higher_net` — the same rank, the
+  same absorbing-rail BFS, the same **decline on ambiguity**. Consecutive
+  members are compared on their two *outer* nets with **both of the
+  pair's edges removed** (the circularity `dc_rank` removes a device's
+  own edge for). If any comparison declines, or disagrees with the walk
+  direction, the **whole column is declined**;
+* the column is re-seated on its own seed **barycenter** — relative
+  geometry, never a page coordinate — and a column with any already-
+  pinned member is skipped whole.
+
+No new `cost.rs` weight (the `power_pin_outward` failure). No hard
+candidate filter, so nothing is owed under ADR-37's escape-hatch rule.
+
+### Where it fires: 27 pairs / 14 columns on 8 of 22 fixtures
+
+| fixture | columns (top to bottom) |
+| --- | --- |
+| `cascode_amp` | `[RB1 RB2 RB3]`, `[RC Q2 Q1 RE]` |
+| `resistor_ladder_ref` | `[R1 R2 R3 R4 R5 R6]` |
+| `two_stage_amp` | `[RB1 RB2]`, `[RC1 Q1 RE1]`, `[RB3 RB4]`, `[RC2 Q2 RE2]` |
+| `common_emitter` | `[R1 R2]`, `[RC Q1 RE]` |
+| `rc_phase_shift` | `[RC Q1 RE]` |
+| `multivibrator` | `[RC1 Q1]`, `[RC2 Q2]` |
+| `diff_pair` | `[RC1 Q1]`, `[RC2 Q2]` |
+| `shunt_feedback_amp` | `[RB RF]`, `[Q1 RE]` |
+
+The remaining 14 fixtures present no DC-series pair at all and are
+untouched by construction. Two entries are worth naming:
+
+* **`diff_pair` is the honesty check, and it passes.** `Q1`/`Q2` share
+  `tail` with `RTAIL`, DC degree 3, so they are *not* a pair and are not
+  columned — a differential pair is drawn side by side on purpose. Only
+  each collector load above its own transistor is.
+* **`shunt_feedback_amp`'s `[RB RF]` is ADR-28 ambiguity 8**, the
+  recorded false-positive candidate: `RF` is a collector-to-base
+  *feedback* resistor whose textbook drawing runs along the feedback
+  direction, not stacked. The construction columns it because the metric
+  says it is a DC-series pair. Reusing the discriminator means inheriting
+  its open ambiguity; that is the correct trade and it is disclosed here
+  rather than special-cased away.
+
+### The 1-cell label margin, swept
+
+At margin 0 the pinned arm graded **NOT promotable** on exactly two
+Tier-1 cells, both `cascode_amp`, both one defect: `label "c1" overlaps
+pin-text Q2.pintext5` and `label "c1" bbox overlaps Q2's body`. The
+shared node between two column members is a signal net, so decoration
+puts a plain label on it, and a stride clearing only body-union-pin
+leaves the label nowhere.
+
+This is exactly the gap CLAUDE.md names ("pin text is graded Tier-1 at
+budget 0 and modelled by NO placement stage"), and the remedy it points
+at — **not** reservation, which is measured dead four times: widen the
+stride *this construction owns*, as `idioms::apply_series_horizontal`
+already does twice (`SHUNT_LABEL_MARGIN_DOWN_CELLS` / `_UP_CELLS`).
+
+Swept 0..=5, each a full workspace suite run into its own sink:
+
+| margin | Tier-1 delta | Tier-2 delta | B | f5 | v5 | bends | branches | crossings |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| *champion* | — | — | 4 | 11 | 42 | 164 | 35 | 14 |
+| 0 | **+2.00** | −129.74 | 0 | 13 | 50 | 140 | 25 | 11 |
+| **1** | **+0.00** | **−129.25** | 0 | 13 | 48 | 141 | 31 | 10 |
+| 2 | +0.00 | −111.00 | 0 | 13 | 49 | 144 | 30 | 9 |
+| 3 | +0.00 | −117.82 | 0 | 13 | 48 | 142 | 30 | 9 |
+| 4 | +0.00 | −127.34 | 0 | 13 | 47 | 142 | 32 | 10 |
+| 5 | **+1.00** | −113.70 | 0 | 13 | 48 | 145 | 31 | 10 |
+
+**1** is the Tier-1-clean value with the best Tier-2 sum, and it is a
+**plateau, not a knife edge** — 1, 2, 3 and 4 are all Tier-1 clean. That
+is precisely the property ADR-19 M4's `MID_SUBROW_GAP` table lacked
+("passes by one cell of Manhattan tie-break margin... a knife-edge, not a
+fix").
+
+### The result: pinning IS the effect
+
+Two arms were registered for attribution, exactly as `terminal-series`
+splits from `terminal-series-divider`. The split earned itself: the two
+arms land on **opposite sides of the promotion rule**.
+
+| | `dc-series-column` (unpinned) | `dc-series-column-pinned` |
+| --- | --- | --- |
+| Tier 0 | **`t0.cross_net_overlap/cascode_amp` 0 -> 1** | clean |
+| Tier 1 delta | **+2.00** (cross-net collinear contact, `cascode_amp`) | **+0.00** |
+| Tier 2 delta | −12.54 | **−129.25** |
+| metric B (suite) | 4 -> **1** | 4 -> **0** |
+| SA-seed refusals (20 seeds x 22 fixtures) | **2 / 440** | **1 / 440** |
+| verdict | **NOT promotable** | **PROMOTABLE** |
+
+The unpinned arm writes the same column and then lets the SA re-basin
+it: it keeps only a quarter of the B repair, *raises* bends by 13, adds a
+Tier-0 cross-net overlap, and adds a conversion refusal the single-sample
+scoreboard cannot see. The pinned arm keeps the column and wins
+everywhere.
+
+That is ADR-15's "SA demoted to a polisher that may not undo the
+construction", measured on this construction: **the construction is not
+the effect; holding it is.**
+
+Pinned-arm Tier-2 detail (single sample, shipped seed):
+
+| metric | delta |
+| --- | ---: |
+| detour | **−66.25** |
+| V16 bends (B) | −23.00 |
+| F6 worst rail-stub lateral run | −14.00 |
+| Q3 flow-monotonicity | −13.00 |
+| Q5 alignment near-misses | −12.00 |
+| V16 branches (J) | −4.00 |
+| crossings | −4.00 |
+| V5 pin-facing | **+6.00** |
+| F5 series pose | **+2.00** |
+| P11b cache-less locality | −1.00 |
+
+Informational cells that moved, all repairs: `stack.side_by_side`
+`cascode_amp` 1->0, `resistor_ladder_ref` 2->0, `shunt_feedback_amp` 1->0;
+`chain.reversal / resistor_ladder_ref` 2->0;
+`port.label_vertical / resistor_ladder_ref` 3->2.
+
+### B vs F5 — which side was taken, and what it actually cost
+
+ADR-28 records B and F5 pointing in opposite directions on
+`resistor_ladder_ref`: B wants the six-resistor string in one column, F5
+charges "series element is not horizontal" and reads 4 there.
+
+**The construction takes B's side**, and the reason is not preference: B
+is a statement about *which elements share a current path*, which is
+topology; F5's "horizontal pin axis" is a statement about *pose*, which
+the column does not decide. They are only in conflict because the
+conventional drawing of a current column also poses its members
+vertically.
+
+The measured cost is smaller than the conflict suggests, and it lands
+somewhere else:
+
+* **`resistor_ladder_ref` F5 does not move: 4 -> 4.** The shipping
+  default already draws all four interior resistors vertical, so pinning
+  them vertical costs nothing. The named conflict is **latent, not
+  realised** on the fixture that names it — while B goes 2 -> 0 and the
+  ladder becomes an actual Kelvin string (R1..R6 at x = 50.80, pitch
+  8.89 mm, vdd to ground).
+* **F5 rises by 2, on two other fixtures**: `cascode_amp` 0 -> 1 and
+  `shunt_feedback_amp` 0 -> 1, where a series element the default drew
+  horizontal is now a column member drawn vertical.
+
+So: B −4 for F5 +2, both Tier-2, with the Tier-2 aggregate −129.25 in the
+same direction. That is the trade, stated rather than left to the
+aggregate.
+
+### The SA seed sweep, and a pre-existing Tier-0 finding
+
+20 seeds x 22 fixtures x 3 arms = **1320 conversions**
+(`--no-layout-cache`, `--sa-seed N`, `RUST_LOG=kicad_emitter::refine=debug`):
+
+| arm | refusals | phase-4.5 Tier-0-dirty baselines | V17 escapes fired |
+| --- | ---: | ---: | ---: |
+| `readable-v1` (control) | 1 / 440 | 12 / 440 | 2 |
+| `dc-series-column` | **2 / 440** | 14 / 440 | 2 |
+| `dc-series-column-pinned` | **1 / 440** | **5 / 440** | 2 |
+
+* **The pinned arm adds no refusal.** Its single refusal is the
+  control's: `opamp_transimpedance` at seed 18. It also hands phase 4.5 a
+  *cleaner* placement (12 -> 5 Tier-0-dirty baselines) — a pinned column
+  is a placement the router does not have to reach across.
+* **The unpinned arm adds one** (`resistor_ladder_ref` seed 5; before the
+  margin was swept in, the same arm added `two_stage_amp` seed 9 — the
+  cell moves with the basin, the +1 does not).
+* The V17 Tier-0 escape fires identically on all three arms (seed 1
+  `sallen_key_lpf`, seed 12 `opamp_transimpedance`), so this construction
+  does not consume it.
+
+**Pre-existing finding, reported not fixed:** the *shipping default*
+refuses `opamp_transimpedance` at SA seed 18 —
+`SPLIT: source net "out" reconstructs as 2 disconnected islands`, phase
+4.5 `severed 1 -> 1`. This is ADR-35's "Tier-0 and Tier-1 invariants fail
+on ~1 SA seed in 20 on the shipping default", now on a fixture added
+*after* ADR-37's 2160-conversion matrix, so that matrix's "refusals 0"
+row no longer covers the suite. It is not caused by this work (every arm
+shows it identically, and the default path is byte-identical).
+
+### `cascode_amp`, by inspection
+
+Emitted symbol origins, `--no-layout-cache`, shipped seed:
+
+| refdes | `readable-v1` | `dc-series-column-pinned` |
+| --- | --- | --- |
+| `RC` | (72.39, 35.56) | (58.42, 35.56) |
+| `Q2` | (73.66, 57.15) rot 270 + mirror y | (58.42, 46.99) rot 0 |
+| `Q1` | (50.80, 66.04) rot 0 | (58.42, 59.69) rot 0 |
+| `RE` | (49.53, 81.28) | (58.42, 71.12) |
+| `RB1` | (49.53, 35.56) mirror y | (46.99, 40.64) |
+| `RB2` | (45.72, 57.15) rot 270 | (46.99, 50.80) |
+| `RB3` | (39.37, 73.66) | (46.99, 60.96) |
+
+The device stack is one column at x = 58.42 in supply-to-ground order and
+the bias ladder is one column at x = 46.99 — the drawing the fixture's own
+header asks for ("Q2's emitter sits on Q1's collector, and the
+three-resistor bias chain RB1/RB2/RB3 is a vertical ladder from the rail
+to ground"). `two_stage_amp` reads the same way: two congruent stages,
+`[RC1 Q1 RE1]` at x = 53.34 and `[RC2 Q2 RE2]` at x = 83.82, each bias
+divider in its own column beside it.
+
+### Default-path byte-identity
+
+Both arms are gated on one accessor, `Placer::dc_series_columns`, and the
+pass returns immediately unless it is `true`.
+`placer::tests::the_dc_series_column_is_off_by_default` is the structural
+half; `baseline_lock` — green, **zero rows changed** — is the empirical
+half. Full suite on the final tree: **76 binaries, 877 passed, 0 failed,
+12 ignored** (868 before, plus 9 new tests).
