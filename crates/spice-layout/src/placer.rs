@@ -493,7 +493,6 @@ pub enum Placer {
     /// disclosed rather than explained away: `port_shapes` +2 (the price
     /// of un-pinning its over-matched chain) and
     /// `opamp_definition_level` +4, which is **unexplained**.
-    #[default]
     ReadableV1,
     /// **DC-series column, position only** — [`Placer::ReadableV1`] plus
     /// [`crate::dc_column`]'s constructive column idiom: elements that
@@ -538,6 +537,28 @@ pub enum Placer {
     /// failure mode ADR-37 records for `terminal-series-divider` on
     /// `sallen_key_lpf` — so an SA seed sweep is part of its grading
     /// rather than an optional extra.
+    /// **Promoted to the default 2026-09-05** on explicit owner
+    /// authorisation ("dc-series-column-pinned clearly better, please
+    /// finish promotion", after reviewing the rendered side-by-side).
+    /// A per-promotion sign-off, not the standing autonomy instruction.
+    ///
+    /// Graded per ADR-23 against `readable-v1`: Tier 0 clean both sides,
+    /// Tier 1 **+0.00**, Tier 2 **-129.25**, and ADR-28 metric B
+    /// (`stack.side_by_side`) **4 -> 0 suite-wide**. Multi-seed
+    /// (ADR-32, k = 9): 47 EFFECT cells, 38 of them better;
+    /// `stack.side_by_side / cascode_amp` 1 -> 0 is INERT, i.e. repaired
+    /// on every seed rather than on a lucky draw. No added conversion
+    /// refusal over 440 seeds, and phase 4.5 receives a *cleaner*
+    /// placement (Tier-0-dirty baselines 12/440 -> 5/440).
+    ///
+    /// Three residuals, disclosed rather than argued away:
+    /// `f5 / resistor_ladder_ref` genuinely regresses (k=9 t = +6.11,
+    /// where the single draw reads it as unmoved);
+    /// `port.label_vertical / resistor_ladder_ref` reverses sign between
+    /// the instruments; and `shunt_feedback_amp`'s `[RB RF]` column is
+    /// ADR-28 ambiguity 8, inherited on purpose with the shared
+    /// discriminator.
+    #[default]
     DcSeriesColumnPinned,
 }
 
@@ -946,9 +967,9 @@ mod tests {
     use super::Placer;
 
     #[test]
-    fn default_is_the_composed_readability_placer() {
-        assert_eq!(Placer::default(), Placer::ReadableV1);
-        assert_eq!(Placer::default().name(), "readable-v1");
+    fn default_is_the_dc_series_column_placer() {
+        assert_eq!(Placer::default(), Placer::DcSeriesColumnPinned);
+        assert_eq!(Placer::default().name(), "dc-series-column-pinned");
     }
 
     /// Neither promotion retired its predecessor. ADR-23's promotion
@@ -969,6 +990,10 @@ mod tests {
         // test; retiring it would make that A/B impossible.
         assert_eq!(Placer::from_name("flow-seed-v4"), Some(Placer::FlowSeedV4));
         assert!(Placer::ALL.contains(&Placer::FlowSeedV4));
+        // The 2026-09-05 promotion added a FOURTH superseded default.
+        assert_eq!(Placer::from_name("readable-v1"), Some(Placer::ReadableV1));
+        assert!(Placer::ALL.contains(&Placer::ReadableV1));
+        assert_ne!(Placer::default(), Placer::ReadableV1);
         // Each must be genuinely *different* from the default, or the
         // A/B they exist for would be vacuous.
         assert_ne!(Placer::default(), Placer::FlowSeed);
@@ -989,9 +1014,16 @@ mod tests {
     /// else, so this assertion is the whole byte-identity argument for
     /// the shipping output — `baseline_lock` is the empirical half.
     #[test]
-    fn the_dc_series_column_is_off_by_default() {
-        assert!(!Placer::default().dc_series_columns());
-        assert!(!Placer::default().dc_series_columns_pinned());
+    fn the_dc_series_column_is_absent_from_the_control_arms() {
+        // Until 2026-09-05 this asserted the construction was off by
+        // DEFAULT — the byte-identity guarantee that held while it was a
+        // challenger. The promotion makes that false by design, so the
+        // claim with content is that the SUPERSEDED defaults lack it,
+        // which is what makes them useful A/B arms.
+        assert!(!Placer::ReadableV1.dc_series_columns());
+        assert!(!Placer::ReadableV1.dc_series_columns_pinned());
+        assert!(Placer::default().dc_series_columns());
+        assert!(Placer::default().dc_series_columns_pinned());
         assert!(!Placer::FlowSeedV4.dc_series_columns());
         assert!(!Placer::Champion.dc_series_columns());
         assert!(Placer::DcSeriesColumn.dc_series_columns());
