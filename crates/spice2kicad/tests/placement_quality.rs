@@ -1603,7 +1603,33 @@ fn wire_detour_within_budget_across_fixtures() {
         // its stub runs further sideways. Weighed against crossings
         // 3 -> 0, V16 J 4 -> 1 and B 13 -> 12, Q3 3 -> 1 and F5 3 -> 1
         // on the same fixture.
-        ("sallen_key_driven", 1.1496),
+        // --- GLOBAL-IMPROVEMENT ESCAPE (CLAUDE.md), owner-authorised
+        // 2026-09-05: the owner replied "Promote it, and land the glyph
+        // pose fix too". This is the per-change sign-off the escape
+        // requires, quoted verbatim; it is NOT the standing autonomy
+        // instruction.
+        //
+        // Rationale (one line, as the escape requires): modelling a rail
+        // glyph at the pose it is DRAWN at removes TWO Tier-1
+        // `v13.9_foreign_over_glyph` violations (`sallen_key_lpf` and
+        // `sallen_key_driven`, both 1 -> 0, and the metric is now 0 on
+        // all 22 fixtures) at the cost of this ONE Tier-2 detour literal.
+        // Total violations strictly fall.
+        //
+        // 1.1496 -> 1.2243. With the obstacle box no longer reflected
+        // about its anchor, the `out` trunk stops crossing the VEE
+        // marker and re-bases y=45.72 -> 50.80 (wire 156.21 -> 166.37
+        // mm). The floor is not much lower: above is barred by V11 (the
+        // anchor pin is at 95.25,44.45), below at 46.99-49.53 by `RB`'s
+        // body; a local jog around the glyph alone would reach ~1.168
+        // but needs a new router primitive that would fire on every V12
+        // avoidance suite-wide (ADR-39).
+        //
+        // Second instance of this class: `opamp_inverting_real`
+        // 1.1464 -> 1.1952 below, which landed on assistant judgement
+        // and is flagged there as "re-examine rather than cite as
+        // precedent". This IS that re-examination, done with sign-off.
+        ("sallen_key_driven", 1.2243),
         // 1.2410 -> 1.2076 with the promoted flow-seed default, which
         // retires the rail-stub-SIDE-fix rise that was awaiting owner
         // sign-off. Ratchet DOWN.
