@@ -470,6 +470,45 @@ fn column_pose(
         .min_by_key(|&o| (score(o), Orientation::ALL.iter().position(|x| *x == o)))
 }
 
+/// Extra cells beyond a body-clean stride between two column members.
+///
+/// **Measured, not chosen.** The shared node between two column members
+/// is a signal net, so decoration puts a plain label on it, and a stride
+/// that only clears body-union-pin leaves the label nowhere to go: on
+/// `cascode_amp` the `c1` label lands on `Q2`'s body AND on its
+/// pin-number text (`v13.1_label_body` and `v13.7_label_pintext`, both
+/// Tier 1, both zero-budget). That is precisely the gap CLAUDE.md's "pin
+/// text is modelled by NO placement stage" note predicts every
+/// repositioning pass will hit — and the lawful remedy is the one
+/// [`crate::idioms::apply_series_horizontal`] already uses twice
+/// (`SHUNT_LABEL_MARGIN_DOWN_CELLS` / `_UP_CELLS`): a margin on the
+/// stride THIS construction owns. It is emphatically not the
+/// decoration-reservation programme, measured dead four times (ADR-14
+/// post-mortem, ADR-19 M3): nothing here reserves a general text class or
+/// widens a band; it widens one stack's own pitch.
+///
+/// **The sweep**, 0..=5, each a full workspace suite run collected into
+/// its own scoreboard sink and graded against `readable-v1`:
+///
+/// | margin | Tier-1 Δ | Tier-2 Δ | B | f5 | v5 | bends | branches | crossings |
+/// | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+/// | *champion* | — | — | 4 | 11 | 42 | 164 | 35 | 14 |
+/// | 0 | **+2.00** | −129.74 | 0 | 13 | 50 | 140 | 25 | 11 |
+/// | **1** | **+0.00** | **−129.25** | 0 | 13 | 48 | 141 | 31 | 10 |
+/// | 2 | +0.00 | −111.00 | 0 | 13 | 49 | 144 | 30 | 9 |
+/// | 3 | +0.00 | −117.82 | 0 | 13 | 48 | 142 | 30 | 9 |
+/// | 4 | +0.00 | −127.34 | 0 | 13 | 47 | 142 | 32 | 10 |
+/// | 5 | **+1.00** | −113.70 | 0 | 13 | 48 | 145 | 31 | 10 |
+///
+/// **1** is the Tier-1-clean value with the best Tier-2 sum. It is a
+/// **plateau, not a knife edge** — 1, 2, 3 and 4 are all Tier-1 clean,
+/// which is the property ADR-19 M4's `MID_SUBROW_GAP` table lacked
+/// ("passes by one cell of Manhattan tie-break margin… a knife-edge, not
+/// a fix"). Only the two ends fail: 0 leaves the `cascode_amp` label
+/// nowhere to go, and 5 spreads the column far enough to cost a Tier-1
+/// point elsewhere.
+const DC_COLUMN_LABEL_MARGIN_CELLS: i32 = 1;
+
 /// Apply every detected DC-series column: one shared X, members ordered
 /// top-to-bottom by DC potential, separated by a geometry-derived
 /// vertical stride.
@@ -527,7 +566,7 @@ pub(crate) fn apply_dc_columns(
             .collect();
         let strides: Vec<i32> = exts
             .windows(2)
-            .map(|w| vertical_stride_cells(&w[0], &w[1]))
+            .map(|w| vertical_stride_cells(&w[0], &w[1]) + DC_COLUMN_LABEL_MARGIN_CELLS)
             .collect();
 
         // Anchor: the component's own seed barycenter, so the column
