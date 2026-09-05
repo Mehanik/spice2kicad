@@ -224,31 +224,25 @@ const XFAIL: &[(&str, &str, &str)] = &[
     // `opamp_inverting_real`. So the same fixture that gains this label
     // overlap loses a glyph-body overlap and a backwards amplifier.
     //
-    // Same deferred class as the two entries below, and fixable in the
-    // same place: the label-nudge pass does not treat power-glyph bodies
-    // as obstacles. One fixture, one label; it expires the day that pass
-    // learns about glyphs.
-    (
-        "no_foreign_label_or_wire_over_power_glyph_body",
-        "sallen_key_lpf",
-        "TIER-1 REGRESSION introduced by the ADR-23 readable-v1 promotion: the `N1` net label now \
-         overlaps the `VEE` rail-glyph body (0 -> 1). The promotion's Tier-1 aggregate is -2.00 \
-         and this is its only +1.00 cell; the same fixture's `v14.glyph_body` falls 1 -> 0 and its \
-         `v17.signal_direction` 1 -> 0. Decoration-fixable exactly as this verifier's own budget \
-         doc says — the label-nudge pass does not treat power-glyph bodies as obstacles — so it \
-         is one fixture, one label, and it expires the day that pass learns about glyphs",
-    ),
-    (
-        "no_foreign_label_or_wire_over_power_glyph_body",
-        "sallen_key_driven",
-        "TIER-1 REGRESSION introduced by the ADR-23 flow-seed-v4 promotion: the `out` net's wire \
-         (77.47,45.72)->(101.60,45.72) now crosses the `VEE` rail-glyph body (0 -> 1). Same \
-         deferred class as the `named_rails` entry directly above and fixable in the same place — \
-         this verifier's own budget doc records that the decoration pass does not treat \
-         power-glyph bodies as obstacles; here it is the ROUTER rather than the label-nudge that \
-         needs to learn it. One fixture, one wire, and it expires the day that pass learns about \
-         glyphs",
-    ),
+    // EXPIRED 2026-09-05 by the glyph-POSE fix (ADR-39 defect 1). BOTH
+    // remaining `no_foreign_label_or_wire_over_power_glyph_body` entries
+    // deleted — `sallen_key_lpf` (the `N1` label over the VEE glyph) and
+    // `sallen_key_driven` (the `out` wire through it) — each reported by
+    // its own tripwire as UNEXPECTED PASS.
+    //
+    // They were registered as two defects in two stages, "the label-nudge
+    // pass does not treat power-glyph bodies as obstacles" and "here it
+    // is the ROUTER rather than the label-nudge that needs to learn it".
+    // Both passes already HAD the glyph bodies — they share
+    // `rail_glyph_body_bboxes` — but that builder posed every glyph at
+    // `Orientation::IDENTITY` on its host pin, and `power:VEE` (which
+    // both fixtures draw, having a negative rail) is emitted at rot 180.
+    // Each box was reflected about its anchor, guarding empty canvas
+    // while the drawn marker went unguarded. Building it from
+    // `spice_route::rails::glyph_pose` closes both.
+    //
+    // `named_rails`' entry, the third of the set, expired one commit
+    // earlier to a different defect entirely — see the block above.
     // R-5, and the fixture ADR-20 named it on. ADR-20 concluded that R-5
     // was what made `shunt_feedback_amp` UNCONVERTIBLE, escalating it
     // from Tier-1 aesthetics to Tier-0 correctness. ADR-24 shows that

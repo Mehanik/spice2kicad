@@ -491,10 +491,29 @@ invariant here.
   the distinct `power:VEE` glyph instead of `power:GND` — a ground
   triangle on a -12 V rail is electrically misleading. The VEE glyph
   is attached exactly like a GND glyph (canonical axis Down, so no
-  forced-sideways stub) — only the drawn symbol differs. The
+  forced-sideways stub), but its marker is *drawn* upward, so it is
+  emitted at **rot 180** (see V14) — the one rail glyph whose drawn
+  body is not on the rot-0 side of its anchor. The
   `NetSpec::negative_rail` flag carries this through `rails::emit`;
   `power_lib_id_for_net` mirrors it so the `power:VEE` lib_symbol
-  inlines verbatim (V3). Signal nets emit
+  inlines verbatim (V3).
+
+  **Anything that models a glyph's drawn footprint must read
+  `spice_route::rails::glyph_pose`**, the single definition
+  `rails::emit` itself draws from. A rail glyph is NOT simply "rot 0 on
+  its host pin": `power:VEE` is rot 180, and a forced-sideways or
+  sheet-edge glyph is offset one to two cells outward. The emitter's
+  router / label obstacle builder (`rail_glyph_body_bboxes`) assumed
+  the simple form and so placed every negative rail's obstacle box on
+  the wrong side of its anchor — guarding empty canvas while the drawn
+  marker went unguarded. That single wrong pose is the whole of the
+  `named_rails` / `sallen_key_lpf` label-over-glyph and
+  `sallen_key_driven` wire-through-glyph defects that
+  `no_foreign_label_or_wire_over_power_glyph_body` had registered as
+  three separate deferred decoration failures. ADR-25's rule stated for
+  a *model* rather than a guard: an obstacle evaluated over geometry the
+  emitted file does not have is not conservative, it is wrong, and
+  silent about it. Signal nets emit
   rectilinear Steiner trees: N=3 is exact via Hwang's median
   rule; 4≤N≤9 is heuristic (rectilinear MST + Borah-Owens-Irwin
   Steinerization on the Hanan grid); N≥10 is plain rectilinear

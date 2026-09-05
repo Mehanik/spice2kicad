@@ -67,7 +67,6 @@ pub fn emit(
                 lib_id,
                 &net.name,
                 pin,
-                canon,
                 &refdes,
                 sheet_uuid,
                 project_name,
@@ -191,6 +190,54 @@ pub(crate) fn glyph_rotation(lib_id: &str, canon: Direction) -> u16 {
         Direction::Up
     };
     if body == canon { 0 } else { 180 }
+}
+
+/// The canonical attachment axis of a `power:*` glyph, recovered from
+/// its `lib_id` alone.
+///
+/// [`lib_id_for`] and [`canonical_axis`] are both functions of
+/// `(class, negative_rail)`, and the composition is invertible: a
+/// negative rail is the only input that yields `power:VEE`, and negative
+/// rails and true ground are the only ones that attach downward. So a
+/// caller that has already resolved a `lib_id` — every consumer that
+/// models a glyph's drawn footprint has — can recover the axis without
+/// re-deriving net class. `glyph_pose_matches_stage_1` pins this inverse
+/// to the forward mapping so the two cannot drift apart.
+fn canonical_axis_of(lib_id: &str) -> Direction {
+    match lib_id {
+        "power:GND" | "power:VEE" => Direction::Down,
+        _ => Direction::Up,
+    }
+}
+
+/// Where Stage 1 will draw the `power:*` glyph `lib_id` for host pin
+/// `pin`: `(x, y, rotation_degrees)`.
+///
+/// **THE definition of a rail glyph's drawn pose.** Stage 1's own
+/// emission ([`power_symbol_sexpr`]) is written in terms of it, so a
+/// consumer that must model the glyph's footprint *before* decoration
+/// runs — the emitter's router and label obstacle sets, phase 4.5's
+/// oracle — reads the pose KiCad will actually see instead of
+/// re-deriving it.
+///
+/// Re-deriving it is what went wrong. The emitter's obstacle builder
+/// placed every glyph on its host pin at rot 0, but:
+///
+///   * `power:VEE` — the glyph EVERY negative rail draws — is emitted at
+///     **rot 180** (its marker is drawn upward while a negative rail
+///     attaches downward, see [`glyph_rotation`]), so its obstacle box
+///     was reflected about its anchor. It guarded the empty canvas above
+///     the pin and left the drawn marker below it unguarded: the router
+///     and the label-nudge pass were repelled from nothing and steered
+///     straight into the glyph.
+///   * a forced-sideways or sheet-edge glyph is emitted one to two grid
+///     cells **outward** of its pin (see [`glyph_offset`]), which that
+///     builder did not model either.
+#[must_use]
+pub fn glyph_pose(lib_id: &str, pin: &PinRef) -> (f64, f64, u16) {
+    let canon = canonical_axis_of(lib_id);
+    let (x, y, _) = symbol_pose(pin, canon);
+    (x, y, glyph_rotation(lib_id, canon))
 }
 
 /// The rotation Stage 1 emits `net`'s rail glyph at, or `None` for a
@@ -375,19 +422,20 @@ fn power_symbol_sexpr(
     lib_id: &str,
     net_name: &str,
     pin: &PinRef,
-    canon: Direction,
     refdes: &str,
     sheet_uuid: &str,
     project_name: &str,
 ) -> Sexpr {
-    let (x, y, _rot) = symbol_pose(pin, canon);
+    // [`glyph_pose`] is the single definition every obstacle consumer
+    // reads; drawing from anything else here is how they drift.
+    let (x, y, rot) = glyph_pose(lib_id, pin);
     glyph_sexpr_at(
         lib_id,
         net_name,
         x,
         y,
         pin.outward,
-        glyph_rotation(lib_id, canon),
+        rot,
         refdes,
         sheet_uuid,
         project_name,
@@ -470,4 +518,86 @@ fn global_label_sexpr(net_name: &str, pin: &PinRef) -> Sexpr {
     };
     let txt = format!("(global_label \"{net_name}\" (shape {shape}) (at {x:.2} {y:.2} {rot}))",);
     lexpr::from_str(&txt).expect("global_label s-expr parses")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec(name: &str, class: NetClass, negative_rail: bool) -> NetSpec {
+        NetSpec {
+            name: name.to_string(),
+            class,
+            pins: Vec::new(),
+            negative_rail,
+            rail_tag: None,
+            has_passive: false,
+            has_power_in: false,
+        }
+    }
+
+    /// [`canonical_axis_of`] recovers the axis from a `lib_id`; that is
+    /// only sound while it agrees with the forward
+    /// `(class, negative_rail) -> lib_id -> axis` mapping Stage 1 uses.
+    /// Adding a rail glyph whose body direction breaks the inverse (a
+    /// downward-drawn positive supply, say) trips this rather than
+    /// silently mis-posing every obstacle box for that glyph.
+    #[test]
+    fn glyph_pose_axis_inverse_agrees_with_forward_mapping() {
+        for name in [
+            "vcc", "vdd", "+5v", "+12v", "+3v3", "0", "gnd", "vee", "rail",
+        ] {
+            for class in [NetClass::Power, NetClass::Ground] {
+                for negative_rail in [false, true] {
+                    let net = spec(name, class, negative_rail);
+                    let Some(lib_id) = lib_id_for(&net) else {
+                        continue;
+                    };
+                    assert_eq!(
+                        canonical_axis_of(lib_id),
+                        canonical_axis(class, negative_rail),
+                        "{name} {class:?} negative={negative_rail} -> {lib_id}",
+                    );
+                }
+            }
+        }
+    }
+
+    /// The pose every obstacle consumer reads must be the pose Stage 1
+    /// draws — including the rot-180 negative rail that made the two
+    /// disagree, and the outward offset of a sheet-edge glyph.
+    #[test]
+    fn glyph_pose_matches_stage_1() {
+        let pin = PinRef {
+            element_idx: 0,
+            pin_number: 0,
+            x_mm: 10.0,
+            y_mm: 20.0,
+            outward: Direction::Down,
+            drives: false,
+            requires_driver: false,
+            on_sheet_edge: false,
+        };
+        // A negative rail attaches downward like ground, but its marker
+        // is drawn upward — hence rot 180, on the pin.
+        assert_eq!(glyph_pose("power:VEE", &pin), (10.0, 20.0, 180));
+        assert_eq!(glyph_pose("power:GND", &pin), (10.0, 20.0, 0));
+        // A positive supply on a down-facing pin is forced sideways:
+        // offset one cell outward (down, +y in file coords), rot 0.
+        let (x, y, rot) = glyph_pose("power:VCC", &pin);
+        assert_eq!(rot, 0);
+        assert!((x - 10.0).abs() < 1e-9 && (y - (20.0 + GRID_MM)).abs() < 1e-9);
+        // A sheet-edge pin takes the larger sheet-edge offset.
+        let edge = PinRef {
+            outward: Direction::Left,
+            on_sheet_edge: true,
+            ..pin
+        };
+        let (ex, ey, erot) = glyph_pose("power:GND", &edge);
+        assert_eq!(erot, 0);
+        assert!(
+            (ex - (10.0 - GRID_MM * SHEET_EDGE_GLYPH_OFFSET_CELLS)).abs() < 1e-9
+                && (ey - 20.0).abs() < 1e-9
+        );
+    }
 }

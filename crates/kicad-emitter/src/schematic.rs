@@ -157,6 +157,12 @@ pub struct ChildSheet<'a> {
 
 /// Emit a top-level (root) schematic. Same as [`emit`] but additionally
 /// embeds a `(sheet …)` block for each entry in `sheets`.
+// Straight-line orchestration of the decoration pipeline in the order it
+// must run (sheets -> pins -> obstacles -> route -> labels -> nudges ->
+// page). Splitting it would only hide that order behind call sites,
+// which is exactly what the phase ordering must NOT be. Same reasoning
+// as `label_specs`, which carries the same allow.
+#[allow(clippy::too_many_lines)]
 pub fn emit_root(
     placement: &Placement,
     library: &Library,
@@ -239,8 +245,14 @@ pub fn emit_root(
     // bodies a foreign signal wire must not spear (V13 item 2A). Glyphs
     // are foreign to every routed net (power nets are unrouted), so
     // appending them repels only foreign wires.
-    let glyph_bodies = rail_glyph_body_bboxes(&net_pins, library, &negative_rails, &rail_tags);
-    let host_bodies = placement_obstacles(placement, library);
+    let (glyph_bodies, host_bodies) = sheet_obstacles(
+        placement,
+        library,
+        &net_pins,
+        &negative_rails,
+        &rail_tags,
+        &sheet_edge_pins,
+    );
     let obstacles: Vec<_> = host_bodies.iter().chain(&glyph_bodies).copied().collect();
     for routed in route_nets(
         &net_pins,
@@ -393,9 +405,17 @@ pub fn emit_child_sheet(
     let net_pins = collect_net_pins(child.placement, library, &extra_pins);
     let child_negative_rails = spice_layout::net_class::negative_rail_nets(child.placement);
     let child_rail_tags = spice_layout::net_class::rail_tags(child.placement);
-    let glyph_bodies =
-        rail_glyph_body_bboxes(&net_pins, library, &child_negative_rails, &child_rail_tags);
-    let host_bodies = placement_obstacles(child.placement, library);
+    // A child sheet draws no nested `(sheet …)` blocks, so it has no
+    // sheet-edge pins of its own — matching the `&[]` its `route_nets`
+    // call passes.
+    let (glyph_bodies, host_bodies) = sheet_obstacles(
+        child.placement,
+        library,
+        &net_pins,
+        &child_negative_rails,
+        &child_rail_tags,
+        &[],
+    );
     let obstacles: Vec<_> = host_bodies.iter().chain(&glyph_bodies).copied().collect();
     let mut driven = collect_driven_nets(child.placement, library);
     // A subckt *port* net is exposed to the parent; its driver status
@@ -1776,7 +1796,10 @@ pub(crate) fn trial_route(placement: &Placement, library: &Library) -> TrialRout
     let host_bodies = placement_obstacles(placement, library);
     let mut obstacles = host_bodies.clone();
     obstacles.extend(
-        rail_glyph_body_bboxes(&net_pins, library, &negative_rails, &rail_tags)
+        // No sheet-edge pins: this `collect_net_pins` deliberately
+        // passes no `extra_pins`, so no synthetic sheet-port pin exists
+        // to anchor an offset glyph on.
+        rail_glyph_body_bboxes(&net_pins, library, &negative_rails, &rail_tags, &[])
             .iter()
             .copied(),
     );
@@ -2246,14 +2269,51 @@ fn body_bbox_to_world(
     }
 }
 
+/// The two obstacle sets a sheet's router and label passes share: the
+/// rail-glyph footprints (at the pose those glyphs are actually drawn
+/// at) and the visible host symbol bodies.
+///
+/// Extracted so `emit_root` and `emit_child_sheet` assemble them with
+/// one call each and cannot drift in what they pass.
+fn sheet_obstacles(
+    placement: &Placement,
+    library: &Library,
+    net_pins: &std::collections::BTreeMap<String, Vec<(f64, f64, u16)>>,
+    negative_rails: &std::collections::BTreeSet<String>,
+    rail_tags: &std::collections::BTreeMap<String, String>,
+    sheet_edge_pins: &[(f64, f64)],
+) -> (Vec<spice_route::Bbox>, Vec<spice_route::Bbox>) {
+    let glyphs = rail_glyph_body_bboxes(
+        net_pins,
+        library,
+        negative_rails,
+        rail_tags,
+        sheet_edge_pins,
+    );
+    (glyphs, placement_obstacles(placement, library))
+}
+
 /// World-frame body bbox of every rail glyph a sheet will draw, one per
 /// Power/Ground net pin. Built from the *actual* `power:*` lib_id
-/// (`power_lib_id_for_net`) and its library body, transformed at the
-/// host pin with the glyph's fixed rot-0 pose — the exact footprint
-/// `spice_route::rails` draws (V14 locks every rail glyph to rot 0) and
-/// the exact box the V13 verifier measures. A GND triangle reaches
-/// screen-down, a VCC/VDD chevron and a VEE marker reach screen-up; each
-/// gets its true asymmetric footprint rather than a guessed one.
+/// (`power_lib_id_for_net`) and its library body, transformed through
+/// the pose `spice_route::rails` will actually emit the glyph at
+/// ([`spice_route::rails::glyph_pose`] — the one definition Stage 1's
+/// own emission reads), so this is the exact footprint that gets drawn
+/// and the exact box the V13 verifier measures off the emitted file.
+///
+/// **ADR-25, measurement half.** This used to assume every glyph sat on
+/// its host pin at `Orientation::IDENTITY`, on the strength of "V14
+/// locks every rail glyph to rot 0". That is false for `power:VEE` —
+/// the glyph every NEGATIVE rail draws — which is emitted at rot 180,
+/// and for any forced-sideways or sheet-edge glyph, which is emitted
+/// one to two cells outward. A VEE box was therefore reflected about
+/// its anchor: it guarded empty canvas above the pin while the drawn
+/// marker below it was unguarded, so the router and the label-nudge
+/// pass this feeds were repelled from nothing. That is exactly the
+/// `named_rails` / `sallen_key_lpf` / `sallen_key_driven` defect
+/// registered in `tests/common/xfail.rs`, and it is why the fix is not
+/// "teach the nudge about glyphs" — the nudge already had them, at the
+/// wrong coordinates.
 ///
 /// **Foreign-only by construction.** Power/Ground nets are unrouted
 /// (only Signal nets reach the Steiner router) and carry no `(label …)`
@@ -2266,15 +2326,15 @@ fn body_bbox_to_world(
 /// excluded (its width is not a wire hazard, and a wider zone risks
 /// over-constraining the router; ADR-14 / phase-2 plan).
 ///
-/// The rot-0 anchor sits on the host pin in the canonical case; the rare
-/// forced-sideways / sheet-edge one-to-two-cell outward offset is not
-/// modelled here (no v0.1 fixture routes a foreign wire through those
-/// offset glyphs), matching the "known scope limits" of ADR-14.
+/// `sheet_edge_pins` is the sheet's hierarchical-port pin coordinates —
+/// the same list `route_nets` uses — because a glyph anchored on one is
+/// offset outward and turned to face away from the sheet body.
 pub(crate) fn rail_glyph_body_bboxes(
     net_pins: &std::collections::BTreeMap<String, Vec<(f64, f64, u16)>>,
     library: &Library,
     negative_rails: &std::collections::BTreeSet<String>,
     rail_tags: &std::collections::BTreeMap<String, String>,
+    sheet_edge_pins: &[(f64, f64)],
 ) -> Vec<spice_route::Bbox> {
     let mut out = Vec::new();
     for (name, pins) in net_pins {
@@ -2284,28 +2344,71 @@ pub(crate) fn rail_glyph_body_bboxes(
         let Some(local) = library.lookup(lib_id).and_then(Symbol::body_bbox) else {
             continue;
         };
-        for &(x, y, _ang) in pins {
-            let mut b = body_bbox_to_world(local, x, y, Orientation::IDENTITY);
-            // Extend the obstacle down the stem to the connection pin.
-            // `body_bbox` stops at the drawn chevron/triangle, leaving a
-            // ~1.27 mm gap between the glyph's open base and the pin it
-            // hangs on (e.g. VCC's base at world y and the pin one cell
-            // below). A foreign wire running along that base edge grazes
-            // the body boundary — below `Bbox::intersects_segment`'s
-            // interior epsilon — so `avoid_obstacles` never fires and the
-            // wire skims the glyph. Union the body with the pin coord so
-            // the whole visual footprint (body ∪ stem to pin) is the
-            // obstacle and such a wire becomes strictly interior. Ground
-            // glyphs already touch their pin at the body edge, so this is
-            // a no-op there; it only closes the VCC/VDD/VEE-style stem.
-            b.x0 = b.x0.min(x);
-            b.x1 = b.x1.max(x);
-            b.y0 = b.y0.min(y);
-            b.y1 = b.y1.max(y);
+        for &(x, y, ang) in pins {
+            let pin = rail_pin_ref(x, y, ang, sheet_edge_pins);
+            let (gx, gy, rot) = spice_route::rails::glyph_pose(lib_id, &pin);
+            let orient = Orientation {
+                rotation: if rot == 180 {
+                    Rotation::R180
+                } else {
+                    Rotation::R0
+                },
+                mirror_y: false,
+            };
+            let mut b = body_bbox_to_world(local, gx, gy, orient);
+            // Extend the obstacle down the stem to the connection pin —
+            // and, when the glyph is offset outward, along the stub wire
+            // that bridges the gap. `body_bbox` stops at the drawn
+            // chevron/triangle, leaving a ~1.27 mm gap between the
+            // glyph's open base and the pin it hangs on (e.g. VCC's base
+            // at world y and the pin one cell below). A foreign wire
+            // running along that base edge grazes the body boundary —
+            // below `Bbox::intersects_segment`'s interior epsilon — so
+            // `avoid_obstacles` never fires and the wire skims the
+            // glyph. Union the body with BOTH the glyph anchor and the
+            // host pin so the whole visual footprint (body ∪ stem ∪
+            // stub) is the obstacle and such a wire becomes strictly
+            // interior. Ground glyphs already touch their pin at the
+            // body edge, so this is a no-op there; it only closes the
+            // VCC/VDD/VEE-style stem.
+            for (px, py) in [(x, y), (gx, gy)] {
+                b.x0 = b.x0.min(px);
+                b.x1 = b.x1.max(px);
+                b.y0 = b.y0.min(py);
+                b.y1 = b.y1.max(py);
+            }
             out.push(b);
         }
     }
     out
+}
+
+/// The [`spice_route::PinRef`] a rail pin presents to
+/// `spice_route::rails`, built exactly as [`route_nets`] builds it — the
+/// glyph pose depends on `outward` and `on_sheet_edge`, so an obstacle
+/// box derived from a differently-built pin models a glyph the router
+/// never draws.
+fn rail_pin_ref(x: f64, y: f64, ang: u16, sheet_edge_pins: &[(f64, f64)]) -> spice_route::PinRef {
+    let on_sheet_edge = sheet_edge_pins
+        .iter()
+        .any(|&(sx, sy)| approx_eq(sx, x) && approx_eq(sy, y));
+    spice_route::PinRef {
+        element_idx: 0,
+        pin_number: 0,
+        x_mm: x,
+        y_mm: y,
+        // Mirrors `route_nets`: a sheet-port pin's glyph must escape
+        // leftward, away from the sheet body, whatever angle
+        // `collect_net_pins` stamped on the synthetic pin.
+        outward: if on_sheet_edge {
+            spice_route::Direction::Left
+        } else {
+            angle_to_direction(ang)
+        },
+        drives: false,
+        requires_driver: false,
+        on_sheet_edge,
+    }
 }
 
 /// World-frame body bboxes (as [`TextBbox`]) of every visible host
