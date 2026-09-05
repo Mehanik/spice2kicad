@@ -175,15 +175,25 @@ const XFAIL: &[(&str, &str, &str)] = &[
     // announced it as an UNEXPECTED PASS, which is the whole reason it
     // was registered as a tripwire rather than given budget headroom.
     // Entry deleted so the fixture is graded again.
-    (
-        "no_foreign_label_or_wire_over_power_glyph_body",
-        "named_rails",
-        "TIER-1 REGRESSION introduced by the ADR-23 flow-seed promotion: the `in` global label now \
-         overlaps the `n5` (-5V) rail glyph body (0 -> 1). Decoration-fixable exactly as this \
-         verifier's own budget doc says — the label-nudge pass does not treat power-glyph bodies \
-         as obstacles — so it is one fixture, one label, and it expires the day that pass learns \
-         about glyphs",
-    ),
+    //
+    // EXPIRED 2026-09-05 by the fixed-vs-movable split in the label
+    // obstacle scorer. ONE entry deleted, `named_rails`, reported by its
+    // own tripwire as UNEXPECTED PASS: "the `in` global label now
+    // overlaps the `n5` (-5V) rail glyph body (0 -> 1) … the label-nudge
+    // pass does not treat power-glyph bodies as obstacles".
+    //
+    // The attribution was wrong, and in a new way: the nudge pass HAD
+    // the glyph bodies (`label_rotation_obstacles` has fed them in since
+    // ADR-14). `in` has no clean rotation at all on this fixture, so the
+    // choice fell to the least-overlap tie-break — which scored symbol
+    // bodies and property text as ONE class and so preferred reading into
+    // the `n5` glyph over grazing `CL`'s Value text. Rank the two apart
+    // — bodies are frozen by the decoration contract, property text is
+    // moved off labels by `nudge_property_text` immediately afterwards —
+    // and the tie-break takes the repairable collision instead.
+    //
+    // A deferral can name the right stage and still be unfixable from
+    // its own text: this one described an obstacle the pass already had.
     // --- REGRESSION INTRODUCED BY THE SECOND ADR-23 PROMOTION of
     // `--placer=flow-seed-v4` to the default (owner-authorised,
     // 2026-08-24).

@@ -2455,19 +2455,68 @@ fn label_spec_bbox(spec: &LabelSpec) -> TextBbox {
 /// An axis-aligned wire segment in world millimetres.
 pub(crate) type WireSeg = ((f64, f64), (f64, f64));
 
+/// How badly one label pose collides, as
+/// `(fixed area, movable area, pin-text area, wire strikes)` — compared
+/// lexicographically, so an earlier key never trades against a later
+/// one. See [`LabelObstacles`] for why "fixed" leads "movable".
+type LabelScore = (f64, f64, f64, f64);
+
+/// The four obstacle classes one label pose is scored against, in the
+/// order [`LabelScore`] compares them. A borrowed bundle rather than four
+/// parameters because all three choosers take the same four and always
+/// in the same order.
+#[derive(Clone, Copy)]
+pub(crate) struct ScoredObstacles<'a> {
+    /// Nothing downstream may move these: symbol bodies, foreign
+    /// rail-glyph bodies, pin leads, and labels already planted.
+    pub fixed: &'a [TextBbox],
+    /// `nudge_property_text` will move these off a label after this pass
+    /// — visible Reference / Value text.
+    pub movable: &'a [TextBbox],
+    /// Symbol-internal pin name / number text.
+    pub pin_texts: &'a [TextBbox],
+    /// Already-emitted wires.
+    pub wires: &'a [WireSeg],
+}
+
+/// A pose that collides with nothing.
+const ZERO_SCORE: LabelScore = (0.0, 0.0, 0.0, 0.0);
+
+/// Worse than any real pose; the seed for a least-overlap search.
+const WORST_SCORE: LabelScore = (f64::INFINITY, f64::INFINITY, f64::INFINITY, f64::INFINITY);
+
 /// The geometry a label must keep clear of, grouped by priority.
 ///
 /// The grouping is load-bearing, not cosmetic: the placement chooser
-/// scores these lexicographically. `properties` and `bodies` are the
-/// primary class (a label reading into a symbol body or over another
-/// string is the worst outcome), `pin_texts` is secondary, and `wires`
-/// is the final tiebreak — a thin line through a string still reads,
-/// and pin-text overlap is a graded zero-budget ratchet while wire
-/// strikes are not yet graded.
+/// scores these lexicographically, in the order **bodies → properties →
+/// pin text → wires**.
+///
+/// **Bodies outrank properties because properties still move and bodies
+/// never do.** `nudge_property_text` runs AFTER labels are planted and
+/// takes them as obstacles, so a Reference/Value a label lands on gets
+/// nudged off it; a symbol body is frozen by the decoration contract and
+/// a label on one stays on one. Scoring the two as one class made the
+/// chooser trade a repairable property collision for a permanent body
+/// collision whenever the property overlap happened to be the larger
+/// rectangle — measured on `named_rails`, where the `in` terminal has no
+/// clean rotation at all and picked reading straight into `CL`'s body
+/// (2.99 mm², plus 1.88 mm² of CL pin text) over grazing `CL`'s Value
+/// text (3.29 mm², nothing else), which the nudge then clears outright.
+///
+/// `pin_texts` stays below both — overprinting a pin number is a lesser
+/// defect than reading into a body, and it is fixed geometry a label can
+/// move off but which cannot move off a label. `wires` is the final
+/// tiebreak: a thin line through a string still reads, and pin-text
+/// overlap is a graded zero-budget ratchet while wire strikes are not
+/// yet graded.
 pub(crate) struct LabelObstacles<'a> {
-    /// Visible Reference / Value text.
+    /// Visible Reference / Value text. MOVABLE: `nudge_property_text`
+    /// runs after labels and will nudge these off a label that lands on
+    /// one, so a collision here is repairable downstream.
     pub properties: &'a [TextBbox],
-    /// Symbol bodies, foreign rail-glyph bodies and pin leads.
+    /// Symbol bodies, foreign rail-glyph bodies and pin leads. FIXED:
+    /// nothing downstream may move a symbol (the decoration contract),
+    /// so a collision here is permanent.
     pub bodies: &'a [TextBbox],
     /// Symbol-internal pin name / number text.
     pub pin_texts: &'a [TextBbox],
@@ -2641,12 +2690,14 @@ pub(crate) fn label_specs(
         // Any pin on the net is an equally V11-correct anchor (foreign
         // coords were filtered out above), so this is a free choice.
         if let Some(dir) = ports.get(net) {
-            let obstacles: Vec<TextBbox> = property_bboxes
-                .iter()
-                .chain(body_obstacles.iter())
-                .chain(placed_labels.iter())
-                .copied()
-                .collect();
+            let (fixed, movable) =
+                obstacle_classes(body_obstacles, &placed_labels, property_bboxes);
+            let scored = ScoredObstacles {
+                fixed: &fixed,
+                movable: &movable,
+                pin_texts,
+                wires,
+            };
             let shape = port_shape_token(*dir);
             // An `output` terminal belongs at the net's RIGHTMOST pin; an
             // `input` at the leftmost (`uniq` is sorted by X, then Y). When
@@ -2667,15 +2718,7 @@ pub(crate) fn label_specs(
             } else {
                 uniq[0]
             };
-            let rot = global_label_rotation_avoiding(
-                net,
-                (px, py),
-                label_rot(pang),
-                shape,
-                &obstacles,
-                pin_texts,
-                wires,
-            );
+            let rot = global_label_rotation_avoiding(net, (px, py), label_rot(pang), shape, scored);
             out.push(LabelSpec {
                 net: net.clone(),
                 x: px,
@@ -2696,20 +2739,19 @@ pub(crate) fn label_specs(
             // (V13 item 2 — a `in` label reading into a GND triangle).
             // The chevron-aware picker keeps every currently-clean
             // fixture byte-identical (preferred tried first).
-            let obstacles: Vec<TextBbox> = property_bboxes
-                .iter()
-                .chain(body_obstacles.iter())
-                .chain(placed_labels.iter())
-                .copied()
-                .collect();
+            let (fixed, movable) =
+                obstacle_classes(body_obstacles, &placed_labels, property_bboxes);
             let rot = global_label_rotation_avoiding(
                 net,
                 (fx, fy),
                 label_rot(fang),
                 "input",
-                &obstacles,
-                pin_texts,
-                wires,
+                ScoredObstacles {
+                    fixed: &fixed,
+                    movable: &movable,
+                    pin_texts,
+                    wires,
+                },
             );
             out.push(LabelSpec {
                 net: net.clone(),
@@ -2732,20 +2774,21 @@ pub(crate) fn label_specs(
             // faithful `plain_label_bbox`, a label reading into a
             // neighbouring body is a real V13(1) overlap, not a modelling
             // artefact.
-            let obstacles: Vec<TextBbox> = property_bboxes
-                .iter()
-                .chain(body_obstacles.iter())
-                .chain(placed_labels.iter())
-                .copied()
-                .collect();
+            let (fixed, movable) =
+                obstacle_classes(body_obstacles, &placed_labels, property_bboxes);
+            let scored = ScoredObstacles {
+                fixed: &fixed,
+                movable: &movable,
+                pin_texts,
+                wires,
+            };
             // A plain label names its net, so ANY pin on that net is an
             // equally valid, equally V11-correct anchor. Prefer the first
             // pin (keeps every already-clean fixture byte-identical), but
             // when no rotation there clears the obstacles, try the net's
             // other pins before settling for a collision — some anchors
             // simply have no clean direction available.
-            let (ax, ay, arot) =
-                best_plain_label_anchor(net, &uniq, &obstacles, pin_texts, wires, anchor_search);
+            let (ax, ay, arot) = best_plain_label_anchor(net, &uniq, scored, anchor_search);
             out.push(LabelSpec {
                 net: net.clone(),
                 x: ax,
@@ -2759,14 +2802,7 @@ pub(crate) fn label_specs(
             }
             if net_touches_port && uniq.len() >= 2 {
                 let (lx, ly, lang) = uniq[uniq.len() - 1];
-                let rot2 = label_rotation_avoiding(
-                    net,
-                    (lx, ly),
-                    label_rot(lang),
-                    &obstacles,
-                    pin_texts,
-                    wires,
-                );
+                let rot2 = label_rotation_avoiding(net, (lx, ly), label_rot(lang), scored);
                 out.push(LabelSpec {
                     net: net.clone(),
                     x: lx,
@@ -2782,6 +2818,22 @@ pub(crate) fn label_specs(
         }
     }
     out
+}
+
+/// Split a sheet's label obstacles into the two classes the choosers
+/// score separately: **fixed** (symbol bodies, foreign rail-glyph bodies,
+/// pin leads, and labels already planted this pass — none of which
+/// anything downstream may move) and **movable** (visible Reference /
+/// Value text, which `nudge_property_text` will nudge off a label after
+/// this pass runs). See [`LabelObstacles`] for why the split is
+/// load-bearing.
+fn obstacle_classes(
+    bodies: &[TextBbox],
+    placed_labels: &[TextBbox],
+    properties: &[TextBbox],
+) -> (Vec<TextBbox>, Vec<TextBbox>) {
+    let fixed: Vec<TextBbox> = bodies.iter().chain(placed_labels.iter()).copied().collect();
+    (fixed, properties.to_vec())
 }
 
 /// Emit the `(label …)` / `(global_label …)` Sexpr nodes for a sheet,
@@ -4055,24 +4107,23 @@ fn outward_label_rot(pin_angle: u16) -> u16 {
 /// connectivity (V11) or the label count (V4). The first pin with a fully
 /// clean rotation wins, which keeps every already-clean fixture
 /// byte-identical; only when no pin/rotation pair is clean does the
-/// lexicographically least-overlapping one (bodies+properties first,
-/// pin-text second) get used.
+/// lexicographically least-overlapping one (bodies first, then
+/// properties, then pin text) get used.
 fn best_plain_label_anchor(
     net: &str,
     pins: &[(f64, f64, u16)],
-    obstacles: &[TextBbox],
-    pin_texts: &[TextBbox],
-    wires: &[WireSeg],
+    obs: ScoredObstacles<'_>,
     anchor_search: bool,
 ) -> (f64, f64, u16) {
     let label_rot = outward_label_rot;
     let pins: &[(f64, f64, u16)] = if anchor_search { pins } else { &pins[..1] };
-    let score_of = |px: f64, py: f64, rot: u16| -> (f64, f64, f64) {
+    let score_of = |px: f64, py: f64, rot: u16| -> LabelScore {
         let b = plain_label_bbox(net, (px, py), rot);
         (
-            area_against(b, obstacles),
-            area_against(b, pin_texts),
-            wire_strike_penalty(b, wires),
+            area_against(b, obs.fixed),
+            area_against(b, obs.movable),
+            area_against(b, obs.pin_texts),
+            wire_strike_penalty(b, obs.wires),
         )
     };
     let rots = |pang: u16| {
@@ -4082,7 +4133,7 @@ fn best_plain_label_anchor(
     // Pass 1: an anchor/rotation clean of everything.
     for &(px, py, pang) in pins {
         for cand in rots(pang) {
-            if score_of(px, py, cand) == (0.0, 0.0, 0.0) {
+            if score_of(px, py, cand) == ZERO_SCORE {
                 return (px, py, cand);
             }
         }
@@ -4099,7 +4150,7 @@ fn best_plain_label_anchor(
     }
     // Pass 3: least-overlapping over every anchor/rotation.
     let mut best = None;
-    let mut best_score = (f64::INFINITY, f64::INFINITY, f64::INFINITY);
+    let mut best_score = WORST_SCORE;
     for &(px, py, pang) in pins {
         for cand in rots(pang) {
             let score = score_of(px, py, cand);
@@ -4162,16 +4213,15 @@ fn label_rotation_avoiding(
     text: &str,
     anchor: (f64, f64),
     preferred: u16,
-    props: &[TextBbox],
-    pin_texts: &[TextBbox],
-    wires: &[WireSeg],
+    obs: ScoredObstacles<'_>,
 ) -> u16 {
-    let overlap_area = |rot: u16| -> (f64, f64, f64) {
+    let overlap_area = |rot: u16| -> LabelScore {
         let b = plain_label_bbox(text, anchor, rot);
         (
-            area_against(b, props),
-            area_against(b, pin_texts),
-            wire_strike_penalty(b, wires),
+            area_against(b, obs.fixed),
+            area_against(b, obs.movable),
+            area_against(b, obs.pin_texts),
+            wire_strike_penalty(b, obs.wires),
         )
     };
     // Order: preferred first (keeps the existing body-clearing choice
@@ -4185,10 +4235,7 @@ fn label_rotation_avoiding(
         (preferred + 270) % 360,
         (preferred + 180) % 360,
     ];
-    if let Some(c) = candidates
-        .iter()
-        .find(|&&c| overlap_area(c) == (0.0, 0.0, 0.0))
-    {
+    if let Some(c) = candidates.iter().find(|&&c| overlap_area(c) == ZERO_SCORE) {
         return *c;
     }
     if let Some(c) = candidates
@@ -4198,7 +4245,7 @@ fn label_rotation_avoiding(
         return *c;
     }
     let mut best = preferred;
-    let mut best_area = (f64::INFINITY, f64::INFINITY, f64::INFINITY);
+    let mut best_area = WORST_SCORE;
     for cand in candidates {
         let area = overlap_area(cand);
         if area < best_area {
@@ -4266,16 +4313,15 @@ fn global_label_rotation_avoiding(
     anchor: (f64, f64),
     preferred: u16,
     shape: &str,
-    obstacles: &[TextBbox],
-    pin_texts: &[TextBbox],
-    wires: &[WireSeg],
+    obs: ScoredObstacles<'_>,
 ) -> u16 {
-    let overlap_area = |rot: u16| -> (f64, f64, f64) {
+    let overlap_area = |rot: u16| -> LabelScore {
         let b = global_label_bbox(text, anchor, rot, shape);
         (
-            area_against(b, obstacles),
-            area_against(b, pin_texts),
-            wire_strike_penalty(b, wires),
+            area_against(b, obs.fixed),
+            area_against(b, obs.movable),
+            area_against(b, obs.pin_texts),
+            wire_strike_penalty(b, obs.wires),
         )
     };
     let candidates = [
@@ -4285,10 +4331,7 @@ fn global_label_rotation_avoiding(
         (preferred + 180) % 360,
     ];
     // Pass 1: fully clean (bodies/properties AND pin text).
-    if let Some(c) = candidates
-        .iter()
-        .find(|&&c| overlap_area(c) == (0.0, 0.0, 0.0))
-    {
+    if let Some(c) = candidates.iter().find(|&&c| overlap_area(c) == ZERO_SCORE) {
         return *c;
     }
     // Pass 2: clean of bodies/properties, tolerating pin text. This is the
@@ -4300,9 +4343,10 @@ fn global_label_rotation_avoiding(
     {
         return *c;
     }
-    // Pass 3: least-overlapping, bodies/properties dominating pin text.
+    // Pass 3: least-overlapping, bodies dominating properties dominating
+    // pin text.
     let mut best = preferred;
-    let mut best_area = (f64::INFINITY, f64::INFINITY, f64::INFINITY);
+    let mut best_area = WORST_SCORE;
     for cand in candidates {
         let area = overlap_area(cand);
         if area < best_area {

@@ -1184,9 +1184,28 @@ fn v13_overlap_count(placement: &Placement, library: &Library) -> usize {
     let label_obstacles = label_rotation_obstacles(placement, library, &glyph_bodies);
     // Consistently upstream of decoration — see the doc comment: no
     // pin-text set, no wires, no anchor search.
+    //
+    // …and, for the same reason, the two obstacle classes are scored
+    // MERGED here. The emitter ranks a body collision above a property
+    // collision because `nudge_property_text` runs after labels and
+    // repairs the property one (see `LabelObstacles`) — a statement about
+    // what a LATER decoration pass will do. This gate runs before any of
+    // decoration and models none of it, so importing half of that
+    // reasoning would be exactly the "half-aligned model" the doc comment
+    // above records as measured-worse: it moved four elements across
+    // `resistor_ladder_ref` and `sallen_key_driven` (rotations only) for
+    // a model-side V13 gain that showed up nowhere in the emitted output,
+    // and cost `resistor_ladder_ref`'s wire detour 1.052 -> 1.127.
+    // Passing the union as `bodies` keeps this gate's arithmetic
+    // byte-identical to what it scored before the split.
+    let merged: Vec<TextBbox> = label_obstacles
+        .iter()
+        .chain(props.iter())
+        .copied()
+        .collect();
     let obs = LabelObstacles {
-        properties: &props,
-        bodies: &label_obstacles,
+        properties: &[],
+        bodies: &merged,
         pin_texts: &[],
         wires: &[],
     };
