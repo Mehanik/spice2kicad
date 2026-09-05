@@ -100,8 +100,9 @@ crates/
                      symmetry → hierarchical sheets; `roots.rs` is the
                      one signal-flow root policy both the layering and
                      the flow idioms read; `placer.rs` is the ADR-23 name
-                     registry (default `readable-v1`, control arms
-                     `flow-seed-v4`, `flow-seed` and `champion`)
+                     registry (default `dc-series-column-pinned`, control
+                     arms `readable-v1`, `flow-seed-v4`, `flow-seed`,
+                     `champion`)
   spice-route/       Steiner routing, power glyphs, PWR_FLAG, conflict /
                      obstacle resolution
   kicad-emitter/     placed model → KiCad S-expressions; phase-4.5
@@ -297,7 +298,13 @@ For full grammar, examples, and diagnostics, see
   from spec §5 sits between the parser and the emitter.
 
   **What X means, and where the roots come from.** The shipping placer
-  is `--placer=readable-v1`, promoted to the default on 2026-09-04
+  is `--placer=dc-series-column-pinned`, promoted to the default on
+  2026-09-05 (ADR-40, owner-authorised) — `readable-v1` plus ONE
+  construction: a DC-series device pair (ADR-28 metric B's own
+  discriminator) shares an X column, anchored on the pair's **shared
+  pin**, and orders in Y by `dc_rank`. Y-ORDERING only; bands are
+  untouched. Before it, `--placer=readable-v1` was the default from
+  2026-09-04
   (ADR-38, owner-authorised) — the four readability arms composed on
   `flow-seed-v4`. It changes ORIENTATION and pinning, not the X layering,
   so everything below still describes what X means: `readable-v1`
@@ -343,8 +350,10 @@ For full grammar, examples, and diagnostics, see
   it is the cheapest check on any future root change: if a third fixture
   moves, the containment argument is wrong.
 
-  **All three superseded defaults stay registered as control arms** and
-  must remain runnable: `--placer flow-seed-v4` (the 2026-08-24 default)
+  **All four superseded defaults stay registered as control arms** and
+  must remain runnable: `--placer readable-v1` (the 2026-09-04 default)
+  is the arm for the `dc-series-column-pinned` promotion,
+  `--placer flow-seed-v4` (the 2026-08-24 default)
   is the arm for the `readable-v1` promotion, `--placer flow-seed` (the
   2026-08-18 default) the arm for the root-policy promotion, and
   `--placer champion` (the original) the arm for the one before it.
@@ -837,8 +846,9 @@ make sideways trades *within* a tier. On promotion, `baseline_lock` and
 every literal are regenerated at the challenger's values and the
 zero-slack regime resumes.
 
-It has now issued **three** promotions — `flow-seed` (2026-08-18),
-`flow-seed-v4` (2026-08-24) and `readable-v1` (2026-09-04). When you
+It has now issued **four** promotions — `flow-seed` (2026-08-18),
+`flow-seed-v4` (2026-08-24), `readable-v1` (2026-09-04) and
+`dc-series-column-pinned` (2026-09-05). When you
 re-record literals after one, read the measured values from the
 **scoreboard sink**, never from test output: several budgets only fail on
 excess and print their "you may lower this to N" hint through
