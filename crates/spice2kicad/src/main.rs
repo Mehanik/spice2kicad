@@ -72,11 +72,11 @@ struct Cli {
 
     /// Which registered placement engine to run (ADR-23).
     ///
-    /// `readable-v1` (the default since the third ADR-23 promotion,
-    /// 2026-09-04) is the shipping placer — omitting the flag changes
-    /// nothing. `flow-seed-v4`, `flow-seed` and `champion` are the
-    /// retained **control arms**, the three placers that shipped before
-    /// it, kept runnable for A/B. Every other name is a *challenger*: an
+    /// `dc-series-column-pinned` (the default since the fourth ADR-23
+    /// promotion, 2026-09-05) is the shipping placer — omitting the flag
+    /// changes nothing. `readable-v1`, `flow-seed-v4`, `flow-seed` and
+    /// `champion` are the retained **control arms**, the four placers
+    /// that shipped before it, kept runnable for A/B. Every other name is a *challenger*: an
     /// alternative registered so the champion/challenger scoreboard can
     /// grade it end-to-end against the same verifiers. A non-default
     /// placer is not a supported output mode and is not a licence to
