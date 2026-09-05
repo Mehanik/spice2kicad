@@ -1,0 +1,45 @@
+* Photodiode transimpedance amplifier: the textbook current-to-voltage
+* converter. The photodiode is modelled by its small-signal parts — a
+* current source IPD into the summing node and its junction capacitance
+* CPD across it — and RF converts that current to a voltage, with CF
+* setting the noise-gain zero that keeps the loop stable.
+*
+* SPECIMEN FOR: ADR-28's ambiguity 8 and the F0 "real feedback"
+* direction. RF (and CF beside it) runs from `out` back to the op-amp's
+* inverting input: an explicit, drawn, un-hidden feedback arc whose
+* whole reason to exist is the loop. The suite has exactly one other —
+* `shunt_feedback_amp`'s collector-to-base RF — and the ADR's stated
+* reason for leaving ambiguity 8 open is that "F0-class fixtures with
+* real feedback are exactly what would let the question be settled with
+* measurement rather than argument". Here the feedback element is NOT on
+* a DC supply-to-ground path (the op-amp breaks it and CPD conducts no
+* DC), so this fixture is the control arm for `shunt_feedback_amp`'s
+* RB/RF cell: a real feedback resistor that metric B must NOT count.
+*
+* Secondary: the fourth fixture whose stimulus is DRAWN rather than
+* `;@ ignore`d, and the suite's first drawn CURRENT source — the
+* signal-flow root policy has only ever seen voltage sources.
+*@symbol Device:R_US                   for=R*
+*@symbol Device:C                      for=C*
+*@symbol Simulation_SPICE:IDC          for=IPD
+*@symbol Amplifier_Operational:OPAMP   for=X1 pinmap=1:3,2:2,3:1,4:8,5:4
+*@port out=output
+
+.subckt OPAMP inp inn out vcc vee
+* Trivial VCVS model — fine for a topology round-trip.
+E1 out 0 inp inn 1e5
+.ends
+
+VCC vcc 0   DC  15   ;@ power=+15V
+VEE vee 0   DC -15   ;@ power=-15V
+
+IPD 0   inv DC 0 AC 1u
+CPD inv 0   10p
+
+RF  inv out 100k
+CF  inv out 2p
+
+X1  0 inv out vcc vee OPAMP
+
+.ac dec 10 1k 10Meg
+.end

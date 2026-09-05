@@ -152,6 +152,7 @@ fn conversion_is_byte_deterministic_across_fixtures() {
         "wien_bridge_osc",
         "sallen_key_driven",
         "shunt_feedback_amp",
+        "opamp_transimpedance",
         "resistor_ladder_ref",
         "compensated_divider",
     ];

@@ -262,6 +262,7 @@ const SHEETS: &[&str] = &[
     "wien_bridge_osc",
     "sallen_key_driven",
     "shunt_feedback_amp",
+    "opamp_transimpedance",
     "resistor_ladder_ref",
     "compensated_divider",
 ];
@@ -2173,6 +2174,7 @@ fn v5_violation_budget(name: &str) -> usize {
         // pin facing into the circuit). Ratchet DOWN.
         // 1 -> 0 with the promoted flow-seed default. Ratchet DOWN.
         "shunt_feedback_amp" => 1,
+        "opamp_transimpedance" => 2,
         "resistor_ladder_ref" => 3,
         "compensated_divider" => 3,
         // 0 -> 1 with the promoted flow-seed default: `RIN.1`. This is
@@ -2628,6 +2630,7 @@ const PHASE1_ERC_FIXTURES: &[&str] = &[
     "wien_bridge_osc",
     "sallen_key_driven",
     "shunt_feedback_amp",
+    "opamp_transimpedance",
     "resistor_ladder_ref",
     "compensated_divider",
 ];
@@ -3195,6 +3198,7 @@ const ALL_FIXTURES_FOR_CROSS_NET: &[&str] = &[
     "wien_bridge_osc",
     "sallen_key_driven",
     "shunt_feedback_amp",
+    "opamp_transimpedance",
     "resistor_ladder_ref",
     "compensated_divider",
 ];

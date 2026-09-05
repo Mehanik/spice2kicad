@@ -153,6 +153,11 @@ const V8_FIXTURES: &[(&str, &str, &[&str])] = &[
         "Amplifier_Operational:OPAMP",
         &["X1", "X2"],
     ),
+    (
+        "opamp_transimpedance",
+        "Amplifier_Operational:OPAMP",
+        &["X1"],
+    ),
 ];
 
 /// Every V8 correctness defect on one emitted parent schematic.

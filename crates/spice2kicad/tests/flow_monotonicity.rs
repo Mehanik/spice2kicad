@@ -371,6 +371,7 @@ const Q3_FLOW_MONOTONICITY_BUDGET: &[(&str, u32)] = &[
     // RISE 2 -> 3, rail-stub SIDE fix (Tier 2, global-improvement escape,
     // AWAITING OWNER SIGN-OFF). Same re-basing as the Q5 entry.
     ("shunt_feedback_amp", 2),
+    ("opamp_transimpedance", 4),
     ("resistor_ladder_ref", 2),
     ("compensated_divider", 3),
 ];
