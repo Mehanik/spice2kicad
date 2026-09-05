@@ -297,7 +297,10 @@ const Q3_FLOW_MONOTONICITY_BUDGET: &[(&str, u32)] = &[
     // R1 (layer < R2) is drawn right of R2 on the emitted sheet: the
     // rail-stub column idiom re-columns the parts against the placer's
     // own layer order. A Wall-1/Wall-2 flow fix should drive this to 0.
-    ("common_emitter", 3),
+    // ADR-40 PROMOTION re-record: literal 3 -> 1. The literal was STALE
+    // (the promotion never re-recorded it); against the pre-fix control
+    // sink the measured count rose 0 -> 1, well inside the mark.
+    ("common_emitter", 1),
     // RB2/RC1 (bias + collector loads) land right of the transistors /
     // cross-coupling caps their layer places upstream. Systemic on the
     // symmetric multivibrator; the flow work targets it.
@@ -317,21 +320,34 @@ const Q3_FLOW_MONOTONICITY_BUDGET: &[(&str, u32)] = &[
     // the flow-monotonicity headroom F0 exists to expose. Ratchet DOWN.
     // 4 -> 2: the rail-stub SIDE fix put RB above its node, so the CE
     // stage no longer folds back under the ladder. Ratchet DOWN.
-    ("rc_phase_shift", 4),
+    // *** RISE, Tier 2, AWAITING OWNER SIGN-OFF (ADR-40 § "Q5 and Q3
+    // measure symbol origins"). *** Q3 is keyed on the symbol-ORIGIN x
+    // (its own module doc says so, and distinguishes itself from F3's
+    // mean-pin x on exactly that point). The pin-anchored DC-series
+    // column moves a BJT's origin two cells off the column so that its
+    // shared PIN lands on it, which flips this strict origin-x
+    // comparison for pairs on adjacent layers. Suite total q3 28 -> 35
+    // against v16.bends 141 -> 137, v5 48 -> 43, f6 79 -> 77.
+    // Q3 4 -> 5.
+    ("rc_phase_shift", 5),
     // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE. Eight Q3 inversions —
     // twice `rc_phase_shift`'s 4 and the worst in the suite. The two
     // stages' bias dividers and collector loads (RB1/RB3, RC1/RC2) are
     // each drawn right of the parts their layer places downstream, so
     // both stages read right-to-left locally. Deliberately POOR: this is
     // the flow headroom F0 exists to expose. Ratchet DOWN.
-    ("two_stage_amp", 6),
+    // ADR-40 PROMOTION re-record: literal 6 -> 4 (stale literal); against
+    // the pre-fix control sink the measured count rose 1 -> 4.
+    ("two_stage_amp", 4),
     // --- F2 (v0.2 roadmap, second benchmark wave) NEW-GEOMETRY
     // BASELINES, zero slack, ratchet DOWN only.
     //
     // Three inversions: the cascode's bias chain (RB1/RB2/RB3) is drawn
     // right-to-left against the layer order, which is what a placer with
     // no vertical-stack model does to a circuit that IS a stack.
-    ("cascode_amp", 3),
+    // ADR-40 PROMOTION re-record: literal 3 -> 2 (stale literal); against
+    // the pre-fix control sink the measured count rose 1 -> 2.
+    ("cascode_amp", 2),
     // Two inversions on a chain that is otherwise the suite's most
     // strictly left-to-right circuit — worth watching, because this is
     // the FIRST fixture whose signal graph has a real root (its source
@@ -373,7 +389,9 @@ const Q3_FLOW_MONOTONICITY_BUDGET: &[(&str, u32)] = &[
     ("shunt_feedback_amp", 2),
     ("stepped_attenuator", 0),
     ("opamp_transimpedance", 4),
-    ("resistor_ladder_ref", 2),
+    // ADR-40 PROMOTION re-record: literal 2 -> 0. Ratchet DOWN; the
+    // control sink also reads 0, so nothing moved here.
+    ("resistor_ladder_ref", 0),
     ("compensated_divider", 3),
 ];
 

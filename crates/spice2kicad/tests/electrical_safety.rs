@@ -2044,7 +2044,13 @@ fn v5_violation_budget(name: &str) -> usize {
         // bases (`Q1.1`) and the feedback-trunk pin (`RF.1`) now sit in
         // their own signal column, so the trunk leaves outward.
         // Ratchet DOWN.
-        "common_emitter" => 0,
+        // --- ADR-23 PROMOTION of `--placer=dc-series-column-pinned`
+        // (ADR-40): re-recorded at the NEW DEFAULT's measured value, read
+        // from the scoreboard sink. 0 -> 1 (`COUT.1`). The promotion's
+        // own re-record had left this arm at the pre-promotion value, so
+        // the branch was red on it; the pin-anchored column then took the
+        // measured count from 2 back down to 1.
+        "common_emitter" => 1,
         // ADR-23 PROMOTION of `--placer=readable-v1` (owner-authorised,
         // 2026-09-04): 0 -> 1. Split out of the shared arm above because
         // the two fixtures no longer measure the same.
@@ -2126,7 +2132,10 @@ fn v5_violation_budget(name: &str) -> usize {
         // 5 -> 2, rail-stub SIDE fix: with RB above `b` and the CE stage
         // no longer folded under the ladder, `R1.2` / `R3.2` / `CIN.2`
         // reach their nets outward. Ratchet DOWN.
-        "rc_phase_shift" => 2,
+        // ADR-40 PROMOTION re-record: 2 -> 3, read from the scoreboard
+        // sink. The pin-anchored column lowered the measured count from
+        // 4 to 3; the residual 3 is what the promoted default emits.
+        "rc_phase_shift" => 3,
         // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE. `two_stage_amp` is the
         // second F0 benchmark fixture, promoted out of `tests/f0_defects.rs`
         // once its runtime defect was fixed. Its five residuals are the same
@@ -2157,7 +2166,10 @@ fn v5_violation_budget(name: &str) -> usize {
         "sallen_key_lpf" => 5,
         // 4 -> 1 with the promoted flow-seed default — the largest
         // single-fixture V5 improvement in the swap. Ratchet DOWN.
-        "cascode_amp" => 2,
+        // ADR-40 PROMOTION re-record: 2 -> 3, read from the scoreboard
+        // sink. The pin-anchored column lowered the measured count from
+        // 4 to 3; the residual 3 is what the promoted default emits.
+        "cascode_amp" => 3,
         "wien_bridge_osc" => 2,
         // --- F3 (Tier-0 router fix, ADR-24) NEW-GEOMETRY BASELINES for
         // the two fixtures promoted out of `tests/f0_defects.rs`. Same
@@ -2177,7 +2189,8 @@ fn v5_violation_budget(name: &str) -> usize {
         "shunt_feedback_amp" => 1,
         "stepped_attenuator" => 5,
         "opamp_transimpedance" => 2,
-        "resistor_ladder_ref" => 3,
+        // ADR-40 PROMOTION re-record: 3 -> 1. Ratchet DOWN.
+        "resistor_ladder_ref" => 1,
         "compensated_divider" => 3,
         // 0 -> 1 with the promoted flow-seed default: `RIN.1`. This is
         // the ONE V5 cell the promotion pays, against eleven it wins,

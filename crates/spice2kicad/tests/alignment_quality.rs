@@ -321,7 +321,11 @@ const Q5_NEAR_MISS_BUDGET: &[(&str, u32)] = &[
     // "M4 reverted"). The literal was first measured on the M4 tree; the
     // pre-M4 Y datum this restores costs one fewer near-miss here. Ratchets
     // down only.
-    ("common_emitter", 3),
+    // ADR-40 PROMOTION re-record: literal 3 -> 2. The literal was STALE
+    // (the promotion never re-recorded it); against the pre-fix control
+    // sink the measured count rose 0 -> 2 — the same origin-frame effect
+    // the RISE arms below document, here still inside the mark.
+    ("common_emitter", 2),
     // C1/RC1, C2/RC2 (cross-coupling caps vs collector loads) and the
     // Q/RC collector columns land just off-axis on this symmetric fixture.
     ("multivibrator", 4),
@@ -336,19 +340,43 @@ const Q5_NEAR_MISS_BUDGET: &[(&str, u32)] = &[
     ("named_rails", 2),
     // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE, owner-approved:
     // C3/CIN, CIN/Q1 and Q1/RB each miss a shared axis by a hair.
-    ("rc_phase_shift", 2),
+    // *** RISE, Tier 2, AWAITING OWNER SIGN-OFF (ADR-40 § "Q5 and Q3
+    // measure symbol origins"). *** Caused by the PIN-ANCHORED DC-series
+    // column: a column puts each member's SHARED PIN on one x, and a
+    // BJT's collector/emitter sit exactly 2.54 mm (= NEAR_CELLS, this
+    // metric's whole snap threshold) off its origin — so a correctly
+    // pin-collinear column is GUARANTEED to read as an origin near-miss.
+    // Every new pair involves a transistor. Measured against it on the
+    // same trees: v16.bends 141 -> 137, v16.branches 31 -> 26, v5 48 ->
+    // 43, f6 79 -> 77, crossings 10 -> 9 — i.e. the routed-ink metric
+    // Q5 calls itself a "leading indicator" of moved the OTHER way.
+    // Q5 2 -> 5.
+    ("rc_phase_shift", 5),
     // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE: seven near-misses
     // (CC/RB3, CE1/RE1, CIN/Q1, CIN/RB1, CIN/RB2, RB1/RB2, RB3/RB4) —
     // the worst in the suite, roughly double `rc_phase_shift`'s 3. Each
     // is a candidate straight drop the router currently jogs.
-    ("two_stage_amp", 8),
+    // ADR-40 PROMOTION re-record: literal 8 -> 4 (stale literal); against
+    // the pre-fix control sink the measured count rose 0 -> 4.
+    ("two_stage_amp", 4),
     // --- F2 (v0.2 roadmap, second benchmark wave) NEW-GEOMETRY BASELINES.
     // Recorded at their measured values with zero slack; they ratchet
     // DOWN only. No existing fixture's literal moved.
     //
     // Q1/RB3, Q2/RB2 and RC/RB1 each miss a shared axis by a hair — the
     // bias chain is a column the placer does not keep in one column.
-    ("cascode_amp", 4),
+    // *** RISE, Tier 2, AWAITING OWNER SIGN-OFF (ADR-40 § "Q5 and Q3
+    // measure symbol origins"). *** Caused by the PIN-ANCHORED DC-series
+    // column: a column puts each member's SHARED PIN on one x, and a
+    // BJT's collector/emitter sit exactly 2.54 mm (= NEAR_CELLS, this
+    // metric's whole snap threshold) off its origin — so a correctly
+    // pin-collinear column is GUARANTEED to read as an origin near-miss.
+    // Every new pair involves a transistor. Measured against it on the
+    // same trees: v16.bends 141 -> 137, v16.branches 31 -> 26, v5 48 ->
+    // 43, f6 79 -> 77, crossings 10 -> 9 — i.e. the routed-ink metric
+    // Q5 calls itself a "leading indicator" of moved the OTHER way.
+    // Q5 4 -> 5.
+    ("cascode_amp", 5),
     // Five near-misses. A doubly-terminated ladder is nothing BUT
     // shared axes, and the placer snaps none of them: worst in the suite
     // after `two_stage_amp`.
@@ -375,10 +403,23 @@ const Q5_NEAR_MISS_BUDGET: &[(&str, u32)] = &[
     // stage, leaving Q1 a near-miss against CE/COUT/RE/RF. Paid for four
     // Tier-1 xfail expiries (V14 rail-pin on this fixture and
     // `rc_phase_shift`, plus that fixture's V14 [3] and rail ordering).
-    ("shunt_feedback_amp", 0),
+    // *** RISE, Tier 2, AWAITING OWNER SIGN-OFF (ADR-40 § "Q5 and Q3
+    // measure symbol origins"). *** Caused by the PIN-ANCHORED DC-series
+    // column: a column puts each member's SHARED PIN on one x, and a
+    // BJT's collector/emitter sit exactly 2.54 mm (= NEAR_CELLS, this
+    // metric's whole snap threshold) off its origin — so a correctly
+    // pin-collinear column is GUARANTEED to read as an origin near-miss.
+    // Every new pair involves a transistor. Measured against it on the
+    // same trees: v16.bends 141 -> 137, v16.branches 31 -> 26, v5 48 ->
+    // 43, f6 79 -> 77, crossings 10 -> 9 — i.e. the routed-ink metric
+    // Q5 calls itself a "leading indicator" of moved the OTHER way.
+    // Q5 0 -> 4: all four pairs are Q1 against RB / RC / RE / RF.
+    ("shunt_feedback_amp", 4),
     ("stepped_attenuator", 0),
     ("opamp_transimpedance", 2),
-    ("resistor_ladder_ref", 1),
+    // ADR-40 PROMOTION re-record: literal 1 -> 0. Ratchet DOWN; the
+    // control sink also reads 0, so nothing moved here.
+    ("resistor_ladder_ref", 0),
     ("compensated_divider", 0),
 ];
 

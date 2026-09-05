@@ -252,7 +252,10 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     // moved no v0.1 fixture's (B, J). Ratchet DOWN.
     // B 19 -> 10, rail-stub SIDE fix: RB above `b` removes the fold-back
     // the ladder trunks used to jog around. Ratchet DOWN.
-    ("rc_phase_shift", 7, 2),
+    // ADR-40 PROMOTION re-record (`dc-series-column-pinned` becomes the
+    // default), read from the scoreboard sink.
+    // Literal (B, J) (7, 2) -> (7, 1). Control sink: B 8 -> 7, J 2 -> 1.
+    ("rc_phase_shift", 7, 1),
     // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE. `two_stage_amp` — two
     // cascaded CE stages sharing one rail — is the new worst fixture in
     // the suite on both counts: B = 33 (from 56 raw segments over 45
@@ -261,7 +264,10 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     // ride along with it. Deliberately POOR — this is exactly the Tier-2
     // V16 headroom F0 exists to expose, and promoting the fixture moved
     // no other fixture's (B, J) by a single count. Ratchet DOWN.
-    ("two_stage_amp", 15, 6),
+    // ADR-40 PROMOTION re-record (`dc-series-column-pinned` becomes the
+    // default), read from the scoreboard sink.
+    // Literal (B, J) (15, 6) -> (8, 2). Control sink: B 10 -> 8, J 4 -> 2.
+    ("two_stage_amp", 8, 2),
     // --- F2 (v0.2 roadmap, second benchmark wave) NEW-GEOMETRY
     // BASELINES, zero slack, ratchet DOWN only. Adding them moved no
     // existing fixture's (B, J) by a single count.
@@ -270,7 +276,12 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     // COLUMN (Q2's emitter on Q1's collector, a three-resistor bias
     // ladder) and the placer has no stack model, so every vertical
     // relationship is drawn as a detour.
-    ("cascode_amp", 14, 4),
+    // ADR-40 PROMOTION re-record (`dc-series-column-pinned` becomes the
+    // default), read from the scoreboard sink.
+    // Literal (B, J) (14, 4) -> (9, 1) — DOWN on both, but the literal was
+    // stale: against the pre-fix control sink B rose 7 -> 9 while J fell
+    // 3 -> 1. Recorded at the measured value either way.
+    ("cascode_amp", 9, 1),
     // B = 16 on ten graded elements. CORRECTION to the claim in this
     // commit's message and in `docs/v0.2-roadmap.md` § F2 as first
     // written: 1.6 bends/element is the SECOND-worst density in the
@@ -314,10 +325,20 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     // B 13 -> 12, J 4 -> 1. Ratchet DOWN on both counts.
     ("sallen_key_driven", 12, 0),
     // B 12 -> 11, rail-stub SIDE fix. Ratchet DOWN.
-    ("shunt_feedback_amp", 9, 2),
+    // ADR-40 PROMOTION re-record (`dc-series-column-pinned` becomes the
+    // default), read from the scoreboard sink.
+    // B 9 -> 6, ratchet DOWN. J 2 -> 3 is a RISE and is PRE-EXISTING on
+    // this branch: the control sink (the promoted default WITHOUT the
+    // pin-anchoring fix) also reads J = 3, so the promotion's own
+    // re-record had simply missed this literal and the branch was red
+    // on it. Tier 2, recorded as promotion bookkeeping under ADR-23 D4.
+    ("shunt_feedback_amp", 6, 3),
     ("stepped_attenuator", 9, 0),
     ("opamp_transimpedance", 12, 2),
-    ("resistor_ladder_ref", 13, 1),
+    // ADR-40 PROMOTION re-record (`dc-series-column-pinned` becomes the
+    // default), read from the scoreboard sink.
+    // Literal (B, J) (13, 1) -> (7, 0); the control sink also reads (7, 0).
+    ("resistor_ladder_ref", 7, 0),
     ("compensated_divider", 5, 2),
     // B 10 → 4. Phase 4.5's acceptance objective gained the V16
     // ink-graph bend count as its FINAL lexicographic key, after
@@ -325,7 +346,10 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     // on every higher-tier count by how straight the resulting ink is.
     // COUT lands at rot 0 instead of rot 180 and Q1 unmirrors. V5 is
     // unchanged at 1 and no Tier-0/Tier-1 count moved. Ratchet DOWN.
-    ("common_emitter", 9, 3),
+    // ADR-40 PROMOTION re-record (`dc-series-column-pinned` becomes the
+    // default), read from the scoreboard sink.
+    // Literal (B, J) (9, 3) -> (3, 2). Control sink: B 4 -> 3, J 2 -> 2.
+    ("common_emitter", 3, 2),
     // B 10 -> 8: `RC1`/`RC2` now sit on their transistors' collector
     // columns, so each collector trunk is one straight drop instead of a
     // dog-leg.

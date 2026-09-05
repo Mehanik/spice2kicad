@@ -944,7 +944,14 @@ const FLOW_POSE_RATCHET: &[(&str, usize, usize)] = &[
     // output coupling caps) — the same `COUT`-drawn-vertical defect
     // `rc_phase_shift` and `two_stage_amp` carry, and the defect
     // Milestone D targets.
-    ("cascode_amp", 0, 0),
+    // ADR-40 PROMOTION re-record (`dc-series-column-pinned` becomes
+    // the default): F5 0 -> 1, exactly the rise ADR-40's B-vs-F5
+    // section predicted for this arm — a column member the previous
+    // default drew horizontal is now drawn vertical. Read from the
+    // scoreboard sink; the promotion's own re-record had missed this
+    // literal, so the branch was already red on it. PRE-EXISTING:
+    // NOT caused by the pin-anchoring fix (the control sink reads 1).
+    ("cascode_amp", 1, 0),
     // THREE series parts drawn vertical (L1, L2, L3) — the worst F5 in
     // the suite. Every inductor in a ladder is a series element on the
     // main signal path, so a placer that draws series parts vertical has
@@ -976,7 +983,14 @@ const FLOW_POSE_RATCHET: &[(&str, usize, usize)] = &[
     ("sallen_key_driven", 1, 0),
     // F5 1 -> 0: with RB above `b`, every series part on this fixture is
     // drawn horizontal. Ratchet DOWN.
-    ("shunt_feedback_amp", 0, 0),
+    // ADR-40 PROMOTION re-record (`dc-series-column-pinned` becomes
+    // the default): F5 0 -> 1, exactly the rise ADR-40's B-vs-F5
+    // section predicted for this arm — a column member the previous
+    // default drew horizontal is now drawn vertical. Read from the
+    // scoreboard sink; the promotion's own re-record had missed this
+    // literal, so the branch was already red on it. PRE-EXISTING:
+    // NOT caused by the pin-anchoring fix (the control sink reads 1).
+    ("shunt_feedback_amp", 1, 0),
     ("stepped_attenuator", 1, 0),
     ("opamp_transimpedance", 0, 0),
     ("resistor_ladder_ref", 4, 0),
@@ -1141,16 +1155,19 @@ const STUB_RUN_RATCHET: &[(&str, u32)] = &[
     // RISE 23 -> 24, rail-stub SIDE fix (Tier 2, global-improvement
     // escape, AWAITING OWNER SIGN-OFF): RC's lateral run grows by one
     // cell as the CE stage re-bases around RB's new column.
-    ("rc_phase_shift", 4),
+    // ADR-40 PROMOTION re-record: F6 4 -> 3. Ratchet DOWN.
+    ("rc_phase_shift", 3),
     // F0 (v0.2 roadmap) NEW-GEOMETRY BASELINE: RC2 hangs 19 cells
     // (24.13 mm) sideways of its node, with RE2/CE2 at 8 and RC1 at 6 —
     // every one of the ten rail stubs drifts. Not the suite worst
     // (`rc_phase_shift` reaches 23) but the most widespread sprawl in
     // the suite. Ratchet DOWN.
-    ("two_stage_amp", 8),
+    // ADR-40 PROMOTION re-record: F6 8 -> 5. Ratchet DOWN.
+    ("two_stage_amp", 5),
     // --- F2 (v0.2 roadmap, second wave) NEW-GEOMETRY BASELINES.
     // Ratchet DOWN.
-    ("cascode_amp", 7),
+    // ADR-40 PROMOTION re-record: F6 7 -> 3. Ratchet DOWN.
+    ("cascode_amp", 3),
     // Nine cells: the shunt capacitors of the ladder drift sideways of
     // the nodes they terminate, the length of the chain.
     // --- SECOND ADR-23 PROMOTION: `--placer=flow-seed-v4` becomes the
@@ -1189,10 +1206,12 @@ const STUB_RUN_RATCHET: &[(&str, u32)] = &[
     ("sallen_key_driven", 2),
     // F6 9 -> 5: RB's column is no longer dragged sideways by the
     // below-the-node re-column. Ratchet DOWN.
-    ("shunt_feedback_amp", 8),
+    // ADR-40 PROMOTION re-record: F6 8 -> 4. Ratchet DOWN.
+    ("shunt_feedback_amp", 4),
     ("stepped_attenuator", 10),
     ("opamp_transimpedance", 7),
-    ("resistor_ladder_ref", 10),
+    // ADR-40 PROMOTION re-record: F6 10 -> 6. Ratchet DOWN.
+    ("resistor_ladder_ref", 6),
     ("compensated_divider", 9),
 ];
 

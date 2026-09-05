@@ -265,6 +265,15 @@ pub fn dc_series_pairs(checked: &CheckedNetlist) -> Vec<(usize, usize, String)> 
 pub struct DcColumn {
     /// Members, highest DC potential first. Always at least 2 long.
     pub members: Vec<usize>,
+    /// The net each consecutive pair of members shares: `shared[k]` is
+    /// the DC-series node joining `members[k]` to `members[k + 1]`, so
+    /// this is always exactly one shorter than [`Self::members`].
+    ///
+    /// Carried because the column is **pin-anchored**, not
+    /// centre-anchored (CLAUDE.md, "Constraints are pin-anchored"): the
+    /// thing that has to be collinear is the shared *pin* on each
+    /// member, and naming that pin needs the net it sits on.
+    pub shared: Vec<String>,
 }
 
 /// Every DC-series column in `checked`, in a deterministic order.
@@ -341,12 +350,14 @@ pub fn detect_dc_columns(checked: &CheckedNetlist) -> Vec<DcColumn> {
         // the whole column.
         let mut order: Option<bool> = None; // Some(true) => `path` runs top→bottom
         let mut ok = true;
+        let mut shared_nets: Vec<String> = Vec::with_capacity(path.len() - 1);
         for w in path.windows(2) {
             let (u, v) = (w[0], w[1]);
             let Some(net) = shared.get(&(u, v)) else {
                 ok = false;
                 break;
             };
+            shared_nets.push(net.clone());
             let (Some(fu), Some(fv)) = (far(u, net), far(v, net)) else {
                 ok = false;
                 break;
@@ -371,8 +382,12 @@ pub fn detect_dc_columns(checked: &CheckedNetlist) -> Vec<DcColumn> {
         let mut members = path;
         if !top_first {
             members.reverse();
+            shared_nets.reverse();
         }
-        columns.push(DcColumn { members });
+        columns.push(DcColumn {
+            members,
+            shared: shared_nets,
+        });
     }
     columns.sort_by(|a, b| a.members.cmp(&b.members));
     columns
@@ -470,6 +485,104 @@ fn column_pose(
         .min_by_key(|&o| (score(o), Orientation::ALL.iter().position(|x| *x == o)))
 }
 
+/// The x offset, in whole grid cells, from `el`'s origin to the pin it
+/// presents on `net` when posed at `o`.
+///
+/// `None` — which the caller turns into a decline — when the element has
+/// no terminal on `net`, when that terminal has no mapped KiCad pin, or
+/// when the pin does not sit an **integral** number of cells from the
+/// origin. The last clause is not fussiness: every origin is grid-snapped
+/// by construction, so a pin at a fractional cell offset cannot be put on
+/// a shared column x at all without taking some other member off it.
+#[allow(clippy::cast_possible_truncation)] // pin coords are bounded; KiCad symbols fit in i32 grid units.
+fn shared_pin_x_cells(el: &ResolvedElement, o: Orientation, net: &str) -> Option<i32> {
+    let ti = el.nodes.iter().position(|n| n == net)?;
+    let want = el.pin_mapping.get(ti)?;
+    let px = el
+        .symbol
+        .pins_in(o)
+        .into_iter()
+        .find(|p| &p.number == want)
+        .map(|p| p.x)?;
+    let cells = px / GridPoint::STEP_MM;
+    let snapped = cells.round();
+    ((cells - snapped).abs() < 1e-6 && snapped.abs() < f64::from(i32::MAX / 2))
+        .then_some(snapped as i32)
+}
+
+/// The per-member x offset that makes a column **pin-anchored**: the
+/// number of cells to subtract from the column's x to get each member's
+/// origin, so that the member's own shared-net pin lands ON the column.
+///
+/// # Why this is not the origin
+///
+/// CLAUDE.md's layout invariant is explicit — "`place` and `align`
+/// describe relationships between *connecting pins*, not symbol
+/// centers … the constraint resolver therefore consumes resolved symbol
+/// pin geometry". A two-pin resistor's pins sit on its origin's x, but
+/// `Device:Q_NPN_BCE`'s collector is 2.54 mm to the right of it, so a
+/// column anchored on origins aligns the *bodies* and leaves a 2-cell jog
+/// in the very wire the column exists to straighten. The offset is read
+/// from [`kicad_symbols::Symbol::pins_in`] at the pose the column draws,
+/// because it differs by symbol AND by orientation.
+///
+/// # The two-shared-pins case
+///
+/// An **interior** member has two shared nets — one to the neighbour
+/// above, one below — and therefore two pins that both have to be on the
+/// column. If their x offsets differ, no single x satisfies both and the
+/// column's own geometry is inconsistent: this returns `None` and the
+/// caller **declines the whole column**.
+///
+/// Declining is the deliberate choice over splitting or picking a side.
+/// Splitting is ill-defined (the offending member belongs to both halves,
+/// and dropping it breaks the very series relation the column asserts),
+/// and picking one pin silently re-introduces the jog this function
+/// exists to remove — on the *other* neighbour, where nothing measures
+/// it. It is the same rule the construction already applies to `dc_rank`
+/// ambiguity and to cycles: "a construction that guesses where the rank
+/// abstains is worse than one that does nothing."
+///
+/// In practice the case is reachable but rare, and only through a
+/// sideways pose: a vertical two-terminal element has both pins on x = 0,
+/// and a vertical BJT has C and E on the same x (±2.54), so both agree.
+/// Rotate that BJT 90° and its C and E land on opposite sides — which is
+/// exactly a member that is not being drawn as part of a column, so
+/// declining is also the right *drawing*. [`column_pose`] prefers upright
+/// poses, so the pinned arm reaches the decline only when V14 ∩ V17
+/// admits nothing else.
+///
+/// **End** members have exactly one shared net; that single offset is
+/// used unconditionally.
+fn column_pin_offsets(
+    checked: &CheckedNetlist,
+    col: &DcColumn,
+    poses: &[Orientation],
+) -> Option<Vec<i32>> {
+    if col.shared.len() + 1 != col.members.len() || poses.len() != col.members.len() {
+        return None;
+    }
+    let mut out = Vec::with_capacity(col.members.len());
+    for (k, &i) in col.members.iter().enumerate() {
+        let el = &checked.elements[i];
+        let above = k.checked_sub(1).and_then(|j| col.shared.get(j));
+        let below = col.shared.get(k);
+        let mut off: Option<i32> = None;
+        for net in [above, below].into_iter().flatten() {
+            let this = shared_pin_x_cells(el, poses[k], net)?;
+            match off {
+                None => off = Some(this),
+                // The pins to the neighbour above and to the neighbour
+                // below want different columns; decline the column.
+                Some(prev) if prev != this => return None,
+                Some(_) => {}
+            }
+        }
+        out.push(off?);
+    }
+    Some(out)
+}
+
 /// Extra cells beyond a body-clean stride between two column members.
 ///
 /// **Measured, not chosen.** The shared node between two column members
@@ -517,10 +630,15 @@ const DC_COLUMN_LABEL_MARGIN_CELLS: i32 = 1;
 /// explicit `*@place` / `*@align`, a cache hint, a V7 symmetry pin or a
 /// divider pin always wins, and half a column is worse than none.
 ///
-/// Anchoring: X is the grid-snapped **mean** of the members' seed
-/// columns and the stack is centred on their **mean seed Y**, so the
-/// construction displaces the component as little as the shape allows.
-/// It writes *relative* geometry (a stack), never a page coordinate.
+/// Anchoring is **pin-anchored, not centre-anchored** (CLAUDE.md,
+/// "Constraints are pin-anchored"): X is the grid-snapped mean of the
+/// members' *shared-pin* seed x, and each member's origin is then offset
+/// so its own shared-net pin lands on that x — see
+/// [`column_pin_offsets`], which also states when a column declines
+/// because its two shared pins disagree. The stack is centred on the
+/// members' **mean seed Y**, so the construction displaces the component
+/// as little as the shape allows. It writes *relative* geometry (a
+/// stack), never a page coordinate.
 pub(crate) fn apply_dc_columns(
     placement: &mut Placement,
     pinned: &mut [bool],
@@ -557,6 +675,16 @@ pub(crate) fn apply_dc_columns(
             continue;
         }
 
+        // Pin-anchoring (CLAUDE.md "Constraints are pin-anchored"): the
+        // column's x is a line through the members' SHARED PINS, not
+        // through their origins. `offsets[k]` is what member `k`'s origin
+        // sits left of that line by, at the pose it is drawn in.
+        // `None` = the column's own geometry cannot put every shared pin
+        // on one x; decline it whole, before anything is mutated.
+        let Some(offsets) = column_pin_offsets(checked, &col, &poses) else {
+            continue;
+        };
+
         // Strides between consecutive members, at the poses above.
         let exts: Vec<WorldExtent> = col
             .members
@@ -572,10 +700,14 @@ pub(crate) fn apply_dc_columns(
         // Anchor: the component's own seed barycenter, so the column
         // moves as little as its shape allows.
         let n = i32::try_from(col.members.len()).unwrap_or(i32::MAX);
+        // The barycenter is taken over the SHARED PINS' seed x, so the
+        // pins — the things that must end up collinear — move as little
+        // as the shape allows.
         let sum_x: i32 = col
             .members
             .iter()
-            .map(|&i| placement.elements[i].origin.x)
+            .zip(&offsets)
+            .map(|(&i, &d)| placement.elements[i].origin.x + d)
             .sum();
         let sum_y: i32 = col
             .members
@@ -587,7 +719,7 @@ pub(crate) fn apply_dc_columns(
         let mut y = sum_y.div_euclid(n) - total / 2;
 
         for (k, &i) in col.members.iter().enumerate() {
-            placement.elements[i].origin = GridPoint::new(x, y);
+            placement.elements[i].origin = GridPoint::new(x - offsets[k], y);
             if pin_it {
                 placement.elements[i].orientation = poses[k];
                 pinned[i] = true;
@@ -608,7 +740,9 @@ mod tests {
     use spice_diagnostics::FileId;
     use spice_policy::{CheckedNetlist, check};
 
-    use super::{dc_series_pairs, detect_dc_columns};
+    use kicad_symbols::{Orientation, Rotation};
+
+    use super::{column_pin_offsets, dc_series_pairs, detect_dc_columns};
 
     fn fixture_library() -> &'static Library {
         static LIB: OnceLock<Library> = OnceLock::new();
@@ -759,6 +893,87 @@ mod tests {
     fn a_floating_series_pair_declines() {
         let src = format!("{HDR}R1 na nb 1k\nR2 nb nc 1k\n.end\n");
         assert_eq!(column_names(&src), Vec::<Vec<String>>::new());
+    }
+
+    /// The netlist behind the pin-anchoring tests: one device stack,
+    /// `RC` above `Q1` above `RE`, sharing `c` and `e`.
+    const STACK: &str = "VCC vcc 0 DC 12 ;@ power=+12V\n\
+                         RB vcc b 100k\nRC vcc c 4k7\nQ1 c b e QGENERIC\n\
+                         RE e 0 470\n.model QGENERIC NPN\n.end\n";
+
+    /// **The pin-anchoring property** (CLAUDE.md: "Constraints are
+    /// pin-anchored … not symbol centers").
+    ///
+    /// `Device:R_US`'s pins sit on its origin's x, but
+    /// `Device:Q_NPN_BCE`'s collector AND emitter are both 2.54 mm — two
+    /// grid cells — to the right of the origin. Anchoring the column on
+    /// origins therefore aligns the *bodies* and leaves a two-cell jog in
+    /// the collector wire; the offsets below are what removes it.
+    #[test]
+    fn a_column_is_anchored_on_its_shared_pins_not_its_origins() {
+        let src = format!("{HDR}{STACK}");
+        let c = checked_of(&src);
+        let cols = detect_dc_columns(&c);
+        assert_eq!(cols.len(), 1, "{cols:?}");
+        let col = &cols[0];
+        assert_eq!(
+            col.members
+                .iter()
+                .map(|&i| refdes(&c, i))
+                .collect::<Vec<_>>(),
+            vec!["RC", "Q1", "RE"]
+        );
+        assert_eq!(col.shared.len(), col.members.len() - 1);
+        let poses = vec![Orientation::IDENTITY; col.members.len()];
+        assert_eq!(
+            column_pin_offsets(&c, col, &poses),
+            Some(vec![0, 2, 0]),
+            "the BJT's shared pins are 2 cells right of its origin; the resistors' are on it"
+        );
+    }
+
+    /// **The two-shared-pins decline.** An interior member has a shared
+    /// pin to the neighbour above AND one to the neighbour below. Posed
+    /// sideways, `Q_NPN_BCE`'s collector and emitter land on OPPOSITE
+    /// sides of the origin, so no single column x carries both — and the
+    /// construction declines the whole column rather than picking a side
+    /// and re-introducing the jog on the other neighbour.
+    #[test]
+    fn a_member_whose_two_shared_pins_disagree_declines_the_column() {
+        let src = format!("{HDR}{STACK}");
+        let c = checked_of(&src);
+        let cols = detect_dc_columns(&c);
+        let col = &cols[0];
+        let sideways = Orientation {
+            rotation: Rotation::R90,
+            mirror_y: false,
+        };
+        // Q1 sideways: C lands at -5.08, E at +5.08.
+        let poses = vec![Orientation::IDENTITY, sideways, Orientation::IDENTITY];
+        assert_eq!(column_pin_offsets(&c, col, &poses), None);
+    }
+
+    /// An **end** member has only one shared pin, and that single offset
+    /// is used unconditionally — a sideways *end* resistor still columns,
+    /// on whichever of its pins the column actually shares.
+    #[test]
+    fn an_end_member_with_one_shared_pin_still_anchors() {
+        let src = format!("{HDR}{STACK}");
+        let c = checked_of(&src);
+        let cols = detect_dc_columns(&c);
+        let col = &cols[0];
+        let sideways = Orientation {
+            rotation: Rotation::R90,
+            mirror_y: false,
+        };
+        let poses = vec![sideways, Orientation::IDENTITY, Orientation::IDENTITY];
+        let offs = column_pin_offsets(&c, col, &poses).expect("an end member cannot disagree");
+        assert_eq!(offs.len(), 3);
+        assert_ne!(
+            offs[0], 0,
+            "a sideways resistor's pin is off its origin's x"
+        );
+        assert_eq!(&offs[1..], &[2, 0]);
     }
 
     /// Columns are emitted in a deterministic order and never share a
