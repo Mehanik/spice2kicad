@@ -303,6 +303,7 @@ const Q6_REFERENCE: &[(&str, f64)] = &[
     // them moved no existing fixture's literal.
     ("sallen_key_driven", 1.2247),
     ("shunt_feedback_amp", 1.0000),
+    ("stepped_attenuator", 1.0000),
     ("opamp_transimpedance", 1.4832),
     ("resistor_ladder_ref", 1.0830),
     ("compensated_divider", 2.4576),

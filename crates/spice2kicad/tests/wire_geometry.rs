@@ -186,6 +186,7 @@ const FIXTURES: &[&str] = &[
     "wien_bridge_osc",
     "sallen_key_driven",
     "shunt_feedback_amp",
+    "stepped_attenuator",
     "opamp_transimpedance",
     "resistor_ladder_ref",
     "compensated_divider",
@@ -314,6 +315,7 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     ("sallen_key_driven", 12, 0),
     // B 12 -> 11, rail-stub SIDE fix. Ratchet DOWN.
     ("shunt_feedback_amp", 9, 2),
+    ("stepped_attenuator", 9, 0),
     ("opamp_transimpedance", 12, 2),
     ("resistor_ladder_ref", 13, 1),
     ("compensated_divider", 5, 2),

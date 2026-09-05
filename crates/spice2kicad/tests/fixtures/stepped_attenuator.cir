@@ -1,0 +1,41 @@
+* Seven-step ladder attenuator — the resistor string inside a switched
+* bench attenuator or an audio "stepped volume" control. One 10 kohm
+* string from the source to ground, tapped every 5 dB; the three taps
+* brought out here are the -10 dB, -20 dB and -30 dB points.
+*
+* SPECIMEN FOR: ADR-28's metric-C ambiguity 11 — "a chain broken into
+* THREE or more clusters". `chain.stranded` counts `total - largest`, so
+* clusters of 2/1/1 and of 2/2 both score 2, and the ADR records the
+* three-way case as unmeasured because the suite's worst chain
+* (`port_shapes`, four members) shatters in two. This is a SEVEN-member
+* series chain, the longest in the benchmark, which is what gives a
+* three-way break room to appear.
+*
+* It is deliberately the SIGNAL-rooted counterpart of
+* `resistor_ladder_ref`: that fixture's string runs rail-to-rail and the
+* placer lays it as a column, this one is driven by a drawn source at
+* one end and terminated on ground at the other, so the placer lays it
+* along the signal axis. Same primitive, two different placement
+* regimes, one metric — which is what distinguishes "the convention"
+* from "that fixture".
+*
+* Secondary: a fourth drawn stimulus (`;@ ignore` hides every other
+* fixture's), and three more declared `*@port` terminals for metric D.
+*@symbol Device:R_US           for=R*
+*@symbol Simulation_SPICE:VDC  for=VIN
+*@port t2=output
+*@port t4=output
+*@port t6=output
+
+VIN in 0 DC 0 AC 1
+
+R1 in t1 4.38k
+R2 t1 t2 2.46k
+R3 t2 t3 1.38k
+R4 t3 t4 780
+R5 t4 t5 438
+R6 t5 t6 246
+R7 t6 0  316
+
+.ac dec 10 10 1Meg
+.end

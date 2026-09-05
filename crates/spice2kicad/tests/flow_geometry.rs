@@ -804,6 +804,7 @@ const FLOW_RATCHET: &[(&str, usize, usize)] = &[
     // them moved no existing fixture's literal.
     ("sallen_key_driven", 0, 0),
     ("shunt_feedback_amp", 0, 0),
+    ("stepped_attenuator", 0, 0),
     ("opamp_transimpedance", 0, 0),
     ("resistor_ladder_ref", 0, 0),
     ("compensated_divider", 0, 0),
@@ -976,6 +977,7 @@ const FLOW_POSE_RATCHET: &[(&str, usize, usize)] = &[
     // F5 1 -> 0: with RB above `b`, every series part on this fixture is
     // drawn horizontal. Ratchet DOWN.
     ("shunt_feedback_amp", 0, 0),
+    ("stepped_attenuator", 1, 0),
     ("opamp_transimpedance", 0, 0),
     ("resistor_ladder_ref", 4, 0),
     ("compensated_divider", 0, 0),
@@ -1188,6 +1190,7 @@ const STUB_RUN_RATCHET: &[(&str, u32)] = &[
     // F6 9 -> 5: RB's column is no longer dragged sideways by the
     // below-the-node re-column. Ratchet DOWN.
     ("shunt_feedback_amp", 8),
+    ("stepped_attenuator", 10),
     ("opamp_transimpedance", 7),
     ("resistor_ladder_ref", 10),
     ("compensated_divider", 9),

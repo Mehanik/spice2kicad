@@ -1982,6 +1982,109 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         270.0,
         "",
     ),
+    //
+    // Rows APPENDED for `stepped_attenuator`, same protocol: the dump's
+    // 281 pre-existing rows were diffed against the committed table and
+    // are byte-identical.
+    (
+        "stepped_attenuator",
+        "#FLG1",
+        "power:PWR_FLAG",
+        35.56,
+        52.07,
+        0.0,
+        "",
+    ),
+    (
+        "stepped_attenuator",
+        "#PWR1",
+        "power:GND",
+        35.56,
+        52.07,
+        0.0,
+        "",
+    ),
+    (
+        "stepped_attenuator",
+        "#PWR2",
+        "power:GND",
+        116.84,
+        52.07,
+        0.0,
+        "",
+    ),
+    (
+        "stepped_attenuator",
+        "R1",
+        "Device:R_US",
+        44.45,
+        41.91,
+        270.0,
+        "",
+    ),
+    (
+        "stepped_attenuator",
+        "R2",
+        "Device:R_US",
+        55.88,
+        35.56,
+        90.0,
+        "",
+    ),
+    (
+        "stepped_attenuator",
+        "R3",
+        "Device:R_US",
+        63.5,
+        43.18,
+        90.0,
+        "",
+    ),
+    (
+        "stepped_attenuator",
+        "R4",
+        "Device:R_US",
+        86.36,
+        35.56,
+        90.0,
+        "",
+    ),
+    (
+        "stepped_attenuator",
+        "R5",
+        "Device:R_US",
+        93.98,
+        43.18,
+        90.0,
+        "",
+    ),
+    (
+        "stepped_attenuator",
+        "R6",
+        "Device:R_US",
+        113.03,
+        39.37,
+        90.0,
+        "",
+    ),
+    (
+        "stepped_attenuator",
+        "R7",
+        "Device:R_US",
+        116.84,
+        48.26,
+        0.0,
+        "",
+    ),
+    (
+        "stepped_attenuator",
+        "VIN",
+        "Simulation_SPICE:VDC",
+        35.56,
+        46.99,
+        0.0,
+        "",
+    ),
     (
         "two_stage_amp",
         "#FLG1",
@@ -2210,51 +2313,52 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
     ),
 ];
 
+// Every emitted fixture, in alphabetical order. The port and
+// definition-level sheets were absent here while the rest of the
+// suite had already been extended to grade them, so accidental
+// movement in the newest features was the least protected.
+//
+// `rc_phase_shift` (F0) sorts last, so its rows APPEND to `BASELINE`
+// rather than interleaving: the ten v0.1 fixtures' rows stayed
+// byte-identical when F0 landed, which is the property CLAUDE.md's
+// "existing fixtures' budgets must not move" rule demands of a
+// fixture addition.
+const FIXTURES: &[&str] = &[
+    "cascode_amp",
+    "common_emitter",
+    "compensated_divider",
+    "diff_pair",
+    "lc_ladder_lpf",
+    "multivibrator",
+    "named_rails",
+    "opamp_definition_level",
+    "opamp_inverting",
+    "opamp_inverting_real",
+    "opamp_transimpedance",
+    "port_shapes",
+    "rc_lowpass",
+    "rc_lowpass_ports",
+    "rc_phase_shift",
+    "resistor_ladder_ref",
+    "sallen_key_driven",
+    "sallen_key_lpf",
+    "shunt_feedback_amp",
+    "stepped_attenuator",
+    "two_stage_amp",
+    "wien_bridge_osc",
+];
+
 #[test]
 fn baseline_lock_all_fixtures() {
     let mut failures = Vec::new();
     let mut all_actual = Vec::new();
 
-    // Every emitted fixture, in alphabetical order. The port and
-    // definition-level sheets were absent here while the rest of the
-    // suite had already been extended to grade them, so accidental
-    // movement in the newest features was the least protected.
-    //
-    // `rc_phase_shift` (F0) sorts last, so its rows APPEND to `BASELINE`
-    // rather than interleaving: the ten v0.1 fixtures' rows stayed
-    // byte-identical when F0 landed, which is the property CLAUDE.md's
-    // "existing fixtures' budgets must not move" rule demands of a
-    // fixture addition.
-    let fixtures = [
-        "cascode_amp",
-        "common_emitter",
-        "compensated_divider",
-        "diff_pair",
-        "lc_ladder_lpf",
-        "multivibrator",
-        "named_rails",
-        "opamp_definition_level",
-        "opamp_inverting",
-        "opamp_inverting_real",
-        "opamp_transimpedance",
-        "port_shapes",
-        "rc_lowpass",
-        "rc_lowpass_ports",
-        "rc_phase_shift",
-        "resistor_ladder_ref",
-        "sallen_key_driven",
-        "sallen_key_lpf",
-        "shunt_feedback_amp",
-        "two_stage_amp",
-        "wien_bridge_osc",
-    ];
-
-    for fix in fixtures {
+    for fix in FIXTURES {
         let dir = tempdir(fix);
         let cir = fixtures_dir().join(format!("{fix}.cir"));
         let sch = spice_to_kicad(&cir, &dir).expect("emit schematic");
         for row in extract_symbols(&sch) {
-            all_actual.push((fix.to_string(), row.0, row.1, row.2, row.3, row.4, row.5));
+            all_actual.push(((*fix).to_string(), row.0, row.1, row.2, row.3, row.4, row.5));
         }
     }
 

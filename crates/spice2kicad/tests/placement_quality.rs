@@ -578,6 +578,7 @@ const FIXTURES_FOR_QUALITY: &[(&str, &str)] = &[
     ("wien_bridge_osc", "wien_bridge_osc.cir"),
     ("sallen_key_driven", "sallen_key_driven.cir"),
     ("shunt_feedback_amp", "shunt_feedback_amp.cir"),
+    ("stepped_attenuator", "stepped_attenuator.cir"),
     ("opamp_transimpedance", "opamp_transimpedance.cir"),
     ("resistor_ladder_ref", "resistor_ladder_ref.cir"),
     ("compensated_divider", "compensated_divider.cir"),
@@ -1607,6 +1608,7 @@ fn wire_detour_within_budget_across_fixtures() {
         // retires the rail-stub-SIDE-fix rise that was awaiting owner
         // sign-off. Ratchet DOWN.
         ("shunt_feedback_amp", 1.1373),
+        ("stepped_attenuator", 1.0858),
         ("opamp_transimpedance", 1.1342),
         ("resistor_ladder_ref", 1.0521),
         ("compensated_divider", 1.0715),
@@ -1776,6 +1778,7 @@ fn crossing_count_within_budget_across_fixtures() {
         // crossings 3 -> 0. Ratchet DOWN.
         ("sallen_key_driven", 0),
         ("shunt_feedback_amp", 0),
+        ("stepped_attenuator", 1),
         ("opamp_transimpedance", 0),
         ("resistor_ladder_ref", 2),
         ("compensated_divider", 1),
