@@ -1502,17 +1502,29 @@ invariant here.
   carry exactly two drawn elements, the endpoint and one two-pin stub.
   `chains()` itself is untouched, so `chain.members` is unchanged.
 
-  Motivating specimen, best to worst, reproduced by the metric:
-  `lc_ladder_lpf` under `--placer=flow-seed-v4` (0 of 5), `port_shapes`
-  under `--placer=divider-rails` — one connected folded path — (0 of 4),
-  `port_shapes` under the shipping default (**2 of 4**).
+  Motivating specimen, best to worst, reproduced by the metric. Each arm
+  is named explicitly rather than as "the shipping default", because that
+  moves: `lc_ladder_lpf` under `--placer=flow-seed-v4` (0 of 5),
+  `port_shapes` under `--placer=divider-rails` — one connected folded
+  path — (0 of 4), `port_shapes` under `--placer=flow-seed-v4`
+  (**2 of 4**).
+
+  Under the shipping default since 2026-09-04 (`readable-v1`, ADR-38)
+  `port_shapes` reads **1**, not 2: the composed placer carries
+  `divider-rails-strict`, so it recovers part of the shattered chain.
+  The three-way ranking above still holds — it is stated over the arms
+  that produce it, and those are all still registered.
 
   Verifier: `crates/spice2kicad/tests/readability_metrics.rs`, with
   `chain_stranded_ranks_the_ladder_the_fold_and_the_shattered_chain` as
   the acceptance test and `chain_stranded_counts_a_known_synthetic_split`
   as the non-vacuity control. **No budget literal**, same reasoning as
   A. Flagged elsewhere and not previously noticed: `wien_bridge_osc`
-  (1 of 2) and `lc_ladder_lpf` under the shipping default (1 of 5).
+  (1 of 2). This line also claimed `lc_ladder_lpf` at "1 of 5"; that was
+  **wrong when written** — it contradicts the specimen ranking above,
+  which records the same fixture at 0 of 5, and the sink measures
+  `chain.stranded / lc_ladder_lpf` = **0** under `flow-seed-v4` and under
+  `readable-v1` alike. Corrected 2026-09-05.
 
 - **B1 — shared-current-path stacking** (readability metric,
   **informational**, ADR-28). Devices in series on a DC current path —
@@ -1572,9 +1584,18 @@ invariant here.
   bidirectional or symmetric use). Declining is a real answer.
 
   Motivating specimen: `two_stage_amp`'s `Q2`, emitted at 180 + mirror
-  by the shipping default and read as clean by every other registered
-  metric because it is locally violation-free. It is the **only**
-  inverted device in the suite (1 of 11 resolved).
+  by `flow-seed-v4` and read as clean by every other registered metric
+  because it is locally violation-free. It was the **only** inverted
+  device in the suite (1 of 11 resolved).
+
+  **Repaired on the shipping path since 2026-09-04.** `readable-v1`
+  (ADR-38) carries `facing-trigger`, and the sink measures
+  `device.facing_inverted` = **0 on every fixture**, with
+  `two_stage_amp` going 1 → 0 while its denominator
+  (`device.facing_resolved`) holds at 2 — so the zero is a repair, not
+  the rank declining to answer. The specimen above is kept as the
+  metric's motivating case and is now graded against the retained
+  control arm.
 
   Verifier: `crates/spice2kicad/tests/readability_metrics.rs`, with
   `facing_ranks_the_repaired_arm_above_the_shipped_two_stage_amp` as

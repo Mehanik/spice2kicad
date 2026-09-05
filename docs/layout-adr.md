@@ -7533,7 +7533,7 @@ change), while a backwards one is an anchor / rotation choice inside
 
 | arm | `port.label_vertical` | `port.label_backwards` |
 | --- | ---: | ---: |
-| shipping default `flow-seed-v4` | 9 | 1 |
+| `flow-seed-v4` (the default when this was measured) | 9 | 1 |
 | `terminal-series` | 4 | 0 |
 | `terminal-series-divider` | **2** | 0 |
 
@@ -8830,6 +8830,15 @@ contingency honestly. Do not revive `label_geom` for this.
 
 ## ADR-35 — Tier-0 and Tier-1 invariants fail on ~1 SA seed in 20, on the *shipping default*, and one-seed ratchets cannot see it
 
+> **Which default.** "Shipping default" here means `flow-seed-v4`, the
+> default when this was measured (2026-08-31). `readable-v1` superseded
+> it on 2026-09-04 (ADR-38). **The finding is unaffected** — its own
+> table shows comparable failure rates on every arm including
+> `readable-v1`, which is the point: seed fragility is a property of the
+> router's budgeted V12 fallback under SA position variation, not of any
+> placer. A re-measurement on the new default would be expected to find
+> the same ~1-in-20.
+
 **Status:** measured 2026-08-31. **No code change.** This records a
 robustness property of the **shipping default placer** that no gate in
 the suite can currently observe, the negative result about hard
@@ -8889,7 +8898,7 @@ regression"*. Widening the sweep inverts it:
 
 | arm | seeds swept | V12-failing seeds |
 | --- | ---: | --- |
-| `flow-seed-v4` (shipping default) | 85 (10…94) | **4** — 12, 32, 70, 86 |
+| `flow-seed-v4` (the default when this was measured) | 85 (10…94) | **4** — 12, 32, 70, 86 |
 | `signal-direction` | 15 (10…24) | 1 — seed 12, the **identical** 4 crossings on the same fixture: inherited from the champion, not added |
 | `readable-v1` (ADR-36's composition) | 35 (10…44) | 2 — seeds 41, 42; **clean at seed 12, where the champion fails** |
 
@@ -9567,7 +9576,7 @@ V17's own verifier through the scoreboard sink, all 18 fixtures:
 
 | arm, seed 1 | `v17.signal_direction`, total | where |
 | --- | ---: | --- |
-| `flow-seed-v4` (shipping default) | **3** | `opamp_inverting_real` 1, `sallen_key_driven` 1, `sallen_key_lpf` 1 |
+| `flow-seed-v4` (the default when this was measured) | **3** | `opamp_inverting_real` 1, `sallen_key_driven` 1, `sallen_key_lpf` 1 |
 | `readable-v1`, before this change | — | **conversion refused; no sheet exists** |
 | `readable-v1`, after | **1** | `sallen_key_lpf` 1 |
 | `readable-v1`, shipped seed | **0** | — |
