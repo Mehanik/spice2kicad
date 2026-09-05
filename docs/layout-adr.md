@@ -10236,3 +10236,263 @@ Tier 0 clean, Tier 1 +0.00, Tier 2 −129.25. The multi-seed reading does
 not overturn that — 38 of 47 resolved cells favour the challenger — but
 it does correct two of the cells the ADR-23 table reports, and the
 corrected F5 number is worse for the challenger, not better.
+
+### Promotion follow-up: the column is PIN-anchored, not centre-anchored
+
+**Status:** landed on `promote/dc-series` after the promotion commit, as
+part of that promotion's own bookkeeping.
+
+`apply_dc_columns` originally chose the column's x as the grid-snapped
+mean of its members' **origins**, and wrote that x to every member. That
+aligns *bodies*. CLAUDE.md § "Layout invariants" is explicit that it must
+not:
+
+> **Constraints are pin-anchored.** `place` and `align` describe
+> relationships between *connecting pins*, not symbol centers. The
+> constraint resolver therefore consumes resolved symbol pin geometry
+> (after `symbol` and `pinmap`), not just the AST.
+
+A two-pin resistor's pins sit on its origin's x, but `Device:Q_NPN_BCE`'s
+collector and emitter are both at x = +2.54 mm. So a column of
+`[RC, Q1, RE]` put RC's body on Q1's body and left a **2.54 mm jog in the
+collector wire** — the opposite of what the column exists for.
+`rail_convention::common_emitter_rc_above_q1_collector_seed` failed on
+exactly that (`RC.c.x = 15.240`, `Q1.c.x = 17.780`).
+
+**What changed.** `DcColumn` now carries `shared: Vec<String>` — the net
+joining each consecutive pair — and `column_pin_offsets` reads each
+member's pin on that net from `Symbol::pins_in(pose)`. The column's x is
+the barycenter of the members' **shared-pin** seed x, and each member's
+origin is written as `x - offset`. The offset differs by symbol AND by
+orientation, so it is read from resolved pin geometry rather than
+assumed.
+
+**The two-shared-pins case.** An interior member has a shared pin to the
+neighbour above and one to the neighbour below. If their x offsets
+differ, no single x carries both, and **the whole column is declined** —
+the same rule the construction already applies to `dc_rank` ambiguity and
+to cycles. Splitting is ill-defined (the offending member belongs to both
+halves, and dropping it breaks the series relation the column asserts),
+and picking one pin re-introduces the jog on the *other* neighbour, where
+nothing measures it. End members have exactly one shared pin and use it
+unconditionally.
+
+The decline is reachable but rare, and only through a sideways pose: an
+upright two-terminal element has both pins on x = 0, and an upright BJT
+has C and E on the same x (±2.54). Rotate that BJT 90° and C and E land
+on opposite sides — which is a member that is not being drawn along the
+column at all, so declining is also the right *drawing*. `column_pose`
+prefers upright poses, so the pinned arm reaches the decline only when
+V14 ∩ V17 admits nothing else. `column_pin_offsets` also declines a pin
+at a **fractional** cell offset: every origin is grid-snapped, so such a
+pin cannot be put on a shared column x without taking another member off
+it.
+
+**Measured effect**, control sink vs treatment sink on the same tree,
+same seed, `--no-layout-cache`, suite totals over 22 fixtures:
+
+| metric | frame | control | treatment |
+| --- | --- | ---: | ---: |
+| `v5` | pins + ink | 48 | **43** |
+| `v16.bends` | ink | 141 | **137** |
+| `v16.branches` | ink | 31 | **26** |
+| `v16.bend_gap` | ink | 36 | **32** |
+| `f6` | pins | 79 | **77** |
+| `crossings` | ink | 10 | **9** |
+| `detour` | ink | 23.42 | 23.43 |
+| `f5` | pins | 13 | 13 (unchanged, every fixture) |
+| `stack.side_by_side` | pins | 0 | 0 (all 22, `stack.pairs` unmoved) |
+| `q5` | **symbol origins** | 30 | **44** |
+| `q3` | **symbol origins** | 28 | **35** |
+
+### Q5 and Q3 measure symbol ORIGINS — and that is the whole rise
+
+The split in that table is neither coincidence nor noise: **every metric
+that reads pins or emitted ink improved, and the only two that got worse
+are the only two in the suite that read symbol origins.** Both say so in
+their own module docs — Q5's "reads only symbol origins",
+"symbol-origin co-alignment, orientation-agnostic"; Q3's "keyed on the
+placer's OWN layer model and the symbol-origin X — a different question
+from all three", where it distinguishes itself from F3's mean-pin X on
+exactly this point.
+
+For Q5 the mechanism is exact rather than approximate. Q5's threshold is
+`NEAR_CELLS = 2` and a `Q_NPN_BCE` collector/emitter is **2 cells** off
+its origin, so a correctly pin-collinear column is *guaranteed* to read
+as an origin near-miss. Every new Q5 pair on every affected fixture
+involves a transistor: `shunt_feedback_amp` goes 0 → 4 and all four are
+`Q1` against `RB` / `RC` / `RE` / `RF`.
+
+Q5's own doc calls it "a **pre-routing leading indicator** of V16 bends".
+On this change the indicator points the wrong way: `q5` +14 while
+`v16.bends` −4, `v16.branches` −5 and `crossings` −1. That is a measured
+falsification of the proxy on this construction, not an argument about
+it.
+
+**Nothing was done about it here, deliberately.** Re-framing Q5 or Q3
+onto pin geometry is a second, separately-gradeable change: it moves an
+ADR-23 scoreboard cell's *definition* while a promotion is in flight,
+and — as `shunt_feedback_amp` shows on inspection — it would not even
+zero the rise. Two of the four new pairs there are `Q1`'s **base**
+against `RB` / `RF`, whose pin gap genuinely shrank from 4 cells to 2:
+the wire got *closer* to alignment without reaching it, which is Q5
+working as designed.
+
+The rises are therefore **recorded at their measured values and flagged
+AWAITING OWNER SIGN-OFF** — `Q5_NEAR_MISS_BUDGET` (`rc_phase_shift`
+2 → 5, `cascode_amp` 4 → 5, `shunt_feedback_amp` 0 → 4) and the Q3 table
+(`rc_phase_shift` 4 → 5) — with the argument above in the comment. There
+is in-tree precedent for exactly this shape: the previous
+`shunt_feedback_amp` Q5 entry carried the same flag for the rail-stub
+SIDE fix.
+
+The recommended follow-up, if the owner wants one, is a **monotone
+amendment** to Q5 rather than a re-frame: treat a pair whose shared-net
+pins are *exactly collinear* as already snapped, before the origin test.
+That can only remove pairs from the count, so no literal can rise from
+it, and it encodes Q5's own stated postcondition ("so the connecting wire
+runs straight") instead of its proxy. On `shunt_feedback_amp` it takes
+the rise from 4 to 2.
+
+### The promotion commit's re-record was incomplete — five ratchets, not one
+
+Recorded because it changes what a reader should assume about
+`promote/dc-series`, and because it is the third promotion in a row to
+hit a bookkeeping trap.
+
+The promotion commit `3f73dab` was believed to leave the suite green but
+for the pin-anchoring test. A control run of the full workspace on that
+commit, unmodified, reads **76 binaries, 875 passed, 6 failed, 12
+ignored**. The five extra failures are all un-re-recorded literals:
+`baseline_lock` (never regenerated), `v5_first_segment_extends_outward`
+(four fixtures), `series_pose_and_terminal_order_within_ratchet` (F5 on
+`cascode_amp` and `shunt_feedback_amp` — precisely the +2 this ADR's own
+B-vs-F5 section predicted), `stub_lateral_run_within_ratchet` (F6), and
+`bend_and_branch_counts_within_ratchet_across_fixtures` (V16).
+
+The trap is the one CLAUDE.md already names — several budgets print their
+"you may lower this to N" hint through `eprintln!`, which cargo swallows
+on a *passing* test — plus its mirror: a literal that is merely **stale**
+(the promotion moved the count and nobody re-read it) fails loudly, and
+if the failure list is taken on trust from a prior report rather than
+re-measured, that failure is invisible to the next reader. **Re-run the
+workspace yourself before believing any statement about which tests a
+branch fails**, including one in a handover.
+
+A corollary for the ratchets in particular: several literals here were
+not just stale but *loose* — the V16 `cascode_amp` mark was (14, 4) while
+the branch actually measured (7, 3), so a real B rise 7 → 9 from this fix
+would have passed the gate silently. Zero slack is not a style
+preference; it is the only state in which the gate measures anything.
+
+### Challenger blindness: no `spice-layout` integration test ever runs a challenger
+
+This defect was invisible for the whole of the challenger's life, and the
+reason generalises.
+
+`crates/spice-layout/tests/rail_convention.rs` builds its `LayoutOptions`
+with `..LayoutOptions::default()` and never sets `S2K_PLACER`, so it only
+ever exercises `Placer::default()`. **Every `spice-layout` integration
+test has this property** — they call `place_with` / `place_seed` on the
+default placer by construction. So while `dc-series-column-pinned` was a
+registered `--placer` challenger it was graded end-to-end on the
+scoreboard (22 fixtures × ~60 verifiers, plus a k = 9 multi-seed replay
+and a 1320-conversion seed sweep), passed all of it, and still shipped a
+pin-anchoring bug that no instrument could see. The bug surfaced the
+moment promotion made the arm the default — which is the first moment a
+`spice-layout` test ran it.
+
+This is worth stating precisely, because it is **not** the same gap as a
+missing verifier. The scoreboard's cells were all working. The
+construction's target metric (B) went 4 → 0, Tier 0 was clean, Tier 1 was
++0.00. The defect lived in a property no scoreboard cell states — *the
+shared pin, not the body, is what the column aligns* — and the one test
+in the tree that does state it was structurally unable to run the arm
+that violated it.
+
+**Recommendation: (a), grade challengers against these tests too — but
+narrowly.** Not (b) "accept it as a known promotion-time risk", and not a
+blanket `S2K_PLACER` sweep of the whole `spice-layout` suite.
+
+The argument against (b) is that the risk is not spread evenly over time.
+A promotion is precisely the moment when the most geometry moves and the
+least attention is available for any single fixture, and the failure it
+produces is maximally confusing: a *placer* defect surfaces as a
+freshly-red test in a crate the promotion commit did not touch, mixed in
+with several legitimately-moved ratchets. Deferring the discovery to
+promotion is deferring it to the worst available moment. That is exactly
+what happened here, and the first hour of the follow-up went on
+disentangling "which of these six failures are mine".
+
+The argument for *narrowness* is that the scoreboard already answers "is
+B better than A" over ~60 aggregate cells, and re-running all of
+`spice-layout`'s integration tests per arm would mostly re-measure that
+in a worse frame — per-fixture and conjunctive, which ADR-23 established
+is achievable essentially only by a no-op. What the scoreboard cannot
+state is a **structural** property: a yes/no geometric fact with one
+correct answer, the class CLAUDE.md's constraints-vs-costs rule already
+separates out from continuous quality gradients. `rail_convention.rs` is
+a file of exactly those, and it exists because a sign error in
+`cost::rail_direction` once survived a test that asserted the inverted
+expectation.
+
+So the concrete proposal is: make the `spice-layout` tests that assert a
+**structural** placement property — `rail_convention.rs`,
+`idiom_placement.rs`, and the pin-anchored assertions specifically —
+parameterisable over `Placer` (they already build `LayoutOptions`
+explicitly, so this is a field, not a redesign), and have
+`just scoreboard-run <arm>` run that subset under the arm being graded,
+as a **hard per-fixture gate** alongside the Tier-0 gate it already
+applies. Quality budgets stay aggregate and stay out of it. Cost: one
+small harness change and a few seconds per arm. Benefit: a challenger can
+no longer pass every instrument in the project while violating a stated
+layout invariant.
+
+A cheaper stopgap, if the harness change is not wanted now: before
+proposing any promotion, run `cargo test -p spice-layout` once with the
+challenger forced as the default (a one-line local edit to the enum's
+`#[default]`) and put the result in the promotion's ADR entry. That is
+strictly worse than (a) — a manual step is a step that gets forgotten,
+and CLAUDE.md already records one promotion that shipped because a second
+source of truth for "which placer is default" went unnoticed — but it
+would have caught this one.
+
+### The re-grade against the retained control arm
+
+`just scoreboard-run readable-v1` / `just scoreboard-run dc-series-column-pinned`
+/ `just scoreboard`, both arms collected on the fixed tree:
+
+| | before the pin-anchoring fix | after |
+| --- | ---: | ---: |
+| Tier 0 | clean / clean, none regressed | **clean / clean, none regressed** |
+| Tier 1 total Δ | +0.00 | **+0.00** |
+| Tier 2 total Δ | −63.66 | **−124.19** |
+| metric B (`stack.side_by_side`) | 4 → 0 | **4 → 0** |
+| verdict | PROMOTABLE | **PROMOTABLE — unchanged** |
+
+**The verdict does not change; the margin roughly doubles.** Tier-2
+breakdown of the −124.19, challenger minus champion:
+
+| term | Δ |
+| --- | ---: |
+| wire detour ratio | **−65.19** |
+| V16 bends (B) | **−27.00** |
+| F6 worst rail-stub lateral run | −16.00 |
+| V16 branches (J) | −9.00 |
+| Q3 flow-monotonicity | −6.00 |
+| wire crossings | −5.00 |
+| P11b cache-less locality | −1.00 |
+| Q5 alignment near-misses | **+2.00** |
+| F5 series pose | **+2.00** |
+| V5 pin outward-direction | +1.00 |
+
+Two framings of Q5/Q3 are both true and neither should be quoted alone.
+Against the **control arm** (this table) Q5 is only +2.00 and Q3 is −6.00,
+because `readable-v1` carries its own origin-frame near-misses. Against
+the **pre-fix default** — which is the frame the per-fixture ratchets are
+calibrated in — Q5 is +14 and Q3 is +7. The ratchets are re-recorded in
+the second frame, which is why the four flagged rises exist at all.
+
+`stack.side_by_side` is **0 on all 22 fixtures** on the fixed default,
+and `stack.pairs` (its denominator) is unmoved — the stacking this
+construction exists to produce survives pin-anchoring intact.
