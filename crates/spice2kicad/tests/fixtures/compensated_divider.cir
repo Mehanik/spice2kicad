@@ -1,0 +1,34 @@
+* 10:1 compensated attenuator — the front end of an oscilloscope probe.
+*
+* SPECIMEN FOR: metric D's ambiguity 13 (ADR-28, second amendment) — a
+* circuit whose signal path is conventionally drawn VERTICALLY. Every
+* one of the eighteen fixtures that preceded it flows left to right, and
+* F3/F5 and metric D1 all assume that convention, so D1's rule "a port
+* terminal at 90/270 is a defect" has never been tested against a
+* drawing where a vertical terminal is the CORRECT one. A probe divider
+* is the textbook case: the tip is at the top, the tap is in the middle,
+* the shield is at the bottom, and no textbook draws it sideways.
+*
+* Secondary: only the third fixture whose stimulus is DRAWN rather than
+* `;@ ignore`d (after `lc_ladder_lpf` and `sallen_key_driven`), so the
+* signal-flow root tier that CLAUDE.md's root-policy containment
+* argument rests on gains a third specimen.
+*
+* Electrically: R1/R2 set the 10:1 DC ratio; C1/C2 set the same ratio at
+* HF, and the pole/zero cancel when R1*C1 == R2*C2 (810 ns here). The
+* R-parallel-C arm is itself new to the suite — two drawn bodies between
+* the same node pair, which no earlier fixture presents.
+*@symbol Device:R_US           for=R*
+*@symbol Device:C              for=C*
+*@symbol Simulation_SPICE:VDC  for=VIN
+*@port out=output
+
+VIN in 0 DC 0 AC 1
+
+R1 in  out 900k
+C1 in  out 900f
+R2 out 0   100k
+C2 out 0   8.1p
+
+.ac dec 20 10 100Meg
+.end

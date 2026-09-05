@@ -376,6 +376,7 @@ const Q5_NEAR_MISS_BUDGET: &[(&str, u32)] = &[
     // Tier-1 xfail expiries (V14 rail-pin on this fixture and
     // `rc_phase_shift`, plus that fixture's V14 [3] and rail ordering).
     ("shunt_feedback_amp", 0),
+    ("compensated_divider", 0),
 ];
 
 #[test]

@@ -578,6 +578,7 @@ const FIXTURES_FOR_QUALITY: &[(&str, &str)] = &[
     ("wien_bridge_osc", "wien_bridge_osc.cir"),
     ("sallen_key_driven", "sallen_key_driven.cir"),
     ("shunt_feedback_amp", "shunt_feedback_amp.cir"),
+    ("compensated_divider", "compensated_divider.cir"),
 ];
 
 fn fixtures() -> Vec<(&'static str, PathBuf)> {
@@ -1604,6 +1605,7 @@ fn wire_detour_within_budget_across_fixtures() {
         // retires the rail-stub-SIDE-fix rise that was awaiting owner
         // sign-off. Ratchet DOWN.
         ("shunt_feedback_amp", 1.1373),
+        ("compensated_divider", 1.0715),
     ];
     // Collect-then-assert: an in-loop `assert!` truncates the report at
     // the first offending fixture, which is the ADR-19 M4 "gate-set
@@ -1770,6 +1772,7 @@ fn crossing_count_within_budget_across_fixtures() {
         // crossings 3 -> 0. Ratchet DOWN.
         ("sallen_key_driven", 0),
         ("shunt_feedback_amp", 0),
+        ("compensated_divider", 1),
     ];
     // Collect-then-assert: see `wire_detour_within_budget_across_fixtures`.
     let mut failures: Vec<String> = Vec::new();

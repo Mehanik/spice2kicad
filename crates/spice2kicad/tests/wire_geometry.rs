@@ -186,6 +186,7 @@ const FIXTURES: &[&str] = &[
     "wien_bridge_osc",
     "sallen_key_driven",
     "shunt_feedback_amp",
+    "compensated_divider",
 ];
 
 /// Per-fixture `(name, B, J)` high-water marks — **zero slack**, each
@@ -311,6 +312,7 @@ const BEND_BRANCH_BUDGETS: &[(&str, u32, u32)] = &[
     ("sallen_key_driven", 12, 0),
     // B 12 -> 11, rail-stub SIDE fix. Ratchet DOWN.
     ("shunt_feedback_amp", 9, 2),
+    ("compensated_divider", 5, 2),
     // B 10 → 4. Phase 4.5's acceptance objective gained the V16
     // ink-graph bend count as its FINAL lexicographic key, after
     // (V13, V12, V5), so the refiner now separates orientations that tie

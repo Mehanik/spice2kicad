@@ -1565,6 +1565,7 @@ const FIXTURES: &[&str] = &[
     "wien_bridge_osc",
     "sallen_key_driven",
     "shunt_feedback_amp",
+    "compensated_divider",
 ];
 
 /// Report both metrics for every fixture to the ADR-23 sink.

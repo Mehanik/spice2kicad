@@ -262,6 +262,7 @@ const SHEETS: &[&str] = &[
     "wien_bridge_osc",
     "sallen_key_driven",
     "shunt_feedback_amp",
+    "compensated_divider",
 ];
 
 /// Per-fixture crossing budget. After the V11/V12 cascade + Steiner-
@@ -2171,6 +2172,7 @@ fn v5_violation_budget(name: &str) -> usize {
         // pin facing into the circuit). Ratchet DOWN.
         // 1 -> 0 with the promoted flow-seed default. Ratchet DOWN.
         "shunt_feedback_amp" => 1,
+        "compensated_divider" => 3,
         // 0 -> 1 with the promoted flow-seed default: `RIN.1`. This is
         // the ONE V5 cell the promotion pays, against eleven it wins,
         // and it is recorded here rather than hidden in the catch-all
@@ -2624,6 +2626,7 @@ const PHASE1_ERC_FIXTURES: &[&str] = &[
     "wien_bridge_osc",
     "sallen_key_driven",
     "shunt_feedback_amp",
+    "compensated_divider",
 ];
 
 #[test]
@@ -3189,6 +3192,7 @@ const ALL_FIXTURES_FOR_CROSS_NET: &[&str] = &[
     "wien_bridge_osc",
     "sallen_key_driven",
     "shunt_feedback_amp",
+    "compensated_divider",
 ];
 
 /// Symmetric fixtures whose two mirror-image sub-circuits force two

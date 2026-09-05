@@ -85,6 +85,7 @@ const SHEETS: &[&str] = &[
     "wien_bridge_osc",
     "sallen_key_driven",
     "shunt_feedback_amp",
+    "compensated_divider",
 ];
 
 #[test]
@@ -137,6 +138,7 @@ fn v4_global_labels_reserved_for_interface_one_pin_nets() {
         ("lc_ladder_lpf", &["out"]),
         ("sallen_key_lpf", &["in", "out"]),
         ("wien_bridge_osc", &["out"]),
+        ("compensated_divider", &["out"]),
     ];
     // Collect-then-assert (ADR-23 D2): see the sibling verifier above.
     let mut failures: Vec<String> = Vec::new();

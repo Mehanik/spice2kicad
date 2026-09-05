@@ -102,6 +102,7 @@ const FIXTURES: &[&str] = &[
     "wien_bridge_osc",
     "sallen_key_driven",
     "shunt_feedback_amp",
+    "compensated_divider",
 ];
 
 fn fixtures_dir() -> PathBuf {
