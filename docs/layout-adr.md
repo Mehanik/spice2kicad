@@ -10083,19 +10083,26 @@ vertically.
 The measured cost is smaller than the conflict suggests, and it lands
 somewhere else:
 
-* **`resistor_ladder_ref` F5 does not move: 4 -> 4.** The shipping
-  default already draws all four interior resistors vertical, so pinning
-  them vertical costs nothing. The named conflict is **latent, not
-  realised** on the fixture that names it — while B goes 2 -> 0 and the
-  ladder becomes an actual Kelvin string (R1..R6 at x = 50.80, pitch
-  8.89 mm, vdd to ground).
-* **F5 rises by 2, on two other fixtures**: `cascode_amp` 0 -> 1 and
+* **F5 rises by 2 on the single sample**, on two fixtures other than the
+  one that names the conflict: `cascode_amp` 0 -> 1 and
   `shunt_feedback_amp` 0 -> 1, where a series element the default drew
-  horizontal is now a column member drawn vertical.
+  horizontal is now a column member drawn vertical. Both are INERT under
+  k = 9 — deterministic, on every seed.
+* **On `resistor_ladder_ref` the single sample reads F5 4 -> 4, unmoved.
+  That reading is a single-draw artefact and the multi-seed section below
+  corrects it**: the champion averages 2.111 ± 0.928 over k = 9 and the
+  challenger is a deterministic 4.000, t = +6.11. The conflict IS
+  realised on the fixture that names it, and it costs about +1.9.
+* In exchange on that fixture: B 2.000 -> 0.000 (t = −6.93), bends
+  14.667 -> 6.111, branches 1.667 -> 0.000, detour 1.130 -> 1.000,
+  `chain.axis` 1.222 -> 0.000 — and the ladder becomes an actual Kelvin
+  string (R1..R6 at x = 50.80, pitch 8.89 mm, vdd to ground).
 
-So: B −4 for F5 +2, both Tier-2, with the Tier-2 aggregate −129.25 in the
+So: B −4 suite-wide for F5 +2 on the shipped seed and rather more than
+that on average, both Tier-2, with the Tier-2 aggregate −129.25 in the
 same direction. That is the trade, stated rather than left to the
-aggregate.
+aggregate — and stated in the form the multi-seed instrument gives,
+because the single-sample form of it was wrong.
 
 ### The SA seed sweep, and a pre-existing Tier-0 finding
 
@@ -10158,3 +10165,74 @@ pass returns immediately unless it is `true`.
 half; `baseline_lock` — green, **zero rows changed** — is the empirical
 half. Full suite on the final tree: **76 binaries, 877 passed, 0 failed,
 12 ignored** (868 before, plus 9 new tests).
+
+### The multi-seed reading (ADR-32, k = 9) — and where it contradicts the single sample
+
+Both arms collected over SA seeds 1..9, 3027 rows / 1620 cells per seed,
+**zero conflicting `(metric, fixture)` pairs in any of the 18 sinks**.
+
+| class | cells |
+| --- | ---: |
+| **EFFECT** (\|t\| > 2) | **47** — 38 challenger better, 9 worse |
+| **INERT** (sd = 0 on both arms) | 1464 — 1459 unchanged, 5 moved |
+| **UNRESOLVED** (\|t\| <= 2) | 109 |
+| PARTIAL | 0 |
+
+The construction's own target metric survives both readings, in the two
+strongest forms the instrument has:
+
+| cell | champion | challenger | class |
+| --- | --- | --- | --- |
+| `stack.side_by_side / cascode_amp` | 1.000 | 0.000 | **INERT** — sd 0 on both arms, so this is a *measurement*: the owner's specimen is repaired on **every** seed |
+| `stack.side_by_side / resistor_ladder_ref` | 2.000 ± 0.866 | 0.000 ± 0.000 | **EFFECT**, t = −6.93 |
+| `stack.side_by_side / shunt_feedback_amp` | 1.111 ± 0.333 | 0.000 ± 0.000 | **EFFECT**, t = −10.00 |
+
+Other EFFECT cells, challenger better: `q5 / two_stage_amp` −7.56
+(t = −11.88), `v16.bends / resistor_ladder_ref` −8.56 (t = −5.62),
+`q3 / two_stage_amp` −3.67, `f6 / cascode_amp` −4.67,
+`v16.bends / cascode_amp` −4.00, `crossings / cascode_amp` −1.78, every
+`detour` cell that resolves, and `device.facing_inverted / cascode_amp`
+0.444 → 0.000 (t = −2.53 — a bonus repair of the metric ADR-29 built).
+Challenger worse: `v5` on `rc_phase_shift` (+2.56, t = +14.55),
+`two_stage_amp` (+2.67) and `common_emitter` (+1.33);
+`q6.cov / common_emitter` +0.34; `q5 / rc_phase_shift` +1.00.
+
+### TWO cells where the two instruments disagree — the multi-seed one is the world
+
+Stated explicitly rather than resolved by preference, because two ADRs
+have already been distorted by single-draw readings (ADR-30 retracted,
+ADR-33's Tier-2 figure fictional):
+
+| cell | single sample says | k = 9 says | which is true |
+| --- | --- | --- | --- |
+| `f5 / resistor_ladder_ref` | **4 → 4, unmoved** | champion **2.111 ± 0.928**, challenger **4.000 ± 0.000**, d = **+1.889**, t = **+6.11**, challenger worse | the multi-seed one |
+| `port.label_vertical / resistor_ladder_ref` | 3 → 2, **better** | champion **1.333 ± 1.118**, challenger **2.778 ± 0.441**, d = **+1.444**, t = **+3.61**, challenger **worse** | the multi-seed one |
+
+The `f5` disagreement matters most, because it is the **B-vs-F5 conflict
+itself**, and the single sample hid it. The shipped seed happens to be
+one on which the champion draws all four interior ladder resistors
+vertical (f5 = 4); across nine seeds the champion averages 2.111, i.e. it
+usually poses one or two of them horizontal. The challenger pins all four
+vertical on every seed, deterministically.
+
+So the honest statement of the trade is stronger than the single sample
+allowed:
+
+* **The construction takes B's side, and on `resistor_ladder_ref` it
+  really does pay F5 for it** — about +1.9 F5 violations on average, not
+  zero. Plus a deterministic +1 each on `cascode_amp` and
+  `shunt_feedback_amp` (both INERT).
+* In exchange, B on that fixture goes 2.000 → 0.000 with t = −6.93, its
+  bends 14.667 → 6.111 (t = −5.62), its branches 1.667 → 0.000, its
+  detour 1.130 → 1.000, and `chain.axis` 1.222 → 0.000.
+* Both metrics are Tier-2/informational, so no tier rule is violated by
+  the trade; it is a within-tier sideways move of the kind ADR-23 permits
+  **only** on the whole-placer path, which is what this is.
+
+The **single-sample verdict remains the rule as written** (ADR-23 states
+promotion over the single-sample aggregate, and ADR-32 explicitly
+declines to restate it): `dc-series-column-pinned` is PROMOTABLE with
+Tier 0 clean, Tier 1 +0.00, Tier 2 −129.25. The multi-seed reading does
+not overturn that — 38 of 47 resolved cells favour the challenger — but
+it does correct two of the cells the ADR-23 table reports, and the
+corrected F5 number is worse for the challenger, not better.
