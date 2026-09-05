@@ -21,12 +21,21 @@ pub struct Bbox {
 }
 
 impl Bbox {
-    /// AABB intersection. Inclusive on edges; coincident-edge cases
-    /// (a label touching a body's edge at a pin coordinate) are
-    /// *quality* defects, not correctness ones, so the verifier
-    /// treats them as overlap when both bboxes have non-zero area.
+    /// AABB intersection, exclusive on edges to within
+    /// `kicad_symbols::text_geom::TOUCH_EPS_MM`.
+    ///
+    /// Two boxes that share an edge do NOT overlap — a label anchored on
+    /// a pin abuts its host's body box by construction (a global label's
+    /// tag is one text size deep, a KiCad pin is 1.27 mm long), and a
+    /// bare `<` reported that shared edge as a 6 × 10⁻¹⁵ mm overlap
+    /// whenever the arithmetic landed a few ulps low. The epsilon is one
+    /// nanometre; see its own docs for why that cannot mask a defect.
     pub fn intersects(&self, other: &Bbox) -> bool {
-        self.x0 < other.x1 && self.x1 > other.x0 && self.y0 < other.y1 && self.y1 > other.y0
+        use kicad_symbols::text_geom::TOUCH_EPS_MM;
+        self.x0 + TOUCH_EPS_MM < other.x1
+            && self.x1 - TOUCH_EPS_MM > other.x0
+            && self.y0 + TOUCH_EPS_MM < other.y1
+            && self.y1 - TOUCH_EPS_MM > other.y0
     }
 
     pub fn intersects_segment(&self, a: Pt, b: Pt) -> bool {
@@ -72,19 +81,15 @@ impl Bbox {
 pub enum TextKind {
     /// Plain `(label …)` — KiCad anchors the text at the left edge.
     PlainLabel,
-    /// A tag-bordered label — `(global_label …)` or
-    /// `(hierarchical_label …)`. KiCad does NOT start the text at the
-    /// anchor: `SCH_GLOBALLABEL::GetSchematicTextOffset` /
-    /// `SCH_HIERLABEL::GetSchematicTextOffset` push it along the reading
-    /// direction to clear the chevron. `lead_em` is that offset in
-    /// multiples of the text size; the modelled box runs from the anchor
-    /// (the chevron's own ink) through `lead + width`.
-    ///
-    /// Use [`TextKind::global_label`] / [`TextKind::hier_label`] rather
-    /// than writing the field by hand — the constants come from KiCad's
-    /// `DEFAULT_LABEL_SIZE_RATIO` / `DEFAULT_TEXT_OFFSET_RATIO` and are
-    /// calibrated against real ink by `rendered_text.rs`.
-    GlobalLabel { lead_em: f64 },
+    /// `(global_label …)` — the drawn **tag outline**, which contains
+    /// the string. `end_caps` is how many pointed
+    /// end-caps the shape draws (0, 1 or 2); see
+    /// `kicad_symbols::text_geom::TextKind::GlobalLabel`, which this
+    /// mirrors and which `rendered_text.rs` calibrates against real ink.
+    GlobalLabel { end_caps: u8 },
+    /// `(hierarchical_label …)` — the string box; its template tag is
+    /// inside it. See `kicad_symbols::text_geom::TextKind::HierLabel`.
+    HierLabel,
     /// `(property "Reference" …)` text — anchor centred or left
     /// depending on `(justify …)`. The emitter now writes `justify
     /// left` (V13 Step 5) so we model it as left-anchored.
@@ -106,12 +111,12 @@ impl TextKind {
     /// Delegates to `kicad_symbols::text_geom::TextKind::global_label`.
     #[must_use]
     pub fn global_label(shape: Option<&str>) -> Self {
-        let kicad_symbols::text_geom::TextKind::TaggedLabel { lead_em } =
+        let kicad_symbols::text_geom::TextKind::GlobalLabel { end_caps } =
             kicad_symbols::text_geom::TextKind::global_label(shape)
         else {
-            unreachable!("global_label is always a tagged label")
+            unreachable!("global_label is always a global label")
         };
-        TextKind::GlobalLabel { lead_em }
+        TextKind::GlobalLabel { end_caps }
     }
 
     /// A `(hierarchical_label …)`.
@@ -119,12 +124,7 @@ impl TextKind {
     /// Delegates to `kicad_symbols::text_geom::TextKind::hier_label`.
     #[must_use]
     pub fn hier_label() -> Self {
-        let kicad_symbols::text_geom::TextKind::TaggedLabel { lead_em } =
-            kicad_symbols::text_geom::TextKind::hier_label()
-        else {
-            unreachable!("hier_label is always a tagged label")
-        };
-        TextKind::GlobalLabel { lead_em }
+        TextKind::HierLabel
     }
 }
 
@@ -149,7 +149,8 @@ pub fn text_bbox(
     use kicad_symbols::text_geom as tg;
     let shared = match kind {
         TextKind::PlainLabel => tg::TextKind::PlainLabel,
-        TextKind::GlobalLabel { lead_em } => tg::TextKind::TaggedLabel { lead_em },
+        TextKind::GlobalLabel { end_caps } => tg::TextKind::GlobalLabel { end_caps },
+        TextKind::HierLabel => tg::TextKind::HierLabel,
         TextKind::PropertyReference | TextKind::PropertyValue => tg::TextKind::LeftProperty,
         TextKind::CenteredValue => tg::TextKind::CenteredProperty,
     };

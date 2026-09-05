@@ -202,6 +202,76 @@ fn ink_runs(svg: &str) -> Vec<InkRun> {
     out
 }
 
+/// Bounding box of every CLOSED SVG path (`d="M … Z"`) in the document.
+///
+/// KiCad plots a `(global_label …)`'s tag outline as one such polygon,
+/// with `x,y` comma-separated vertices — a different shape from the
+/// `M x y / L x y` stroke runs [`path_bbox`] reads. Symbol graphics
+/// (a GND triangle, a VEE marker) are closed polygons too, so callers
+/// must select by geometry rather than by document order; see
+/// [`enclosing_outline`].
+fn closed_outlines(svg: &str) -> Vec<Bbox> {
+    let mut out = Vec::new();
+    let mut rest = svg;
+    while let Some(start) = rest.find("d=\"M ") {
+        let after = &rest[start + 4..];
+        let Some(end) = after.find('"') else { break };
+        let body = &after[..end];
+        rest = &after[end..];
+        if !body.trim_end().ends_with('Z') {
+            continue;
+        }
+        let mut xs: Vec<f64> = Vec::new();
+        let mut ys: Vec<f64> = Vec::new();
+        for pair in body.split_whitespace() {
+            let Some((a, b)) = pair.split_once(',') else {
+                continue;
+            };
+            if let (Ok(x), Ok(y)) = (
+                a.parse::<f64>(),
+                b.trim_end_matches('Z').trim().parse::<f64>(),
+            ) {
+                xs.push(x);
+                ys.push(y);
+            }
+        }
+        if xs.len() < 3 {
+            continue;
+        }
+        out.push(Bbox {
+            x0: xs.iter().copied().fold(f64::INFINITY, f64::min),
+            y0: ys.iter().copied().fold(f64::INFINITY, f64::min),
+            x1: xs.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            y1: ys.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        });
+    }
+    out
+}
+
+/// The smallest closed outline that ENCLOSES `inner` — the tag KiCad drew
+/// around a global label's string.
+///
+/// Selection is by containment, not by document order: a sheet's closed
+/// polygons also include every symbol graphic, and a global label's tag is
+/// the one polygon guaranteed to wrap its own string
+/// (`CreateGraphicShape` sizes it from `GetTextBox()` plus margins).
+fn enclosing_outline(outlines: &[Bbox], inner: &Bbox) -> Option<Bbox> {
+    const EPS: f64 = 0.02;
+    outlines
+        .iter()
+        .filter(|o| {
+            o.x0 <= inner.x0 + EPS
+                && o.y0 <= inner.y0 + EPS
+                && o.x1 >= inner.x1 - EPS
+                && o.y1 >= inner.y1 - EPS
+        })
+        .min_by(|a, b| {
+            let area = |b: &Bbox| (b.x1 - b.x0) * (b.y1 - b.y0);
+            area(a).total_cmp(&area(b))
+        })
+        .copied()
+}
+
 /// Min/max of every `M x y` / `L x y` coordinate pair in an SVG path body.
 fn path_bbox(body: &str) -> Option<Bbox> {
     let mut xs: Vec<f64> = Vec::new();
@@ -364,9 +434,17 @@ impl TextClass {
     /// text run being measured.
     fn slack_epsilon_mm(self) -> f64 {
         match self {
-            // Chevron/triangle lead. Worst measured: 1.83 (global),
-            // 1.80 (hierarchical).
-            TextClass::GlobalLabel | TextClass::HierarchicalLabel => 1.90,
+            // A global label is graded against its own drawn TAG, which
+            // is exactly what the model claims, and the model does
+            // KiCad's own tag formula — so the two agree to the ~400 nm
+            // of integer-IU rounding and drafting slop the model
+            // deliberately omits (see `text_geom`). Worst measured across
+            // all 37 samples: 0.0000.
+            TextClass::GlobalLabel => 0.001,
+            // The hierarchical-label model is still the string box plus
+            // the template lead, so it carries that lead as slack.
+            // Worst measured: 1.80.
+            TextClass::HierarchicalLabel => 1.90,
             // Standoff (0.35 mm) plus unused descender. Worst: 0.77.
             TextClass::PlainLabel => 0.85,
             // Trailing side bearing plus unused descender. Worst: 0.46.
@@ -398,6 +476,7 @@ fn text_bbox_model_covers_rendered_ink() {
             let root = parse_sch(&sch);
             let modelled = modelled_text(&root);
             let mut ink = ink_runs(&svg);
+            let outlines = closed_outlines(&svg);
 
             for m in modelled {
                 // Match this modelled box to the nearest unconsumed ink
@@ -405,7 +484,37 @@ fn text_bbox_model_covers_rendered_ink() {
                 let Some(idx) = nearest_ink(&ink, &m) else {
                     continue;
                 };
-                let run = ink.remove(idx);
+                let mut run = ink.remove(idx);
+                // ADR-25, measurement half: grade the model against the
+                // geometry it CLAIMS. A `(global_label …)`'s modelled box
+                // is its drawn TAG OUTLINE — which wraps the string on
+                // every side — so comparing it to the string run alone
+                // measures the wrong thing twice over: it reports the
+                // tag's own width as "over-reserved" slack, and it is
+                // structurally blind to the tag escaping the model, which
+                // is precisely the defect this model used to have (the box
+                // stopped 1.017 mm short of the drawn tail on
+                // `named_rails`' `in`, and this test passed). Union the
+                // enclosing outline in so both directions are graded.
+                if m.class == TextClass::GlobalLabel {
+                    // Collect-then-assert: a `panic!` here would abort the
+                    // fixture loop and silently un-measure every later
+                    // fixture's scoreboard cell.
+                    let Some(tag) = enclosing_outline(&outlines, &run.bbox) else {
+                        escapes.push(format!(
+                            "{fixture}/{stem}: global label {:?} — no enclosing tag outline \
+                             in the SVG; the model could not be graded",
+                            m.text,
+                        ));
+                        continue;
+                    };
+                    run.bbox = Bbox {
+                        x0: run.bbox.x0.min(tag.x0),
+                        y0: run.bbox.y0.min(tag.y0),
+                        x1: run.bbox.x1.max(tag.x1),
+                        y1: run.bbox.y1.max(tag.y1),
+                    };
+                }
                 let over = [
                     m.bbox.x0 - run.bbox.x0,
                     m.bbox.y0 - run.bbox.y0,
@@ -485,9 +594,14 @@ fn text_bbox_model_covers_rendered_ink() {
 /// Kept below half a pen width (KiCad strokes text with ~0.15 mm), since
 /// the SVG path coordinates are stroke centrelines and the real ink
 /// already extends that far. The measured worst case across every fixture
-/// is −0.02 mm: the model strictly contains every centreline today. A
-/// positive number here means the model has drifted and some verifier is
-/// silently under-reserving space.
+/// is −0.01 mm for the text classes. Global labels are the one class with
+/// a POSITIVE escape, +0.001 mm: they are graded against their own drawn
+/// tag polygon, and the model computes KiCad's tag formula in real
+/// arithmetic where KiCad `KiROUND`s each term and then adds 3 IU of
+/// drafting slop — see `text_geom`, which records why landing a few
+/// hundred nanometres inside the polygon is the right side to err on. A
+/// larger positive number here means the model has drifted and some
+/// verifier is silently under-reserving space.
 const INK_OVERHANG_TOL_MM: f64 = 0.05;
 
 /// Nearest unconsumed ink run drawing the same string as `m`, by

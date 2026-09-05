@@ -4141,11 +4141,18 @@ fn wire_strike_penalty(b: TextBbox, wires: &[WireSeg]) -> f64 {
 }
 
 fn area_against(b: TextBbox, obstacles: &[TextBbox]) -> f64 {
+    use kicad_symbols::text_geom::TOUCH_EPS_MM;
     obstacles
         .iter()
         .map(|o| {
-            let w = (b.x1.min(o.x1) - b.x0.max(o.x0)).max(0.0);
-            let h = (b.y1.min(o.y1) - b.y0.max(o.y0)).max(0.0);
+            // Shrink by the shared touch epsilon so a box that merely
+            // ABUTS an obstacle scores 0 rather than a float-noise
+            // sliver — the candidate chooser's "fully clean" pass tests
+            // this against exactly 0.0, and the V13 verifiers apply the
+            // same epsilon, so a disagreement here is one the emitter
+            // optimises for and the verifier then fails.
+            let w = (b.x1.min(o.x1) - b.x0.max(o.x0) - TOUCH_EPS_MM).max(0.0);
+            let h = (b.y1.min(o.y1) - b.y0.max(o.y0) - TOUCH_EPS_MM).max(0.0);
             w * h
         })
         .sum()

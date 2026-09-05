@@ -18,6 +18,40 @@
 //! along. See `../kicad-source/eeschema/sch_label.cpp:2044` (global) and
 //! `:2336` (hierarchical).
 //!
+//! # A label's extent is its outline, not its string
+//!
+//! For a `(global_label …)` the string is not the drawn item: KiCad
+//! wraps it in a tag polygon that is *wider than the string on every
+//! side* (`SCH_GLOBALLABEL::CreateGraphicShape`, `sch_label.cpp:2146`).
+//! Sizing the box to `lead + text_width` therefore under-covered the
+//! drawn tag by ~24% — measured on `named_rails`' `in`, 1.017 mm of
+//! tail plus 0.229 mm above and 0.381 mm below — so every pass that
+//! moves a label off an obstacle was aiming a box a quarter too small,
+//! and could "clear" an obstacle the rendered tag still sat on.
+//! [`TextKind::GlobalLabel`] is the outline, transcribed from that
+//! function. A `(hierarchical_label …)` is the opposite case: its tag
+//! is a fixed template inside the string's own box, so its box stays
+//! the string's — see [`TextKind::HierLabel`].
+//!
+//! ## Sub-micron faithfulness, and which side to err on
+//!
+//! KiCad computes that polygon in integer internal units (100 nm) with a
+//! `KiROUND` at every step, and then adds a literal `+ 3` IU of drafting
+//! slop to both half-extents. Transcribing all of it exactly would make
+//! the model a ~400 nm *superset* of the drawn ink — and, because a tag's
+//! half-depth is one text size and a KiCad pin is 1.27 mm long, it would
+//! make EVERY global label anchored on a standard pin overlap its own
+//! host's body box by 0.0004 mm. That promotes KiCad's drafting slop to a
+//! Tier-1 V13 violation on a shared edge, which is not a legibility
+//! defect in any sense a reader would recognise.
+//!
+//! So the model is computed in real arithmetic and lands ~400 nm INSIDE
+//! the drawn polygon. That is the right side to err on for an
+//! edge-touching predicate — a shared edge reads as "clear", not as
+//! "overlapping" — and it is three orders of magnitude below the 0.05 mm
+//! `rendered_text.rs` already treats as a stroke artefact, which is
+//! exactly what its `INK_OVERHANG_TOL_MM` grades.
+//!
 //! The numbers here are calibrated against real ink measured from
 //! `kicad-cli sch export svg` by
 //! `crates/spice2kicad/tests/rendered_text.rs`; that suite asserts this
@@ -79,15 +113,40 @@ pub enum TextKind {
     /// leaves it bottom-justified, so the body sits entirely on one
     /// side of the anchor.
     PlainLabel,
-    /// A tag-bordered label — `(global_label …)` or
-    /// `(hierarchical_label …)`. `lead_em` is
-    /// `GetSchematicTextOffset`'s along-reading-direction push, in
-    /// multiples of the text size. The modelled box runs from the
-    /// anchor (the tag's own ink) through `lead + width`.
+    /// `(global_label …)` — a string wrapped in a drawn **tag
+    /// outline**.
     ///
-    /// Use [`TextKind::global_label`] / [`TextKind::hier_label`] rather
-    /// than writing the field by hand.
-    TaggedLabel { lead_em: f64 },
+    /// The outline, not the string, is the item's drawn extent, and it
+    /// is a strict superset of the string: `CreateGraphicShape`
+    /// (`../kicad-source/eeschema/sch_label.cpp:2146`) builds a box of
+    /// `GetTextBox().GetWidth() + 2·margin + linewidth` along the
+    /// reading direction by `±(halfSize + linewidth)` across it, then
+    /// extends it by one `halfSize` end-cap per pointed end (one for
+    /// `input` / `output`, two for `bidirectional` / `tri_state`, none
+    /// for `passive` / unspecified). `end_caps` is how many of those
+    /// caps this shape draws (0, 1 or 2); each one `halfSize` long.
+    ///
+    /// Modelling only the string — anchor through `lead + text_width`,
+    /// which is what this variant used to do — under-covered the drawn
+    /// tag by ~24% (1.017 mm of tail, 0.229 mm above and 0.381 mm below
+    /// on `named_rails`' `in`), so every pass that nudges a label away
+    /// from an obstacle was aiming a box a quarter too small.
+    ///
+    /// Use [`TextKind::global_label`] rather than writing the field by
+    /// hand.
+    GlobalLabel { end_caps: u8 },
+    /// `(hierarchical_label …)` — a string preceded by a **fixed
+    /// template polygon**.
+    ///
+    /// Unlike the global-label tag, `SCH_HIERLABEL::CreateGraphicShape`
+    /// (`sch_label.cpp:2259`) scales a shape template by `halfSize`
+    /// (`GetTextHeight() / 2`) alone, so the tag never grows with the
+    /// string: it reaches at most `1.0 · size` along the reading
+    /// direction and `±0.5 · size` across it. Both are inside the
+    /// string's own box (which starts `1.15 · size` along — see
+    /// [`TextKind::hier_label`]), so the drawn extent here *is* the
+    /// string box and no outline term is needed.
+    HierLabel,
     /// `(property "Reference" …)` / `(property "Value" …)` text carrying
     /// an explicit `(justify left)` — anchored on its left edge.
     LeftProperty,
@@ -100,17 +159,22 @@ pub enum TextKind {
 impl TextKind {
     /// A `(global_label …)`, given its `(shape …)` token.
     ///
-    /// `SCH_GLOBALLABEL::GetSchematicTextOffset` (`sch_label.cpp:2044`)
-    /// offsets the text by `GetLabelBoxExpansion()` —
-    /// `DEFAULT_LABEL_SIZE_RATIO` (0.375) × text height — plus, for the
-    /// arrow-headed shapes, three quarters of the height as a proxy for
-    /// the triangle.
+    /// The shape decides only how many pointed **end-caps** the tag
+    /// outline grows — `SCH_GLOBALLABEL::CreateGraphicShape`
+    /// (`sch_label.cpp:2146`) pushes `aPoints[0]` out by `halfSize` for
+    /// the shapes with an arrow head at the anchor (`input`,
+    /// `bidirectional`, `tri_state`) and `aPoints[3]` out by `halfSize`
+    /// for the shapes with one at the far end (`output`,
+    /// `bidirectional`, `tri_state`). `passive` / unspecified is a plain
+    /// rectangle.
     #[must_use]
     pub fn global_label(shape: Option<&str>) -> Self {
-        let arrowed = matches!(shape, Some("input" | "bidirectional" | "tri_state"));
-        TextKind::TaggedLabel {
-            lead_em: 0.375 + if arrowed { 0.75 } else { 0.0 },
-        }
+        let end_caps = match shape {
+            Some("bidirectional" | "tri_state") => 2,
+            Some("input" | "output") => 1,
+            _ => 0,
+        };
+        TextKind::GlobalLabel { end_caps }
     }
 
     /// A `(hierarchical_label …)`.
@@ -121,12 +185,52 @@ impl TextKind {
     /// cell), regardless of shape.
     #[must_use]
     pub fn hier_label() -> Self {
-        TextKind::TaggedLabel { lead_em: 1.15 }
+        TextKind::HierLabel
     }
 }
 
 /// KiCad's default schematic text size (mm).
 pub const DEFAULT_TEXT_SIZE_MM: f64 = 1.27;
+
+/// Below this, an overlap between two boxes from this model is IEEE-754
+/// noise, not geometry (mm).
+///
+/// Schematic geometry lands on a 1.27 mm grid, and the boxes here are
+/// built from sums and products of grid coordinates and font ratios — so
+/// two boxes that *share an edge* routinely differ by a few units in the
+/// last place rather than comparing equal. That is not hypothetical: a
+/// `(global_label …)` tag is exactly one text size deep and a KiCad pin is
+/// exactly 1.27 mm long, so a label anchored on a pin abuts its host's
+/// body box on every fixture, and `49.529999999999994 < 49.53` made the
+/// V13 body-overlap verifier report a 6 × 10⁻¹⁵ mm "overlap".
+///
+/// One nanometre: eight orders of magnitude above the noise it absorbs
+/// and three below the 0.001 mm anything in this project calls a defect,
+/// so it cannot mask one. Both the emitter's candidate scorer and the V13
+/// verifiers read it, because a predicate they disagree on is a predicate
+/// the emitter optimises and the verifier then fails.
+pub const TOUCH_EPS_MM: f64 = 1.0e-6;
+
+/// `DEFAULT_LABEL_SIZE_RATIO` (`eeschema/default_values.h:75`), the
+/// ratio `SCH_LABEL_BASE::GetLabelBoxExpansion` scales the text height
+/// by to get a label's box margin.
+const LABEL_SIZE_RATIO: f64 = 0.375;
+
+/// `CreateGraphicShape`'s `halfSize` — `GetTextHeight() / 2 + margin` —
+/// in multiples of the text size. Also the length of each pointed
+/// end-cap the arrow-headed shapes add.
+const TAG_HALF_SIZE_EM: f64 = 0.5 + LABEL_SIZE_RATIO;
+
+/// `SCH_HIERLABEL::GetSchematicTextOffset`'s along-reading push of the
+/// string: `DEFAULT_TEXT_OFFSET_RATIO` (0.15) × height plus one full
+/// `GetTextWidth()` (the square template cell).
+const HIER_LEAD_EM: f64 = 1.15;
+
+/// Newstroke's inter-character gap, in em. `STROKE_FONT::GetTextAsGlyphs`
+/// (`common/font/stroke_font.cpp:305`) closes the run's bounding box one
+/// `INTER_CHAR` short of the final cursor, so a string's *box* is one gap
+/// narrower than its summed advance.
+const INTER_CHAR_EM: f64 = 0.2;
 
 /// Renderer-faithful bbox of `text` drawn at `anchor`, rotated
 /// `orientation_deg` CCW *on screen*.
@@ -177,11 +281,44 @@ pub fn text_bbox(
     let (lx, rx, ty, by) = match kind {
         TextKind::PlainLabel | TextKind::LeftProperty => (0.0, width, top, bot),
         TextKind::CenteredProperty => (-width / 2.0, width / 2.0, top, bot),
-        // The tag's own ink starts AT the anchor (chevron / triangle)
-        // and the text only begins `lead` further along the reading
-        // direction — it does not straddle the anchor backwards, which
-        // is what the pre-calibration model wrongly assumed.
-        TextKind::TaggedLabel { lead_em } => (0.0, lead_em * size_mm + width, top, bot),
+        // The template polygon is inside the string's own box, so the
+        // drawn extent is the string: it starts `lead` along the reading
+        // direction from the anchor and does not straddle the anchor
+        // backwards.
+        TextKind::HierLabel => (0.0, HIER_LEAD_EM * size_mm + width, top, bot),
+        // The tag OUTLINE is the drawn extent (it contains the string),
+        // so the box is `CreateGraphicShape`'s polygon, transcribed:
+        //
+        //   margin    = GetLabelBoxExpansion()      = 0.375·size
+        //   halfSize  = GetTextHeight()/2 + margin  = 0.875·size
+        //   linewidth = GetPenWidth()               = size/8
+        //   symb_len  = GetTextBox().GetWidth() + 2·margin
+        //   x = symb_len + linewidth + 3 IU     (+ halfSize per end-cap)
+        //   y = halfSize + linewidth + 3 IU
+        //
+        // and `GetTextBox().GetWidth()` is `FONT::StringBoundaryLimits`:
+        // the stroke run's own box — the summed advance less one
+        // `INTER_CHAR` gap — inflated by `1.5·thickness` on each side.
+        //
+        // Arithmetic is in f64 mm where KiCad's is in `KiROUND`ed
+        // integer IU, so the result can differ from the drawn polygon by
+        // ~1 µm; `rendered_text.rs` grades that against real ink.
+        TextKind::GlobalLabel { end_caps } => {
+            let margin = LABEL_SIZE_RATIO * size_mm;
+            let half_size = TAG_HALF_SIZE_EM * size_mm;
+            let linewidth = size_mm / 8.0;
+            // `FONT::StringBoundaryLimits`: the stroke run's own box —
+            // the summed advance less one `INTER_CHAR` gap — inflated by
+            // `1.5 · thickness` on each side.
+            let text_box_w = width - INTER_CHAR_EM * size_mm + 3.0 * linewidth;
+            let symb_len = text_box_w + 2.0 * margin;
+            (
+                0.0,
+                symb_len + linewidth + f64::from(end_caps) * half_size,
+                -(half_size + linewidth),
+                half_size + linewidth,
+            )
+        }
     };
 
     let theta = f64::from(orientation_deg).to_radians();
@@ -210,9 +347,9 @@ mod tests {
 
     /// The defect this module exists to fix: a global label reserves NO
     /// space behind its anchor, and enough space ahead of it to contain
-    /// the lead plus the full string.
+    /// the whole tag outline.
     #[test]
-    fn global_label_lead_is_one_sided() {
+    fn global_label_tag_is_one_sided() {
         let b = text_bbox(
             "ni",
             (100.0, 100.0),
@@ -221,18 +358,69 @@ mod tests {
             TextKind::global_label(Some("input")),
         );
         assert!((b.x0 - 100.0).abs() < 1e-9, "reserved space behind anchor");
-        let lead = 1.125 * DEFAULT_TEXT_SIZE_MM;
-        let want = 100.0 + lead + crate::text_metrics::text_width("ni", DEFAULT_TEXT_SIZE_MM);
-        assert!((b.x1 - want).abs() < 1e-9);
+        // symb_len + linewidth + one end-cap = width + 1.925 em, to
+        // within the integer-IU rounding the exact model carries.
+        let want = 100.0
+            + crate::text_metrics::text_width("ni", DEFAULT_TEXT_SIZE_MM)
+            + 1.925 * DEFAULT_TEXT_SIZE_MM;
+        assert!((b.x1 - want).abs() < 1e-3, "{} != {want}", b.x1);
     }
 
-    /// A passive (non-arrowed) shape gets only the box expansion.
+    /// The tag is the drawn extent, so it must strictly contain the
+    /// string KiCad prints inside it — anchor + lead through
+    /// anchor + lead + width, and half a text height either side.
     #[test]
-    fn passive_shape_has_no_triangle_lead() {
-        let TextKind::TaggedLabel { lead_em } = TextKind::global_label(Some("passive")) else {
-            panic!("expected a tagged label");
+    fn global_label_tag_contains_its_string() {
+        for shape in ["input", "output", "bidirectional", "tri_state", "passive"] {
+            let b = text_bbox(
+                "descender_pgy",
+                (0.0, 0.0),
+                DEFAULT_TEXT_SIZE_MM,
+                0,
+                TextKind::global_label(Some(shape)),
+            );
+            let arrowed = matches!(shape, "input" | "bidirectional" | "tri_state");
+            let lead = (0.375 + if arrowed { 0.75 } else { 0.0 }) * DEFAULT_TEXT_SIZE_MM;
+            let string_end =
+                lead + crate::text_metrics::text_width("descender_pgy", DEFAULT_TEXT_SIZE_MM);
+            assert!(b.x1 >= string_end, "{shape}: tag {} < string end", b.x1);
+            assert!(b.y1 >= 0.7 * DEFAULT_TEXT_SIZE_MM, "{shape}: descender");
+            assert!(b.y0 <= -0.7 * DEFAULT_TEXT_SIZE_MM, "{shape}: ascender");
+        }
+    }
+
+    /// A passive (non-arrowed) shape gets no pointed end-cap.
+    #[test]
+    fn passive_shape_has_no_end_caps() {
+        let TextKind::GlobalLabel { end_caps } = TextKind::global_label(Some("passive")) else {
+            panic!("expected a global label");
         };
-        assert!((lead_em - 0.375).abs() < 1e-9);
+        assert_eq!(end_caps, 0);
+        let TextKind::GlobalLabel { end_caps } = TextKind::global_label(Some("bidirectional"))
+        else {
+            panic!("expected a global label");
+        };
+        assert_eq!(end_caps, 2);
+    }
+
+    /// A hierarchical label's template tag is inside its string box, so
+    /// the model stays the string — never the wider global-label tag.
+    #[test]
+    fn hier_label_box_is_the_string() {
+        let b = text_bbox(
+            "clk",
+            (0.0, 0.0),
+            DEFAULT_TEXT_SIZE_MM,
+            0,
+            TextKind::hier_label(),
+        );
+        let want = HIER_LEAD_EM * DEFAULT_TEXT_SIZE_MM
+            + crate::text_metrics::text_width("clk", DEFAULT_TEXT_SIZE_MM);
+        assert!((b.x1 - want).abs() < 1e-9);
+        // …and it covers the template polygon (≤ 1.0 em long, ±0.5 em deep).
+        assert!(b.x1 >= DEFAULT_TEXT_SIZE_MM);
+        assert!(b.y1 >= 0.5 * DEFAULT_TEXT_SIZE_MM);
+        assert!(b.y0 <= -0.5 * DEFAULT_TEXT_SIZE_MM);
     }
 
     /// Descenders extend below the em box.
