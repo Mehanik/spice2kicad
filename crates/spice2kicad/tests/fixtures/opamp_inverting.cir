@@ -1,6 +1,14 @@
 * Inverting op-amp: gain = -Rf/Rin = -10.
 * Op-amp modelled as a .subckt so it lands on its own hierarchical sheet.
 *@symbol Device:R_US for=R*
+* `*@port` on the INPUT nets. The emitter already stamps
+* `(shape input)` on an undeclared interface net, so the token states
+* nothing and ADR-28's metric D2 (`port.label_backwards`) grades only
+* terminals the SOURCE declares. Declaring them is the ADR's own
+* remedy for its ambiguity 15, and it is free: the emitted file is
+* byte-identical with and without these lines (the default the
+* declaration replaces is the same direction).
+*@port in=input
 
 .subckt OPAMP inp inn out vcc vee
 * Trivial VCVS model — fine for a topology round-trip.

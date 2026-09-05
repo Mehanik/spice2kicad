@@ -4,6 +4,15 @@
 * as a flat Amplifier_Operational:OPAMP triangle, and the OPAMP subckt is
 * NOT lowered to a hierarchical sheet.
 *@symbol Device:R_US for=R*
+* `*@port` on the INPUT nets. The emitter already stamps
+* `(shape input)` on an undeclared interface net, so the token states
+* nothing and ADR-28's metric D2 (`port.label_backwards`) grades only
+* terminals the SOURCE declares. Declaring them is the ADR's own
+* remedy for its ambiguity 15, and it is free: the emitted file is
+* byte-identical with and without these lines (the default the
+* declaration replaces is the same direction).
+*@port in1=input
+*@port in2=input
 
 .subckt OPAMP inp inn out vcc vee ;@ symbol=Amplifier_Operational:OPAMP ;@ pinmap=inp:3,inn:2,out:1,vcc:8,vee:4
 E1 out 0 inp inn 1e5

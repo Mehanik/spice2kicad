@@ -15,6 +15,14 @@
 
 *@symbol Device:R_US for=R*
 *@symbol Device:C    for=C*
+* `*@port` on the INPUT nets. The emitter already stamps
+* `(shape input)` on an undeclared interface net, so the token states
+* nothing and ADR-28's metric D2 (`port.label_backwards`) grades only
+* terminals the SOURCE declares. Declaring them is the ADR's own
+* remedy for its ambiguity 15, and it is free: the emitted file is
+* byte-identical with and without these lines (the default the
+* declaration replaces is the same direction).
+*@port in=input
 
 VPOS p5 0 DC  5    ;@ power=+5V
 VNEG n5 0 DC -5    ;@ power=-5V
