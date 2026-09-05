@@ -9740,3 +9740,164 @@ contradiction was the evidence, not the suite.
   default and an explicit `--placer=readable-v1`.
 * Every re-recorded literal was read from the scoreboard sink, never from
   test output.
+
+## ADR-39 — Three "the decoration pass does not know about glyphs" defects were one wrong pose
+
+**Status:** the diagnosis is landed, and so is defect 2 (the tie-break)
+and the `text_geom` precondition. **Defect 1 — the wrong glyph pose — is
+implemented and BLOCKED**, on branch
+`glyph-pose-obstacles-pending-signoff`: it repairs the two remaining
+xfail entries and costs exactly one per-fixture Tier-1 ratchet rise,
+which needs owner sign-off. See "What defect 1's repair costs".
+
+### The report
+
+`crates/spice2kicad/tests/common/xfail.rs` carried three entries against
+`no_foreign_label_or_wire_over_power_glyph_body`, registered across two
+different promotions, in two different stages, with the same stated
+expiry condition — *"the label-nudge pass does not treat power-glyph
+bodies as obstacles … it expires the day that pass learns about
+glyphs"*:
+
+| fixture | defect | stage the entry blamed |
+| --- | --- | --- |
+| `named_rails` | the `in` label over the `n5` (VEE) glyph | label-nudge |
+| `sallen_key_lpf` | the `N1` label over the VEE glyph | label-nudge |
+| `sallen_key_driven` | the `out` wire through the VEE glyph | the router |
+
+All three attributions were wrong, and there were only ever **two**
+defects — one of them shared by all three fixtures.
+
+### Defect 1 — the pass HAD the glyphs, at the wrong coordinates
+
+`label_rotation_obstacles` has fed rail-glyph bodies to the label chooser
+since ADR-14, and `emit_root` has fed the same list to the router. Both
+read `rail_glyph_body_bboxes`, and that builder posed **every** glyph at
+`Orientation::IDENTITY` on its host pin, on the strength of a comment
+reading "V14 locks every rail glyph to rot 0".
+
+V14 does not. `power:VEE` — the glyph **every negative rail** draws — is
+emitted at **rot 180** (`rails::glyph_rotation`: its marker is drawn
+upward while a negative rail attaches downward), and a forced-sideways or
+sheet-edge glyph is emitted one to two cells **outward** of its pin. A
+VEE obstacle box was therefore *reflected about its anchor*: it guarded
+the empty canvas on one side while the drawn marker on the other went
+unguarded. Each of the three fixtures has a negative rail. Each was being
+repelled from nothing.
+
+This is ADR-25's rule stated for a **model** rather than a guard: an
+obstacle evaluated over geometry the emitted file does not have is not
+conservative, it is wrong, and silent about it. The repair is the same
+shape as ADR-25's — build the box from the one definition Stage 1's own
+emission reads, `spice_route::rails::glyph_pose`, rather than
+re-deriving it.
+
+Its blast radius is exactly one Tier-1 cell (below); everything else,
+`baseline_lock` included, is unchanged.
+
+### Defect 2 — the least-bad tie-break could not tell repairable from permanent
+
+Fixing defect 1 alone made `named_rails` **worse**, and the reason is a
+second, independent defect. `in` is a one-pin terminal with no clean
+rotation on that fixture, so its pose falls to the least-overlap
+tie-break — which scored symbol bodies and Reference/Value text as ONE
+class and picked whichever rectangle was smaller. That comparison is
+meaningless: `nudge_property_text` runs immediately AFTER labels are
+planted and takes them as obstacles, so a property collision is repaired
+seconds later, while a symbol body is frozen by the decoration contract
+and a label on one stays on one.
+
+Split the score into `(fixed, movable, pin-text, wires)` and `in` takes
+the property collision, which the nudge then clears outright (`CL`'s
+"10n" moves 40.64 → 48.26). Passes 1 and 2 are unchanged by construction
+— areas are non-negative, so `a + b == 0` iff `a == 0 && b == 0` — so
+every fixture with a clean rotation is byte-identical.
+
+**Phase 4.5 keeps scoring the classes merged.** The split is a statement
+about what a later decoration pass will repair, and
+`refine::v13_overlap_count` runs before decoration and models none of it
+— the same reason its doc already gives for carrying no pin-text set, no
+wires and no anchor search. Importing half of it was measured and is
+worse: four elements move across `resistor_ladder_ref` and
+`sallen_key_driven` (rotations only) for a model-side V13 gain that
+reaches no emitted output, and `resistor_ladder_ref`'s wire detour goes
+1.052 → 1.127.
+
+Defect 2 alone expires the `named_rails` entry — even with defect 1
+still in place, because the tie-break stops choosing the glyph.
+
+### The precondition: the global-label box covered 76% of the drawn tag
+
+Neither repair is worth much aimed with a box a quarter too small, and
+`text_geom` had one. `TextKind::TaggedLabel` sized a `(global_label …)`
+from the anchor through `lead + text_width`, but KiCad does not draw a
+string there — it draws a tag OUTLINE around the string, wider on every
+side (`SCH_GLOBALLABEL::CreateGraphicShape`, `sch_label.cpp:2146`).
+Measured against `kicad-cli sch export svg` ink on `named_rails`' `in`:
+model `x[34.9174, 38.1000] y[49.7586, 51.6890]`, ink
+`x[33.9008, 38.1000] y[49.5296, 52.0704]` — 1.017 mm of tail plus
+0.229 above and 0.381 below.
+
+The calibration could not see it, and that is the second half of ADR-25
+again: `rendered_text.rs` graded the tag model against the **string
+run**, so the tag's own width read as over-reservation and an escaping
+tag was structurally invisible. It now grades a global label against its
+own drawn tag polygon (matched by containment — a sheet's other closed
+polygons are symbol graphics), and the class's slack ratchet drops
+1.90 → 0.001 mm.
+
+Two sub-micron judgements are recorded in `text_geom`'s own docs: the
+`+ 3` IU of drafting slop and KiCad's per-term `KiROUND`ing are NOT
+modelled, so the model lands ~400 nm *inside* the drawn polygon — the
+right side to err on, because a tag is exactly one text size deep and a
+KiCad pin exactly 1.27 mm long, so every global label anchored on a pin
+abuts its host's body box and a model a hair over turns that shared edge
+into a Tier-1 violation. `TOUCH_EPS_MM` (1 nm) then absorbs the IEEE-754
+noise on that shared edge, in both the emitter's scorer and the V13
+verifiers.
+
+### What defect 1's repair costs
+
+With the pose corrected, the `out` trunk on `sallen_key_driven` stops
+crossing the VEE marker — and gets longer:
+
+| | before | after |
+| --- | --- | --- |
+| `out` trunk back | y = 45.72 | y = 50.80 |
+| emitted wire | 156.21 mm | 166.37 mm |
+| `detour / sallen_key_driven` | 1.1496 | **1.2243** |
+
+That is the change's ENTIRE cost. `v13.9_foreign_over_glyph` is 0 on all
+22 fixtures, every other `detour` cell equals its recorded literal to
+five decimals, and `baseline_lock` is untouched.
+
+**The floor is not much lower.** The obstacle is the drawn VEE marker,
+`x[94.488, 96.012] y[44.45, 46.99]`, sitting in the trunk's channel:
+
+* Routing *above* it is barred by V11, not by geometry — `y = 44.45`
+  would be 2.54 mm **shorter** than today's route, but the glyph's anchor
+  pin is at `(95.25, 44.45)` and a foreign wire through a pin coordinate
+  is a silent short.
+* Routing below it at `y = 46.99 … 49.53` is barred by `RB`'s body,
+  `x[85.344, 87.376] y[45.72, 50.80]` — for the *trunk*. A **local** U
+  around the glyph alone (x ≈ 93 … 97, where RB is not) is free at
+  `y = 46.99` and costs 2 × 1.27 = 2.54 mm, i.e. detour **1.168**.
+
+So a router that jogged locally instead of re-basing the whole trunk
+would ask for 1.1496 → 1.168 rather than 1.1496 → 1.2243. Both exceed a
+zero-slack ratchet, and neither qualifies for the "adds genuinely new
+geometry" exception: the change lengthens a wire, it does not introduce
+one.
+
+**This is the global-improvement escape's case, and it needs the owner.**
+The change strictly reduces total Tier-1 violations across the suite (two
+`v13.9` cells 1 → 0, none created) while raising one fixture's Tier-1
+budget — which CLAUDE.md permits *only* with a one-line rationale and
+owner sign-off. Absent sign-off the local-optimum freeze stands.
+
+The architectural alternative, which needs no budget at all, is the
+placer-side one ADR-14 left unbuilt: a rail glyph's drawn reach is not
+reserved against **routing channels**, only against bodies, so the placer
+is free to hang a VEE marker across the one horizontal lane the `out` net
+has. Reserve the channel and the wire never needs the detour. That is a
+placer change with its own blast radius, not a router one.
