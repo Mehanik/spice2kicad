@@ -26,6 +26,7 @@
 pub mod bands;
 pub mod channels;
 pub mod cost;
+pub mod dc_column;
 pub mod dc_rank;
 pub mod footprint;
 pub mod glyph_geom;
@@ -668,6 +669,15 @@ pub fn place_with_hint(
     // column, and before `pick_orientations` (which skips pinned
     // elements). Pins what it places so the SA and phase 4.5 cannot revert
     // it. `refinement_meta` recomputes the identical pins.
+    // Idiom 6 (ADR-28 metric B's construction): elements carrying the
+    // same DC current share an X column, ordered top-to-bottom by
+    // `dc_rank`. Y-ORDERING, never Y-spacing — the bands are untouched.
+    // Runs after the rail-stub idiom (so a stub already pulled into its
+    // node's column is re-seated by the stronger current-path
+    // constraint) and BEFORE `apply_series_horizontal`, which then reads
+    // the columned positions. Dead on every default path — gated on
+    // `Placer::dc_series_columns`.
+    dc_column::apply_dc_columns(&mut placement, &mut pinned, &checked, &allowed, opts.placer);
     idioms::apply_series_horizontal(&mut placement, &mut pinned, &checked, &allowed, opts.placer);
     orient::debug_assert_seed_pins_satisfy_v14(
         &placement,
@@ -1088,6 +1098,7 @@ pub fn refinement_meta(
     // so phase 4.5 sees the same pins and keeps each series element at its
     // constructed horizontal facing (it never re-orients a pinned
     // element).
+    dc_column::apply_dc_columns(&mut placement, &mut pinned, checked, &allowed, placer);
     idioms::apply_series_horizontal(&mut placement, &mut pinned, checked, &allowed, placer);
     orient::debug_assert_seed_pins_satisfy_v14(
         &placement,
@@ -1602,7 +1613,9 @@ fn pack_rows(
         | Placer::TerminalSeriesDivider
         | Placer::YSign
         | Placer::SignalDirection
-        | Placer::ReadableV1 => shift.last().copied().unwrap_or(0) / 2,
+        | Placer::ReadableV1
+        | Placer::DcSeriesColumn
+        | Placer::DcSeriesColumnPinned => shift.last().copied().unwrap_or(0) / 2,
         Placer::M4YDatum => 0,
     };
     for (i, pe) in placed.iter_mut().enumerate() {
@@ -1768,7 +1781,9 @@ fn place_seed(
         | Placer::TerminalSeriesDivider
         | Placer::YSign
         | Placer::SignalDirection
-        | Placer::ReadableV1 => {
+        | Placer::ReadableV1
+        | Placer::DcSeriesColumn
+        | Placer::DcSeriesColumnPinned => {
             let n_i32 = i32::try_from(n).unwrap_or(i32::MAX);
             let y_top: i32 = 0;
             let y_bot: i32 = (n_i32 + 4) * Y_RANK_STRIDE;

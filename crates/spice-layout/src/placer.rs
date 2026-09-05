@@ -495,6 +495,50 @@ pub enum Placer {
     /// `opamp_definition_level` +4, which is **unexplained**.
     #[default]
     ReadableV1,
+    /// **DC-series column, position only** — [`Placer::ReadableV1`] plus
+    /// [`crate::dc_column`]'s constructive column idiom: elements that
+    /// carry the same DC current share an X column and order in Y by
+    /// [`crate::dc_rank`].
+    ///
+    /// The mismodelling it addresses has the V14/V17 shape — one axis
+    /// promoted a generation, the orthogonal one left behind. X has meant
+    /// *depth along the DC signal path* since the second promotion; Y is
+    /// still [`crate::bands`]' five-value net-class-membership table,
+    /// while the convention it serves is *Y proportional to DC potential
+    /// along the current path*. `dc_rank` is that functional, and
+    /// placement never read it — only phase 4.5's facing trigger does.
+    ///
+    /// It is deliberately **Y-ordering and not Y-spacing**: ADR-19's M4
+    /// post-mortem measured that Y-spacing changes land in chaotic,
+    /// unattributable basins, and M4 was landed-then-reverted. The bands
+    /// are untouched; a matched component is re-seated onto its own
+    /// barycenter as a stack, and nothing else moves.
+    ///
+    /// This arm **pins nothing**. `pick_orientations`, the SA and phase
+    /// 4.5 keep every degree of freedom they have today, so it removes no
+    /// pose from the Tier-0 repair and owes no ADR-37 escape.
+    DcSeriesColumn,
+    /// **DC-series column, pinned** — [`Placer::DcSeriesColumn`] with the
+    /// column frozen: members are pinned, so the SA and phase 4.5 leave
+    /// the stack put.
+    ///
+    /// The split from the unpinned arm is for **attribution**, exactly as
+    /// [`Placer::TerminalSeries`] splits from
+    /// [`Placer::TerminalSeriesDivider`]: an unpinned seed nudge the SA
+    /// can re-basin away and a frozen construction are two different
+    /// experiments, and one aggregate could not say which half paid.
+    ///
+    /// Pinning skips `pick_orientations`, so under CLAUDE.md's
+    /// *consistency requirement* this arm must own the pose it freezes —
+    /// [`crate::dc_column::apply_dc_columns`] chooses one from the same
+    /// [`crate::orient::allowed_orientations`] set (V14 intersect V17)
+    /// every other stage reads, and declines the whole column when that
+    /// set admits nothing. It is a construction, not a filter, but it
+    /// still narrows what phase 4.5's Tier-0 repair can reach — the
+    /// failure mode ADR-37 records for `terminal-series-divider` on
+    /// `sallen_key_lpf` — so an SA seed sweep is part of its grading
+    /// rather than an optional extra.
+    DcSeriesColumnPinned,
 }
 
 impl Placer {
@@ -518,6 +562,8 @@ impl Placer {
         Self::TerminalSeriesDivider,
         Self::YSign,
         Self::SignalDirection,
+        Self::DcSeriesColumn,
+        Self::DcSeriesColumnPinned,
     ];
 
     /// The name accepted by `--placer` and printed by the scoreboard.
@@ -541,6 +587,8 @@ impl Placer {
             Self::YSign => "y-sign",
             Self::SignalDirection => "signal-direction",
             Self::ReadableV1 => "readable-v1",
+            Self::DcSeriesColumn => "dc-series-column",
+            Self::DcSeriesColumnPinned => "dc-series-column-pinned",
         }
     }
 
@@ -608,6 +656,14 @@ impl Placer {
                  signal-direction + terminal-series-divider + \
                  divider-rails-strict + facing-trigger (no y-sign)"
             }
+            Self::DcSeriesColumn => {
+                "readable-v1 plus the DC-series column idiom: elements on \
+                 one DC current share an X column, ordered by dc_rank"
+            }
+            Self::DcSeriesColumnPinned => {
+                "dc-series-column with the column pinned, so the SA and \
+                 phase 4.5 leave the stack put (attribution arm)"
+            }
         }
     }
 
@@ -658,6 +714,8 @@ impl Placer {
                 | Self::YSign
                 | Self::SignalDirection
                 | Self::ReadableV1
+                | Self::DcSeriesColumn
+                | Self::DcSeriesColumnPinned
         )
     }
 
@@ -696,6 +754,8 @@ impl Placer {
                 | Self::YSign
                 | Self::SignalDirection
                 | Self::ReadableV1
+                | Self::DcSeriesColumn
+                | Self::DcSeriesColumnPinned
         )
     }
 
@@ -712,7 +772,11 @@ impl Placer {
     pub fn rail_gated_dividers(self) -> bool {
         matches!(
             self,
-            Self::DividerRails | Self::DividerRailsStrict | Self::ReadableV1
+            Self::DividerRails
+                | Self::DividerRailsStrict
+                | Self::ReadableV1
+                | Self::DcSeriesColumn
+                | Self::DcSeriesColumnPinned
         )
     }
 
@@ -723,7 +787,13 @@ impl Placer {
     /// This is the attribution arm — see [`Self::DividerRailsStrict`].
     #[must_use]
     pub fn divider_tap_must_be_unloaded(self) -> bool {
-        matches!(self, Self::DividerRailsStrict | Self::ReadableV1)
+        matches!(
+            self,
+            Self::DividerRailsStrict
+                | Self::ReadableV1
+                | Self::DcSeriesColumn
+                | Self::DcSeriesColumnPinned
+        )
     }
 
     /// Orientation-churn stage 2: does the SA's V5 never-increase gate
@@ -745,7 +815,13 @@ impl Placer {
     /// on `(severed, coincident, v11, v13, v12, v5, bends)`.
     #[must_use]
     pub fn facing_inverted_trigger(self) -> bool {
-        matches!(self, Self::FacingTrigger | Self::ReadableV1)
+        matches!(
+            self,
+            Self::FacingTrigger
+                | Self::ReadableV1
+                | Self::DcSeriesColumn
+                | Self::DcSeriesColumnPinned
+        )
     }
 
     /// F1 case (a): does [`crate::idioms::apply_series_horizontal`] accept
@@ -761,7 +837,11 @@ impl Placer {
     pub fn terminal_net_series(self) -> bool {
         matches!(
             self,
-            Self::TerminalSeries | Self::TerminalSeriesDivider | Self::ReadableV1
+            Self::TerminalSeries
+                | Self::TerminalSeriesDivider
+                | Self::ReadableV1
+                | Self::DcSeriesColumn
+                | Self::DcSeriesColumnPinned
         )
     }
 
@@ -774,7 +854,13 @@ impl Placer {
     /// never moved.
     #[must_use]
     pub fn divider_node_series(self) -> bool {
-        matches!(self, Self::TerminalSeriesDivider | Self::ReadableV1)
+        matches!(
+            self,
+            Self::TerminalSeriesDivider
+                | Self::ReadableV1
+                | Self::DcSeriesColumn
+                | Self::DcSeriesColumnPinned
+        )
     }
 
     /// F3: does the placer convert a library-frame pin `y` into the
@@ -805,7 +891,37 @@ impl Placer {
     /// why it must be a hard filter rather than a `cost.rs` weight.
     #[must_use]
     pub fn signal_direction_filter(self) -> bool {
-        matches!(self, Self::SignalDirection | Self::ReadableV1)
+        matches!(
+            self,
+            Self::SignalDirection
+                | Self::ReadableV1
+                | Self::DcSeriesColumn
+                | Self::DcSeriesColumnPinned
+        )
+    }
+
+    /// Does the seed run [`crate::dc_column::apply_dc_columns`] — the
+    /// constructive column idiom that puts a chain of DC-series elements
+    /// into one X column ordered by [`crate::dc_rank`]?
+    ///
+    /// Gating the whole construction on this one accessor is the entire
+    /// byte-identity argument for the shipping output: the pass returns
+    /// immediately unless this is `true`, so no default-path placement
+    /// can change. `baseline_lock` is the empirical half.
+    #[must_use]
+    pub fn dc_series_columns(self) -> bool {
+        matches!(self, Self::DcSeriesColumn | Self::DcSeriesColumnPinned)
+    }
+
+    /// Does that construction additionally **pin** the column, freezing
+    /// it against the SA and phase 4.5?
+    ///
+    /// The attribution half — see [`Self::DcSeriesColumnPinned`]. Pinning
+    /// is also what obliges the pass to choose each member's orientation
+    /// (CLAUDE.md's consistency requirement).
+    #[must_use]
+    pub fn dc_series_columns_pinned(self) -> bool {
+        matches!(self, Self::DcSeriesColumnPinned)
     }
 
     /// Look a placer up by the name `--placer` accepts.
@@ -866,6 +982,35 @@ mod tests {
             !Placer::FlowSeedV4.page_frame_pin_y() && !Placer::FlowSeedV4.terminal_net_series()
         );
         assert!(Placer::default().terminal_net_series());
+    }
+
+    /// The DC-series column construction is **dead on the default
+    /// path**. Both halves are gated on a `Placer` accessor and nothing
+    /// else, so this assertion is the whole byte-identity argument for
+    /// the shipping output — `baseline_lock` is the empirical half.
+    #[test]
+    fn the_dc_series_column_is_off_by_default() {
+        assert!(!Placer::default().dc_series_columns());
+        assert!(!Placer::default().dc_series_columns_pinned());
+        assert!(!Placer::FlowSeedV4.dc_series_columns());
+        assert!(!Placer::Champion.dc_series_columns());
+        assert!(Placer::DcSeriesColumn.dc_series_columns());
+        assert!(!Placer::DcSeriesColumn.dc_series_columns_pinned());
+        assert!(Placer::DcSeriesColumnPinned.dc_series_columns());
+        assert!(Placer::DcSeriesColumnPinned.dc_series_columns_pinned());
+        // Both compose ON the shipping default, so a comparison against
+        // `readable-v1` isolates the construction under test.
+        for p in [Placer::DcSeriesColumn, Placer::DcSeriesColumnPinned] {
+            assert!(p.flow_seed_layering());
+            assert!(p.unified_roots());
+            assert!(p.signal_direction_filter());
+            assert!(p.terminal_net_series());
+            assert!(p.divider_node_series());
+            assert!(p.rail_gated_dividers());
+            assert!(p.divider_tap_must_be_unloaded());
+            assert!(p.facing_inverted_trigger());
+            assert!(!p.page_frame_pin_y());
+        }
     }
 
     #[test]

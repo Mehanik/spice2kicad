@@ -1650,6 +1650,104 @@ fn readability_metrics_are_reported_for_every_fixture() {
     );
 }
 
+/// **The metric and the construction must be the same predicate.**
+///
+/// `spice_layout::dc_column` restates metric B's DC-series discriminator
+/// over a `CheckedNetlist` so the placer can *build* the column the
+/// metric grades. Two implementations of one definition drift, and a
+/// construction optimising against a different predicate than the one
+/// scoring it is exactly the failure ADR-28 was written to stop. So this
+/// asserts they return the same pair set — by refdes, on every fixture.
+///
+/// It falsifies the crate in the direction the F3/F5 precedent asks for:
+/// the metric is derived independently from the netlist, and the placer
+/// has to agree with it, not the other way round.
+#[test]
+fn the_placer_and_metric_b_agree_on_every_fixture() {
+    let library = load_test_library();
+    let mut checked_any = 0usize;
+    for name in FIXTURES {
+        let f = load(name);
+        let mine: BTreeSet<(String, String, String)> = dc_series_pairs(&f)
+            .into_iter()
+            .map(|(u, v, n)| {
+                let (a, b) = if u <= v { (u, v) } else { (v, u) };
+                (a, b, n)
+            })
+            .collect();
+
+        let spice_src =
+            std::fs::read_to_string(fixtures_dir().join(format!("{name}.cir"))).expect("read cir");
+        let parsed = spice_parser::parse(&spice_src, FileId(0)).expect("parse spice");
+        let resolved = spice_resolve::resolve(&parsed.netlist, &library).expect("resolve spice");
+        let (checked, _w) = spice_policy::check(resolved).expect("policy check");
+        let theirs: BTreeSet<(String, String, String)> =
+            spice_layout::dc_column::dc_series_pairs(&checked)
+                .into_iter()
+                .map(|(u, v, n)| {
+                    let (a, b) = (
+                        checked.elements[u].refdes.clone(),
+                        checked.elements[v].refdes.clone(),
+                    );
+                    if a <= b { (a, b, n) } else { (b, a, n) }
+                })
+                .collect();
+
+        assert_eq!(
+            mine, theirs,
+            "{name}: metric B and `spice_layout::dc_column` disagree about which \
+             element pairs are DC-series"
+        );
+        checked_any += 1;
+    }
+    assert_eq!(checked_any, FIXTURES.len());
+}
+
+/// The suite-wide census of what the DC-series column construction can
+/// see: which fixtures present a column at all, and how long each one is.
+///
+/// Not a ratchet — it prints (under `S2K_READABILITY_DUMP=1`) and asserts
+/// only the two properties the construction's correctness rests on:
+/// columns are **disjoint** (no element is in two of them) and every
+/// column has at least two members. A construction that fires on nothing
+/// would still pass; the point of the test is that the census is
+/// reproducible and visible, not that it is large.
+#[test]
+fn the_dc_series_column_census_is_disjoint_across_fixtures() {
+    let dump = std::env::var("S2K_READABILITY_DUMP").is_ok();
+    let library = load_test_library();
+    for name in FIXTURES {
+        let spice_src =
+            std::fs::read_to_string(fixtures_dir().join(format!("{name}.cir"))).expect("read cir");
+        let parsed = spice_parser::parse(&spice_src, FileId(0)).expect("parse spice");
+        let resolved = spice_resolve::resolve(&parsed.netlist, &library).expect("resolve spice");
+        let (checked, _w) = spice_policy::check(resolved).expect("policy check");
+        let cols = spice_layout::dc_column::detect_dc_columns(&checked);
+        let mut seen: BTreeSet<usize> = BTreeSet::new();
+        for c in &cols {
+            assert!(c.members.len() >= 2, "{name}: degenerate column {c:?}");
+            for m in &c.members {
+                assert!(seen.insert(*m), "{name}: element {m} is in two columns");
+            }
+        }
+        if dump {
+            let printed: Vec<Vec<&str>> = cols
+                .iter()
+                .map(|c| {
+                    c.members
+                        .iter()
+                        .map(|&i| checked.elements[i].refdes.as_str())
+                        .collect()
+                })
+                .collect();
+            println!(
+                "{name:<24} pairs={:<3} columns={printed:?}",
+                spice_layout::dc_column::dc_series_pairs(&checked).len()
+            );
+        }
+    }
+}
+
 // --- specimen rankings ---------------------------------------------------
 
 /// **The acceptance test for metric A.** `lc_ladder_lpf`'s

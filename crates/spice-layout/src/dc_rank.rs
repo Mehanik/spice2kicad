@@ -122,7 +122,7 @@ const UNREACHED: usize = usize::MAX;
 /// The two SPICE terminal indices a DC current flows between, for the
 /// elements that conduct DC at all. See the module docs for why a base /
 /// gate is excluded and a capacitor contributes nothing.
-fn conduction_terminals(el: &ResolvedElement) -> Option<Facing> {
+pub(crate) fn conduction_terminals(el: &ResolvedElement) -> Option<Facing> {
     if matches!(el.role, ElementRole::Power(_)) {
         return None;
     }
@@ -154,7 +154,7 @@ fn is_facing_device(el: &ResolvedElement) -> bool {
 }
 
 /// The DC graph: net → `(other net, element index)` for every DC edge.
-fn dc_adjacency(checked: &CheckedNetlist) -> HashMap<&str, Vec<(&str, usize)>> {
+pub(crate) fn dc_adjacency(checked: &CheckedNetlist) -> HashMap<&str, Vec<(&str, usize)>> {
     let mut adj: HashMap<&str, Vec<(&str, usize)>> = HashMap::new();
     for (i, el) in checked.elements.iter().enumerate() {
         let Some((ta, tb)) = conduction_terminals(el) else {
@@ -178,7 +178,7 @@ fn rank(
     adj: &HashMap<&str, Vec<(&str, usize)>>,
     prefs: &HashMap<String, VertPref>,
     polarity: VertPref,
-    skip: usize,
+    skip: &[usize],
 ) -> HashMap<String, usize> {
     let mut dist: HashMap<String, usize> = HashMap::new();
     let mut q: VecDeque<(&str, usize)> = VecDeque::new();
@@ -200,7 +200,7 @@ fn rank(
             continue;
         }
         for (other, via) in adj.get(net).into_iter().flatten() {
-            if *via == skip || dist.contains_key(*other) {
+            if skip.contains(via) || dist.contains_key(*other) {
                 continue;
             }
             dist.insert((*other).to_string(), d + 1);
@@ -208,6 +208,44 @@ fn rank(
         }
     }
     dist
+}
+
+/// Which of two nets sits at the **higher DC potential**, judged with
+/// every element index in `skip` removed from the DC graph.
+///
+/// `Some(true)` — `a` is the higher one; `Some(false)` — `b` is;
+/// `None` — the comparison **declines**, for exactly the three reasons
+/// the module docs give (both unreachable, a tie on either axis, or the
+/// two axes disagreeing). Never guess.
+///
+/// This is the one comparison [`device_facings`] makes, lifted out so the
+/// DC-series column construction (`crate::dc_column`) orders a stack by
+/// the *same* rank rather than re-deriving one. `skip` is a slice and not
+/// a single index because that construction compares the two *outer* nets
+/// of an element **pair**, and both of the pair's edges have to come out:
+/// ranking either side by a path that runs through the pair itself is the
+/// same circularity the single-device case removes its own edge for.
+#[must_use]
+pub(crate) fn higher_net(
+    adj: &HashMap<&str, Vec<(&str, usize)>>,
+    prefs: &HashMap<String, VertPref>,
+    a: &str,
+    b: &str,
+    skip: &[usize],
+) -> Option<bool> {
+    let up = rank(adj, prefs, VertPref::Up, skip);
+    let dn = rank(adj, prefs, VertPref::Down, skip);
+    let d = |m: &HashMap<String, usize>, n: &str| m.get(n).copied().unwrap_or(UNREACHED);
+    let (ua, ub) = (d(&up, a), d(&up, b));
+    let (da, db) = (d(&dn, a), d(&dn, b));
+    if ua < ub && da > db {
+        Some(true)
+    } else if ub < ua && db > da {
+        Some(false)
+    } else {
+        // Tie, disagreement, or both nets unreachable.
+        None
+    }
 }
 
 /// The DC facing of every element in `checked`, parallel to
@@ -232,20 +270,13 @@ pub fn device_facings(checked: &CheckedNetlist) -> Vec<Option<Facing>> {
             let (ta, tb) = conduction_terminals(el)?;
             let (a, b) = (el.nodes[ta].as_str(), el.nodes[tb].as_str());
             // The device's own edge is removed: ranking a device by a
-            // path through itself is circular.
-            let up = rank(&adj, &prefs, VertPref::Up, i);
-            let dn = rank(&adj, &prefs, VertPref::Down, i);
-            let d = |m: &HashMap<String, usize>, n: &str| m.get(n).copied().unwrap_or(UNREACHED);
-            let (ua, ub) = (d(&up, a), d(&up, b));
-            let (da, db) = (d(&dn, a), d(&dn, b));
-            if ua < ub && da > db {
+            // path through itself is circular. Declining (a tie, a
+            // disagreement, or both terminals unreachable) is correct;
+            // never guess.
+            if higher_net(&adj, &prefs, a, b, &[i])? {
                 Some((ta, tb))
-            } else if ub < ua && db > da {
-                Some((tb, ta))
             } else {
-                // Tie, disagreement, or both terminals unreachable.
-                // Declining is correct; never guess.
-                None
+                Some((tb, ta))
             }
         })
         .collect()

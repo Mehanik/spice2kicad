@@ -2102,6 +2102,23 @@ const BLIND_CELL_EXEMPT: &[(&str, &str, &str)] = &[
          id would count the same terminals twice.",
     ),
     (
+        "readability_metrics.rs",
+        "the_placer_and_metric_b_agree_on_every_fixture",
+        "grades two IMPLEMENTATIONS of one definition against each other, not a \
+         drawing. Both sides are pure functions of the netlist, so the cell is \
+         identical for every placer by construction — the D13 / V9 case, where a \
+         cell that can never move would be scored as a 0.00 claim.",
+    ),
+    (
+        "readability_metrics.rs",
+        "the_dc_series_column_census_is_disjoint_across_fixtures",
+        "the DC-series column census is netlist-derived (`detect_dc_columns` never \
+         reads placement), so it is placer-invariant like the agreement test above. \
+         What the construction DOES to the drawing is already graded by \
+         `stack.side_by_side` / `stack.pairs`; a census cell would only add a \
+         permanently-zero row.",
+    ),
+    (
         "roundtrip_connectivity.rs",
         "the_reconstruction_is_sensitive_on_real_fixtures",
         "a mutation guard on the ADR-22 net-partition reconstruction: it corrupts the \
