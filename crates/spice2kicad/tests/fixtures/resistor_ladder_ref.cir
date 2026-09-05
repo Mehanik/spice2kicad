@@ -1,0 +1,47 @@
+* Six-element resistor-string reference (a Kelvin divider), bypassed at
+* three sense taps. The shape a flash-ADC reference ladder or a
+* multi-rail bias generator has: one current from the supply to ground,
+* six equal resistors in series, and high-impedance taps off the
+* interior nodes.
+*
+* SPECIMEN FOR two of ADR-28's open promotion conditions:
+*
+*   * metric C (`chain.stranded`), ambiguity 11 — "a chain broken into
+*     THREE or more clusters". `chain.stranded` counts `total - largest`,
+*     so 2/1/1 and 2/2 both score 2, and the ADR records the case as
+*     unmeasured because the suite's worst chain shatters in two. Six
+*     series members is the suite's longest chain (`lc_ladder_lpf`'s is
+*     four), which is what gives a three-way break room to appear.
+*   * metric B (`stack.side_by_side`) — the ADR's own condition for
+*     promoting B out of informational is "at least one more fixture
+*     exercises a stack", `cascode_amp` being the only one. Every
+*     interior node here is DC degree 2 on a supply-to-ground path, so
+*     the string presents FIVE DC-series pairs, and the convention for
+*     all five is the same single column.
+*
+* The three bypass capacitors are rail stubs, so they neither break the
+* chain (metric A/C read signal degree over non-stub elements) nor raise
+* the taps' DC degree (a capacitor conducts no DC). They are here
+* because a real reference string has them, and because they make the
+* fixture state that property rather than rely on it silently.
+*@symbol Device:R_US for=R*
+*@symbol Device:C    for=C*
+*@port t2=output
+*@port t3=output
+*@port t4=output
+
+VDD vdd 0 DC 12   ;@ power=+12V
+
+R1 vdd t1  10k
+R2 t1  t2  10k
+R3 t2  t3  10k
+R4 t3  t4  10k
+R5 t4  t5  10k
+R6 t5  0   10k
+
+CB2 t2 0 100n
+CB3 t3 0 100n
+CB4 t4 0 100n
+
+.op
+.end

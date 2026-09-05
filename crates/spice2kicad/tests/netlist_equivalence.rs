@@ -67,6 +67,7 @@ const FIXTURES: &[&str] = &[
     "wien_bridge_osc",
     "sallen_key_driven",
     "shunt_feedback_amp",
+    "resistor_ladder_ref",
     "compensated_divider",
 ];
 
