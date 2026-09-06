@@ -6,15 +6,54 @@
 //! OUTPUT-geometry count, measured on the emitted `.kicad_sch` and
 //! ratcheted per fixture at the value measured on `master`.
 //!
-//! # Why this is a leading indicator, not a duplicate of V16
+//! # Two metrics live here: `q5` (origin frame) and `q5.pin` (pin frame)
 //!
-//! V16 (`wire_geometry.rs`) counts bends on *routed* wires. Q5 counts
-//! *placement* near-misses — it never looks at a wire. A shared-net pair
-//! whose origins sit a cell or two off a common axis almost always costs
-//! the router a bend to reconnect, so Q5 is a **pre-routing leading
-//! indicator** of V16 bends that is gradable on placement alone. Like
-//! V16 it is Tier-2 aesthetic and a **counted quantity**, never a
-//! coefficient (CLAUDE.md § constraints-vs-costs / V16 doctrine).
+//! `q5` is the original, kept verbatim below. It compares symbol
+//! **origins**, and ADR-40 measured what that costs: it and `q3` were the
+//! only two metrics in the suite that read origins, and the pin-anchored
+//! DC-series column — which puts its members' SHARED PINS on one x,
+//! exactly as CLAUDE.md § "Layout invariants" requires — offsets their
+//! origins by each symbol's own pin offset. A `Device:Q_NPN_BCE`
+//! collector sits 2 cells off its origin, `NEAR_CELLS` is 2, so a
+//! correctly pin-collinear column read as an origin near-miss BY
+//! CONSTRUCTION. Every spurious pair involved a transistor.
+//!
+//! `q5.pin` asks the same question between **the pins that share the
+//! net** — the two ends of the wire whose straightness the metric's own
+//! first paragraph is about. The spurious column pairs vanish there
+//! (`common_emitter` loses `Q1↔RC` and `Q1↔RE`; `rc_phase_shift` loses
+//! `Q1↔RC`, `Q1↔RE` and `CE↔Q1`), and real near-misses the origin frame
+//! could not see appear (`common_emitter` `COUT↔Q1`: 1.27 mm of vertical
+//! jog across a 13.97 mm run, while the two origins are far apart on
+//! both axes). Neither frame dominates: see the two budget tables.
+//!
+//! # NOT a leading indicator of V16 — measured, in BOTH frames
+//!
+//! This module used to claim Q5 was "a **pre-routing leading indicator**
+//! of V16 bends". That claim is **falsified**, and re-framing does not
+//! rescue it. ADR-40 recorded `q5` moving **+14 while `v16.bends` moved
+//! −4** on one construction; measured again here over six registered
+//! placer arms × 18 common fixtures, fixture-centred so circuit size
+//! cannot carry the correlation:
+//!
+//! | metric | r vs `v16.bends` | r vs `v16.branches` |
+//! | --- | ---: | ---: |
+//! | `q5` (origins) | +0.47 | +0.26 |
+//! | `q5.pin` (pins) | **+0.01** | **+0.03** |
+//!
+//! The reason is in the definition, not the frame: a **near**-miss is an
+//! INTERMEDIATE state. A placer that pulls connected parts together turns
+//! "far apart on both axes" (not counted) into "close on one axis"
+//! (counted) on its way to "aligned" (not counted), so the count is
+//! non-monotone in quality either way. ADR-23's own `flow-seed` promotion
+//! note said as much — "a placer that packs columns tighter naturally
+//! produces more of them".
+//!
+//! Q5 therefore stands or falls on its FIRST claim only — an avoidable
+//! jog is a legibility defect whatever the router then does with it —
+//! and must never be read as a bend forecast. Like V16 it is Tier-2
+//! aesthetic and a **counted quantity**, never a coefficient (CLAUDE.md
+//! § constraints-vs-costs / V16 doctrine).
 //!
 //! # The metric
 //!
@@ -44,11 +83,14 @@
 //! # Distinct from what already exists
 //!
 //! * **V16** (`wire_geometry.rs`) — bends on *routed* wires; Q5 is
-//!   pre-routing and reads only symbol origins.
+//!   pre-routing and never looks at a wire.
 //! * **Q3** (`flow_monotonicity.rs`) — left→right *ordering* against the
 //!   placer's layer model; Q5 is order-agnostic and measures *offset*.
+//!   Q3 has the same origin/pin split, for the same reason.
 //! * **V5** (`placement_quality.rs`) — pin-*facing* orientation; Q5 is
-//!   about symbol-origin co-alignment, orientation-agnostic.
+//!   about co-alignment, orientation-agnostic.
+//! * **F7** (`flow_geometry.rs`, ADR-42) — how FAR apart two elements on
+//!   the identical net set are drawn; Q5 is about the last two cells.
 //!
 //! # Ratchet
 //!
@@ -63,6 +105,7 @@ mod common;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
+use common::pin_frame::{CELL_UM as PIN_CELL_UM, PinFrame};
 use common::spice_to_kicad;
 use lexpr::Value;
 use spice_diagnostics::FileId;
@@ -180,9 +223,16 @@ struct AlignElem {
     y_um: i64,
 }
 
+/// Everything one fixture contributes: the origin-frame bodies (Q5) and
+/// the pin frame both `q5` and `q5.pin` are measured over (`q5.pin`).
+struct AlignFixture {
+    elems: Vec<AlignElem>,
+    frame: PinFrame,
+}
+
 /// Build the Q5 alignment bodies for a fixture: convert it, then join the
 /// resolved netlist's Signal-class nets to the emitted symbol origins.
-fn align_elems(name: &str) -> Vec<AlignElem> {
+fn align_elems(name: &str) -> AlignFixture {
     let dir = tempdir(name);
     let sch = spice_to_kicad(&fixtures_dir().join(format!("{name}.cir")), &dir)
         .unwrap_or_else(|e| panic!("convert {name}: {e}"));
@@ -228,7 +278,8 @@ fn align_elems(name: &str) -> Vec<AlignElem> {
             y_um,
         });
     }
-    out
+    let frame = PinFrame::build(&root, &checked.elements);
+    AlignFixture { elems: out, frame }
 }
 
 /// The load helper mirrors `flow_monotonicity.rs`: the same four fixture
@@ -290,6 +341,155 @@ fn q5_near_misses(elems: &[AlignElem]) -> Vec<(String, String)> {
                     };
                     out.push((lo, hi));
                 }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+// --- Q5.pin — the same question, asked in the pin frame ------------------
+
+/// Snap threshold for the pin-frame metric, in grid cells.
+///
+/// **Re-derived, not carried across.** In the origin frame `NEAR_CELLS = 2`
+/// was justified as "what a human would snap flush", and ADR-40 showed the
+/// number then collided with a `Q_NPN_BCE`'s own 2-cell collector/emitter
+/// offset, so a correctly pin-collinear column read as an origin near-miss
+/// by construction. That collision cannot happen here: the pins on the
+/// shared net ARE the compared points, so a pin-collinear column measures
+/// `dx == 0`.
+///
+/// The pin frame supplies its own scale. A KiCad symbol's pin pitch is
+/// 100 mil = 2.54 mm = **2 grid cells** — the smallest offset that can
+/// separate two pins of the same body, and therefore the smallest jog
+/// that can be *intentional* rather than a placement residue. A jog of at
+/// most one pin pitch is a jog a human snaps out; more than that and the
+/// two pins are on genuinely different rows/columns. Numerically equal to
+/// the origin-frame constant, from a different argument.
+const PIN_NEAR_CELLS: i64 = 2;
+
+/// Snap threshold in micrometres, pin frame.
+const PIN_NEAR_UM: i64 = PIN_NEAR_CELLS * PIN_CELL_UM;
+
+/// How one shared net reads between two bodies, in the pin frame.
+#[derive(PartialEq, Eq)]
+enum NetSnap {
+    /// Some pin pair on this net is exactly collinear: the connecting
+    /// wire can run straight. Q5's stated postcondition, met.
+    Aligned,
+    /// Not collinear, but within one pin pitch on an axis — the jog a
+    /// human would snap out.
+    NearMiss,
+    /// Comfortably off-axis: intentional separation, not a near-miss.
+    Apart,
+}
+
+/// Read one shared net between two bodies in the pin frame.
+///
+/// An element may present a net on more than one pin (a shorted terminal
+/// pair). `Aligned` wins over `NearMiss` over `Apart`: if ANY pin pair on
+/// the net can be joined by a straight wire, the net is drawn, and the
+/// metric must not charge for the pins that were not used.
+fn net_snap(frame: &PinFrame, a: &str, b: &str, net: &str) -> Option<NetSnap> {
+    // `None` is unreachable in practice, and NOT a silent skip: both
+    // bodies are drawn (that is how they entered `elems`) and both carry
+    // `net`, so an absent pin is recorded in `PinFrame::unresolved`,
+    // which the verifier asserts is empty before it reads this count.
+    let (pa, pb) = (frame.pins(a, net)?, frame.pins(b, net)?);
+    let mut best = NetSnap::Apart;
+    for &(ax, ay) in pa {
+        for &(bx, by) in pb {
+            let (dx, dy) = ((ax - bx).abs(), (ay - by).abs());
+            if dx == 0 || dy == 0 {
+                return Some(NetSnap::Aligned);
+            }
+            if dx <= PIN_NEAR_UM || dy <= PIN_NEAR_UM {
+                best = NetSnap::NearMiss;
+            }
+        }
+    }
+    Some(best)
+}
+
+/// The worst (smallest) near-miss offset between two bodies, in µm, over
+/// every shared Signal net and every pin pair on it — the diagnostic
+/// behind a `q5.pin` entry. Only used by the `S2K_Q5_DUMP` path.
+fn q5_pin_detail(
+    elems: &[AlignElem],
+    frame: &PinFrame,
+    a: &str,
+    b: &str,
+) -> Option<(String, i64, i64)> {
+    let ea = elems.iter().find(|e| e.refdes == a)?;
+    let eb = elems.iter().find(|e| e.refdes == b)?;
+    let mut best: Option<(String, i64, i64)> = None;
+    for net in &ea.signal_nets {
+        if !eb.signal_nets.contains(net) || net_snap(frame, a, b, net) != Some(NetSnap::NearMiss) {
+            continue;
+        }
+        let (Some(pa), Some(pb)) = (frame.pins(a, net), frame.pins(b, net)) else {
+            continue;
+        };
+        for &(ax, ay) in pa {
+            for &(bx, by) in pb {
+                let (dx, dy) = ((ax - bx).abs(), (ay - by).abs());
+                let score = dx.min(dy);
+                if best
+                    .as_ref()
+                    .is_none_or(|&(_, bx2, by2)| score < bx2.min(by2))
+                {
+                    best = Some((net.clone(), dx, dy));
+                }
+            }
+        }
+    }
+    best
+}
+
+/// **Q5.pin** — mutual-alignment near-misses measured between the pins
+/// that share a net, rather than between symbol origins.
+///
+/// Same pair set, same threshold semantics, same counting unit (one entry
+/// per unordered pair). The single difference is the frame: `dx`/`dy` are
+/// taken between the two bodies' pins ON THE SHARED NET, which is the
+/// geometry the metric's own postcondition is stated in ("so the
+/// connecting wire runs straight instead of jogging") and the geometry
+/// CLAUDE.md § "Layout invariants" says a placement constraint IS.
+///
+/// A pair counts once if ANY of its shared Signal nets reads `NearMiss`;
+/// a net that reads `Aligned` exempts only itself, because a pair sharing
+/// two nets can be straight on one and jog on the other, and the jog is
+/// really there.
+fn q5_pin_near_misses(elems: &[AlignElem], frame: &PinFrame) -> Vec<(String, String)> {
+    let mut net_members: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (i, e) in elems.iter().enumerate() {
+        for net in &e.signal_nets {
+            net_members.entry(net.as_str()).or_default().push(i);
+        }
+    }
+
+    let mut out = Vec::new();
+    let mut nets: Vec<&&str> = net_members.keys().collect();
+    nets.sort_unstable();
+    for net in nets {
+        let members = &net_members[*net];
+        for &a in members {
+            for &b in members {
+                if a >= b {
+                    continue;
+                }
+                let (ea, eb) = (&elems[a], &elems[b]);
+                if net_snap(frame, &ea.refdes, &eb.refdes, net) != Some(NetSnap::NearMiss) {
+                    continue;
+                }
+                let (lo, hi) = if ea.refdes <= eb.refdes {
+                    (ea.refdes.clone(), eb.refdes.clone())
+                } else {
+                    (eb.refdes.clone(), ea.refdes.clone())
+                };
+                out.push((lo, hi));
             }
         }
     }
@@ -426,11 +626,43 @@ const Q5_NEAR_MISS_BUDGET: &[(&str, u32)] = &[
     ("compensated_divider", 0),
 ];
 
+/// Every fixture, with its zero-slack **pin-frame** Q5 high-water mark
+/// measured on the shipping default (`dc-series-column-pinned`).
+///
+/// A separate table from `Q5_NEAR_MISS_BUDGET` on purpose: `q5.pin` is a
+/// different metric wearing a related name, so its literals are its own
+/// and neither table's history transfers to the other. Zero slack,
+/// ratchets DOWN only, same policy as every other budget in the suite.
+const Q5_PIN_NEAR_MISS_BUDGET: &[(&str, u32)] = &[
+    ("rc_lowpass", 0),
+    ("rc_lowpass_ports", 0),
+    ("common_emitter", 6),
+    ("multivibrator", 6),
+    ("diff_pair", 2),
+    ("opamp_inverting", 0),
+    ("opamp_inverting_real", 1),
+    ("port_shapes", 0),
+    ("opamp_definition_level", 2),
+    ("named_rails", 2),
+    ("rc_phase_shift", 2),
+    ("two_stage_amp", 9),
+    ("cascode_amp", 4),
+    ("lc_ladder_lpf", 1),
+    ("sallen_key_lpf", 0),
+    ("wien_bridge_osc", 4),
+    ("sallen_key_driven", 3),
+    ("shunt_feedback_amp", 4),
+    ("stepped_attenuator", 0),
+    ("opamp_transimpedance", 2),
+    ("resistor_ladder_ref", 0),
+    ("compensated_divider", 2),
+];
+
 #[test]
 fn alignment_near_miss_within_budget_across_fixtures() {
     let mut failures = Vec::new();
     for &(name, budget) in Q5_NEAR_MISS_BUDGET {
-        let elems = align_elems(name);
+        let elems = align_elems(name).elems;
         let viol = q5_near_misses(&elems);
         let count = u32::try_from(viol.len()).unwrap_or(u32::MAX);
         common::scoreboard::record_count("q5", name, viol.len());
@@ -456,4 +688,102 @@ fn alignment_near_miss_within_budget_across_fixtures() {
         "Q5 mutual-alignment near-miss ratchet regressions:\n{}",
         failures.join("\n")
     );
+}
+
+#[test]
+fn alignment_near_miss_pin_frame_within_budget_across_fixtures() {
+    let mut failures = Vec::new();
+    for &(name, budget) in Q5_PIN_NEAR_MISS_BUDGET {
+        let fx = align_elems(name);
+        // Coverage, not a formality: a join that silently resolved no
+        // pins would report 0 near-misses on every fixture and read as a
+        // perfect score (ADR-23 D9, "a blind cell is not conservatively
+        // blind"). Both halves are collected, not asserted in-loop, so a
+        // failure still reports every fixture's number to the sink.
+        if fx.frame.pin_count() == 0 {
+            failures.push(format!(
+                "{name}: the pin frame resolved NO pins — the metric measured nothing"
+            ));
+        }
+        if !fx.frame.unresolved.is_empty() {
+            failures.push(format!(
+                "{name}: {} (refdes, net) pair(s) have no resolvable pin: {:?}. \
+                 Q5.pin would silently skip them.",
+                fx.frame.unresolved.len(),
+                fx.frame.unresolved
+            ));
+        }
+        let viol = q5_pin_near_misses(&fx.elems, &fx.frame);
+        let count = u32::try_from(viol.len()).unwrap_or(u32::MAX);
+        common::scoreboard::record_count("q5.pin", name, viol.len());
+        if std::env::var("S2K_Q5_DUMP").is_ok() {
+            println!("(\"{name}\", {count}),");
+            for (a, b) in &viol {
+                let d = q5_pin_detail(&fx.elems, &fx.frame, a, b);
+                println!("    Q5.pin near-miss: {a} and {b} {d:?}");
+            }
+        }
+        if count > budget {
+            failures.push(format!(
+                "{name}: Q5.pin pin-frame near-misses rose to {count} (budget {budget}): \
+                 {viol:?}. Do NOT raise the budget — diagnose the placement regression."
+            ));
+        } else if count < budget {
+            eprintln!(
+                "Q5.pin {name}: improved — you may lower the ratchet to (\"{name}\", {count})"
+            );
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "Q5.pin pin-frame near-miss ratchet regressions:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// The mechanism, pinned to one fixture with the origin frame as its
+/// control arm.
+///
+/// ADR-40's diagnosis in executable form: on `common_emitter` the
+/// origin-frame metric flags `Q1↔RC` and `Q1↔RE` — the two members of
+/// the pin-anchored DC-series column — while their SHARED PINS are
+/// exactly collinear, so no wire between them jogs at all. A future
+/// change that quietly re-based `q5.pin` onto bodies would pass every
+/// ratchet above (the literals would simply be re-recorded) and fail
+/// here.
+///
+/// The control arm is deliberately the live `q5_near_misses`, not a
+/// copy: the claim under test is that the two frames DISAGREE on these
+/// pairs, which is only meaningful against the origin metric the suite
+/// actually ships.
+#[test]
+fn the_dc_series_column_is_an_origin_near_miss_and_a_pin_frame_match() {
+    let fx = align_elems("common_emitter");
+    let origin: HashSet<(String, String)> = q5_near_misses(&fx.elems).into_iter().collect();
+    let pin: HashSet<(String, String)> = q5_pin_near_misses(&fx.elems, &fx.frame)
+        .into_iter()
+        .collect();
+
+    for (a, b, net) in [("Q1", "RC", "c"), ("Q1", "RE", "e")] {
+        let pair = (a.to_owned(), b.to_owned());
+        assert!(
+            origin.contains(&pair),
+            "control arm broken: the origin frame no longer flags {a}\u{2194}{b}, so this \
+             test can no longer show the two frames disagree"
+        );
+        assert!(
+            !pin.contains(&pair),
+            "{a}\u{2194}{b} is still a pin-frame near-miss — `q5.pin` has been re-based \
+             onto body geometry"
+        );
+        let (pa, pb) = (
+            fx.frame.pins(a, net).expect("pins on the shared net"),
+            fx.frame.pins(b, net).expect("pins on the shared net"),
+        );
+        assert!(
+            pa.iter().any(|&(ax, _)| pb.iter().any(|&(bx, _)| ax == bx)),
+            "{a} and {b} are column members, so their `{net}` pins must share an x: \
+             {pa:?} vs {pb:?}"
+        );
+    }
 }
