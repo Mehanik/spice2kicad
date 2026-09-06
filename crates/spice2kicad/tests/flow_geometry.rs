@@ -81,6 +81,34 @@
 //! `rc_lowpass_ports` both terminals pass F4 while sitting at the same
 //! x, stacked vertically — the sheet shows no flow direction at all.
 //!
+//! # F7 — parallel-partner separation
+//!
+//! Two elements incident on the **identical set of nets** are
+//! electrically in parallel: the R and the C of `compensated_divider`'s
+//! `R1 in out` / `C1 in out` arm, or `wien_bridge_osc`'s `RP np 0` /
+//! `CP np 0`. Every reference drawing of such an arm puts the two
+//! bodies side by side, sharing both nodes, because that adjacency is
+//! *what tells the reader they are one arm*.
+//!
+//! F7 is the drawn distance between them: for every unordered pair of
+//! drawn elements whose net sets are equal, and for each net they
+//! share, the Manhattan distance between their pins on that net, in
+//! whole grid cells (1.27 mm). The per-fixture ratchet records the
+//! MAXIMUM. Like F6 it is deliberately a **distance, not a violation
+//! count**: there is no threshold at which a separation becomes
+//! categorically wrong, and a count would hide a partner drifting from
+//! 2 cells to 36.
+//!
+//! It exists because nothing else in the suite could see the defect.
+//! `compensated_divider` was emitted with `C1` **36 cells (45.7 mm)**
+//! from its partner `R1` on the net they both span, and the wire-detour
+//! ratchet — the instrument that looks most like a wire-length gate —
+//! scored that drawing **1.0715**, near-ideal, because its ideal is
+//! HPWL over the *emitted pin positions*: moving a symbol 46 mm away
+//! inflates numerator and denominator together. See
+//! `placement_quality.rs::wire_floor_ratio_within_budget_across_fixtures`
+//! for the companion that closes the same blind spot on wire length.
+//!
 //! # Scope
 //!
 //! ADR-15 Stage 4 was **positions only**, and the orientation half was
@@ -91,7 +119,7 @@
 
 mod common;
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 
 use common::spice_to_kicad;
@@ -754,6 +782,78 @@ fn f6_stub_lateral_runs(f: &Fixture) -> Vec<(String, u32)> {
     out
 }
 
+/// **F7 — parallel-partner separation.** Two elements incident on the
+/// *identical* set of nets are electrically parallel — one arm of the
+/// circuit, drawn by every reference as two bodies side by side sharing
+/// both nodes. `compensated_divider`'s `R1`/`C1` (both on `in`,`out`)
+/// and `wien_bridge_osc`'s `RP`/`CP` (both on `np`,`0`) are the suite's
+/// specimens.
+///
+/// For every unordered pair of drawn elements whose net SETS are equal,
+/// and for each net they share, measure the Manhattan distance between
+/// their pins on that net, in whole grid cells (1.27 mm). Partners drawn
+/// adjacent score a cell or two; a partner exiled across the sheet
+/// scores tens.
+///
+/// **Why the identical-net-SET discriminator.** It is structural and
+/// derived from the netlist alone — no refdes, no element kind, no
+/// "looks like an RC" pattern (CLAUDE.md principle 9). It is also the
+/// strictest possible reading: sharing *one* net is ordinary fan-out and
+/// says nothing about how the two should be drawn, while sharing *all*
+/// of them means the two devices are interchangeable at every terminal.
+///
+/// **Rail nets are included deliberately.** A pair sharing `(out, 0)`
+/// drops to two separate ground glyphs, and the distance between those
+/// two rail pins is exactly the lateral spread a reader sees as "these
+/// two were not drawn together". Excluding it would blind the metric to
+/// every rail-referenced parallel arm — `compensated_divider`'s own
+/// `R2`/`C2` among them.
+///
+/// Power sources (lowered to glyphs, never to a body) and elements with
+/// no emitted body pins take no part.
+fn f7_parallel_partner_runs(f: &Fixture) -> Vec<(String, String, String, u32)> {
+    let mut sets: Vec<(String, BTreeSet<String>)> = Vec::new();
+    for (refdes, nets) in &f.element_nets {
+        if f.power_elements.contains(refdes) {
+            continue;
+        }
+        let set: BTreeSet<String> = nets.iter().cloned().collect();
+        // A one-net element is a short across a single node, not a
+        // parallel partner of anything.
+        if set.len() < 2 {
+            continue;
+        }
+        if !f.pins.iter().any(|p| &p.refdes == refdes) {
+            continue;
+        }
+        sets.push((refdes.clone(), set));
+    }
+    sets.sort();
+
+    let mut out = Vec::new();
+    for (i, (u, su)) in sets.iter().enumerate() {
+        for (v, sv) in sets.iter().skip(i + 1) {
+            if su != sv {
+                continue;
+            }
+            for net in su {
+                let (Some(pu), Some(pv)) = (
+                    f.pins.iter().find(|p| &p.refdes == u && &p.net == net),
+                    f.pins.iter().find(|p| &p.refdes == v && &p.net == net),
+                ) else {
+                    continue;
+                };
+                let mm = (pu.x_mm - pv.x_mm).abs() + (pu.y_mm - pv.y_mm).abs();
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let cells = (mm / 1.27).round() as u32;
+                out.push((u.clone(), v.clone(), net.clone(), cells));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
 // --- ratchets ------------------------------------------------------------
 
 /// Every fixture, with its zero-slack `(F3, F4)` high-water marks.
@@ -1257,5 +1357,125 @@ fn stub_lateral_run_within_ratchet() {
         reclaim.is_empty(),
         "F6 ratchet has slack; lower these literals in the same commit:\n{}",
         reclaim.join("\n")
+    );
+}
+
+/// Per-fixture zero-slack high-water mark for F7 (see
+/// [`f7_parallel_partner_runs`]): the MAXIMUM separation, in grid cells,
+/// between two elements incident on the identical set of nets. Ratchets
+/// DOWN only, per CLAUDE.md § "Budgets are ratchets, not knobs".
+///
+/// A fixture with no parallel pair at all reads 0, which is a real
+/// measurement here and not an abstention: `f7_parallel_partner_pairs_exist`
+/// below asserts that the population is non-empty suite-wide, so a
+/// column of zeros cannot mean the discriminator stopped matching.
+const PARALLEL_SEPARATION_RATCHET: &[(&str, u32)] = &[
+    // fixture                  max parallel-partner separation, grid cells
+    ("rc_lowpass", 0),
+    ("rc_lowpass_ports", 0),
+    // `RE`/`CE`, both on (`e`,`0`): a two-stub group that
+    // `apply_rail_stub_columns` spreads symmetrically about its anchor on
+    // purpose, so the 4 is deliberate (F6 records the same 4 for it).
+    ("common_emitter", 4),
+    ("multivibrator", 0),
+    ("diff_pair", 0),
+    ("opamp_inverting", 0),
+    ("opamp_inverting_real", 0),
+    ("port_shapes", 0),
+    ("opamp_definition_level", 0),
+    ("named_rails", 0),
+    ("rc_phase_shift", 7),
+    ("two_stage_amp", 13),
+    ("cascode_amp", 8),
+    ("lc_ladder_lpf", 6),
+    ("sallen_key_lpf", 0),
+    ("wien_bridge_osc", 5),
+    ("sallen_key_driven", 0),
+    ("shunt_feedback_amp", 4),
+    ("stepped_attenuator", 0),
+    ("opamp_transimpedance", 12),
+    ("resistor_ladder_ref", 0),
+    // THE MOTIVATING CELL: `C1` is drawn 36 cells (45.72 mm) from
+    // `R1`, the partner it shares BOTH nodes with, on a five-element
+    // circuit. The detour ratchet scored that drawing 1.0715.
+    ("compensated_divider", 36),
+];
+
+/// F7 ratchet. Two devices on the identical set of nets are one arm of
+/// the circuit; this bounds how far apart they may be drawn.
+#[test]
+fn parallel_partner_separation_within_ratchet() {
+    let mut failures = Vec::new();
+    let mut reclaim = Vec::new();
+    for &(name, budget) in PARALLEL_SEPARATION_RATCHET {
+        let f = load(name);
+        let runs = f7_parallel_partner_runs(&f);
+        let worst = runs.iter().map(|(_, _, _, c)| *c).max().unwrap_or(0);
+        common::scoreboard::record_count("f7", name, worst as usize);
+        if std::env::var("S2K_FLOW_DUMP").is_ok() {
+            println!("(\"{name}\", {worst}),  // {runs:?}");
+        }
+        if worst > budget {
+            let detail: Vec<String> = runs
+                .iter()
+                .filter(|(_, _, _, c)| *c > budget)
+                .map(|(u, v, net, c)| {
+                    format!(
+                        "{u}..{v} on `{net}`: {c} cells ({:.2} mm) apart",
+                        f64::from(*c) * 1.27
+                    )
+                })
+                .collect();
+            failures.push(format!(
+                "{name}: worst parallel-partner separation rose to {worst} cells \
+                 (budget {budget}): {}",
+                detail.join("; ")
+            ));
+        } else if worst < budget {
+            reclaim.push(format!("{name}: F7 may be lowered to {worst}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "F7 ratchet regressions (do NOT raise the budget — diagnose the geometry):\n{}",
+        failures.join("\n")
+    );
+    assert!(
+        reclaim.is_empty(),
+        "F7 ratchet has slack; lower these literals in the same commit:\n{}",
+        reclaim.join("\n")
+    );
+}
+
+/// Non-vacuity guard on F7's discriminator.
+///
+/// A metric that silently stops matching reads as a clean sweep of
+/// zeros, which is indistinguishable from a repaired drawing — the exact
+/// failure ADR-23 D9 names ("a blind cell is not conservatively blind"),
+/// reached one level down. The suite contains parallel arms by
+/// construction (`compensated_divider`'s `R1`/`C1` and `R2`/`C2`,
+/// `wien_bridge_osc`'s `RP`/`CP`), so if the identical-net-set predicate
+/// ever finds NONE of them the metric has broken, not the placer.
+#[test]
+fn f7_parallel_partner_pairs_exist() {
+    let f = load("compensated_divider");
+    let runs = f7_parallel_partner_runs(&f);
+    let pairs: BTreeSet<(String, String)> = runs
+        .iter()
+        .map(|(u, v, _, _)| (u.clone(), v.clone()))
+        .collect();
+    assert!(
+        pairs.contains(&("C1".to_string(), "R1".to_string())),
+        "F7 did not recognise C1 || R1 (both on `in`,`out`) as a parallel pair: {pairs:?}"
+    );
+    assert!(
+        pairs.contains(&("C2".to_string(), "R2".to_string())),
+        "F7 did not recognise C2 || R2 (both on `out`,`0`) as a parallel pair: {pairs:?}"
+    );
+    // Two elements sharing ONE net are ordinary fan-out and must not be
+    // counted: R1 and R2 share `out` but not `in`/`0`.
+    assert!(
+        !pairs.contains(&("R1".to_string(), "R2".to_string())),
+        "F7 counted a merely-fan-out pair R1/R2 as parallel: {pairs:?}"
     );
 }

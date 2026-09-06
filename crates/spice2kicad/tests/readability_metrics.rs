@@ -183,12 +183,44 @@
 //! `port_direction_is_graded_only_where_the_source_declares_it` for the
 //! assertion that keeps it honest.
 //!
-//! # Informational at birth
+//! # Informational at birth — except C, promoted 2026-09-06
 //!
-//! All three metrics are registered with the ADR-23 scoreboard as
+//! **Metric C (`chain.stranded`) is now a per-fixture zero-slack ratchet
+//! and a weighted Tier-2 scoreboard cell** — see
+//! [`STRANDED_RATCHET`] and [`chain_stranded_within_ratchet`]. The rest
+//! of this section still describes A, B, D and E.
+//!
+//! Why C and not the others. `compensated_divider` was emitted with
+//! `C1` exiled 46 mm from the partner it shares both nodes with, and C
+//! was **already reporting it** — `chain.stranded = 1`, detail
+//! `"R1..C1 on 'in': run 45.72 > body 15.24"` — while nothing in the
+//! suite's 76 test binaries gated on it. The instrument that looks most
+//! like a wire gate, `placement_quality.rs`'s wire-detour ratchet,
+//! scored that drawing **1.0715** (near-ideal), because its ideal is
+//! HPWL over the EMITTED pin positions and so cannot see placement at
+//! all. A metric that computes the right number and asserts nothing is
+//! the project's recurring failure mode (MEMORY "verify what a number
+//! measures"), and the cheapest close is to give the number teeth.
+//!
+//! **This is landed against ADR-28's own stated precondition, knowingly.**
+//! ADR-28 said C would be promoted once "the placer reaches 0 on
+//! `port_shapes` and `wien_bridge_osc` with the default placer, so the
+//! ratchet records an achieved state". It does not: `wien_bridge_osc`
+//! and `compensated_divider` both record 1. That precondition asks a
+//! ratchet to be an *aspiration met*, which is not what CLAUDE.md says a
+//! ratchet is — "a recorded high-water mark, not a tunable headroom …
+//! the literal records the actual current count on `master`". F6 ships
+//! non-zero literals on eleven fixtures on exactly that reading. The
+//! promotion therefore records what is measured, including the two
+//! honest non-zero cells, and the direction-of-change guarantee (any
+//! RISE is a regression to diagnose) is what the suite gains.
+//!
+//! A, B, D and E stay informational.
+//!
+//! The remaining metrics are registered with the ADR-23 scoreboard as
 //! `Tier::Info` — printed per fixture, zero aggregate weight — on the
 //! precedent of Q6's balance CoV and `bend_bound.rs`'s V16 bound.
-//! **None of them is a zero-slack ratchet.** A metric whose definition is
+//! **None of THEM is a zero-slack ratchet.** A metric whose definition is
 //! still being calibrated must not be able to block work: an ambiguity
 //! resolved the wrong way (see ADR-28's list) would, as a gate, reject
 //! correct drawings while being wrong. What would justify promoting each
@@ -1570,6 +1602,112 @@ const FIXTURES: &[&str] = &[
     "resistor_ladder_ref",
     "compensated_divider",
 ];
+
+/// Per-fixture zero-slack high-water mark for **metric C**
+/// (`chain.stranded`, see [`compactness_metrics`]): the number of series-chain
+/// members drawn outside the largest adjacent cluster of their own chain.
+/// Ratchets DOWN only, per CLAUDE.md § "Budgets are ratchets, not knobs".
+///
+/// The threshold that decides "adjacent" is stated in the drawing's own
+/// material — a link is broken when its Manhattan run exceeds the chain's
+/// summed device-body length — so the ratchet carries no millimetre
+/// constant and no geometry number, which is CLAUDE.md principle 3 read
+/// at the verifier.
+///
+/// **Tier 2.** By the constraints-vs-costs decision rule a property is a
+/// hard/Tier-1 matter when it is categorical; "these devices are one
+/// current path, so draw them in one run" is nearly that, but the
+/// *threshold* is a judgement about spacing, and a chain legitimately
+/// broken by a page-fit or a hierarchical sheet is a drawing a reader
+/// accepts. ADR-28 reaches the same conclusion ("which argues for Tier 2
+/// rather than Tier 1 when it gets there").
+const STRANDED_RATCHET: &[(&str, usize)] = &[
+    // fixture                  chain.stranded
+    ("rc_lowpass", 0),
+    ("rc_lowpass_ports", 0),
+    ("common_emitter", 0),
+    ("multivibrator", 0),
+    ("diff_pair", 0),
+    ("opamp_inverting", 0),
+    ("opamp_inverting_real", 0),
+    // ADR-28's own motivating specimen: a four-resistor series chain
+    // emitted as two vertical stacks of two, joined by a 38.10 mm jump
+    // against a 30.48 mm summed body. `chain.axis` and `chain.reversal`
+    // both read 0 on it.
+    ("port_shapes", 1),
+    ("opamp_definition_level", 0),
+    ("named_rails", 0),
+    ("rc_phase_shift", 0),
+    ("two_stage_amp", 0),
+    ("cascode_amp", 0),
+    ("lc_ladder_lpf", 0),
+    ("sallen_key_lpf", 0),
+    // `RS..CS on `ns`: run 35.56 > body 15.24` — the series arm of the
+    // Wien bridge, drawn in two pieces.
+    ("wien_bridge_osc", 1),
+    ("sallen_key_driven", 0),
+    ("shunt_feedback_amp", 0),
+    ("stepped_attenuator", 0),
+    ("opamp_transimpedance", 0),
+    ("resistor_ladder_ref", 0),
+    // `R1..C1 on `in`: run 45.72 > body 15.24`. The cell this promotion
+    // exists for: C was ALREADY computing it and asserting nothing.
+    ("compensated_divider", 1),
+];
+
+/// Metric C as a **ratchet** (promoted 2026-09-06; see the module docs
+/// for why C and not A/B/D/E, and for the ADR-28 precondition this
+/// knowingly lands against).
+///
+/// Deliberately a second loop rather than an assertion bolted onto
+/// [`readability_metrics_are_reported_for_every_fixture`]: that verifier's
+/// contract is *report everything, gate nothing*, and folding a gate into
+/// it would make the informational metrics A/B/D/E share a failure with
+/// C — a red cell for `chain.axis` would then read as a C regression.
+/// The cost is 22 extra conversions; the benefit is that each verifier
+/// still says exactly one thing.
+///
+/// It records `chain.stranded` again, with the same value the reporter
+/// records (both measure the shipping default on the same fixture, and
+/// conversion is deterministic — `baseline_lock` rests on that). The
+/// ADR-23 sink collapses identical duplicates and reports differing ones
+/// as an instrumentation defect, so the duplicate is a cross-check, not
+/// noise.
+#[test]
+fn chain_stranded_within_ratchet() {
+    let mut failures = Vec::new();
+    let mut reclaim = Vec::new();
+    for &(name, budget) in STRANDED_RATCHET {
+        let f = load(name);
+        let (strand, total, detail) = compactness_metrics(&f);
+        common::scoreboard::record_count("chain.stranded", name, strand);
+        common::scoreboard::record_count("chain.run_members", name, total);
+        if std::env::var("S2K_READABILITY_DUMP").is_ok() {
+            println!("(\"{name}\", {strand}),  // of {total}: {detail:?}");
+        }
+        if strand > budget {
+            failures.push(format!(
+                "{name}: chain.stranded rose to {strand} of {total} (budget {budget}): {}",
+                detail.join(" | ")
+            ));
+        } else if strand < budget {
+            reclaim.push(format!("{name}: chain.stranded may be lowered to {strand}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "metric C (chain.stranded) ratchet regressions — a chain member was drawn away \
+         from the rest of its chain. Do NOT raise the budget; diagnose the \
+         geometry:\n{}",
+        failures.join("\n")
+    );
+    assert!(
+        reclaim.is_empty(),
+        "metric C (chain.stranded) ratchet has slack; lower these literals in the same \
+         commit:\n{}",
+        reclaim.join("\n")
+    );
+}
 
 /// Report both metrics for every fixture to the ADR-23 sink.
 ///

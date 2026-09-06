@@ -1444,6 +1444,92 @@ invariant here.
   stubs in one column, which the idiom exists to prevent. Treat 6 as
   the fixture's correct score, not an owed fix.
 
+- **F7 — parallel-partner separation** (flow metric, Tier 2, ADR-42).
+  Two elements incident on the **identical set of nets** are
+  electrically in parallel — `compensated_divider`'s `R1 in out` /
+  `C1 in out`, `wien_bridge_osc`'s `RP np 0` / `CP np 0`. Every
+  reference drawing puts such a pair side by side sharing both nodes,
+  because that adjacency is what tells the reader they are one arm.
+
+  For every unordered pair of drawn elements whose net SETS are equal,
+  and for each net they share, the Manhattan distance between their pins
+  on that net, in whole grid cells (1.27 mm). Per-fixture MAXIMUM.
+  Deliberately a **distance, not a violation count**, for F6's reason:
+  no threshold makes a separation categorically wrong, and a count would
+  hide a partner drifting from 2 cells to 36.
+
+  The identical-net-SET discriminator is structural and netlist-derived
+  — no refdes, no element kind, no "looks like an RC" (CLAUDE.md
+  principle 9) — and it is the strictest reading available: sharing
+  *one* net is ordinary fan-out and says nothing about how two devices
+  should be drawn, while sharing *all* of them means they are
+  interchangeable at every terminal. Rail nets are included on purpose:
+  a pair sharing `(out, 0)` drops to two separate ground glyphs, and the
+  distance between those rail pins is exactly the lateral spread a
+  reader sees as "these two were not drawn together".
+
+  Motivating specimen: `compensated_divider`, whose `C1` is emitted
+  **36 cells (45.72 mm)** from the `R1` it shares both nodes with, on a
+  five-element circuit — and which the wire-detour ratchet, the
+  instrument that most looks like a wire gate, scored **1.0715**
+  (near-ideal). Nothing in 76 test binaries gated on it.
+
+  Verifier:
+  `crates/spice2kicad/tests/flow_geometry.rs::parallel_partner_separation_within_ratchet`,
+  per-fixture zero-slack maximum, ratcheting down only, with
+  `f7_parallel_partner_pairs_exist` as the non-vacuity control. A
+  non-zero score is not automatically a defect: `common_emitter`'s 4 is
+  `RE`/`CE` on `(e, 0)`, a two-stub group `apply_rail_stub_columns`
+  spreads symmetrically about its anchor on purpose — the same 4 F6
+  records for the same pair.
+
+- **W1 — wire against a placement-independent floor** (routing/placement
+  metric, Tier 2, ADR-42). The wire-**detour** ratchet
+  (`placement_quality.rs`) divides emitted ink by the HPWL of the
+  **emitted pin positions**. That denominator is a function of the
+  placement, so exiling a symbol inflates numerator and denominator
+  together and the ratio barely moves: it is a faithful grade of the
+  *router* and is structurally blind to *where the pins are*. It scored
+  `compensated_divider` — 114.30 mm of wire on a five-element circuit,
+  a capacitor 46 mm from its parallel partner, a 53.34 mm x-extent, a
+  drawing the owner called "pretty broken" on sight — at **1.0715**.
+
+  W1 keeps the same numerator, the same graded ink components and the
+  same V10 glyph-net exclusions, and changes exactly one term:
+
+  ```text
+  floor = Σ_components (pins − 1) · 2.54 mm
+  ```
+
+  A component with `d` pins needs at least `d − 1` connections, and two
+  distinct pins cannot be drawn closer than one 100-mil symbol pin
+  pitch, so `floor` is ink no drawing of this netlist can go below
+  whatever the placer does. Move a symbol and only the numerator moves.
+
+  It **supplements** the detour ratchet rather than replacing it, and
+  that is deliberate: the detour ratio is the only instrument that
+  isolates router quality from placement quality, so a placement change
+  must not be able to launder a routing regression through it. With both,
+  a rise is attributable — floor ratio up with detour flat is placement;
+  both up is the router.
+
+  The floor is a **loose** absolute bound (nothing reaches it: real
+  symbols are longer than a pin pitch and real sheets need clearance),
+  so a value means something only against the same fixture's own
+  history. It is a per-fixture ratchet for exactly that reason, is not
+  comparable across fixtures, and must not be summed into a suite-wide
+  "wire score". Suite range at the promotion: `rc_lowpass` 2.0000 to
+  `sallen_key_lpf` 9.4375.
+
+  Verifier:
+  `crates/spice2kicad/tests/placement_quality.rs::wire_floor_ratio_within_budget_across_fixtures`,
+  zero-slack in both directions at four decimal places. The comparison
+  quantises to those 4 dp first: both sums accumulate over a `HashMap`,
+  so the summation order — and the last two or three ulps of every ratio
+  — varies between runs, and an exact `>` against a decimal literal is a
+  coin-flip failure (observed on this table before the quantisation went
+  in).
+
 - **A1 / A2 — series-chain axis uniformity** (readability metric,
   **informational**, ADR-28). A *series chain* is a maximal path of
   two-terminal signal elements linked by nets of signal degree 2 — each
@@ -1488,9 +1574,10 @@ invariant here.
   legitimately folds is the sharpest) and what would justify promoting
   it to a zero-slack Tier-2 ratchet.
 
-- **C1 — series-chain compactness** (readability metric,
-  **informational**, ADR-28). The same chains A1/A2 measure, asked a
-  different question: *do these devices read as ONE connected run?*
+- **C1 — series-chain compactness** (readability metric, **Tier 2,
+  zero-slack ratchet since 2026-09-06**, ADR-28 + ADR-42). The same
+  chains A1/A2 measure, asked a different question: *do these devices
+  read as ONE connected run?*
 
   Two consecutive members are **adjacent** when the wire between them —
   the Manhattan distance between their pins on the net they share — is
@@ -1537,9 +1624,20 @@ invariant here.
   Verifier: `crates/spice2kicad/tests/readability_metrics.rs`, with
   `chain_stranded_ranks_the_ladder_the_fold_and_the_shattered_chain` as
   the acceptance test and `chain_stranded_counts_a_known_synthetic_split`
-  as the non-vacuity control. **No budget literal**, same reasoning as
-  A. Flagged elsewhere and not previously noticed: `wien_bridge_osc`
-  (1 of 2). This line also claimed `lc_ladder_lpf` at "1 of 5"; that was
+  as the non-vacuity control.
+
+  **Budget literals since 2026-09-06** (ADR-42):
+  `chain_stranded_within_ratchet`, a per-fixture zero-slack high-water
+  mark in `STRANDED_RATCHET`, and a weighted Tier-2 scoreboard cell.
+  Three fixtures record 1 — `port_shapes`, `wien_bridge_osc`,
+  `compensated_divider` — and the other nineteen record 0. ADR-42
+  records why this landed against ADR-28's own stated precondition
+  ("the placer reaches 0 … so the ratchet records an achieved state"):
+  CLAUDE.md defines a ratchet as *a recorded high-water mark, not a
+  tunable headroom*, F6 already ships eleven non-zero literals on that
+  reading, and what the suite gains is the direction-of-change
+  guarantee. Flagged elsewhere and not previously noticed:
+  `wien_bridge_osc` (1 of 2). This line also claimed `lc_ladder_lpf` at "1 of 5"; that was
   **wrong when written** — it contradicts the specimen ranking above,
   which records the same fixture at 0 of 5, and the sink measures
   `chain.stranded / lc_ladder_lpf` = **0** under `flow-seed-v4` and under

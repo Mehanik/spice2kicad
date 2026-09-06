@@ -10739,3 +10739,174 @@ same fixture.
   measured: it breaks the moment one tap carries two stubs, and it
   produces exactly the zigzag the owner's "non-regular" complaint is
   about.
+
+## ADR-42 — Three instruments for a defect 890 tests could not see, and the ratchet that scored it 1.07
+
+**Status:** landed. **Purely a measurement change**: no file under
+`crates/spice-layout/`, `crates/spice-route/` or `crates/kicad-emitter/`
+is touched, `baseline_lock` is untouched, and no existing budget literal
+moves. Three new per-fixture zero-slack ratchets, two new registered
+metric ids, one metric promoted out of `Tier::Info`.
+
+### The gap
+
+`compensated_divider` was emitted with **114.30 mm of wire against a
+placement-independent floor of 12.70 mm** — a ratio of **9.00** — with
+one capacitor drawn **46 mm** from the partner it shares *both* nodes
+with, and a 53.34 mm x-extent for a five-element circuit. The owner
+called the drawing "pretty broken" on sight.
+
+**Nothing in 76 test binaries and 890 tests gated on it.** Three
+distinct causes, each closed below:
+
+1. **The wire-detour ratchet is structurally blind to placement.**
+   `placement_quality.rs::wire_detour_within_budget_across_fixtures`
+   recorded `("compensated_divider", 1.0715)` — near-ideal. Its ideal is
+   HPWL over the **emitted pin positions**, so moving a symbol 46 mm
+   away inflates numerator and denominator together and the ratio barely
+   moves. It grades the *router*, faithfully, and cannot see a placement
+   defect at all. It was the single most misleading instrument in the
+   suite, and its doc comment invited exactly the wrong reading.
+2. **ADR-28's metric C saw it and asserted nothing.**
+   `readability_metrics.rs` already reported
+   `chain.stranded = 1` on that fixture, with the diagnostic
+   `"R1..C1 on 'in': run 45.72 > body 15.24"`. Its verifier is
+   documented "Informational: this test asserts no budget."
+3. **No metric measured how far apart two elements on the identical net
+   set are drawn.**
+
+This is the project's recurring failure mode — a check that reports
+success while measuring nothing (MEMORY "verify what a number
+measures"; ADR-23 D9's "a blind cell is not conservatively blind", one
+level down: here the cell is not blind, it is *ungated*).
+
+### 1. Metric C promoted to a ratchet (`chain.stranded`)
+
+`readability_metrics.rs::chain_stranded_within_ratchet`, per-fixture
+zero-slack, plus the scoreboard row moved `Tier::Info` → **`Tier::T2`,
+1.0 point per stranded member**. An informational cell cannot back a
+ratchet: zero aggregate weight means a challenger that shatters a chain
+pays nothing for it in the promotion rule.
+
+Measured literals on the shipping default: **`port_shapes` 1,
+`wien_bridge_osc` 1, `compensated_divider` 1**, and 0 on the other
+nineteen. Its threshold is stated in the drawing's own material — a link
+is broken when its Manhattan run exceeds the chain's summed device-body
+length — so the ratchet carries no millimetre constant, which is
+CLAUDE.md principle 3 read at the verifier.
+
+**This lands against ADR-28's own stated precondition, knowingly.**
+ADR-28 said C would be promoted once "the placer reaches 0 on
+`port_shapes` and `wien_bridge_osc` with the default placer, so the
+ratchet records an achieved state". It does not. That precondition asks
+a ratchet to be *an aspiration met*, which is not what CLAUDE.md says a
+ratchet is — "a recorded high-water mark, not a tunable headroom … the
+literal records the actual current count on `master`" — and F6 already
+ships eleven non-zero literals on exactly that reading. What the suite
+gains is the direction-of-change guarantee: any RISE is now a regression
+to diagnose rather than a number nobody reads. A/B/D/E stay
+informational; C is promoted because it is the one that was already
+correctly reporting a defect the owner had independently confirmed.
+
+### 2. F7 — parallel-partner separation
+
+`flow_geometry.rs::parallel_partner_separation_within_ratchet`,
+structurally F6's twin: a distance in whole grid cells, per-fixture
+maximum, zero-slack ratchet, deliberately **not** a violation count.
+For every unordered pair of drawn elements incident on the *identical*
+set of nets, and for each net they share, the Manhattan distance between
+their pins on that net.
+
+The identical-net-SET discriminator is netlist-derived and structural
+(CLAUDE.md principle 9), and is the strictest reading available: sharing
+*one* net is ordinary fan-out, sharing *all* of them means the two
+devices are interchangeable at every terminal. Rail nets count, because
+a pair sharing `(out, 0)` drops to two separate glyphs and the spread
+between those rail pins is exactly what the eye reads as "not drawn
+together". `f7_parallel_partner_pairs_exist` is the non-vacuity control.
+
+Nine fixtures record non-zero; `compensated_divider` records **36**.
+
+### 3. W1 — wire against a placement-independent floor
+
+`placement_quality.rs::wire_floor_ratio_within_budget_across_fixtures`.
+Same numerator, same graded ink components, same V10 glyph-net
+exclusions as the detour ratchet — one term differs:
+
+```text
+floor = Σ_components (pins − 1) · 2.54 mm
+```
+
+A component with `d` pins needs at least `d − 1` connections, and two
+distinct pins cannot be drawn closer than one 100-mil symbol pin pitch,
+so this is ink **no drawing of this netlist can go below**, whatever the
+placer does. It is a function of the netlist and the emitted
+connectivity partition, never of a coordinate: move a symbol and only
+the numerator moves.
+
+**It supplements the detour ratchet; it does not replace it.** The
+detour ratio is the only instrument that isolates *router* quality, and
+a placement change must not be able to launder a routing regression
+through it. Keeping both makes a rise attributable: floor ratio up with
+detour flat is placement, both up is the router. The detour verifier's
+doc comment and the test's own header now say, in as many words, that it
+cannot see placement and that a passing detour ratchet is not evidence
+the placement is sane.
+
+The floor is a **loose** absolute bound — nothing reaches it — so a
+value means something only against the same fixture's own history. Hence
+a per-fixture ratchet, not a suite-wide wire score.
+
+Its comparison quantises to four decimal places before testing. Both
+sums accumulate over a `HashMap`, so the summation order and the last
+two or three ulps of every ratio vary between runs: `two_stage_amp`
+measured 2.5 on one run and 2.5000000000000004 on the next, and an exact
+`>` against a decimal literal produced a coin-flip failure (observed
+before the quantisation went in). **The pre-existing `detour` ratchet
+has the same hazard and is left alone**, because re-recording its
+literals is a policy act, not a mechanical one; noted here so the next
+flake is diagnosed rather than re-derived.
+
+### The instruments are alive: the per-arm table
+
+Measured over the five registered control arms plus the default
+(`dc-series-column-pinned`), each a whole-suite run of the three
+verifiers under `S2K_PLACER=<arm>` with its own scoreboard sink. Any
+metric that read the same under every arm would not be measuring what it
+claims.
+
+| metric / fixture | default | champion | flow-seed | flow-seed-v4 | readable-v1 | conet-layer-collapse |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `chain.stranded` (suite total) | 3 | 5 | 4 | 3 | 3 | **2** |
+| `f7` `compensated_divider` | **36** | — | — | — | 36 | **9** |
+| `f7` `opamp_transimpedance` | 12 | — | — | — | 12 | **7** |
+| `f7` `rc_phase_shift` | 7 | **15** | 8 | 8 | **4** | 7 |
+| `f7` `two_stage_amp` | 13 | 16 | 8 | 8 | 8 | 13 |
+| `wire.floor_ratio` `compensated_divider` | **9.00** | — | — | — | 9.00 | **3.50** |
+| `wire.floor_ratio` `two_stage_amp` | 2.50 | **15.71** | 8.25 | 8.25 | 8.07 | 2.50 |
+| `wire.floor_ratio` `common_emitter` | 2.14 | 5.36 | 4.21 | 4.21 | **7.14** | 2.14 |
+| `wire.floor_ratio` `opamp_transimpedance` | 7.75 | — | — | — | 7.75 | **4.08** |
+
+`champion`, `flow-seed` and `flow-seed-v4` cannot convert
+`stepped_attenuator` at all (`t0.convert_fail = 1`), which aborts the
+fixture loop on the documented conversion-failure idiom, so those three
+columns cover 18 of 22 fixtures and their totals are not comparable with
+the other three. That is a pre-existing property of those arms, not of
+these metrics.
+
+**The headline row is the one that is NOT in the table above.** On
+`compensated_divider`, `conet-layer-collapse` cuts the emitted ink by
+61% — `wire.floor_ratio` 9.00 → 3.50, `f7` 36 → 9, `chain.stranded`
+1 → 0 — and over the same repair the **detour ratio RISES**, 1.0714 →
+1.1667. The instrument that looks most like a wire gate would have
+scored the drastically better drawing as a regression, and the three
+metrics added here score it, correctly, as a large win. That is the gap,
+measured on both sides.
+
+### What this does not do
+
+It adds no placer behaviour, proposes no fix, and takes no position on
+whether `conet-layer-collapse` should be promoted — it only makes the
+question answerable. The literals here are calibrated on
+`dc-series-column-pinned` at `6d4408b` and will need re-recording after
+any placer change, `dc_column.rs` / `idioms.rs` work included.

@@ -1350,8 +1350,51 @@ fn hpwl(pts: &[Pt]) -> f64 {
     (x1 - x0) + (y1 - y0)
 }
 
-/// Per-fixture wire **detour**: emitted wire length over the ideal
-/// rectilinear lower bound, measured on real pin geometry.
+/// The smallest separation two distinct pins can be drawn with: one
+/// 100-mil KiCad symbol pin pitch. Used as the placement-independent
+/// wire floor below.
+const FLOOR_PITCH_MM: f64 = 2.54;
+
+/// One fixture's wire measurement: the emitted ink, and the **two**
+/// denominators it is graded against.
+struct WireMeasure {
+    /// Emitted rectilinear wire length over the graded components, mm.
+    wire: f64,
+    /// The **placement-DEPENDENT** ideal: Σ HPWL over each graded
+    /// component's own emitted pins. Grades the router.
+    ideal: f64,
+    /// The **placement-INDEPENDENT** floor: `Σ (pins − 1) · 2.54 mm`.
+    /// Grades placement and routing together. See
+    /// [`wire_floor_ratio_within_budget_across_fixtures`].
+    floor: f64,
+}
+
+/// Per-fixture wire **detour** and **floor ratio**: emitted wire length
+/// over each of two lower bounds, measured on real pin geometry.
+///
+/// # `ideal` CANNOT SEE PLACEMENT — read this before trusting it
+///
+/// The `ideal` denominator is the HPWL of each component's **emitted**
+/// pin positions, so it moves with the symbols. Exile one capacitor
+/// 46 mm from the partner it shares both nodes with and the numerator
+/// and the denominator inflate together: the ratio barely moves. The
+/// detour ratio is therefore a faithful grade of **the router** — "how
+/// far did the ink wander past the shortest route through the pins it
+/// was given" — and is structurally blind to **where those pins are**.
+///
+/// This is not a hypothetical. `compensated_divider` was emitted with
+/// 114.30 mm of wire on a five-element circuit, one capacitor exiled
+/// 46 mm from its parallel partner, and a 53.34 mm x-extent — a drawing
+/// the project owner called "pretty broken" on sight — and this ratchet
+/// scored it **1.0715**. It was the single most misleading instrument in
+/// the suite.
+///
+/// [`WireMeasure::floor`] is the companion that closes that: a
+/// denominator that depends on the NETLIST only. See
+/// [`wire_floor_ratio_within_budget_across_fixtures`]. The two
+/// supplement each other and neither replaces the other — the detour
+/// ratio remains the only instrument that isolates router quality from
+/// placement quality, and deleting it would lose that.
 ///
 /// The unit of measurement is a connected COMPONENT of emitted ink (see
 /// the accumulation loop for why, not the net). For each component the
@@ -1379,13 +1422,18 @@ fn hpwl(pts: &[Pt]) -> f64 {
 /// Segments are attributed to nets by union-find over shared endpoints
 /// and pin coincidences — the same connectivity model KiCad itself uses
 /// (V11) — rather than by proximity.
-fn wire_detour(spice_path: &std::path::Path, root: &Value) -> (f64, f64) {
+#[allow(clippy::too_many_lines)] // one cohesive union-find walk; splitting it hides the connectivity model
+fn wire_detour(spice_path: &std::path::Path, root: &Value) -> WireMeasure {
     use std::collections::HashMap;
 
     let segs = wire_segments(root);
     let (pins_by_net, glyph_anchors) = world_pins_by_net(spice_path, root);
     if segs.is_empty() {
-        return (0.0, 0.0);
+        return WireMeasure {
+            wire: 0.0,
+            ideal: 0.0,
+            floor: 0.0,
+        };
     }
 
     // Union-find over quantised coordinates: wire endpoints, plus any pin
@@ -1488,7 +1536,7 @@ fn wire_detour(spice_path: &std::path::Path, root: &Value) -> (f64, f64) {
         }
     }
 
-    let (mut wire, mut ideal) = (0.0, 0.0);
+    let (mut wire, mut ideal, mut floor) = (0.0, 0.0, 0.0);
     for (comp, len) in &wire_by_comp {
         let Some(pts) = pins_by_comp.get(comp) else {
             continue;
@@ -1498,8 +1546,13 @@ fn wire_detour(spice_path: &std::path::Path, root: &Value) -> (f64, f64) {
         }
         wire += len;
         ideal += hpwl(pts);
+        // (pins - 1) links, each at least one pin pitch long. Depends on
+        // the component's pin COUNT, never on where those pins are.
+        #[allow(clippy::cast_precision_loss)]
+        let extra = (pts.len() - 1) as f64;
+        floor += extra * FLOOR_PITCH_MM;
     }
-    (wire, ideal)
+    WireMeasure { wire, ideal, floor }
 }
 
 #[test]
@@ -1507,6 +1560,19 @@ fn wire_detour_within_budget_across_fixtures() {
     // Per-fixture wire DETOUR: emitted wire length over the rectilinear
     // ideal for the same ink (see `wire_detour`). 1.0 is a route that
     // could not be shorter; 1.4 means 40% of the ink is wander.
+    //
+    // *** THIS RATCHET GRADES THE ROUTER, NOT THE PLACER. ***
+    //
+    // Its ideal is HPWL over the EMITTED pin positions, so moving a
+    // symbol 46 mm away inflates numerator and denominator together and
+    // the ratio barely moves. It scored `compensated_divider` — 114.30 mm
+    // of wire on a five-element circuit, one capacitor exiled from its
+    // parallel partner, a drawing the owner called "pretty broken" on
+    // sight — at 1.0715. Do not read a passing detour ratchet as evidence
+    // that the placement is sane; that question is asked by
+    // `wire_floor_ratio_within_budget_across_fixtures` below, and by F7
+    // in `flow_geometry.rs`. See the doc comment on `wire_detour` for the
+    // full argument, and ADR-42.
     //
     // This is deliberately a RATIO, not a length. Absolute wire length is
     // not a project objective — see the HPWL ablation in
@@ -1652,7 +1718,11 @@ fn wire_detour_within_budget_across_fixtures() {
         let tmp = tempdir(name);
         let sch = common::spice_to_kicad(&path, &tmp).expect("spice2kicad");
         let root = parse_sch(&sch);
-        let (total, baseline) = wire_detour(&path, &root);
+        let WireMeasure {
+            wire: total,
+            ideal: baseline,
+            ..
+        } = wire_detour(&path, &root);
         if baseline <= 1e-6 {
             // Vacuity guard. Collected rather than asserted in place: a
             // panic here aborts the whole test function, so every later
@@ -1700,6 +1770,164 @@ fn wire_detour_within_budget_across_fixtures() {
     assert!(
         failures.is_empty(),
         "wire-detour budget exceeded:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// **Wire against a PLACEMENT-INDEPENDENT floor** — the companion the
+/// detour ratchet needs, and the instrument that would have caught
+/// `compensated_divider`.
+///
+/// # The gap it closes
+///
+/// [`wire_detour_within_budget_across_fixtures`] divides the emitted ink
+/// by the HPWL of the **emitted pin positions**. That denominator is a
+/// function of the placement, so a placement defect inflates numerator
+/// and denominator together and cancels out. `compensated_divider` was
+/// emitted with 114.30 mm of wire, one capacitor 46 mm from the partner
+/// it shares both nodes with, and the detour ratchet read **1.0715** —
+/// near-ideal. Nothing else in 76 test binaries and 890 tests gated on
+/// it either.
+///
+/// # What this measures instead
+///
+/// Same numerator, same graded components, same V10 glyph-net
+/// exclusions — so the two ratios are read off one measurement and
+/// differ in exactly one term. The denominator is
+///
+/// ```text
+/// floor = Σ_components (pins − 1) · 2.54 mm
+/// ```
+///
+/// A component with `d` pins needs at least `d − 1` connections, and two
+/// distinct pins cannot be drawn closer than one 100-mil symbol pin
+/// pitch. So `floor` is ink that **no drawing of this netlist can go
+/// below, whatever the placer does** — it is a function of the netlist
+/// and the emitted connectivity partition, never of a coordinate. Move a
+/// symbol and the numerator moves alone. That is the whole point.
+///
+/// # It supplements the detour ratchet; it does not replace it
+///
+/// Deliberate, and the reason is that they answer different questions.
+/// The detour ratio is the only instrument that isolates **router**
+/// quality — it asks whether the ink wandered past the shortest route
+/// through the pins the router was handed, and a placement change must
+/// not be able to launder a routing regression through it. This ratio
+/// asks whether the drawing as a whole is near the best a drawing of
+/// this circuit could be, and cannot tell which stage lost the ink.
+/// Keeping both, one can attribute a rise: floor ratio up with detour
+/// flat is a placement regression; both up is the router.
+///
+/// # Reading the numbers
+///
+/// The floor is a **loose** bound — nothing reaches it, because real
+/// symbols are longer than a pin pitch and real sheets need clearance.
+/// A value is therefore only meaningful against the SAME fixture's
+/// history, which is exactly what a per-fixture ratchet is. It is not
+/// comparable across fixtures and must not be summed into a
+/// "suite wire score".
+#[test]
+fn wire_floor_ratio_within_budget_across_fixtures() {
+    // Per-fixture zero-slack high-water marks at **four decimal places**
+    // (ADR-23 D4's precision, as everywhere in this file). Ratchet DOWN
+    // only.
+    //
+    // The comparison quantises the measured ratio to those same 4 dp
+    // before testing it, which is not slack — it is what makes the
+    // literal mean anything. Both sums inside `wire_detour` accumulate
+    // over a `HashMap`, so the summation ORDER varies between runs and
+    // the last two or three ulps of every ratio with it: `two_stage_amp`
+    // measures 2.5 on one run and 2.5000000000000004 on the next. An
+    // exact `>` against a decimal literal turns that into a coin-flip
+    // failure (observed, on this very table). Quantising first gives a
+    // literal that is exactly the measured value at the precision it is
+    // written to, and a test that fails on any real rise and never on
+    // float noise. The RAW ratio is what reaches the scoreboard sink.
+    let budgets: &[(&str, f64)] = &[
+        ("rc_lowpass", 2.0000),
+        ("rc_lowpass_ports", 2.0000),
+        ("common_emitter", 2.1429),
+        ("multivibrator", 6.8125),
+        ("diff_pair", 2.3750),
+        ("opamp_inverting", 7.3333),
+        ("opamp_inverting_real", 6.0000),
+        ("port_shapes", 9.3333),
+        ("opamp_definition_level", 8.0000),
+        ("named_rails", 2.3333),
+        ("rc_phase_shift", 2.8333),
+        ("two_stage_amp", 2.5000),
+        ("cascode_amp", 3.7727),
+        ("lc_ladder_lpf", 4.1111),
+        ("sallen_key_lpf", 9.4375),
+        ("wien_bridge_osc", 6.0625),
+        ("sallen_key_driven", 7.2778),
+        ("shunt_feedback_amp", 3.2500),
+        ("stepped_attenuator", 5.4286),
+        ("opamp_transimpedance", 7.7500),
+        ("resistor_ladder_ref", 4.8125),
+        // THE MOTIVATING CELL: 114.30 mm of emitted wire against a
+        // 12.70 mm floor on a FIVE-element circuit. The detour ratchet
+        // scored the same drawing 1.0715.
+        ("compensated_divider", 9.0000),
+    ];
+    let mut failures: Vec<String> = Vec::new();
+    for (name, path) in fixtures() {
+        let tmp = tempdir(name);
+        let sch = common::spice_to_kicad(&path, &tmp).expect("spice2kicad");
+        let root = parse_sch(&sch);
+        let WireMeasure {
+            wire, ideal, floor, ..
+        } = wire_detour(&path, &root);
+        if floor <= 1e-6 {
+            // Vacuity guard, collected rather than asserted in place so
+            // every later fixture still reports (ADR-23 D6).
+            failures.push(format!(
+                "{name}: no graded multi-pin component — the wire-floor metric cannot \
+                 grade this fixture"
+            ));
+            continue;
+        }
+        let ratio = wire / floor;
+        common::scoreboard::record("wire.floor_ratio", name, ratio);
+        if ratio < 1.0 - 1e-9 {
+            // The floor is a true lower bound on any rectilinear drawing
+            // of this connectivity, so a sub-1.0 reading means the
+            // MEASUREMENT broke (ink counted against pins that are not
+            // there), never that the placer got clever.
+            failures.push(format!(
+                "{name}: wire/floor = {ratio:.4} is below the theoretical floor of 1.0 — \
+                 the measurement is broken (wire {wire:.2} mm, floor {floor:.2} mm)"
+            ));
+            continue;
+        }
+        if std::env::var_os("S2K_QUALITY_DUMP").is_some() {
+            println!(
+                "wire_floor (\"{name}\", {ratio}),  // wire {wire:.2} floor {floor:.2} detour-ideal {ideal:.2}"
+            );
+            continue;
+        }
+        let &(_, budget) = budgets
+            .iter()
+            .find(|(n, _)| *n == name)
+            .expect("budget for fixture");
+        let graded = (ratio * 10_000.0).round() / 10_000.0;
+        if graded > budget {
+            failures.push(format!(
+                "{name}: wire/floor = {graded:.4} > budget {budget:.4} (emitted wire \
+                 {wire:.2} mm against a placement-independent floor of {floor:.2} mm). \
+                 Do NOT raise the budget — this is ink a better PLACEMENT would not \
+                 need, and the detour ratchet is structurally unable to see it."
+            ));
+        } else if graded < budget {
+            failures.push(format!(
+                "{name}: wire/floor fell to {graded:.4} (budget {budget:.4}) — lower the \
+                 literal to {graded:.4} in the same commit. Ratchets have zero slack."
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "wire-floor ratio budget exceeded:\n{}",
         failures.join("\n")
     );
 }
@@ -3213,8 +3441,12 @@ fn detour_dump() {
         };
         let cir = fixtures_dir().join(format!("{fixture}.cir"));
         let root = parse_sch(Path::new(path));
-        let (wire, ideal) = wire_detour(&cir, &root);
+        let WireMeasure { wire, ideal, floor } = wire_detour(&cir, &root);
         let ratio = if ideal > 0.0 { wire / ideal } else { 0.0 };
-        println!("{path}: detour={ratio:.4} wire={wire:.2} ideal={ideal:.2}");
+        let fratio = if floor > 0.0 { wire / floor } else { 0.0 };
+        println!(
+            "{path}: detour={ratio:.4} floor_ratio={fratio:.4} wire={wire:.2} \
+             ideal={ideal:.2} floor={floor:.2}"
+        );
     }
 }
