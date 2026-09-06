@@ -5,6 +5,8 @@
 
 #![allow(dead_code)]
 
+pub mod structural;
+
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
