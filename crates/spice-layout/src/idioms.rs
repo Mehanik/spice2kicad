@@ -945,7 +945,7 @@ struct ShuntSlot<'a> {
 /// policy), so it lives in one place instead. What legitimately differs
 /// between the two is where the row sits relative to its anchor, and that
 /// is named — see [`RowAnchor`].
-fn row_stride_cells(exts: &[WorldExtent]) -> i32 {
+pub(crate) fn row_stride_cells(exts: &[WorldExtent]) -> i32 {
     let mut stride = CELL_W;
     for w in exts.windows(2) {
         let gap_mm = w[0].max_x + (-w[1].min_x) + crate::MIN_CLEARANCE_MM;
@@ -960,7 +960,7 @@ fn row_stride_cells(exts: &[WorldExtent]) -> i32 {
 /// single member, they are the same offsets), which is why the choice
 /// went unnoticed until a row of exactly two appeared.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RowAnchor {
+pub(crate) enum RowAnchor {
     /// The row's *midline* is the anchor column, so an even-sized row
     /// straddles it and NO member stands on it. What
     /// [`apply_rail_stub_columns`] does, and what it must keep doing: its
@@ -970,6 +970,16 @@ enum RowAnchor {
     /// Slot `count / 2` lands exactly ON the anchor column and the rest
     /// spread to its left, so one member always gets the column.
     OnColumn,
+    /// Slot 0 lands ON the anchor column and the rest grow in the
+    /// **`+stride` direction only**; the caller negates the result to
+    /// grow the other way. What
+    /// [`crate::dc_column::apply_dc_columns`]'s carried rail stubs use:
+    /// their anchor is a column of *bodies* they must stand clear of, so
+    /// there is exactly one free half-plane and the row can only grow
+    /// into it. Straddling it would put half the row back inside the
+    /// column, and `OnColumn`'s left bias would do the same whenever the
+    /// stubs sit on the column's right.
+    Outward,
 }
 
 /// Offset in cells of slot `slot` of `count` from the row's anchor
@@ -1001,12 +1011,18 @@ enum RowAnchor {
 /// element is flowing into. Growing it rightward pushes a member past the
 /// node and costs a branch; growing it leftward tucks it under the series
 /// body, where the node's own wire already runs.
-fn row_slot_offset_cells(slot: usize, count: usize, stride: i32, anchor: RowAnchor) -> i32 {
+pub(crate) fn row_slot_offset_cells(
+    slot: usize,
+    count: usize,
+    stride: i32,
+    anchor: RowAnchor,
+) -> i32 {
     let slot_i = i32::try_from(slot).unwrap_or(0);
     let n = i32::try_from(count).unwrap_or(1);
     match anchor {
         RowAnchor::Straddle => slot_i * stride - (n - 1) * stride / 2,
         RowAnchor::OnColumn => (slot_i - n.div_euclid(2)) * stride,
+        RowAnchor::Outward => slot_i * stride,
     }
 }
 
@@ -1178,7 +1194,11 @@ pub(crate) fn apply_rail_stub_columns(
 /// flip [`crate::world_extent`] applies (`grow(p.x, -p.y)`). Note that
 /// `PlacedElement::world_pin_mm` adds it instead — a known upstream defect
 /// being corrected on its own track; do not mirror it here.
-fn pin_offset_world(e: &ResolvedElement, orient: Orientation, net: &str) -> Option<(f64, f64)> {
+pub(crate) fn pin_offset_world(
+    e: &ResolvedElement,
+    orient: Orientation,
+    net: &str,
+) -> Option<(f64, f64)> {
     let ti = e.nodes.iter().position(|n| n == net)?;
     let want = e.pin_mapping.get(ti)?;
     e.symbol
@@ -1748,7 +1768,7 @@ fn horizontal_flow_orientation(
 /// pinned a `+12V` bias resistor upside-down (glyph below the body) past
 /// every stage that enforces V14. `None` if no vertical orientation faces
 /// the rail pin the wanted way.
-fn rail_facing_orientation(
+pub(crate) fn rail_facing_orientation(
     se: &ResolvedElement,
     signal_net: &str,
     side: VertPref,

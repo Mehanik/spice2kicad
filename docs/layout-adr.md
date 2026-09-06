@@ -10496,3 +10496,246 @@ the second frame, which is why the four flagged rises exist at all.
 `stack.side_by_side` is **0 on all 22 fixtures** on the fixed default,
 and `stack.pairs` (its denominator) is unmoved — the stacking this
 construction exists to produce survives pin-anchoring intact.
+
+## ADR-41 — The DC-series column carries its own node stubs (pin-anchored in BOTH axes)
+
+**Status:** built and graded 2026-09-06, **NOT promoted** (promotion is an
+owner decision under ADR-23). Registered as one `--placer` challenger,
+`dc-column-node-stubs`, composing on the shipping default
+`dc-series-column-pinned`. Dead on the default path.
+
+### The defect — two owner-reported drawings, one cause
+
+Reviewing the eval render of the newly-promoted `dc-series-column-pinned`
+default, the owner reported, verbatim:
+
+* `resistor_ladder_ref` — "I like very much how resistors form a single
+  column now, but terminals and capacitors are very broken. A lot of
+  overlapping, also circuit is pretty regular, but the way terminals is
+  connected are pretty non-regular."
+* `two_stage_amp` — "the only visible regression (in many circuits),
+  CE1/RE1 previously was aligned horizontally, now they are on different
+  height. I think aligning it cost nothing and looks visually better. But
+  don't make this wires too long, as it was on `readable-v1` — now it's
+  much better."
+
+Both are one defect. `apply_dc_columns` re-seats a column's members
+constructively from `dc_rank`, but a rail stub hanging off one of the
+column's own taps is placed by two OTHER authorities, neither of which
+knows the column exists:
+
+* its **X** comes from `idioms::apply_rail_stub_columns`, which runs at
+  `lib.rs:654` — BEFORE `apply_dc_columns` at `lib.rs:680` — so it anchors
+  on positions the column then moves; and
+* its **Y** comes from `bands.rs`, which assigns a *sheet-height fraction*
+  (`assign_y_bands`: ground+signal → `Mid`, `soft_y_target_frac = 2/3`)
+  with no knowledge of the anchor node's own Y.
+
+`apply_rail_stub_columns`'s own doc comment states the second half
+outright: "**Only X changes**: … the stub's Y is left exactly as the band
+seeder placed it." CLAUDE.md's layout invariant — "constraints are
+pin-anchored … relationships between *connecting pins*, not symbol
+centers" — is therefore implemented in **one axis**. This is an incomplete
+invariant, not a missing feature.
+
+Measured on the shipping default at `7b31f65`, `resistor_ladder_ref`
+(R1..R6 a perfect column at x = 40.64, pitch 10.16):
+
+| cap | net | its tap's y | cap emitted at | wire |
+| --- | --- | ---: | --- | --- |
+| CB2 | t2 | 52.07 | (35.56, 86.36) mirror y | 30 mm vertical run |
+| CB3 | t3 | 62.23 | (48.26, 82.55) | 16 mm |
+| CB4 | t4 | 72.39 | (48.26, 93.98) | L through (45.72,72.39)→(45.72,90.17) |
+
+CB3's GND glyph at (48.26, 86.36) and CB4's body at (48.26, 93.98) crowd
+each other, and the `t3` / `t4` port labels are dragged down to y = 78.74
+and 90.17 instead of sitting at their taps — the owner's "non-regular
+terminals". Verified with `--no-refine` to be **entirely in the
+deterministic seed**, not the SA: seed-only, CB2 is at y = 73.66 for a tap
+at 52.07, and `two_stage_amp`'s CE1 at 81.28 against RE1's 58.42 (the SA
+actually *improves* CE1 to 68.58). No `cost.rs` weight is implicated.
+
+### The construction
+
+`apply_dc_columns` now carries the rail stubs of its `shared` nets
+(`dc_column::plan_carried_stubs` / `seat_carried_stubs`), following the
+existing shape of that file exactly — plan before mutate, decline the
+whole group rather than half-apply.
+
+**Which member a stub is drawn level with.** A stub *parallels* the column
+leg it drops alongside: a ground-side stub on `shared[k]` and the member
+BELOW that node both run down toward the same rail, so they are drawn side
+by side; a supply-side stub parallels the member above. Levelling is on
+the **pin**, not the origin — the anchor member's own pin already sits ON
+the column trunk, so the stub reaches it with one horizontal run and no
+bend. That is exactly the owner's `two_stage_amp` request, and it is what
+makes each ladder tap's capacitor land beside the ladder resistor it
+bypasses.
+
+**How far out.** Geometry, never a tuned constant: the widest reach toward
+the stubs of the column members the row can ACTUALLY clip — those whose Y
+span overlaps a stub's — plus the widest stub's reach back, plus
+`MIN_CLEARANCE_MM`, grid-snapped up. The Y-overlap filter is worth 2 cells
+on every fixture with a transistor in its column and is the difference
+between a correct stride and a merely safe one: a bypass capacitor level
+with an *emitter resistor* is nowhere near the BJT two rows above it. The
+unfiltered version measured 6 cells where 4 clears everything, and F6
+priced it on five fixtures at once.
+
+**Which side.** One side for the whole column, so a ladder of taps reads
+as a second regular column rather than a zigzag. Chosen by two keys: how
+many foreign bodies the row would land on, then which side the seed
+already leaned to (ties right). The collision key is load-bearing rather
+than decorative: on `cascode_amp` the bias ladder's right-hand side is
+where the device stack lives, and a row seated there overlapped `Q2`,
+which `legalize` then "repaired" by shoving `Q2` 5.08 mm out of its own
+column — the construction undone two columns away by a pass that only
+protects `user_pinned`.
+
+**The stride widens on stubbed nodes.** Two consecutive taps' stubs share
+one X lane, so a pitch that clears the BODIES does not clear them: a
+`Device:C` spans 7.62 mm pin to pin and its ground glyph and net-name text
+reach 3.81 mm further (`glyph_geom::VALUE_TEXT_OFFSET_MM`), against a
+column pitch of 10.16 mm. The lawful remedy is the one
+`DC_COLUMN_LABEL_MARGIN_CELLS` already uses — widen the stride THIS
+construction owns, derived from `world_extent_with_glyphs` rather than
+tuned. It is emphatically not the decoration-reservation programme
+(measured dead four times): nothing here reserves a general text class or
+widens a band; it widens one stack's own pitch, on stubbed nodes only.
+(Alternating sides was the other candidate and is rejected: it breaks the
+moment one tap carries two stubs.)
+
+**What declines.** A `(net, side)` group is declined WHOLE — never
+half-applied — when any member is already pinned (a user `*@place` /
+`*@align`, V7 symmetry, an earlier idiom, or the ADR-4 layout cache), when
+the anchor member presents no pin on the shared net, or when a stub has no
+V14-legal rail facing inside its `orient::allowed_orientations` set.
+`apply_rail_stub_columns` records what the other choice costs: a member
+"skipped without consuming its slot" put a newcomer in a cached element's
+exact column on `tests/layout_cache.rs`. A stub that is itself a column
+member (a bottom-of-ladder resistor to ground is both) is never carried.
+
+### Where it fires: 6 of 22 fixtures, 26 `baseline_lock` rows
+
+`cascode_amp` (`CB2` on `b2`, `CE` on `e1`), `common_emitter` (`CE`),
+`rc_phase_shift` (`CE`), `resistor_ladder_ref` (`CB2`/`CB3`/`CB4`),
+`shunt_feedback_amp` (`CE`) and `two_stage_amp` (`CE1`/`CE2`). The other
+16 fixtures present no rail stub on a DC-column shared net and are
+untouched by construction; `multivibrator` and `diff_pair` have columns
+(`[RC1 Q1]`, `[RC2 Q2]`) whose one shared net carries no stub, so they too
+are byte-identical.
+
+Emitted symbol origins, `--no-layout-cache`, shipped seed:
+
+| fixture | element | `dc-series-column-pinned` | this arm |
+| --- | --- | --- | --- |
+| `resistor_ladder_ref` | column x | 40.64 | 35.56 |
+| | `CB2` (tap `t2`) | (35.56, 86.36) | **(40.64, 55.88)** = `R3`'s y |
+| | `CB3` (tap `t3`) | (48.26, 82.55) | **(40.64, 69.85)** = `R4`'s y |
+| | `CB4` (tap `t4`) | (48.26, 93.98) | **(40.64, 83.82)** = `R5`'s y |
+| | `t2`/`t3`/`t4` labels | 49.53 / 78.74 / 90.17 | **52.07 / 66.04 / 80.01** (at their taps) |
+| `two_stage_amp` | `RE1` / `CE1` | (54.61, 58.42) / (58.42, **68.58**) | (54.61, 58.42) / (59.69, **58.42**) |
+| | `RE2` / `CE2` | (85.09, 58.42) / (78.74, **68.58**) | (85.09, 58.42) / (90.17, **58.42**) |
+| `cascode_amp` | `CB2` (tap `b2`) | (46.99, 77.47) | **(41.91, 50.80)** = `RB2`'s y |
+| | `RE` / `CE` | (59.69, 71.12) / (55.88, **77.47**) | (59.69, 71.12) / (54.61, **71.12**) |
+| `shunt_feedback_amp` | `RE` / `CE` | (50.80, 67.31) / (55.88, 67.31) | **unchanged** (only `RC`'s mirror flag moves) |
+
+Every carried stub's run in is **one horizontal segment of 4 cells
+(5.08 mm)** — down from `CB2`'s 30 mm vertical drop on
+`resistor_ladder_ref` and `CE1`'s 10.16 mm on `two_stage_amp`. The
+fixture the owner already called "much better", `shunt_feedback_amp`, is
+geometrically unchanged: its `CE` was accidentally already at `RE`'s Y,
+and the construction puts it in the same place deliberately.
+
+### The grading (ADR-23, single sample, vs `dc-series-column-pinned`)
+
+Tier 0: **clean**. Every `t0.*` cell is 0 on all 22 fixtures.
+
+Tier 1: **+0.00**. Every `v4` / `v10` / `v12` / `v13.*` / `v14.*` / `v15` /
+`v17` cell is 0 on all six moved fixtures. The only non-zero Tier-1 cell
+in the suite is the pre-existing `v14.glyph_body / wien_bridge_osc = 2`,
+on a fixture this construction does not touch.
+
+Tier 2, over the six moved fixtures (champion = the in-tree zero-slack
+ratchet literals, challenger = the scoreboard sink):
+
+| metric | Δ | detail |
+| --- | ---: | --- |
+| V16 bends (B) | **−9** | `resistor_ladder_ref` 7→3, `cascode_amp` 9→7, `two_stage_amp` 8→6, `rc_phase_shift` 7→6 |
+| wire crossings | **−5** | `cascode_amp` 2→0, `resistor_ladder_ref` 2→0, `two_stage_amp` 1→0 |
+| wire detour ratio | **−0.530** | five fall (`common_emitter` 1.429→1.034 the largest); `resistor_ladder_ref` 1.052→**1.107** rises |
+| F6 stub lateral run | −1 | `resistor_ladder_ref` 6→4, `two_stage_amp` 5→4; `cascode_amp` 3→**4**, `rc_phase_shift` 3→**4** |
+| Q3 flow-monotonicity | −1 | `rc_phase_shift` 5→4, `two_stage_amp` 4→3; `cascode_amp` 2→**3** |
+| Q5 alignment near-miss | −1 | `rc_phase_shift` 5→4 |
+| V16 branches (J) | **+8** | `resistor_ladder_ref` 0→3, `cascode_amp` 1→3, `two_stage_amp` 2→4, `rc_phase_shift` 1→2 |
+
+F5 and V5 are unmoved on every fixture (both ratchets pass on the arm).
+
+### Why J rises, and why that is the metric being right
+
+The J rise is **topological, not a routing regression**. A carried stub
+seated level with its anchor member puts three pins on the shared net at
+one place, so the router draws a proper Steiner T — and `J >= k − 2` is
+that net's floor, the same argument the V16 table already records for
+`opamp_inverting_real` ("`inv` is a 3-pin net, so J >= k-2 = 1 is its
+topological floor; the previous J = 0 came from a degenerate collinear
+layout"). `resistor_ladder_ref` has three such taps and goes 0 → 3
+exactly. The champion's J = 0 was bought by putting the capacitor 30 mm
+away, where the net degenerates into an L-shaped chain — which is the
+defect, priced as a virtue.
+
+The honest way to read the pair is together: **B −9 against J +8**, with
+crossings −5 and detour −0.53 alongside. Under CLAUDE.md's V16 rule that
+is a within-Tier-2 sideways trade, which ADR-23 permits **only** on the
+whole-placer path — which is what this is.
+
+### Why it is an arm and not a default-path fix
+
+Eight per-fixture Tier-2 ratchets rise: F6 on two fixtures, V16 J on four,
+Q3 on `cascode_amp`, detour on `resistor_ladder_ref`. CLAUDE.md's ratchet
+policy forbids an ordinary change from raising any of them, and the
+global-improvement escape needs owner sign-off. So the construction is
+registered as `--placer dc-column-node-stubs` and the default path is left
+**byte-identical** — `baseline_lock` green with zero rows changed on the
+default, and `placer::tests::the_carried_node_stubs_are_off_by_default`
+as the structural half.
+
+Two of those rises are not slack that can be tuned away, and it is worth
+saying which:
+
+* **F6 +1 on `cascode_amp` and `rc_phase_shift` is the floor of the
+  drawing.** A mid-column tap's stub cannot stand IN the column — the
+  trunk continues below it — so it stands beside it, and 4 cells is the
+  smallest offset at which a `Device:C` clears a `Device:R_US` with
+  `MIN_CLEARANCE_MM` between them (1.27 + 1.778 + 1.27 = 4.318 mm, one
+  cell up = 5.08). The champion reaches 3 cells only because `legalize`
+  tolerates a sub-clearance gap it never derived — and only on fixtures
+  where it never seated the stub against its member at all.
+* **V16 J is the topological floor**, per the section above.
+
+`resistor_ladder_ref`'s detour rise (+0.055) is the ladder growing 3
+cells taller on the three stubbed gaps so consecutive bypass capacitors'
+GND glyphs clear each other; it buys B 7 → 3 and crossings 2 → 0 on the
+same fixture.
+
+### What was measured and rejected on the way
+
+* **Taking the widest column member's reach for the sideways stride,
+  unconditionally.** Correct but not tight: it put every carried stub 6
+  cells out instead of 4, because a bypass capacitor level with an
+  emitter resistor was being spaced against the BJT two rows above it.
+  Measured F6 rises on FIVE fixtures (`common_emitter` 4→6,
+  `rc_phase_shift` 3→6, `two_stage_amp` 5→6, `cascode_amp` 3→7,
+  `shunt_feedback_amp` 4→6). Replaced by the Y-overlap filter, which
+  takes all five back to 4 and leaves only the two floor cases.
+* **Choosing the side by seed lean alone.** On `cascode_amp` that put the
+  bias ladder's `CB2` into the device stack's lane; `legalize` repaired
+  the overlap by moving `Q2` 5.08 mm out of its own column, so the
+  construction silently broke the column it composes on — two columns
+  away from the edit, and visible only as a `baseline_lock` row. The
+  foreign-body collision key removes it (`Q2` and `Q1` are back at
+  x = 57.15 together).
+* **Alternating sides per tap.** Rejected at design time rather than
+  measured: it breaks the moment one tap carries two stubs, and it
+  produces exactly the zigzag the owner's "non-regular" complaint is
+  about.

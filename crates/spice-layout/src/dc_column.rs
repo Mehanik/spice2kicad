@@ -60,6 +60,14 @@
 //! keep every degree of freedom they have today. It removes no pose from
 //! phase 4.5's Tier-0 repair, so it owes no Tier-0 escape.
 //!
+//! [`Placer::DcColumnNodeStubs`] additionally **carries the rail stubs of
+//! the column's own shared nets** — each seated beside the column at its
+//! shared pin's Y, so a tap's bypass capacitor sits level with the leg it
+//! parallels instead of wherever [`crate::bands`]'s sheet-height fraction
+//! left it. See [`plan_carried_stubs`] and ADR-41; it is an arm because it
+//! raises eight Tier-2 per-fixture ratchets, two of them at the geometric
+//! floor of the drawing.
+//!
 //! [`Placer::DcSeriesColumnPinned`] additionally **pins** the column, so
 //! the SA and phase 4.5 leave it put. Pinning skips `pick_orientations`,
 //! and CLAUDE.md's *consistency requirement* says a pass that freezes a
@@ -77,6 +85,7 @@ use kicad_symbols::{Orientation, Rotation};
 use spice_policy::CheckedNetlist;
 use spice_resolve::{ElementKind, ElementRole, ResolvedElement};
 
+use crate::idioms::{RailStub, RowAnchor};
 use crate::net_class::{NetClass, VertPref, classify_nets, vertical_prefs};
 use crate::placer::Placer;
 use crate::{GridPoint, Placement, WorldExtent, vertical_stride_cells, world_extent};
@@ -622,6 +631,184 @@ fn column_pin_offsets(
 /// point elsewhere.
 const DC_COLUMN_LABEL_MARGIN_CELLS: i32 = 1;
 
+// ---------------------------------------------------------------------------
+// Carried rail stubs — a column's own nodes, pin-anchored in BOTH axes
+// ---------------------------------------------------------------------------
+
+/// One rail stub carried beside a DC-series column, fully planned before
+/// any geometry is written.
+///
+/// A stub on a column's *shared* net is the bypass capacitor, the
+/// emitter bypass, the decoupling cap hanging off a tap. Before this
+/// construction its X came from [`crate::idioms::apply_rail_stub_columns`]
+/// — which runs BEFORE `apply_dc_columns` and therefore anchors on
+/// positions the column then moves — and its Y came from
+/// [`crate::bands`], a **sheet-height fraction** that knows nothing about
+/// the node it hangs off. Two disagreeing Y authorities, and the stub
+/// loses: on `resistor_ladder_ref` `CB2` ended 34 mm below the `t2` tap
+/// it bypasses, dragging the `t2` port label down with it.
+struct CarriedStub {
+    /// Element index of the stub.
+    element: usize,
+    /// **Slot** (not element index) of the column member the stub is
+    /// drawn level with — see [`plan_carried_stubs`] for which member
+    /// that is and why.
+    member: usize,
+    /// The stub's own pin offset (mm, world frame) from its origin on the
+    /// shared net, at [`Self::pose`].
+    pin: (f64, f64),
+    /// The anchor member's pin offset (mm) on the same net, at the pose
+    /// the column draws it in. `anchor_dy - pin.1` is the whole Y
+    /// construction: it puts the two pins on one horizontal line.
+    anchor_dy: f64,
+    /// The V14-correct rail facing, from
+    /// [`crate::idioms::rail_facing_orientation`], intersected with the
+    /// element's [`crate::orient::allowed_orientations`] set.
+    pose: Orientation,
+    /// Slot in its own `(net, side)` row; slot 0 is nearest the column.
+    slot: usize,
+    /// Size of that row.
+    count: usize,
+    /// The row's geometry-derived pitch, from
+    /// [`crate::idioms::row_stride_cells`].
+    row_stride: i32,
+    /// Glyph-inclusive extent at [`Self::pose`] — the reach a `power:*`
+    /// glyph and its net-name text add below a ground stub is exactly
+    /// what makes two consecutive taps' capacitors collide, so the span
+    /// this construction widens the column stride by has to include it.
+    ext: WorldExtent,
+}
+
+/// Plan every rail stub `col` carries, without moving anything.
+///
+/// # Which member a stub is drawn level with
+///
+/// A stub *parallels* the column leg it drops alongside. A ground-side
+/// stub on `shared[k]` and the member **below** that node both run down
+/// toward the same rail, so they are drawn side by side — that is the
+/// conventional emitter-resistor-and-bypass-capacitor drawing, and it is
+/// exactly what the owner asked for on `two_stage_amp` ("CE1/RE1
+/// previously was aligned horizontally … aligning it cost nothing and
+/// looks visually better"). A supply-side stub parallels the member
+/// **above** the node, symmetrically.
+///
+/// Levelling on the *pin* rather than the origin is CLAUDE.md's layout
+/// invariant ("relationships between *connecting pins*, not symbol
+/// centers") and it is also what makes the wire short: the anchor
+/// member's own pin already sits ON the column trunk, so the stub reaches
+/// it with one horizontal run and no bend.
+///
+/// # What declines
+///
+/// A `(net, side)` group is declined **whole** — never half-applied — when
+///
+/// * any member is already `pinned` (a user `*@place` / `*@align`, a V7
+///   symmetry pin, the ADR-4 layout cache, or an earlier idiom).
+///   `apply_rail_stub_columns` records what the other choice cost: a
+///   member "skipped without consuming its slot" put a newcomer in a
+///   cached element's exact column on `tests/layout_cache.rs`. Declining
+///   the group avoids the question entirely;
+/// * the anchor member presents no pin on the shared net, or a stub has
+///   no V14-legal rail facing inside its `allowed` set. Pinning skips
+///   `pick_orientations`, so CLAUDE.md's *consistency requirement* makes
+///   choosing a pose this pass's own responsibility — and a pose outside
+///   `allowed` would freeze a V14/V17 violation past every enforcer.
+///
+/// A stub that is itself a column member (a bottom-of-ladder resistor to
+/// ground is both) is not carried: the column already owns its geometry.
+// One read-only mask, the netlist, the two geometry tables the poses are
+// filtered through, the column, its poses, the stub list and the member
+// set. Bundling them into a struct would hide which are policy and which
+// are geometry, for no benefit at a single call site.
+#[allow(clippy::too_many_arguments)]
+fn plan_carried_stubs(
+    pinned: &[bool],
+    checked: &CheckedNetlist,
+    allowed: &[Vec<Orientation>],
+    prefs: &HashMap<String, VertPref>,
+    col: &DcColumn,
+    poses: &[Orientation],
+    stubs: &[RailStub],
+    columned: &HashSet<usize>,
+    variant: Placer,
+) -> Vec<CarriedStub> {
+    // The single gate. An empty plan leaves BOTH halves of the
+    // construction inert — the stride widening reads `carried` and the
+    // seating iterates it — so the shipping placer's output is unchanged
+    // by construction (`baseline_lock` is the empirical half). See
+    // [`Placer::DcColumnNodeStubs`] for what it costs, and why that makes
+    // it an arm rather than a default-path fix.
+    if !variant.dc_column_node_stubs() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for (k, net) in col.shared.iter().enumerate() {
+        for side in [VertPref::Up, VertPref::Down] {
+            let group: Vec<&RailStub> = stubs
+                .iter()
+                .filter(|s| {
+                    s.signal_net == *net && s.side == side && !columned.contains(&s.element)
+                })
+                .collect();
+            if group.is_empty() || group.iter().any(|s| pinned[s.element]) {
+                continue;
+            }
+            // Down-side stubs parallel the leg BELOW the node, up-side
+            // ones the leg above it.
+            let member = if side == VertPref::Down { k + 1 } else { k };
+            let Some((_, anchor_dy)) = crate::idioms::pin_offset_world(
+                &checked.elements[col.members[member]],
+                poses[member],
+                net,
+            ) else {
+                continue;
+            };
+            let mut planned: Vec<(usize, Orientation, (f64, f64), WorldExtent)> =
+                Vec::with_capacity(group.len());
+            let mut declined = false;
+            for s in &group {
+                let el = &checked.elements[s.element];
+                let Some(pose) = crate::idioms::rail_facing_orientation(el, net, side)
+                    .filter(|p| allowed.get(s.element).is_some_and(|a| a.contains(p)))
+                else {
+                    declined = true;
+                    break;
+                };
+                let Some(pin) = crate::idioms::pin_offset_world(el, pose, net) else {
+                    declined = true;
+                    break;
+                };
+                planned.push((
+                    s.element,
+                    pose,
+                    pin,
+                    crate::world_extent_with_glyphs(el, pose, None, prefs),
+                ));
+            }
+            if declined {
+                continue;
+            }
+            let count = planned.len();
+            let row_stride =
+                crate::idioms::row_stride_cells(&planned.iter().map(|p| p.3).collect::<Vec<_>>());
+            for (slot, (element, pose, pin, ext)) in planned.into_iter().enumerate() {
+                out.push(CarriedStub {
+                    element,
+                    member,
+                    pin,
+                    anchor_dy,
+                    pose,
+                    slot,
+                    count,
+                    row_stride,
+                    ext,
+                });
+            }
+        }
+    }
+    out
+}
+
 /// Apply every detected DC-series column: one shared X, members ordered
 /// top-to-bottom by DC potential, separated by a geometry-derived
 /// vertical stride.
@@ -639,6 +826,13 @@ const DC_COLUMN_LABEL_MARGIN_CELLS: i32 = 1;
 /// members' **mean seed Y**, so the construction displaces the component
 /// as little as the shape allows. It writes *relative* geometry (a
 /// stack), never a page coordinate.
+///
+/// The column also **carries the rail stubs of its own shared nets** —
+/// see [`plan_carried_stubs`]. Each is seated beside the column at its
+/// shared pin's Y, so the tap's bypass capacitor sits level with the leg
+/// it parallels instead of wherever [`crate::bands`]'s sheet-height
+/// fraction left it, and the column's pitch widens on stubbed nodes to
+/// clear their glyph-inclusive extents.
 pub(crate) fn apply_dc_columns(
     placement: &mut Placement,
     pinned: &mut [bool],
@@ -652,8 +846,18 @@ pub(crate) fn apply_dc_columns(
     let pin_it = variant.dc_series_columns_pinned();
     let prefs = vertical_prefs(checked);
     let facings = crate::dc_rank::device_facings(checked);
+    let stubs = crate::idioms::detect_rail_stubs(checked);
+    let columns = detect_dc_columns(checked);
+    // Every element the construction owns as a column MEMBER, across all
+    // columns. A bottom-of-ladder resistor to ground is both a member and
+    // a rail stub; the column already writes its geometry, so it must not
+    // also be carried beside itself.
+    let columned: HashSet<usize> = columns
+        .iter()
+        .flat_map(|c| c.members.iter().copied())
+        .collect();
 
-    for col in detect_dc_columns(checked) {
+    for col in &columns {
         if col.members.iter().any(|&i| pinned[i]) {
             continue;
         }
@@ -681,9 +885,16 @@ pub(crate) fn apply_dc_columns(
         // sits left of that line by, at the pose it is drawn in.
         // `None` = the column's own geometry cannot put every shared pin
         // on one x; decline it whole, before anything is mutated.
-        let Some(offsets) = column_pin_offsets(checked, &col, &poses) else {
+        let Some(offsets) = column_pin_offsets(checked, col, &poses) else {
             continue;
         };
+
+        // The rail stubs this column carries. Planned here, before any
+        // geometry is written, for the reason the poses are: a group that
+        // turns out to be unposeable must leave nothing half-applied.
+        let carried = plan_carried_stubs(
+            pinned, checked, allowed, &prefs, col, &poses, &stubs, &columned, variant,
+        );
 
         // Strides between consecutive members, at the poses above.
         let exts: Vec<WorldExtent> = col
@@ -692,9 +903,43 @@ pub(crate) fn apply_dc_columns(
             .zip(&poses)
             .map(|(&i, &o)| world_extent(&checked.elements[i].symbol, o, None))
             .collect();
-        let strides: Vec<i32> = exts
-            .windows(2)
-            .map(|w| vertical_stride_cells(&w[0], &w[1]) + DC_COLUMN_LABEL_MARGIN_CELLS)
+        // The Y span each member's carried stubs occupy, in that member's
+        // OWN origin frame — the stub is levelled on the member's pin, so
+        // it travels with it and its reach is part of what the column's
+        // pitch has to clear.
+        let mut carried_span: Vec<Option<(f64, f64)>> = vec![None; col.members.len()];
+        for c in &carried {
+            let d = c.anchor_dy - c.pin.1;
+            let (lo, hi) = (c.ext.min_y + d, c.ext.max_y + d);
+            let slot = &mut carried_span[c.member];
+            *slot = Some(match *slot {
+                None => (lo, hi),
+                Some((a, b)) => (a.min(lo), b.max(hi)),
+            });
+        }
+        let strides: Vec<i32> = (0..exts.len() - 1)
+            .map(|k| {
+                let body = vertical_stride_cells(&exts[k], &exts[k + 1]);
+                // Two consecutive taps' stubs share one X lane, so the
+                // pitch that clears the BODIES does not clear them: a
+                // `Device:C` spans 7.62 mm pin to pin and its ground glyph
+                // and net-name text reach 3.81 mm further, against a
+                // column pitch of 10.16 mm. That is the zero-budget
+                // `v13.7_label_pintext` class CLAUDE.md predicts every
+                // repositioning pass will hit, and the lawful remedy is
+                // the one `DC_COLUMN_LABEL_MARGIN_CELLS` already uses:
+                // widen the stride THIS construction owns, derived from
+                // `glyph_geom` reach rather than tuned. (Alternating sides
+                // was the other candidate and is rejected: it breaks the
+                // moment one tap carries two stubs.)
+                let carried_need = match (carried_span[k], carried_span[k + 1]) {
+                    (Some(a), Some(b)) => {
+                        crate::mm_up_to_cells(a.1 - b.0 + crate::MIN_CLEARANCE_MM)
+                    }
+                    _ => 0,
+                };
+                body.max(carried_need) + DC_COLUMN_LABEL_MARGIN_CELLS
+            })
             .collect();
 
         // Anchor: the component's own seed barycenter, so the column
@@ -718,7 +963,9 @@ pub(crate) fn apply_dc_columns(
         let x = sum_x.div_euclid(n);
         let mut y = sum_y.div_euclid(n) - total / 2;
 
+        let mut member_y: Vec<i32> = Vec::with_capacity(col.members.len());
         for (k, &i) in col.members.iter().enumerate() {
+            member_y.push(y);
             placement.elements[i].origin = GridPoint::new(x - offsets[k], y);
             if pin_it {
                 placement.elements[i].orientation = poses[k];
@@ -728,7 +975,197 @@ pub(crate) fn apply_dc_columns(
                 y += *s;
             }
         }
+
+        seat_carried_stubs(
+            placement, pinned, checked, &prefs, &carried, col, &exts, &member_y, x, pin_it,
+        );
     }
+}
+
+/// Write the geometry of one column's carried rail stubs: beside the
+/// column, level with each one's anchor member's shared pin.
+///
+/// # One side for the whole column
+///
+/// A ladder of taps must read as a second regular column, not a zigzag
+/// (the owner: "circuit is pretty regular, but the way terminals is
+/// connected are pretty non-regular"). So the side is chosen once, for
+/// the column, by two keys in order:
+///
+/// 1. **How many foreign bodies the row would land on.** A side is not
+///    free just because the column clears it: on `cascode_amp` the bias
+///    ladder's right-hand side is where the device stack lives, and a
+///    row seated there overlaps `Q2` — which `legalize` then repairs by
+///    shoving `Q2` out of its own column, undoing the construction two
+///    columns away. Counting the collision here is what keeps the repair
+///    from being needed.
+/// 2. **Which side the seed already leaned to**, so an unobstructed
+///    choice displaces the group as little as the shape allows. Ties go
+///    right.
+///
+/// # How far out
+///
+/// Geometry, never a tuned constant: the widest reach toward the stubs of
+/// the column members the row can ACTUALLY clip — those whose Y span
+/// overlaps a stub's — plus the widest stub's reach back toward the
+/// column, plus [`crate::MIN_CLEARANCE_MM`], grid-snapped up.
+///
+/// The Y-overlap filter is the difference between a correct stride and a
+/// merely safe one, and it is worth 2 cells on every fixture with a
+/// transistor in its column: a bypass capacitor level with an *emitter
+/// resistor* is nowhere near the BJT two rows above it, so the BJT's
+/// width has no business setting the run. Taking the max over all members
+/// unconditionally measured 6 cells where 4 clears everything — and F6
+/// (rail-stub lateral run) prices exactly that difference, on five
+/// fixtures at once. It is also the owner's other report: "don't make
+/// this wires too long".
+// The placement and pin mask it writes, the netlist and glyph prefs the
+// collision test reads, the plan, the column (members, extents, Y and x)
+// and whether to pin. A struct would only rename them.
+#[allow(clippy::too_many_arguments)]
+fn seat_carried_stubs(
+    placement: &mut Placement,
+    pinned: &mut [bool],
+    checked: &CheckedNetlist,
+    prefs: &HashMap<String, VertPref>,
+    carried: &[CarriedStub],
+    col: &DcColumn,
+    exts: &[WorldExtent],
+    member_y: &[i32],
+    x: i32,
+    pin_it: bool,
+) {
+    if carried.is_empty() {
+        return;
+    }
+    let lean: i64 = carried
+        .iter()
+        .map(|c| i64::from(placement.elements[c.element].origin.x - x))
+        .sum();
+    let leaned = if lean < 0 { -1 } else { 1 };
+
+    // Everything the row could land on: not a member of this column, and
+    // not one of the stubs being seated.
+    let own: HashSet<usize> = col
+        .members
+        .iter()
+        .copied()
+        .chain(carried.iter().map(|c| c.element))
+        .collect();
+    let foreign: Vec<(f64, f64, f64, f64)> = (0..checked.elements.len())
+        .filter(|i| !own.contains(i))
+        .map(|i| {
+            let e = crate::world_extent_with_glyphs(
+                &checked.elements[i],
+                placement.elements[i].orientation,
+                None,
+                prefs,
+            );
+            let (ox, oy) = placement.elements[i].origin.to_mm();
+            (ox + e.min_x, ox + e.max_x, oy + e.min_y, oy + e.max_y)
+        })
+        .collect();
+
+    let mut best: Option<(usize, u8, i32, i32)> = None;
+    for side in [1_i32, -1] {
+        let gap = carried_gap_cells(carried, exts, member_y, side > 0);
+        let mut hits = 0_usize;
+        for c in carried {
+            let (lo_x, hi_x, lo_y, hi_y) = stub_box(c, x, side, gap, member_y);
+            hits += foreign
+                .iter()
+                .filter(|(a, b, p, q)| lo_x < *b && *a < hi_x && lo_y < *q && *p < hi_y)
+                .count();
+        }
+        let lean_rank = u8::from(side != leaned);
+        let key = (hits, lean_rank, side, gap);
+        if best.is_none_or(|b| (key.0, key.1) < (b.0, b.1)) {
+            best = Some(key);
+        }
+    }
+    let Some((_, _, side, gap)) = best else {
+        return;
+    };
+
+    for c in carried {
+        let slot_off =
+            crate::idioms::row_slot_offset_cells(c.slot, c.count, c.row_stride, RowAnchor::Outward);
+        #[allow(clippy::cast_possible_truncation)]
+        let dx = (c.pin.0 / GridPoint::STEP_MM).round() as i32;
+        placement.elements[c.element].origin = GridPoint::new(
+            x + side * (gap + slot_off) - dx,
+            member_y[c.member] + stub_dy_cells(c),
+        );
+        if pin_it {
+            placement.elements[c.element].orientation = c.pose;
+            pinned[c.element] = true;
+        }
+    }
+}
+
+/// Cells from the anchor member's origin to the stub's, so the two pins
+/// on the shared net land on one horizontal line.
+#[allow(clippy::cast_possible_truncation)]
+fn stub_dy_cells(c: &CarriedStub) -> i32 {
+    ((c.anchor_dy - c.pin.1) / GridPoint::STEP_MM).round() as i32
+}
+
+/// World bbox (mm) a carried stub would occupy at `side` / `gap`.
+fn stub_box(
+    c: &CarriedStub,
+    x: i32,
+    side: i32,
+    gap: i32,
+    member_y: &[i32],
+) -> (f64, f64, f64, f64) {
+    let slot_off =
+        crate::idioms::row_slot_offset_cells(c.slot, c.count, c.row_stride, RowAnchor::Outward);
+    #[allow(clippy::cast_possible_truncation)]
+    let dx = (c.pin.0 / GridPoint::STEP_MM).round() as i32;
+    let ox = f64::from(x + side * (gap + slot_off) - dx) * GridPoint::STEP_MM;
+    let oy = f64::from(member_y[c.member] + stub_dy_cells(c)) * GridPoint::STEP_MM;
+    (
+        ox + c.ext.min_x,
+        ox + c.ext.max_x,
+        oy + c.ext.min_y,
+        oy + c.ext.max_y,
+    )
+}
+
+/// Cells from the column's shared-pin line to the nearest carried-stub
+/// slot, on the given side.
+///
+/// Only the members whose Y span the stub's own span actually reaches are
+/// consulted — see [`seat_carried_stubs`] for why that filter is the
+/// whole difference between a 4-cell run and a 6-cell one.
+fn carried_gap_cells(
+    carried: &[CarriedStub],
+    exts: &[WorldExtent],
+    member_y: &[i32],
+    right: bool,
+) -> i32 {
+    let mut gap = 1;
+    for c in carried {
+        let oy = f64::from(member_y[c.member] + stub_dy_cells(c)) * GridPoint::STEP_MM;
+        let (lo, hi) = (oy + c.ext.min_y, oy + c.ext.max_y);
+        let mut member_reach = 0.0_f64;
+        for (m, e) in exts.iter().enumerate() {
+            let my = f64::from(member_y[m]) * GridPoint::STEP_MM;
+            // Clearance-padded overlap: a member the stub merely grazes
+            // still has to be cleared sideways.
+            if my + e.max_y + crate::MIN_CLEARANCE_MM <= lo
+                || hi + crate::MIN_CLEARANCE_MM <= my + e.min_y
+            {
+                continue;
+            }
+            member_reach = member_reach.max(if right { e.max_x } else { -e.min_x });
+        }
+        let stub_reach = if right { -c.ext.min_x } else { c.ext.max_x };
+        gap = gap.max(crate::mm_up_to_cells(
+            member_reach + stub_reach + crate::MIN_CLEARANCE_MM,
+        ));
+    }
+    gap
 }
 
 #[cfg(test)]
@@ -742,7 +1179,13 @@ mod tests {
 
     use kicad_symbols::{Orientation, Rotation};
 
-    use super::{column_pin_offsets, dc_series_pairs, detect_dc_columns};
+    use std::collections::HashSet;
+
+    use super::{
+        column_pin_offsets, dc_series_pairs, detect_dc_columns, plan_carried_stubs, vertical_prefs,
+    };
+    use crate::GridPoint;
+    use crate::placer::Placer;
 
     fn fixture_library() -> &'static Library {
         static LIB: OnceLock<Library> = OnceLock::new();
@@ -996,5 +1439,250 @@ mod tests {
                 assert!(seen.insert(*m), "member {m} in two columns");
             }
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Carried rail stubs
+    // -----------------------------------------------------------------
+
+    /// A ladder with a bypass capacitor on two consecutive taps — the
+    /// `resistor_ladder_ref` shape, cut to the two taps that make
+    /// consecutive-stub spacing observable.
+    const LADDER: &str = "VDD vdd 0 DC 12 ;@ power=+12V\n\
+                          R1 vdd t1 10k\nR2 t1 t2 10k\nR3 t2 t3 10k\n\
+                          R4 t3 t4 10k\nR5 t4 0 10k\n\
+                          CB2 t2 0 100n\nCB3 t3 0 100n\n.end\n";
+
+    /// Seed-only placement (no SA), so "did this move?" is attributable
+    /// to the seed pass under test — the `idioms.rs` `seed_with` rule.
+    fn seed(src: &str) -> (CheckedNetlist, crate::Placement) {
+        let checked = checked_of(src);
+        let placement = crate::place_with(
+            checked.clone(),
+            fixture_library(),
+            &crate::LayoutOptions {
+                refine: false,
+                placer: Placer::DcColumnNodeStubs,
+                ..crate::LayoutOptions::default()
+            },
+        )
+        .expect("place");
+        (checked, placement)
+    }
+
+    fn index_of(checked: &CheckedNetlist, r: &str) -> usize {
+        checked
+            .elements
+            .iter()
+            .position(|e| e.refdes == r)
+            .unwrap_or_else(|| panic!("{r} present"))
+    }
+
+    /// World `(x, y)` mm of `refdes`'s pin on `net`, as placed.
+    fn pin_at(
+        checked: &CheckedNetlist,
+        placement: &crate::Placement,
+        refdes: &str,
+        net: &str,
+    ) -> (f64, f64) {
+        let i = index_of(checked, refdes);
+        let (dx, dy) = crate::idioms::pin_offset_world(
+            &checked.elements[i],
+            placement.elements[i].orientation,
+            net,
+        )
+        .expect("pin on net");
+        let (ox, oy) = placement.elements[i].origin.to_mm();
+        (ox + dx, oy + dy)
+    }
+
+    /// **The Y half of the construction, and the negative control.**
+    ///
+    /// A ground-side bypass capacitor parallels the ladder leg *below*
+    /// its tap, so its own tap pin lands on exactly the same horizontal
+    /// line as that leg's — CLAUDE.md's "constraints are pin-anchored",
+    /// now in both axes rather than X only.
+    ///
+    /// This is what fails on the pre-fix code. Before the carry,
+    /// `apply_rail_stub_columns` moved a stub in **X only** ("the stub's
+    /// Y is left exactly as the band seeder placed it") while
+    /// `apply_dc_columns` re-seated its tap constructively from
+    /// `dc_rank` — two disagreeing Y authorities, and the stub lost by a
+    /// whole band. Measured on the shipping `resistor_ladder_ref`: `CB2`
+    /// emitted at y = 86.36 for a `t2` tap at y = 52.07.
+    #[test]
+    fn a_carried_stub_lands_on_its_tap_pin_line() {
+        let src = format!("{HDR}{LADDER}");
+        let (checked, p) = seed(&src);
+        for (cap, leg, net) in [("CB2", "R3", "t2"), ("CB3", "R4", "t3")] {
+            let (cx, cy) = pin_at(&checked, &p, cap, net);
+            let (lx, ly) = pin_at(&checked, &p, leg, net);
+            assert!(
+                (cy - ly).abs() < 1e-6,
+                "{cap}'s {net} pin (y = {cy}) must sit on {leg}'s ({ly})"
+            );
+            assert!(
+                (cx - lx).abs() > GridPoint::STEP_MM / 2.0,
+                "{cap} must sit BESIDE the column, not in it (both at x = {cx})"
+            );
+        }
+    }
+
+    /// **The X half.** The run in is one horizontal segment whose length
+    /// is the geometry: the widest column member's reach toward the
+    /// stubs plus the widest stub's reach back, plus one clearance cell,
+    /// rounded up to the grid. Nothing tuned, and nothing long — the
+    /// owner's other report was that `readable-v1`'s stub wires were too
+    /// long.
+    #[test]
+    fn a_carried_stub_sits_one_geometry_derived_stride_from_the_column() {
+        let src = format!("{HDR}{LADDER}");
+        let (checked, p) = seed(&src);
+        let (cx, _) = pin_at(&checked, &p, "CB2", "t2");
+        let (lx, _) = pin_at(&checked, &p, "R3", "t2");
+        let widest = |r: &str| {
+            let i = index_of(&checked, r);
+            crate::world_extent(&checked.elements[i].symbol, p.elements[i].orientation, None)
+        };
+        let need = widest("R3").max_x - widest("CB2").min_x + crate::MIN_CLEARANCE_MM;
+        let run = (cx - lx).abs();
+        assert!(
+            run >= need - 1e-6,
+            "the run ({run}) must clear both bodies ({need})"
+        );
+        assert!(
+            run <= need + GridPoint::STEP_MM,
+            "the run ({run}) must be the SMALLEST such stride, not a page-scale detour \
+             (grid-snapped {need})"
+        );
+        // Both taps' capacitors take the SAME side, so the taps read as a
+        // second regular column rather than a zigzag. (The owner: "circuit
+        // is pretty regular, but the way terminals is connected are pretty
+        // non-regular".)
+        let (c3x, _) = pin_at(&checked, &p, "CB3", "t3");
+        let (l4x, _) = pin_at(&checked, &p, "R4", "t3");
+        assert!(
+            (cx - lx) * (c3x - l4x) > 0.0,
+            "the two carried stubs took opposite sides of the column"
+        );
+        assert!((cx - c3x).abs() < 1e-6, "and they share one column x");
+    }
+
+    /// Consecutive taps' stubs share one X lane, so the column pitch has
+    /// to clear their **glyph-inclusive** extents, not just their bodies:
+    /// a `Device:C` spans 7.62 mm pin to pin and its GND glyph and
+    /// net-name text reach 3.81 mm further, against a 10.16 mm body-clean
+    /// pitch. This is the `v13.7_label_pintext` class CLAUDE.md predicts,
+    /// and the remedy is the stride *this construction owns*.
+    #[test]
+    fn consecutive_carried_stubs_clear_each_other() {
+        let src = format!("{HDR}{LADDER}");
+        let (checked, p) = seed(&src);
+        let prefs = vertical_prefs(&checked);
+        let span = |r: &str| {
+            let i = index_of(&checked, r);
+            let e = crate::world_extent_with_glyphs(
+                &checked.elements[i],
+                p.elements[i].orientation,
+                None,
+                &prefs,
+            );
+            let oy = p.elements[i].origin.to_mm().1;
+            (oy + e.min_y, oy + e.max_y)
+        };
+        let (a_lo, a_hi) = span("CB2");
+        let (b_lo, b_hi) = span("CB3");
+        assert!(
+            a_hi + crate::MIN_CLEARANCE_MM <= b_lo || b_hi + crate::MIN_CLEARANCE_MM <= a_lo,
+            "CB2 [{a_lo}, {a_hi}] and CB3 [{b_lo}, {b_hi}] overlap, glyphs included"
+        );
+    }
+
+    /// A **member** of the column is never carried beside itself. `R5`
+    /// here is both the ladder's bottom leg and a ground rail stub on
+    /// `t4`; the column already owns its geometry.
+    #[test]
+    fn a_column_member_is_not_carried_beside_itself() {
+        let src = format!("{HDR}{LADDER}");
+        let (checked, p) = seed(&src);
+        let col_x = pin_at(&checked, &p, "R4", "t3").0;
+        let r5_x = pin_at(&checked, &p, "R5", "t4").0;
+        assert!(
+            (col_x - r5_x).abs() < 1e-6,
+            "R5 is a column member and must stay on the column x ({col_x}), got {r5_x}"
+        );
+    }
+
+    /// **The decline.** A `(net, side)` group with ANY already-pinned
+    /// member is declined WHOLE — never half-applied.
+    ///
+    /// `apply_rail_stub_columns` records what the other choice costs: a
+    /// member "skipped without consuming its slot" put a newcomer in a
+    /// cached element's exact column on `tests/layout_cache.rs`. The pin
+    /// can come from a user `*@place` / `*@align`, V7 symmetry, an
+    /// earlier idiom or the ADR-4 layout cache, so this is asserted on the
+    /// mask itself rather than through one directive that produces it.
+    #[test]
+    fn one_pinned_member_declines_the_whole_carried_group() {
+        let src = format!(
+            "{HDR}VCC vcc 0 DC 12 ;@ power=+12V\n\
+             RB vcc b 100k\nRC vcc c 4k7\nQ1 c b e QGENERIC\n\
+             RE e 0 470\nCE e 0 100u\nCE2 e 0 10u\n.model QGENERIC NPN\n.end\n"
+        );
+        let c = checked_of(&src);
+        let cols = detect_dc_columns(&c);
+        let col = cols
+            .iter()
+            .find(|col| col.shared.iter().any(|n| n == "e"))
+            .expect("the RC/Q1/RE stack");
+        let prefs = vertical_prefs(&c);
+        let allowed = crate::orient::allowed_orientations(&c, Placer::default());
+        let stubs = crate::idioms::detect_rail_stubs(&c);
+        let columned: HashSet<usize> = cols
+            .iter()
+            .flat_map(|x| x.members.iter().copied())
+            .collect();
+        let poses = vec![Orientation::IDENTITY; col.members.len()];
+
+        let free = vec![false; c.elements.len()];
+        let carried = plan_carried_stubs(
+            &free,
+            &c,
+            &allowed,
+            &prefs,
+            col,
+            &poses,
+            &stubs,
+            &columned,
+            Placer::DcColumnNodeStubs,
+        );
+        assert_eq!(
+            carried.len(),
+            2,
+            "both bypass caps on `e` are carried when nothing is pinned"
+        );
+
+        let mut pinned = free.clone();
+        pinned[c
+            .elements
+            .iter()
+            .position(|e| e.refdes == "CE2")
+            .expect("CE2")] = true;
+        let carried = plan_carried_stubs(
+            &pinned,
+            &c,
+            &allowed,
+            &prefs,
+            col,
+            &poses,
+            &stubs,
+            &columned,
+            Placer::DcColumnNodeStubs,
+        );
+        assert!(
+            carried.is_empty(),
+            "one pinned member must decline the whole group, not half-apply it: {:?}",
+            carried.iter().map(|x| x.element).collect::<Vec<_>>()
+        );
     }
 }

@@ -560,6 +560,42 @@ pub enum Placer {
     /// discriminator.
     #[default]
     DcSeriesColumnPinned,
+
+    /// `dc-series-column-pinned` plus **the column carrying the rail
+    /// stubs of its own shared nets** — see
+    /// [`crate::dc_column::plan_carried_stubs`].
+    ///
+    /// # The defect
+    ///
+    /// The promoted column re-seats its members constructively from
+    /// `dc_rank`, but a bypass capacitor hanging off one of its taps is
+    /// placed by two OTHER authorities, neither of which knows about it:
+    /// [`crate::idioms::apply_rail_stub_columns`] gives it an X (from
+    /// positions the column then moves — it runs first) and
+    /// [`crate::bands`] gives it a Y that is a *sheet-height fraction*.
+    /// On `resistor_ladder_ref` that puts `CB2` at y = 86.36 for a `t2`
+    /// tap at y = 52.07, a 30 mm vertical run, and drags the `t2` port
+    /// label down with it. CLAUDE.md's "constraints are pin-anchored"
+    /// invariant is implemented in ONE axis; this arm implements the
+    /// other.
+    ///
+    /// # Why it is an arm and not a default-path fix
+    ///
+    /// It costs **F6 (rail-stub lateral run) +1 cell on two fixtures**,
+    /// `rc_phase_shift` and `cascode_amp` (3 -> 4), and that is a Tier-2
+    /// ratchet RISE, which CLAUDE.md's ratchet policy forbids an ordinary
+    /// change from taking. The rise is not slack to be tuned away: a
+    /// mid-column tap's stub cannot stand IN the column (the trunk
+    /// continues below it), so it stands beside it, and 4 cells is the
+    /// SMALLEST offset at which a `Device:C` clears a `Device:R_US` with
+    /// [`crate::MIN_CLEARANCE_MM`] between them. The incumbent reaches 3
+    /// only because it never seats the stub against the member at all —
+    /// it leaves it a band away, which is the defect.
+    ///
+    /// So the trade is stated rather than taken: F6 +2 cells across two
+    /// fixtures, against every carried stub landing on its tap's own
+    /// line. Promotion is the owner's decision under ADR-23.
+    DcColumnNodeStubs,
 }
 
 impl Placer {
@@ -585,6 +621,7 @@ impl Placer {
         Self::SignalDirection,
         Self::DcSeriesColumn,
         Self::DcSeriesColumnPinned,
+        Self::DcColumnNodeStubs,
     ];
 
     /// The name accepted by `--placer` and printed by the scoreboard.
@@ -610,6 +647,7 @@ impl Placer {
             Self::ReadableV1 => "readable-v1",
             Self::DcSeriesColumn => "dc-series-column",
             Self::DcSeriesColumnPinned => "dc-series-column-pinned",
+            Self::DcColumnNodeStubs => "dc-column-node-stubs",
         }
     }
 
@@ -685,6 +723,10 @@ impl Placer {
                 "dc-series-column with the column pinned, so the SA and \
                  phase 4.5 leave the stack put (attribution arm)"
             }
+            Self::DcColumnNodeStubs => {
+                "dc-series-column-pinned plus the column carrying its \
+                 shared nets' rail stubs, pin-anchored in BOTH axes"
+            }
         }
     }
 
@@ -737,6 +779,7 @@ impl Placer {
                 | Self::ReadableV1
                 | Self::DcSeriesColumn
                 | Self::DcSeriesColumnPinned
+                | Self::DcColumnNodeStubs
         )
     }
 
@@ -777,6 +820,7 @@ impl Placer {
                 | Self::ReadableV1
                 | Self::DcSeriesColumn
                 | Self::DcSeriesColumnPinned
+                | Self::DcColumnNodeStubs
         )
     }
 
@@ -798,6 +842,7 @@ impl Placer {
                 | Self::ReadableV1
                 | Self::DcSeriesColumn
                 | Self::DcSeriesColumnPinned
+                | Self::DcColumnNodeStubs
         )
     }
 
@@ -814,6 +859,7 @@ impl Placer {
                 | Self::ReadableV1
                 | Self::DcSeriesColumn
                 | Self::DcSeriesColumnPinned
+                | Self::DcColumnNodeStubs
         )
     }
 
@@ -842,6 +888,7 @@ impl Placer {
                 | Self::ReadableV1
                 | Self::DcSeriesColumn
                 | Self::DcSeriesColumnPinned
+                | Self::DcColumnNodeStubs
         )
     }
 
@@ -863,6 +910,7 @@ impl Placer {
                 | Self::ReadableV1
                 | Self::DcSeriesColumn
                 | Self::DcSeriesColumnPinned
+                | Self::DcColumnNodeStubs
         )
     }
 
@@ -881,6 +929,7 @@ impl Placer {
                 | Self::ReadableV1
                 | Self::DcSeriesColumn
                 | Self::DcSeriesColumnPinned
+                | Self::DcColumnNodeStubs
         )
     }
 
@@ -918,6 +967,7 @@ impl Placer {
                 | Self::ReadableV1
                 | Self::DcSeriesColumn
                 | Self::DcSeriesColumnPinned
+                | Self::DcColumnNodeStubs
         )
     }
 
@@ -931,7 +981,10 @@ impl Placer {
     /// can change. `baseline_lock` is the empirical half.
     #[must_use]
     pub fn dc_series_columns(self) -> bool {
-        matches!(self, Self::DcSeriesColumn | Self::DcSeriesColumnPinned)
+        matches!(
+            self,
+            Self::DcSeriesColumn | Self::DcSeriesColumnPinned | Self::DcColumnNodeStubs
+        )
     }
 
     /// Does that construction additionally **pin** the column, freezing
@@ -942,7 +995,25 @@ impl Placer {
     /// (CLAUDE.md's consistency requirement).
     #[must_use]
     pub fn dc_series_columns_pinned(self) -> bool {
-        matches!(self, Self::DcSeriesColumnPinned)
+        matches!(self, Self::DcSeriesColumnPinned | Self::DcColumnNodeStubs)
+    }
+
+    /// Does the DC-series column also **carry the rail stubs of its own
+    /// shared nets** — seating each beside the column at its shared pin's
+    /// Y, and widening the column's pitch to clear their glyph-inclusive
+    /// extents?
+    ///
+    /// Gating the whole construction on this one accessor is the entire
+    /// byte-identity argument for the shipping output:
+    /// [`crate::dc_column::plan_carried_stubs`] returns an empty plan
+    /// unless this is `true`, and an empty plan leaves both the stride
+    /// and the stub untouched. `baseline_lock` is the empirical half.
+    ///
+    /// See [`Self::DcColumnNodeStubs`] for what it repairs and what it
+    /// costs.
+    #[must_use]
+    pub fn dc_column_node_stubs(self) -> bool {
+        matches!(self, Self::DcColumnNodeStubs)
     }
 
     /// Look a placer up by the name `--placer` accepts.
@@ -1043,6 +1114,37 @@ mod tests {
             assert!(p.facing_inverted_trigger());
             assert!(!p.page_frame_pin_y());
         }
+    }
+
+    /// The carried-node-stub construction is **dead on the default
+    /// path**. It is gated on one accessor and nothing else, so this
+    /// assertion is the whole byte-identity argument for the shipping
+    /// output — `baseline_lock` is the empirical half.
+    ///
+    /// It composes ON the promoted default, so a comparison against
+    /// `dc-series-column-pinned` isolates exactly the carry.
+    #[test]
+    fn the_carried_node_stubs_are_off_by_default() {
+        assert!(!Placer::default().dc_column_node_stubs());
+        for &p in Placer::ALL {
+            assert_eq!(
+                p.dc_column_node_stubs(),
+                p == Placer::DcColumnNodeStubs,
+                "{} must not carry node stubs",
+                p.name()
+            );
+        }
+        assert!(Placer::DcColumnNodeStubs.dc_series_columns());
+        assert!(Placer::DcColumnNodeStubs.dc_series_columns_pinned());
+        assert!(Placer::DcColumnNodeStubs.flow_seed_layering());
+        assert!(Placer::DcColumnNodeStubs.unified_roots());
+        assert!(Placer::DcColumnNodeStubs.signal_direction_filter());
+        assert!(Placer::DcColumnNodeStubs.terminal_net_series());
+        assert!(Placer::DcColumnNodeStubs.divider_node_series());
+        assert!(Placer::DcColumnNodeStubs.rail_gated_dividers());
+        assert!(Placer::DcColumnNodeStubs.divider_tap_must_be_unloaded());
+        assert!(Placer::DcColumnNodeStubs.facing_inverted_trigger());
+        assert!(!Placer::DcColumnNodeStubs.page_frame_pin_y());
     }
 
     #[test]
