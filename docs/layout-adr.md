@@ -11232,3 +11232,98 @@ resistor string be drawn as a single vertical column. That is a separate
 construction (K6): it would fire on `port_shapes`, where it reverses the
 repair `readable-v1` shipped for the split-chain defect, and it needs its
 own owner decision. Not attempted here.
+
+## ADR-45 — The promotion candidate repairs a Tier-0 refusal, and the sweep that nearly missed it
+
+**Status:** measured 2026-09-06. **Not a code change** beyond one doc
+comment; this ADR records a grading result and an instrument defect.
+
+### The result
+
+`--placer=column-stubs-conet-chain` (ADR-41 + ADR-42's subject + ADR-44,
+composed) graded against the shipping `dc-series-column-pinned`:
+
+```
+Tier 0     champion: clean   challenger: clean   regressed: none
+Tier 1 total Δ = +0.00 points
+Tier 2 total Δ = -107.66 points
+VERDICT: PROMOTABLE
+```
+
+Every metric reports on all 22 fixtures — no blind cell scoring a false
+`0.00` (ADR-23 D9).
+
+The aggregate understates it. A **22-fixture × 20-seed refusal sweep**,
+440 conversions per arm:
+
+| arm | refusals |
+| --- | --- |
+| `dc-series-column-pinned` (shipping) | **1 / 440** |
+| `column-stubs-conet-chain` | **0 / 440** |
+
+The single refusal is `opamp_transimpedance` at SA seed 18:
+
+```
+ERROR: net partition: SPLIT: source net "out" reconstructs as 2
+disconnected islands (KiCad imports it as 2 nets):
+[["out@(38.10,30.48)", "out@(53.34,30.48)"], ["out@(78.74,40.64)"]]
+```
+
+That is ADR-22's unconditional emit refusal doing its job — no sheet is
+written, so the failure is loud rather than a silent short. It is also
+**Tier 0**, the tier CLAUDE.md calls inviolable and never tradeable, and
+the scoreboard cannot see it: the aggregate reads a single shipped seed,
+where the fixture converts.
+
+Mechanism, plausibly: `conet-layer-collapse` compresses
+`opamp_transimpedance` from five X layers to two (all five elements share
+net `inv`, so the clique expansion spread them across a Hamiltonian
+path). The seed-18 split is three `out` pins the router could not join
+across 40 mm of sheet; at 22.86 mm of x-extent instead of 49.53 mm the
+geometry that produced it does not arise. **Stated as a hypothesis, not a
+finding** — it was not isolated, and the sweep measures the outcome, not
+the cause.
+
+### The instrument defect this sweep nearly died of
+
+The first version of this sweep exported `S2K_SA_SEED=$s` around a
+`spice2kicad` invocation and reported **5/5 seeds clean, seed 18
+included**, on a tree where the refusal was live and reproducible.
+
+`S2K_SA_SEED` is read by the **test harness only**
+(`crates/spice2kicad/tests/common/mod.rs`). The CLI reads `--sa-seed` and
+nothing else. So every iteration of that loop ran the same default seed,
+and uniform success is exactly what a genuine all-seeds pass looks like.
+
+This is the project's signature failure, now eight instances deep: a
+missing `/usr/bin/time` read as exit 127; a subshell capturing `$?` from
+`echo`; a regex matching across symbol boundaries; a collection loop
+killed behind `|| true`; a "blank = nothing unique" label over non-blank
+output; a duplicated `--placer` default that made a whole promotion a
+no-op while the suite stayed green; the wire-detour ratchet scoring a
+114 mm-of-wire drawing at 1.07 (ADR-42); and now a seed sweep that swept
+one seed twenty times.
+
+The common shape is unchanged and worth restating: **a check that reports
+success while measuring nothing is indistinguishable from a check that
+passes.** The only defence is to falsify the instrument first — here, one
+`cmp` of two seeds' output, which takes seconds and fails immediately:
+
+```
+env  1 vs env  18: SAME      <- the sweep was vacuous
+flag 1 vs flag 18: differ    <- the flag is the real knob
+```
+
+`--sa-seed`'s help text now states this outright, so the next reader hits
+the warning rather than the artifact.
+
+### What this does not decide
+
+Promotion is an owner decision under ADR-23 and is not taken here. What
+this ADR fixes is that the decision is now informed by the tier that
+outranks every number in the aggregate: on the current default one
+conversion in 440 is REFUSED, and under the candidate none is.
+
+Caveat kept: the grading is single-seed apart from this refusal sweep. A
+k=9 ADR-32 multi-seed collection has NOT been run for this candidate.
+ADR-31 is the standing reminder of what one draw is worth.

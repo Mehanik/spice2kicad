@@ -67,6 +67,20 @@ struct Cli {
     /// indistinguishable (3.50 vs 3.70, t = 0.43) while the one shipped
     /// seed reads 1 vs 6. Re-derive any single-fixture claim across
     /// several seeds before treating it as an effect.
+    ///
+    /// **This flag is the ONLY way to set the seed for a CLI run.** The
+    /// `S2K_SA_SEED` environment variable that `just scoreboard-run-multi`
+    /// and ADR-32 use is read by the TEST HARNESS only
+    /// (`crates/spice2kicad/tests/common/mod.rs`), never here. Exporting
+    /// it around a `spice2kicad` invocation changes nothing, silently —
+    /// so a hand-rolled `for s in …; do S2K_SA_SEED=$s spice2kicad …` sweep
+    /// runs the SAME seed every iteration and reports uniform success,
+    /// which is indistinguishable from a real all-seeds pass.
+    ///
+    /// That is not hypothetical: a 5-seed sweep run that way reported
+    /// `opamp_transimpedance` clean at seed 18 while the defect was live
+    /// and reproducible. Use `--sa-seed`, and confirm two seeds actually
+    /// produce different output before trusting any sweep.
     #[arg(long)]
     sa_seed: Option<u64>,
 
