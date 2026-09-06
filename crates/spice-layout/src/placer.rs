@@ -786,6 +786,33 @@ pub enum Placer {
     /// and that escape needs owner sign-off. So the trade is stated rather
     /// than taken. Promotion is the owner's decision under ADR-23.
     ChainInteriorPose,
+
+    /// **The promotion candidate** — [`Self::ConetLayerCollapse`],
+    /// [`Self::DcColumnNodeStubs`] and [`Self::ChainInteriorPose`],
+    /// composed on `dc-series-column-pinned`.
+    ///
+    /// It is [`Self::ColumnStubsConet`] plus the chain-interior pose.
+    /// Between them the three answer FIVE of the six defects the owner
+    /// reported on the 2026-09-05 eval render: `compensated_divider`
+    /// (co-net collapse), `resistor_ladder_ref` and `two_stage_amp`
+    /// (carried node stubs), `stepped_attenuator`'s reversed `R1`
+    /// (chain-interior pose), and `opamp_transimpedance` as a bonus
+    /// neither was aimed at.
+    ///
+    /// [`Self::SeriesMidspan`] is deliberately NOT here. It centres the
+    /// three inductors of `lc_ladder_lpf` exactly as asked but leaves
+    /// `RS` — the owner's first-named element — unmoved, because at seed
+    /// time `RS` has no upstream slack at all (the 12.70 mm on the
+    /// shipped sheet is opened later by the SA moving an unpinned `VIN`,
+    /// which a seed-time pass cannot see). It also costs F6 +7 and
+    /// branches +10. Half a repair that charges two other fixtures is
+    /// not a component of a promotion candidate; it stays registered on
+    /// its own until the residual is fixed at the right stage.
+    ///
+    /// Composition only — no construction of its own. See
+    /// [`Self::ColumnStubsConet`] for why composing before grading is
+    /// mandatory here (ADR-36) rather than optional.
+    ColumnStubsConetChain,
 }
 
 impl Placer {
@@ -816,6 +843,7 @@ impl Placer {
         Self::ColumnStubsConet,
         Self::SeriesMidspan,
         Self::ChainInteriorPose,
+        Self::ColumnStubsConetChain,
     ];
 
     /// The name accepted by `--placer` and printed by the scoreboard.
@@ -846,6 +874,7 @@ impl Placer {
             Self::ColumnStubsConet => "column-stubs-conet",
             Self::SeriesMidspan => "series-midspan",
             Self::ChainInteriorPose => "chain-interior-pose",
+            Self::ColumnStubsConetChain => "column-stubs-conet-chain",
         }
     }
 
@@ -941,6 +970,10 @@ impl Placer {
                 "dc-series-column-pinned plus the chain-interior case: a \
                  series element between two interior links is posed and pinned"
             }
+            Self::ColumnStubsConetChain => {
+                "the promotion candidate: co-net collapse + carried node \
+                 stubs + chain-interior pose"
+            }
         }
     }
 
@@ -998,6 +1031,7 @@ impl Placer {
                 | Self::ColumnStubsConet
                 | Self::SeriesMidspan
                 | Self::ChainInteriorPose
+                | Self::ColumnStubsConetChain
         )
     }
 
@@ -1043,6 +1077,7 @@ impl Placer {
                 | Self::ColumnStubsConet
                 | Self::SeriesMidspan
                 | Self::ChainInteriorPose
+                | Self::ColumnStubsConetChain
         )
     }
 
@@ -1069,6 +1104,7 @@ impl Placer {
                 | Self::ColumnStubsConet
                 | Self::SeriesMidspan
                 | Self::ChainInteriorPose
+                | Self::ColumnStubsConetChain
         )
     }
 
@@ -1090,6 +1126,7 @@ impl Placer {
                 | Self::ColumnStubsConet
                 | Self::SeriesMidspan
                 | Self::ChainInteriorPose
+                | Self::ColumnStubsConetChain
         )
     }
 
@@ -1123,6 +1160,7 @@ impl Placer {
                 | Self::ColumnStubsConet
                 | Self::SeriesMidspan
                 | Self::ChainInteriorPose
+                | Self::ColumnStubsConetChain
         )
     }
 
@@ -1149,6 +1187,7 @@ impl Placer {
                 | Self::ColumnStubsConet
                 | Self::SeriesMidspan
                 | Self::ChainInteriorPose
+                | Self::ColumnStubsConetChain
         )
     }
 
@@ -1172,6 +1211,7 @@ impl Placer {
                 | Self::ColumnStubsConet
                 | Self::SeriesMidspan
                 | Self::ChainInteriorPose
+                | Self::ColumnStubsConetChain
         )
     }
 
@@ -1214,6 +1254,7 @@ impl Placer {
                 | Self::ColumnStubsConet
                 | Self::SeriesMidspan
                 | Self::ChainInteriorPose
+                | Self::ColumnStubsConetChain
         )
     }
 
@@ -1236,6 +1277,7 @@ impl Placer {
                 | Self::ColumnStubsConet
                 | Self::SeriesMidspan
                 | Self::ChainInteriorPose
+                | Self::ColumnStubsConetChain
         )
     }
 
@@ -1255,6 +1297,7 @@ impl Placer {
                 | Self::ColumnStubsConet
                 | Self::SeriesMidspan
                 | Self::ChainInteriorPose
+                | Self::ColumnStubsConetChain
         )
     }
 
@@ -1278,7 +1321,10 @@ impl Placer {
     /// ordinary change may not raise a ratchet.
     #[must_use]
     pub fn conet_layer_collapse(self) -> bool {
-        matches!(self, Self::ConetLayerCollapse | Self::ColumnStubsConet)
+        matches!(
+            self,
+            Self::ConetLayerCollapse | Self::ColumnStubsConet | Self::ColumnStubsConetChain
+        )
     }
 
     /// Does the DC-series column also **carry the rail stubs of its own
@@ -1296,7 +1342,10 @@ impl Placer {
     /// costs.
     #[must_use]
     pub fn dc_column_node_stubs(self) -> bool {
-        matches!(self, Self::DcColumnNodeStubs | Self::ColumnStubsConet)
+        matches!(
+            self,
+            Self::DcColumnNodeStubs | Self::ColumnStubsConet | Self::ColumnStubsConetChain
+        )
     }
 
     /// K3: does [`crate::idioms::apply_series_horizontal`] slide each
@@ -1330,7 +1379,7 @@ impl Placer {
     /// costs.
     #[must_use]
     pub fn chain_interior_series(self) -> bool {
-        matches!(self, Self::ChainInteriorPose)
+        matches!(self, Self::ChainInteriorPose | Self::ColumnStubsConetChain)
     }
 
     /// Look a placer up by the name `--placer` accepts.
@@ -1353,6 +1402,31 @@ impl Placer {
 #[cfg(test)]
 mod tests {
     use super::Placer;
+
+    /// The placers that MUST NOT reach any challenger construction: the
+    /// shipping default and the four retained control arms.
+    ///
+    /// Guard tests below assert a construction is off for every one of
+    /// these, rather than asserting it is on for exactly one named
+    /// variant. That distinction is load-bearing and was learned the
+    /// expensive way: the one-variant form
+    /// (`p.accessor() == (p == Placer::X)`) has now broken THREE times
+    /// in two days, once per composition registered — and each break is
+    /// a test failing for a reason that has nothing to do with the
+    /// property it exists to protect. Worse, the repair each time is to
+    /// widen a list, which is indistinguishable from quietly relaxing
+    /// the guard.
+    ///
+    /// The real invariant is "no SHIPPING path reaches it". Stating that
+    /// directly means a new composition needs no edit here, and a
+    /// genuine leak onto the default or a control arm still fails loudly.
+    const NON_CHALLENGERS: &[Placer] = &[
+        Placer::DcSeriesColumnPinned, // the shipping default
+        Placer::ReadableV1,
+        Placer::FlowSeedV4,
+        Placer::FlowSeed,
+        Placer::Champion,
+    ];
 
     /// K3 is a CHALLENGER, not the default. Eight Tier-2 literals rise
     /// under it (F6 on two fixtures, V16 branches on four, crossings and
@@ -1399,14 +1473,14 @@ mod tests {
     #[test]
     fn the_chain_interior_case_is_off_on_the_default_path() {
         assert!(!Placer::default().chain_interior_series());
-        for p in Placer::ALL {
-            assert_eq!(
-                p.chain_interior_series(),
-                matches!(p, Placer::ChainInteriorPose),
+        for p in NON_CHALLENGERS {
+            assert!(
+                !p.chain_interior_series(),
                 "{} must not reach the chain-interior case",
                 p.name()
             );
         }
+        assert!(Placer::ChainInteriorPose.chain_interior_series());
         // It composes ON the shipping default, so every arm the default
         // switches on must still be switched on.
         let d = Placer::default();
@@ -1444,21 +1518,14 @@ mod tests {
     #[test]
     fn conet_layer_collapse_is_off_on_the_default_path() {
         assert!(!Placer::default().conet_layer_collapse());
-        for p in Placer::ALL {
-            // Two arms answer `true`: the isolating challenger, and
-            // the composition that contains it. Until 2026-09-06 this
-            // read `*p == Placer::ConetLayerCollapse` — the exact
-            // one-arm form — and `column-stubs-conet` makes that false
-            // BY DESIGN, since composing the pass is the whole point of
-            // that variant. What must stay true is the property this
-            // test exists for: nothing on the SHIPPING path reaches it.
-            assert_eq!(
-                p.conet_layer_collapse(),
-                matches!(p, Placer::ConetLayerCollapse | Placer::ColumnStubsConet),
+        for p in NON_CHALLENGERS {
+            assert!(
+                !p.conet_layer_collapse(),
                 "{} must not reach the co-net collapse",
                 p.name()
             );
         }
+        assert!(Placer::ConetLayerCollapse.conet_layer_collapse());
         // It composes ON the shipping default, so every arm the default
         // switches on must still be switched on.
         let d = Placer::default();
@@ -1554,19 +1621,14 @@ mod tests {
     #[test]
     fn the_carried_node_stubs_are_off_by_default() {
         assert!(!Placer::default().dc_column_node_stubs());
-        for &p in Placer::ALL {
-            // Two arms answer `true`: the isolating challenger, and
-            // the composition that contains it. See the sibling note in
-            // `conet_layer_collapse_is_off_on_the_default_path` — the
-            // invariant under test is "dead on the SHIPPING path", not
-            // "exactly one variant".
-            assert_eq!(
-                p.dc_column_node_stubs(),
-                matches!(p, Placer::DcColumnNodeStubs | Placer::ColumnStubsConet),
+        for p in NON_CHALLENGERS {
+            assert!(
+                !p.dc_column_node_stubs(),
                 "{} must not carry node stubs",
                 p.name()
             );
         }
+        assert!(Placer::DcColumnNodeStubs.dc_column_node_stubs());
         assert!(Placer::DcColumnNodeStubs.dc_series_columns());
         assert!(Placer::DcColumnNodeStubs.dc_series_columns_pinned());
         assert!(Placer::DcColumnNodeStubs.flow_seed_layering());
@@ -1784,6 +1846,69 @@ mod tests {
     /// whichever single component moves it. Zero interaction. That is an
     /// empirical fact about today's fixtures, not a theorem — this test
     /// pins the accessor half, which is the half that can be proved.
+    /// `column-stubs-conet-chain` — the promotion candidate — is the
+    /// union of THREE components, and adds nothing of its own.
+    ///
+    /// Same argument as the two-way case below: a composition that could
+    /// switch on a pass none of its components switch on would make any
+    /// difference from the union a new feature rather than an
+    /// interaction, and grading it would answer the wrong question.
+    ///
+    /// Measured on emitted output when this was written: ten fixtures
+    /// move, and each is byte-identical to whichever component moves it
+    /// — eight matching `column-stubs-conet`, two (`sallen_key_driven`,
+    /// `stepped_attenuator`) matching `chain-interior-pose`. The three
+    /// components move DISJOINT fixture sets. That is an empirical fact
+    /// about today's fixtures, not a theorem; this test pins the
+    /// accessor half, which is the half that can be proved.
+    #[test]
+    fn the_promotion_candidate_is_the_union_of_its_three_parts() {
+        type Acc = (&'static str, fn(Placer) -> bool);
+        let all: &[Acc] = &[
+            ("conet_layer_collapse", Placer::conet_layer_collapse),
+            ("dc_column_node_stubs", Placer::dc_column_node_stubs),
+            ("chain_interior_series", Placer::chain_interior_series),
+            ("series_midspan_centring", Placer::series_midspan_centring),
+            ("dc_series_columns", Placer::dc_series_columns),
+            ("dc_series_columns_pinned", Placer::dc_series_columns_pinned),
+            ("signal_direction_filter", Placer::signal_direction_filter),
+            ("terminal_net_series", Placer::terminal_net_series),
+            ("divider_node_series", Placer::divider_node_series),
+            ("rail_gated_dividers", Placer::rail_gated_dividers),
+            (
+                "divider_tap_must_be_unloaded",
+                Placer::divider_tap_must_be_unloaded,
+            ),
+            ("facing_inverted_trigger", Placer::facing_inverted_trigger),
+            ("flow_seed_layering", Placer::flow_seed_layering),
+            ("unified_roots", Placer::unified_roots),
+            ("sa_rotate_v5_gate", Placer::sa_rotate_v5_gate),
+            ("page_frame_pin_y", Placer::page_frame_pin_y),
+        ];
+        let parts = [
+            Placer::ConetLayerCollapse,
+            Placer::DcColumnNodeStubs,
+            Placer::ChainInteriorPose,
+        ];
+        let cand = Placer::ColumnStubsConetChain;
+        for &(name, f) in all {
+            assert_eq!(
+                f(cand),
+                parts.iter().any(|&p| f(p)),
+                "the candidate must answer {name} as the union of its parts"
+            );
+        }
+        // It really is all three, and NOT the one deliberately excluded.
+        assert!(cand.conet_layer_collapse());
+        assert!(cand.dc_column_node_stubs());
+        assert!(cand.chain_interior_series());
+        assert!(
+            !cand.series_midspan_centring(),
+            "series-midspan is deliberately excluded: it leaves `RS` \
+             unmoved and costs F6 +7 / branches +10"
+        );
+    }
+
     #[test]
     fn the_composition_is_exactly_the_union_of_its_parts() {
         type Acc = (&'static str, fn(Placer) -> bool);
