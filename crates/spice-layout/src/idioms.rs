@@ -1434,6 +1434,12 @@ pub(crate) fn apply_series_horizontal(
         declared_ports.contains(n) || net_degree.get(n).copied().unwrap_or(0) <= 1
     };
 
+    // K3: every element this pass places with [`Construction::Recolumn`],
+    // paired with its upstream net — the input to `centre_recolumned_series`
+    // below. Collected here rather than re-derived, because the accepting
+    // branch already owns the role test, the flow direction and the V14
+    // gate, and a second pass re-deciding all three would drift.
+    let mut recolumned: Vec<(usize, String)> = Vec::new();
     for i in 0..checked.elements.len() {
         if pinned[i] {
             continue;
@@ -1570,6 +1576,9 @@ pub(crate) fn apply_series_horizontal(
         placement.elements[i].origin = origin;
         placement.elements[i].orientation = orient;
         pinned[i] = true;
+        if construction == Construction::Recolumn {
+            recolumned.push((i, up.to_string()));
+        }
 
         if construction != Construction::Recolumn {
             // Neither F1 construction re-columns anything: a terminal net
@@ -1696,6 +1705,126 @@ pub(crate) fn apply_series_horizontal(
             pinned[el] = true;
         }
     }
+
+    centre_recolumned_series(placement, checked, &recolumned, variant);
+}
+
+/// Slide each [`Construction::Recolumn`] element into the MIDDLE of the
+/// span between its two node columns, instead of leaving it glued to the
+/// downstream one (K3).
+///
+/// # The defect
+///
+/// `Construction::Recolumn` fixes the *downstream* column by construction
+/// — the shunt is moved onto the series element's downstream pin — and
+/// says nothing at all about the upstream one, which is wherever the layer
+/// seeder left the element. On `lc_ladder_lpf` that draws every ladder arm
+/// hard against the capacitor on its right with the whole inter-stage gap
+/// spent on one long wire back to the previous node: `RS` spans
+/// 48.26 … 55.88 with `C1` at 55.88 and 12.70 mm of bare wire back to
+/// `VIN`; `L2` spans 93.98 … 101.60 with 22.86 mm back to `C2`. The owner
+/// reported it as "sticks to right component going down … it would be good
+/// to put it in the middle on horizontal axis".
+///
+/// # The construction
+///
+/// Structural and pin-anchored, with no topology or refdes test (CLAUDE.md
+/// principle 9). A series element's downstream node column IS its own
+/// downstream pin — that is what `Recolumn` just established — so
+/// centring the element between the two columns reduces to **closing half
+/// the upstream slack**:
+///
+/// ```text
+/// dx = -(upstream_pin_x - upstream_column_x) / 2
+/// ```
+///
+/// after which the element stands the same distance from the pins on its
+/// upstream node as its downstream shunt stands from its own downstream
+/// pin. The shunt group is deliberately NOT moved: it keeps the column
+/// `Recolumn` gave it, so the node it drops from stays where the drawing
+/// (and the shared-node label) already put it, and the element takes the
+/// whole of the correction.
+///
+/// **Upstream column** is the RIGHTMOST world pin `x` on the upstream net
+/// belonging to some *other* element and lying strictly left of this
+/// element's own upstream pin — the pin the horizontal run must actually
+/// reach back to. `None` (a node with nothing else placed to its left, the
+/// `rc_lowpass` shape where the upstream net is a bare boundary wire) is a
+/// decline: there is no second column, so there is no middle.
+///
+/// **Plan before mutate**, like every other construction in this file: all
+/// the columns are read off ONE placement, so a chain's members do not
+/// each see their predecessor's correction and compound it. On the ladder
+/// that is the difference between a uniform re-centring and a progressive
+/// leftward collapse.
+///
+/// Never moves an element rightward and never by less than a whole cell:
+/// the slack must be at least two grid cells for half of it to be a legal
+/// grid move at all, which also makes the pass a no-op on the already-tight
+/// drawings.
+fn centre_recolumned_series(
+    placement: &mut Placement,
+    checked: &CheckedNetlist,
+    recolumned: &[(usize, String)],
+    variant: Placer,
+) {
+    // Half of a 1-cell slack is not a grid move, so 2 cells is the
+    // smallest span this construction can act on at all.
+    const MIN_SLACK_CELLS: i32 = 2;
+
+    // Gating the whole construction on this one accessor is the entire
+    // byte-identity argument for the shipping output: the pass returns
+    // before reading a single position unless it is set, so no
+    // default-path placement can change. `baseline_lock` is the empirical
+    // half.
+    if !variant.series_midspan_centring() {
+        return;
+    }
+
+    let plan: Vec<(usize, i32)> = recolumned
+        .iter()
+        .filter_map(|(i, up)| {
+            let (up_pin_x, _) =
+                world_pin_xy_of(&placement.elements[*i], &checked.elements[*i], up)?;
+            let up_col = upstream_column_x(placement, checked, *i, up, up_pin_x)?;
+            #[allow(clippy::cast_possible_truncation)]
+            let slack_cells = ((up_pin_x - up_col) / GridPoint::STEP_MM).round() as i32;
+            (slack_cells >= MIN_SLACK_CELLS).then_some((*i, -(slack_cells / 2)))
+        })
+        .collect();
+
+    for (i, dx_cells) in plan {
+        let o = placement.elements[i].origin;
+        placement.elements[i].origin = GridPoint::new(o.x + dx_cells, o.y);
+    }
+}
+
+/// The world `x` of the column element `i`'s upstream run has to reach
+/// back to on net `up`: the largest pin `x` among the OTHER elements on
+/// that net that lies strictly left of `up_pin_x`.
+///
+/// The maximum rather than the mean, deliberately: the gap the wire spans
+/// is measured to the nearest thing on the node, and a mean would let a
+/// far-away third member on the same net pull the target past a near one
+/// and push the element into it.
+fn upstream_column_x(
+    placement: &Placement,
+    checked: &CheckedNetlist,
+    i: usize,
+    up: &str,
+    up_pin_x: f64,
+) -> Option<f64> {
+    checked
+        .elements
+        .iter()
+        .enumerate()
+        .filter(|(j, e)| *j != i && e.nodes.iter().any(|n| n == up))
+        .filter_map(|(j, e)| world_pin_xy_of(&placement.elements[j], e, up))
+        .map(|(x, _)| x)
+        .filter(|x| *x < up_pin_x)
+        .fold(None, |acc: Option<f64>, x| {
+            Some(acc.map_or(x, |a| a.max(x)))
+        })
 }
 
 /// The V14 consistency gate for a pass that **pins** what it orients.
@@ -2880,6 +3009,108 @@ C2  n2  0  1n
 
     fn is_horizontal(o: Orientation) -> bool {
         matches!(o.rotation, Rotation::R90 | Rotation::R270)
+    }
+
+    /// The gaps a `Recolumn` element leaves on either side, in mm:
+    /// `(upstream slack, downstream slack)`. Upstream slack is measured
+    /// from the rightmost OTHER pin on the upstream net to this element's
+    /// own upstream pin; downstream slack from this element's downstream
+    /// pin to the shunt that hangs off the downstream node.
+    fn recolumn_slack(
+        placement: &Placement,
+        checked: &CheckedNetlist,
+        refdes: &str,
+        up: &str,
+        down: &str,
+        shunt: &str,
+    ) -> (f64, f64) {
+        let (up_x, _) = pin_at(placement, checked, refdes, up);
+        let (down_x, _) = pin_at(placement, checked, refdes, down);
+        let i = checked
+            .elements
+            .iter()
+            .position(|e| e.refdes == refdes)
+            .expect("element present");
+        let up_col =
+            upstream_column_x(placement, checked, i, up, up_x).expect("an upstream neighbour");
+        let (shunt_x, _) = pin_at(placement, checked, shunt, down);
+        (up_x - up_col, shunt_x - down_x)
+    }
+
+    /// K3 — series mid-span centring, and its negative control.
+    ///
+    /// `R2` is a `Construction::Recolumn` element: its downstream node
+    /// `n2` carries the ground shunt `C2`, which the pass moves onto
+    /// `R2`'s downstream pin. Nothing in the shipping pass touches the
+    /// UPSTREAM side, so the element ends up hard against `C2` with the
+    /// whole inter-stage gap spent on one wire back to `n1` — the
+    /// `lc_ladder_lpf` defect in miniature.
+    ///
+    /// The negative control is the first assertion, and it is the reason
+    /// this test can fail: on the shipping default the downstream slack is
+    /// exactly **zero** (glued) while the upstream slack is whole cells of
+    /// bare wire. Swap `Placer::SeriesMidspan` for `Placer::default()`
+    /// below and the balance assertion fails on a 5-cell difference.
+    #[test]
+    fn a_recolumn_series_element_centres_between_its_node_columns_only_under_k3() {
+        let src = "\
+series mid-span centring
+*@symbol Device:R for=R*
+*@symbol Device:C for=C*
+*@port in=input
+R1  in  n1 1k
+C1  n1  0  1n
+R2  n1  n2 1k
+C2  n2  0  1n
+R3  n2  n3 1k
+C3  n3  0  1n
+.end
+";
+        let checked = checked_of(src);
+        let step = GridPoint::STEP_MM;
+
+        // NEGATIVE CONTROL: the shipping default glues the element to its
+        // shunt and leaves every cell of slack on the upstream side.
+        let base = seed_with(&checked, Placer::default());
+        let (base_up, base_down) = recolumn_slack(&base, &checked, "R3", "n2", "n3", "C3");
+        assert!(
+            base_down.abs() < step / 2.0,
+            "the shipping default must leave R3 GLUED to C3 (downstream \
+             slack {base_down} mm); if it does not, `Recolumn` no longer \
+             re-columns the shunt onto the downstream pin and this test \
+             proves nothing"
+        );
+        assert!(
+            base_up >= 2.0 * step,
+            "the specimen must present at least 2 cells of upstream slack \
+             for half of it to be a legal grid move; got {base_up} mm"
+        );
+
+        // THE CONSTRUCTION: the element stands the same distance from
+        // each of its two node columns, to within the one cell integer
+        // halving can leave behind.
+        let k3 = seed_with(&checked, Placer::SeriesMidspan);
+        let (up, down) = recolumn_slack(&k3, &checked, "R3", "n2", "n3", "C3");
+        assert!(
+            (up - down).abs() <= step + f64::EPSILON,
+            "R3 must sit mid-span: upstream slack {up} mm vs downstream \
+             {down} mm (was {base_up} vs {base_down})"
+        );
+        // It closes the gap; it never opens one. The element only ever
+        // moves toward its upstream node.
+        assert!(
+            up < base_up,
+            "K3 must REDUCE the upstream run: {up} !< {base_up}"
+        );
+
+        // The shunt is deliberately NOT moved — the node keeps the column
+        // `Recolumn` gave it, and the element takes the whole correction.
+        let (base_c3, _) = pin_at(&base, &checked, "C3", "n3");
+        let (k3_c3, _) = pin_at(&k3, &checked, "C3", "n3");
+        assert!(
+            (base_c3 - k3_c3).abs() < step / 2.0,
+            "C3 must keep its column: {base_c3} -> {k3_c3}"
+        );
     }
 
     /// F1 case (a) — the shunt-bearing guard's terminal-net relaxation.
