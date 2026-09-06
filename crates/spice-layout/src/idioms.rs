@@ -1323,6 +1323,12 @@ enum Construction {
     /// the divider's column at the node's outgoing-wire Y, and never touch
     /// the divider itself.
     DividerNode,
+    /// K4 case — the element is INTERIOR to a signal chain: its
+    /// downstream node carries no rail stub to re-column and neither
+    /// endpoint is terminal, so the shipping pass abandons it to the
+    /// general orientation chooser. Orient in place, upstream pin left,
+    /// and pin it. See [`Placer::chain_interior_series`].
+    ChainInterior,
 }
 
 /// Draw series signal elements horizontally on the flow lane, upstream
@@ -1508,6 +1514,44 @@ pub(crate) fn apply_series_horizontal(
             // re-column and nothing for the element to swing into. The
             // position half survives as a pin-anchored re-seat below.
             Construction::TerminalNet
+        } else if variant.chain_interior_series() {
+            // CHAIN-INTERIOR case (K4). What is left once the two guards
+            // above have had their say is an element with a rail stub on
+            // NEITHER side of its downstream node and a terminal net at
+            // NEITHER endpoint — i.e. one whose two nodes are both
+            // interior links of a signal chain. The shipping pass declines
+            // it for want of an anchor, and the general chooser then poses
+            // it from V5 alone, which is blind to flow direction: on
+            // `stepped_attenuator` that draws `R1` (`in` -> `t1`) at rot
+            // 270 with `t1` on its LEFT pin and `in` on its right, reading
+            // backwards against every other member of the same string.
+            //
+            // Such an element needs no anchor, because it has neighbours
+            // on BOTH sides: there is no empty half-plane to swing into
+            // and nothing to re-column. It is oriented in place — the
+            // origin is kept, exactly as `Recolumn` keeps it — and the
+            // only thing that changes is which end of the body the
+            // upstream net arrives at. For the two horizontal poses of a
+            // y-symmetric two-pin passive that is a pure relabelling: the
+            // occupied extent is identical, which is why this is the one
+            // case where an orientation-only change does not re-run the
+            // ADR-15 Stage-5 failure ("axis is only half the constraint" —
+            // here BOTH halves are constrained, since the pose is chosen
+            // by flow direction, not by axis).
+            //
+            // ONE exclusion, structural: an element whose two nodes are
+            // both incident on the SAME multi-terminal device is not a
+            // chain link at all — it is drawn ACROSS that device (an
+            // op-amp's feedback resistor, `opamp_inverting_real`'s `RF` on
+            // `inv`/`out`), and the neighbour it is "between" is a single
+            // element on both sides. `bridges_one_device` declines it, and
+            // the measurement agrees: forcing `RF` horizontal-and-pinned
+            // cost that fixture 8.89 mm of wire (`wire.floor_ratio`
+            // 6.00 -> 7.17) and V16 B 3 -> 5.
+            if bridges_one_device(checked, i, up, down) {
+                continue;
+            }
+            Construction::ChainInterior
         } else {
             // No shunt to re-column and no terminal net to swing into — no
             // anchor, so leave the element to the general chooser
@@ -1531,7 +1575,7 @@ pub(crate) fn apply_series_horizontal(
         // exactly the orientation-only change ADR-15 Stage 5 measured the
         // cost of.
         let origin = match construction {
-            Construction::Recolumn => placement.elements[i].origin,
+            Construction::Recolumn | Construction::ChainInterior => placement.elements[i].origin,
             Construction::TerminalNet => {
                 // Hold the pin on the element's INTERIOR side at its current
                 // world position, so the body swings out into the empty
@@ -1825,6 +1869,25 @@ fn upstream_column_x(
         .fold(None, |acc: Option<f64>, x| {
             Some(acc.map_or(x, |a| a.max(x)))
         })
+}
+
+/// True when element `i`'s two nodes are both incident on ONE AND THE SAME
+/// element with three or more terminals.
+///
+/// Such a two-terminal element is drawn *across* that device, not
+/// *between* two neighbours: an op-amp feedback resistor, a Miller
+/// capacitor, a collector-base bootstrap. It has no upstream and
+/// downstream sides in the drawing's sense, so the chain-interior
+/// construction (which exists to make a chain read left-to-right) has
+/// nothing to say about it. Structural — pin counts and net membership
+/// only, no element kind and no refdes (CLAUDE.md principle 9).
+fn bridges_one_device(checked: &CheckedNetlist, i: usize, a: &str, b: &str) -> bool {
+    checked.elements.iter().enumerate().any(|(j, e)| {
+        j != i
+            && e.nodes.len() >= 3
+            && e.nodes.iter().any(|n| n == a)
+            && e.nodes.iter().any(|n| n == b)
+    })
 }
 
 /// The V14 consistency gate for a pass that **pins** what it orients.
@@ -3035,6 +3098,115 @@ C2  n2  0  1n
             upstream_column_x(placement, checked, i, up, up_x).expect("an upstream neighbour");
         let (shunt_x, _) = pin_at(placement, checked, shunt, down);
         (up_x - up_col, shunt_x - down_x)
+    }
+
+    /// K4 — the chain-interior case, and its negative control.
+    ///
+    /// `R1` (`in` -> `t1`) is interior to a signal chain: `t1` carries no
+    /// rail stub and neither endpoint is a terminal net, so all three
+    /// shipping cases decline and the element is abandoned to
+    /// `pick_orientations`, whose V5 scorer is blind to flow direction.
+    /// This is `stepped_attenuator`'s `R1` in miniature — the one member
+    /// of that seven-resistor string no existing case reaches, because
+    /// `R2`..`R6` each touch a declared `*@port` and `R7` is a rail stub.
+    ///
+    /// The negative control is the first assertion: on the shipping
+    /// default the pass leaves `R1` UNPINNED, i.e. its pose is whatever
+    /// the seed chooser and the SA settle on. (That is the right claim to
+    /// make: asserting "the default draws it backwards" would be
+    /// seed-dependent — measured on `stepped_attenuator`, the default
+    /// emits `R1` at rot 0 on SA seeds 1/2/3/11/13, rot 270 on seed 5 and
+    /// the shipped seed, and rot 90 on seed 7, while this arm pins rot 90
+    /// on all seven.)
+    #[test]
+    fn a_chain_interior_series_element_is_posed_and_pinned_only_under_k4() {
+        let src = "\
+chain-interior pose
+*@symbol Device:R for=R*
+*@symbol Simulation_SPICE:VDC for=VIN
+*@port t2=output
+VIN in 0  DC 0 AC 1
+R1  in t1 1k
+R2  t1 t2 1k
+R3  t2 0  1k
+.end
+";
+        let checked = checked_of(src);
+        let i_r1 = checked
+            .elements
+            .iter()
+            .position(|e| e.refdes == "R1")
+            .expect("R1 present");
+
+        let pinned_under = |placer: Placer| -> bool {
+            crate::refinement_meta(&checked, &crate::Hint::default(), placer)
+                .expect("refinement meta")
+                .pinned[i_r1]
+        };
+        // NEGATIVE CONTROL.
+        assert!(
+            !pinned_under(Placer::default()),
+            "the shipping default must leave R1 unpinned here; if it does \
+             not, some other case now reaches a chain-interior element and \
+             this test proves nothing"
+        );
+        assert!(
+            pinned_under(Placer::ChainInteriorPose),
+            "K4 must PIN the constructed pose — an unpinned orientation is \
+             one `pick_orientations`, the SA and phase 4.5 can each undo, \
+             and phase 4.5 demonstrably prefers the reversed pose"
+        );
+
+        let k4 = seed_with(&checked, Placer::ChainInteriorPose);
+        let o = orientation_of(&k4, &checked, "R1");
+        assert!(is_horizontal(o), "R1 must be drawn horizontal, got {o:?}");
+        let (up_x, _) = pin_at(&k4, &checked, "R1", "in");
+        let (down_x, _) = pin_at(&k4, &checked, "R1", "t1");
+        assert!(
+            up_x < down_x,
+            "the upstream pin must sit left, so the chain reads with the \
+             flow: {up_x} !< {down_x}"
+        );
+    }
+
+    /// K4's one structural exclusion: a two-terminal element whose two
+    /// nodes are both incident on the SAME multi-terminal device is drawn
+    /// ACROSS that device, not between two neighbours.
+    ///
+    /// Measured, not asserted: without this test's subject being excluded,
+    /// `opamp_inverting_real`'s `RF` is forced horizontal-and-pinned at a
+    /// cost of `wire.floor_ratio` 6.00 -> 7.17 and V16 B 3 -> 5.
+    #[test]
+    fn a_feedback_element_across_one_device_is_not_chain_interior() {
+        let src = "\
+feedback bridge
+*@symbol Device:R for=R*
+*@symbol Device:Q_NPN_BCE for=Q*
+*@symbol Simulation_SPICE:VDC for=VIN
+VIN in 0  DC 0 AC 1
+R1  in b  1k
+RF  b  c  100k
+Q1  c  b  0 QMOD
+.end
+";
+        let checked = checked_of(src);
+        let idx = |r: &str| {
+            checked
+                .elements
+                .iter()
+                .position(|e| e.refdes == r)
+                .expect("element present")
+        };
+        assert!(
+            bridges_one_device(&checked, idx("RF"), "b", "c"),
+            "RF spans two terminals of Q1, so it is drawn across the \
+             device, not between two neighbours"
+        );
+        assert!(
+            !bridges_one_device(&checked, idx("R1"), "in", "b"),
+            "R1 is a genuine chain link: nothing three-terminal touches \
+             both `in` and `b`"
+        );
     }
 
     /// K3 — series mid-span centring, and its negative control.
