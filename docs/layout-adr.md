@@ -10910,3 +10910,325 @@ whether `conet-layer-collapse` should be promoted — it only makes the
 question answerable. The literals here are calibrated on
 `dc-series-column-pinned` at `6d4408b` and will need re-recording after
 any placer change, `dc_column.rs` / `idioms.rs` work included.
+
+## ADR-43 — Series mid-span centring: the element between two nodes, not glued to one
+
+**Status:** built and graded 2026-09-06, **NOT promoted** (promotion is an
+owner decision under ADR-23). Registered as one `--placer` challenger,
+`series-midspan`, composing on the shipping default
+`dc-series-column-pinned`. Dead on the default path.
+
+### The defect — one owner report, one missing half of a construction
+
+Reviewing the 2026-09-05 eval render, the owner reported, verbatim:
+
+> "small issue, was here for a long time. RS, L1, L2 and L3 sticks to
+> right component going down (C1, C2, C3, C4), but visually it would be
+> good to put it in the middle on horisontal axis, like RS in the middle
+> (approximatelly, still on grid) between VIN and C1, L1 in between C1 and
+> C2 etc"
+
+`idioms::apply_series_horizontal`'s `Construction::Recolumn` fixes the
+element's **downstream** column by construction — it moves the node's rail
+stub onto the series element's downstream pin — and says *nothing at all*
+about the upstream one, which stays wherever `layers` + `place_seed` left
+it. The result is that the whole inter-stage gap is spent on one wire back
+to the previous node while the element hugs the capacitor on its right.
+Measured on the shipping default, `lc_ladder_lpf`:
+
+| element | pins span | shunt on its right | bare wire back from the previous node |
+| --- | --- | --- | ---: |
+| `RS` | 48.26 … 55.88 | `C1` at 55.88 | 12.70 mm (from `VIN` at 35.56) |
+| `L1` | 63.50 … 71.12 | `C2` at 71.12 | 7.62 mm |
+| `L2` | 93.98 … 101.60 | `C3` at 101.60 | **22.86 mm** |
+| `L3` | 124.46 … 132.08 | `C4` at 124.46 / `RL` at 132.08 | **22.86 mm** |
+
+This is CLAUDE.md's pin-anchoring invariant implemented on one side of the
+element only — structurally the same shape as ADR-41's one-axis defect,
+one axis further in.
+
+### The construction
+
+A post-pass at the end of `apply_series_horizontal`
+(`centre_recolumned_series`), over the elements that pass already placed
+with `Recolumn` — collected from the accepting branch rather than
+re-derived, so the role test, the flow direction and the V14 gate are not
+duplicated and cannot drift.
+
+Because `Recolumn` has *just* made the downstream node column identical to
+the element's own downstream pin, "centre between the two node columns"
+reduces to closing half the upstream slack:
+
+```text
+dx = -(upstream_pin_x - upstream_column_x) / 2
+```
+
+after which the element stands the same distance from its upstream node's
+pins as its shunt stands from its downstream pin. No millimetre constant
+appears anywhere (CLAUDE.md principle 3); the only literal is
+`MIN_SLACK_CELLS = 2`, which is not a threshold but the arithmetic floor —
+half of a one-cell slack is not a grid move.
+
+**The upstream column is the RIGHTMOST other pin on the upstream net that
+lies strictly left of our own upstream pin** — the pin the horizontal run
+must actually reach back to. The maximum rather than the mean, so a
+far-away third member of the same net cannot pull the target past a near
+one and push the element into it. No such pin (`rc_lowpass`, whose upstream
+net is a bare boundary wire) is a decline: there is no second column, so
+there is no middle.
+
+**The shunt is deliberately NOT moved.** It keeps the column `Recolumn`
+gave it; the element takes the whole correction. That is what the owner
+asked for — "RS in the middle between VIN and C1" only means anything if
+`C1` stays put — and it is also what makes the pass a pure translation of
+one already-pinned element rather than a re-basing of a group.
+
+**Plan before mutate**, like every other construction in the file: all the
+columns are read off ONE placement, so a chain's members do not each see
+their predecessor's correction and compound it. On the ladder that is the
+difference between a uniform re-centring and a progressive leftward
+collapse.
+
+### Where it fires: 6 fixtures, 30 `baseline_lock` rows
+
+Directly moved: `lc_ladder_lpf` `L1`/`L2`/`L3`, `rc_phase_shift`
+`R2`/`R3`/`CIN`, `compensated_divider` `C1`, `sallen_key_lpf` `R2`,
+`sallen_key_driven` `R2`/`RA`, `stepped_attenuator` `R6`. The rest of the
+30 rows are the SA and the page frame following.
+
+Emitted origins, `--no-layout-cache`, shipped seed, `lc_ladder_lpf`:
+
+| element | `dc-series-column-pinned` | this arm | left / right gap after |
+| --- | --- | --- | --- |
+| `L1` | 67.31 | **63.50** | 3.81 / 3.81 mm |
+| `L2` | 97.79 | **86.36** | 11.43 / 11.43 mm |
+| `L3` | 128.27 | **116.84** | 11.43 / 11.43 mm |
+
+which is, to the millimetre, "L1 in between C1 and C2".
+
+### The grading (ADR-23, single sample, vs `dc-series-column-pinned`)
+
+Tier 0: **clean**. No `t0.*` cell moves on any of the 22 fixtures.
+
+Tier 1: **+0.00**. No `v4` / `v10` / `v12` / `v13.*` / `v14.*` / `v15` /
+`v17` cell moves at all.
+
+Tier 2, over the six moved fixtures:
+
+| metric | Δ | detail |
+| --- | ---: | --- |
+| V16 bends (B) | **−6** | `sallen_key_driven` 12→7, `lc_ladder_lpf` 5→4, `rc_phase_shift` 7→6; `stepped_attenuator` 9→**10** |
+| V5 | **−4** | `lc_ladder_lpf` 1→0, `rc_phase_shift` 3→2, `sallen_key_lpf` 5→4, `stepped_attenuator` 5→4 |
+| `wire.floor_ratio` (ADR-42) | **−2.24** | `compensated_divider` 9.00→**7.60**, `sallen_key_driven` 7.28→6.44, `lc_ladder_lpf` 4.11→3.78; `sallen_key_lpf` 9.44→**9.75** |
+| `f7` (ADR-42) | **−7** | `compensated_divider` 36→**29** |
+| `chain.stranded` (ADR-42) | 0 | unmoved on all 22 |
+| Q5 alignment near-miss | −3 | `sallen_key_driven` 5→2 |
+| Q3 flow-monotonicity | −2 | `lc_ladder_lpf` 2→1, `sallen_key_driven` 2→1 |
+| detour | −7.6 pts | `sallen_key_driven` 1.2243→1.1485, `sallen_key_lpf` −0.004; `compensated_divider` 1.0714→**1.0857**, `lc_ladder_lpf` +0.001 |
+| wire crossings | **+1** | `sallen_key_driven` 0→1 |
+| F6 stub lateral run | **+7** | `sallen_key_lpf` 0→**5**, `sallen_key_driven` 2→**4** |
+| V16 branches (J) | **+10** | `lc_ladder_lpf` 1→3, `rc_phase_shift` 1→3, `sallen_key_driven` 0→3, `sallen_key_lpf` 0→2 |
+
+### Why it is an arm and not a default-path fix, and what it trades against
+
+Eight per-fixture Tier-2 ratchets rise, so CLAUDE.md's ratchet policy
+forbids landing it as an ordinary change. Two of the rises are not slack
+to be tuned away, and it is worth being explicit about which:
+
+* **F6 is the metric this construction trades against, by
+  construction.** F6 measures a rail stub's lateral run from its node's
+  anchor pin, and the entire point of mid-span centring is to put
+  horizontal wire between the series element's pin and the shunt that
+  hangs off the node. Any pass that satisfies the owner's request must
+  raise F6 on a fixture where the stub was previously glued. They are two
+  readings of the same geometry with opposite signs; only the owner can
+  say which one the drawing wants.
+* **V16 J is the topological floor**, the argument ADR-41 already records:
+  once the node is a genuine three-pin junction rather than a degenerate
+  collinear chain, `J >= k - 2` is that net's floor. `lc_ladder_lpf`'s three
+  shunted taps go 1 → 3 exactly.
+
+The honest way to read the pair is together: **B −6 and V5 −4 against
+J +10 and F6 +7**, with `wire.floor_ratio` −2.24, `f7` −7 and Q3/Q5 −5
+alongside. Under CLAUDE.md's V16 rule that is a within-Tier-2 sideways
+trade, which ADR-23 permits **only** on the whole-placer path — which is
+what this is.
+
+### Known residual: `RS`, the first element the owner named, does not move
+
+`lc_ladder_lpf`'s `RS` is unchanged, and the reason is worth recording so
+it is not re-derived. `apply_rail_stub_columns` runs *before*
+`apply_series_horizontal` and columns `VIN` — a two-terminal source with
+one ground pin, i.e. a rail stub on `src` — onto `RS`'s own column. At the
+moment this pass reads the placement there is therefore **no upstream
+slack at all**: `VIN`'s pin sits at `RS`'s origin, between its two pins.
+The 12.70 mm the shipped sheet shows is opened *later*, by the SA moving
+the (unpinned) `VIN` while the (pinned) `RS` stays put, and a seed-time
+construction cannot see it.
+
+Closing it would need a *post-SA* position pass, which is a new placement
+stage rather than a post-pass, and is deliberately not attempted here.
+`L1`, `L2` and `L3` — the three the metrics actually move — land exactly
+where the owner asked.
+
+### What was measured and rejected on the way
+
+* **Moving the shunt with the element.** Self-defeating: the shunt is the
+  downstream *column*, so translating both changes nothing relative and
+  the drawing is identical.
+* **Gating on a body-length threshold** (centre only a link whose run
+  already exceeds the device's own pin span, the shape of ADR-42's
+  `chain.stranded` rule). It would have removed `rc_phase_shift` from the
+  blast radius and nothing else — `sallen_key_lpf`'s `R2` has 12.70 mm of
+  slack against a 7.62 mm body — so it buys no containment while adding a
+  rule the fixtures cannot justify. Left out.
+
+## ADR-44 — The chain-interior pose: the last decline, and why only pinning could fix it
+
+**Status:** built and graded 2026-09-06, **NOT promoted** (promotion is an
+owner decision under ADR-23). Registered as one `--placer` challenger,
+`chain-interior-pose`, composing on the shipping default
+`dc-series-column-pinned`. Dead on the default path.
+
+### The defect
+
+Owner report on the 2026-09-05 eval render, verbatim:
+
+> "In the current circuit R1 orientation is very broken: is should be
+> flipped horisontally, otherwise it's acceptable"
+
+`stepped_attenuator` is `in -> R1 -> t1 -> R2 -> … -> R7 -> 0`, the
+suite's longest chain. The shipped sheet emits `R1` at **rot 270 with
+`t1` on its LEFT pin and `in` on its right** — the element reads backwards
+against every other member of the string. `R2`..`R7` are all at rot 90/0.
+
+`idioms::apply_series_horizontal` is the only mechanism in the tree that
+draws a series element horizontally *and* pins it. After ADR-36's
+`terminal-series` and `terminal-series-divider` relaxed its two guards,
+exactly ONE unconditional decline remained: an element with a rail stub on
+neither side of its downstream node and a terminal net at neither
+endpoint. `R2`..`R6` are all reached by the terminal-net case (`t2`, `t4`,
+`t6` carry declared `*@port`s, and a port at either endpoint is enough);
+`R7` is a rail stub. **`R1` is the one member of the string no case
+covers**, so it is abandoned to `pick_orientations`, whose V5 scorer is
+blind to flow direction.
+
+### Nothing else could have repaired it — three checks, all negative
+
+1. **No existing trigger sees a reversed two-pin element.**
+   `refine::is_facing_inverted` reads `dc_rank::device_facings`, which
+   resolves for Q / M / J devices only.
+2. **The one metric that reports it asserts nothing.** ADR-28 metric B's
+   `chain.reversal` is `Tier::Info` and carries no ratchet — the same
+   ungated-cell shape ADR-42 closed for metric C.
+3. **A phase-4.5 repair is structurally refused.** The phase already
+   *chose* rot 270: measured `baseline v5=6 bends=6 -> final v5=5
+   bends=9`, i.e. at that position the real router prefers the reversed
+   pose, so a reach-only trigger would trial the correct pose and reject
+   it on the acceptance predicate. **Pinning is the only mechanism** —
+   ADR-15's "pinning is the only trivially-consistent hard mechanism",
+   read forward.
+
+**The default's pose is a draw, not a choice.** Measured across seven SA
+seeds (ADR-31's rule — never read a single draw as an effect):
+
+| SA seed | default `R1` | this arm |
+| --- | --- | --- |
+| 1, 2, 3, 11, 13 | rot **0** (vertical) | rot 90 |
+| 5, shipped | rot **270** (reversed horizontal) | rot 90 |
+| 7 | rot 90 | rot 90 |
+
+So on five of seven seeds the default does not draw `R1` backwards, it
+draws it **standing on end** — which `chain.reversal` scores 0, because it
+counts reversal and not verticality. The arm pins rot 90 on every seed, by
+construction: the SA and phase 4.5 both skip a pinned element.
+
+### The construction
+
+A fourth `Construction` variant, `ChainInterior`, replacing the pass's
+final `_ => continue`. Orient in place, upstream pin left, pin it.
+
+The origin is **kept** — exactly as `Recolumn` keeps it — and that is
+deliberate rather than lazy. ADR-15 Stage 5's root diagnosis is that
+constraining the *axis* leaves the *direction* free and the element swings
+into whatever sits beside it; `TerminalNet` answers that by holding the
+interior-side pin so the body swings into the empty half-plane. A
+chain-interior element has neighbours on BOTH sides, so there is no empty
+half-plane and nothing to re-column — and for the two horizontal poses of
+a y-symmetric two-pin passive the occupied extent is *identical*. It is
+the one case where an orientation-only change cannot re-run Stage 5,
+because here both halves are constrained: the pose is chosen by flow
+direction, not by axis.
+
+**One structural exclusion** (`idioms::bridges_one_device`, principle-9
+clean — pin counts and net membership only): an element whose two nodes
+are both incident on the SAME element with three or more terminals is
+drawn *across* that device, not *between* two neighbours — an op-amp
+feedback resistor, a Miller capacitor, a collector-base bootstrap. It has
+no upstream and downstream sides in the drawing's sense.
+
+This was **measured, not assumed**. Without it, `opamp_inverting_real`'s
+`RF` (`inv` -> `out`, both nets on `X1`) is forced horizontal-and-pinned,
+and that fixture pays `wire.floor_ratio` 6.00 -> 7.17, `detour` 1.0588 ->
+1.1026 and V16 B 3 -> 5. With the exclusion it is byte-identical.
+
+### Where it fires: 3 elements, 2 fixtures
+
+Suite-wide the case is reached by exactly three elements —
+`stepped_attenuator` `R1`, `sallen_key_driven` `R1`, and
+`opamp_inverting_real` `RF`, the last of which the exclusion declines. Two
+fixtures move; the other twenty are byte-identical.
+
+`stepped_attenuator`, `--no-layout-cache`, shipped seed:
+
+| | `dc-series-column-pinned` | this arm |
+| --- | --- | --- |
+| `R1` | (44.45, 41.91) **rot 270** | (48.26, 39.37) **rot 90** |
+| `in` reaches | R1's RIGHT pin, 48.26 | R1's LEFT pin, 44.45 |
+| `t1` reaches | R1's LEFT pin, 40.64 | R1's RIGHT pin, 52.07 |
+| `in` wire | (35.56,40.64)→(49.53,40.64)→(49.53,41.91)→(48.26,41.91) | (35.56,39.37)→(44.45,39.37) |
+
+### The grading (ADR-23, single sample, vs `dc-series-column-pinned`)
+
+Tier 0: **clean**. No `t0.*` cell moves on any of the 22 fixtures.
+
+Tier 1: **+0.00**. No `v4` / `v10` / `v12` / `v13.*` / `v14.*` / `v15` /
+`v17` cell moves at all.
+
+Tier 2:
+
+| metric | `stepped_attenuator` | `sallen_key_driven` |
+| --- | --- | --- |
+| `chain.reversal` (Info) | **1 → 0** | 0 |
+| V16 bends (B) | **9 → 7** | **12 → 9** |
+| V16 branches (J) | 0 → 0 | 0 → **2** |
+| wire crossings | **1 → 0** | 0 → **1** |
+| detour | **1.0857 → 1.0000** | **1.2243 → 1.0515** |
+| `wire.floor_ratio` (ADR-42) | **5.4286 → 4.7857** | **7.2778 → 5.6667** |
+| `f7` (ADR-42) | 0 → 0 | 0 → 0 |
+| `chain.stranded` (ADR-42) | 0 → 0 | 0 → 0 |
+| F5 series pose | **1 → 0** | **1 → 0** |
+| F6 stub lateral run | **10 → 7** | 2 → **3** |
+| Q3 flow-monotonicity | 0 → 0 | **2 → 1** |
+| Q5 alignment near-miss | 0 → 0 | **5 → 0** |
+
+`stepped_attenuator` — the fixture the owner reported — improves on
+**every** metric that moves, and its detour ratio reaches **1.0000**, i.e.
+the emitted ink is exactly the rectilinear ideal.
+
+### Why it is an arm and not a default-path fix
+
+Three per-fixture Tier-2 ratchets rise, all on `sallen_key_driven`:
+`crossings` 0 -> 1, `f6` 2 -> 3, `v16.branches` 0 -> 2. CLAUDE.md's
+ratchet policy forbids an ordinary change from raising any of them, and
+the global-improvement escape — which this squarely qualifies for on the
+aggregate, `sallen_key_driven` alone being six cells better against three
+worse — needs owner sign-off. So the trade is stated rather than taken.
+
+### Out of scope, deliberately
+
+The owner also asked, in the same review, that `stepped_attenuator`'s
+resistor string be drawn as a single vertical column. That is a separate
+construction (K6): it would fire on `port_shapes`, where it reverses the
+repair `readable-v1` shipped for the split-chain defect, and it needs its
+own owner decision. Not attempted here.

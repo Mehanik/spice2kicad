@@ -1323,6 +1323,12 @@ enum Construction {
     /// the divider's column at the node's outgoing-wire Y, and never touch
     /// the divider itself.
     DividerNode,
+    /// K4 case — the element is INTERIOR to a signal chain: its
+    /// downstream node carries no rail stub to re-column and neither
+    /// endpoint is terminal, so the shipping pass abandons it to the
+    /// general orientation chooser. Orient in place, upstream pin left,
+    /// and pin it. See [`Placer::chain_interior_series`].
+    ChainInterior,
 }
 
 /// Draw series signal elements horizontally on the flow lane, upstream
@@ -1434,6 +1440,12 @@ pub(crate) fn apply_series_horizontal(
         declared_ports.contains(n) || net_degree.get(n).copied().unwrap_or(0) <= 1
     };
 
+    // K3: every element this pass places with [`Construction::Recolumn`],
+    // paired with its upstream net — the input to `centre_recolumned_series`
+    // below. Collected here rather than re-derived, because the accepting
+    // branch already owns the role test, the flow direction and the V14
+    // gate, and a second pass re-deciding all three would drift.
+    let mut recolumned: Vec<(usize, String)> = Vec::new();
     for i in 0..checked.elements.len() {
         if pinned[i] {
             continue;
@@ -1502,6 +1514,44 @@ pub(crate) fn apply_series_horizontal(
             // re-column and nothing for the element to swing into. The
             // position half survives as a pin-anchored re-seat below.
             Construction::TerminalNet
+        } else if variant.chain_interior_series() {
+            // CHAIN-INTERIOR case (K4). What is left once the two guards
+            // above have had their say is an element with a rail stub on
+            // NEITHER side of its downstream node and a terminal net at
+            // NEITHER endpoint — i.e. one whose two nodes are both
+            // interior links of a signal chain. The shipping pass declines
+            // it for want of an anchor, and the general chooser then poses
+            // it from V5 alone, which is blind to flow direction: on
+            // `stepped_attenuator` that draws `R1` (`in` -> `t1`) at rot
+            // 270 with `t1` on its LEFT pin and `in` on its right, reading
+            // backwards against every other member of the same string.
+            //
+            // Such an element needs no anchor, because it has neighbours
+            // on BOTH sides: there is no empty half-plane to swing into
+            // and nothing to re-column. It is oriented in place — the
+            // origin is kept, exactly as `Recolumn` keeps it — and the
+            // only thing that changes is which end of the body the
+            // upstream net arrives at. For the two horizontal poses of a
+            // y-symmetric two-pin passive that is a pure relabelling: the
+            // occupied extent is identical, which is why this is the one
+            // case where an orientation-only change does not re-run the
+            // ADR-15 Stage-5 failure ("axis is only half the constraint" —
+            // here BOTH halves are constrained, since the pose is chosen
+            // by flow direction, not by axis).
+            //
+            // ONE exclusion, structural: an element whose two nodes are
+            // both incident on the SAME multi-terminal device is not a
+            // chain link at all — it is drawn ACROSS that device (an
+            // op-amp's feedback resistor, `opamp_inverting_real`'s `RF` on
+            // `inv`/`out`), and the neighbour it is "between" is a single
+            // element on both sides. `bridges_one_device` declines it, and
+            // the measurement agrees: forcing `RF` horizontal-and-pinned
+            // cost that fixture 8.89 mm of wire (`wire.floor_ratio`
+            // 6.00 -> 7.17) and V16 B 3 -> 5.
+            if bridges_one_device(checked, i, up, down) {
+                continue;
+            }
+            Construction::ChainInterior
         } else {
             // No shunt to re-column and no terminal net to swing into — no
             // anchor, so leave the element to the general chooser
@@ -1525,7 +1575,7 @@ pub(crate) fn apply_series_horizontal(
         // exactly the orientation-only change ADR-15 Stage 5 measured the
         // cost of.
         let origin = match construction {
-            Construction::Recolumn => placement.elements[i].origin,
+            Construction::Recolumn | Construction::ChainInterior => placement.elements[i].origin,
             Construction::TerminalNet => {
                 // Hold the pin on the element's INTERIOR side at its current
                 // world position, so the body swings out into the empty
@@ -1570,6 +1620,9 @@ pub(crate) fn apply_series_horizontal(
         placement.elements[i].origin = origin;
         placement.elements[i].orientation = orient;
         pinned[i] = true;
+        if construction == Construction::Recolumn {
+            recolumned.push((i, up.to_string()));
+        }
 
         if construction != Construction::Recolumn {
             // Neither F1 construction re-columns anything: a terminal net
@@ -1696,6 +1749,145 @@ pub(crate) fn apply_series_horizontal(
             pinned[el] = true;
         }
     }
+
+    centre_recolumned_series(placement, checked, &recolumned, variant);
+}
+
+/// Slide each [`Construction::Recolumn`] element into the MIDDLE of the
+/// span between its two node columns, instead of leaving it glued to the
+/// downstream one (K3).
+///
+/// # The defect
+///
+/// `Construction::Recolumn` fixes the *downstream* column by construction
+/// — the shunt is moved onto the series element's downstream pin — and
+/// says nothing at all about the upstream one, which is wherever the layer
+/// seeder left the element. On `lc_ladder_lpf` that draws every ladder arm
+/// hard against the capacitor on its right with the whole inter-stage gap
+/// spent on one long wire back to the previous node: `RS` spans
+/// 48.26 … 55.88 with `C1` at 55.88 and 12.70 mm of bare wire back to
+/// `VIN`; `L2` spans 93.98 … 101.60 with 22.86 mm back to `C2`. The owner
+/// reported it as "sticks to right component going down … it would be good
+/// to put it in the middle on horizontal axis".
+///
+/// # The construction
+///
+/// Structural and pin-anchored, with no topology or refdes test (CLAUDE.md
+/// principle 9). A series element's downstream node column IS its own
+/// downstream pin — that is what `Recolumn` just established — so
+/// centring the element between the two columns reduces to **closing half
+/// the upstream slack**:
+///
+/// ```text
+/// dx = -(upstream_pin_x - upstream_column_x) / 2
+/// ```
+///
+/// after which the element stands the same distance from the pins on its
+/// upstream node as its downstream shunt stands from its own downstream
+/// pin. The shunt group is deliberately NOT moved: it keeps the column
+/// `Recolumn` gave it, so the node it drops from stays where the drawing
+/// (and the shared-node label) already put it, and the element takes the
+/// whole of the correction.
+///
+/// **Upstream column** is the RIGHTMOST world pin `x` on the upstream net
+/// belonging to some *other* element and lying strictly left of this
+/// element's own upstream pin — the pin the horizontal run must actually
+/// reach back to. `None` (a node with nothing else placed to its left, the
+/// `rc_lowpass` shape where the upstream net is a bare boundary wire) is a
+/// decline: there is no second column, so there is no middle.
+///
+/// **Plan before mutate**, like every other construction in this file: all
+/// the columns are read off ONE placement, so a chain's members do not
+/// each see their predecessor's correction and compound it. On the ladder
+/// that is the difference between a uniform re-centring and a progressive
+/// leftward collapse.
+///
+/// Never moves an element rightward and never by less than a whole cell:
+/// the slack must be at least two grid cells for half of it to be a legal
+/// grid move at all, which also makes the pass a no-op on the already-tight
+/// drawings.
+fn centre_recolumned_series(
+    placement: &mut Placement,
+    checked: &CheckedNetlist,
+    recolumned: &[(usize, String)],
+    variant: Placer,
+) {
+    // Half of a 1-cell slack is not a grid move, so 2 cells is the
+    // smallest span this construction can act on at all.
+    const MIN_SLACK_CELLS: i32 = 2;
+
+    // Gating the whole construction on this one accessor is the entire
+    // byte-identity argument for the shipping output: the pass returns
+    // before reading a single position unless it is set, so no
+    // default-path placement can change. `baseline_lock` is the empirical
+    // half.
+    if !variant.series_midspan_centring() {
+        return;
+    }
+
+    let plan: Vec<(usize, i32)> = recolumned
+        .iter()
+        .filter_map(|(i, up)| {
+            let (up_pin_x, _) =
+                world_pin_xy_of(&placement.elements[*i], &checked.elements[*i], up)?;
+            let up_col = upstream_column_x(placement, checked, *i, up, up_pin_x)?;
+            #[allow(clippy::cast_possible_truncation)]
+            let slack_cells = ((up_pin_x - up_col) / GridPoint::STEP_MM).round() as i32;
+            (slack_cells >= MIN_SLACK_CELLS).then_some((*i, -(slack_cells / 2)))
+        })
+        .collect();
+
+    for (i, dx_cells) in plan {
+        let o = placement.elements[i].origin;
+        placement.elements[i].origin = GridPoint::new(o.x + dx_cells, o.y);
+    }
+}
+
+/// The world `x` of the column element `i`'s upstream run has to reach
+/// back to on net `up`: the largest pin `x` among the OTHER elements on
+/// that net that lies strictly left of `up_pin_x`.
+///
+/// The maximum rather than the mean, deliberately: the gap the wire spans
+/// is measured to the nearest thing on the node, and a mean would let a
+/// far-away third member on the same net pull the target past a near one
+/// and push the element into it.
+fn upstream_column_x(
+    placement: &Placement,
+    checked: &CheckedNetlist,
+    i: usize,
+    up: &str,
+    up_pin_x: f64,
+) -> Option<f64> {
+    checked
+        .elements
+        .iter()
+        .enumerate()
+        .filter(|(j, e)| *j != i && e.nodes.iter().any(|n| n == up))
+        .filter_map(|(j, e)| world_pin_xy_of(&placement.elements[j], e, up))
+        .map(|(x, _)| x)
+        .filter(|x| *x < up_pin_x)
+        .fold(None, |acc: Option<f64>, x| {
+            Some(acc.map_or(x, |a| a.max(x)))
+        })
+}
+
+/// True when element `i`'s two nodes are both incident on ONE AND THE SAME
+/// element with three or more terminals.
+///
+/// Such a two-terminal element is drawn *across* that device, not
+/// *between* two neighbours: an op-amp feedback resistor, a Miller
+/// capacitor, a collector-base bootstrap. It has no upstream and
+/// downstream sides in the drawing's sense, so the chain-interior
+/// construction (which exists to make a chain read left-to-right) has
+/// nothing to say about it. Structural — pin counts and net membership
+/// only, no element kind and no refdes (CLAUDE.md principle 9).
+fn bridges_one_device(checked: &CheckedNetlist, i: usize, a: &str, b: &str) -> bool {
+    checked.elements.iter().enumerate().any(|(j, e)| {
+        j != i
+            && e.nodes.len() >= 3
+            && e.nodes.iter().any(|n| n == a)
+            && e.nodes.iter().any(|n| n == b)
+    })
 }
 
 /// The V14 consistency gate for a pass that **pins** what it orients.
@@ -2880,6 +3072,217 @@ C2  n2  0  1n
 
     fn is_horizontal(o: Orientation) -> bool {
         matches!(o.rotation, Rotation::R90 | Rotation::R270)
+    }
+
+    /// The gaps a `Recolumn` element leaves on either side, in mm:
+    /// `(upstream slack, downstream slack)`. Upstream slack is measured
+    /// from the rightmost OTHER pin on the upstream net to this element's
+    /// own upstream pin; downstream slack from this element's downstream
+    /// pin to the shunt that hangs off the downstream node.
+    fn recolumn_slack(
+        placement: &Placement,
+        checked: &CheckedNetlist,
+        refdes: &str,
+        up: &str,
+        down: &str,
+        shunt: &str,
+    ) -> (f64, f64) {
+        let (up_x, _) = pin_at(placement, checked, refdes, up);
+        let (down_x, _) = pin_at(placement, checked, refdes, down);
+        let i = checked
+            .elements
+            .iter()
+            .position(|e| e.refdes == refdes)
+            .expect("element present");
+        let up_col =
+            upstream_column_x(placement, checked, i, up, up_x).expect("an upstream neighbour");
+        let (shunt_x, _) = pin_at(placement, checked, shunt, down);
+        (up_x - up_col, shunt_x - down_x)
+    }
+
+    /// K4 — the chain-interior case, and its negative control.
+    ///
+    /// `R1` (`in` -> `t1`) is interior to a signal chain: `t1` carries no
+    /// rail stub and neither endpoint is a terminal net, so all three
+    /// shipping cases decline and the element is abandoned to
+    /// `pick_orientations`, whose V5 scorer is blind to flow direction.
+    /// This is `stepped_attenuator`'s `R1` in miniature — the one member
+    /// of that seven-resistor string no existing case reaches, because
+    /// `R2`..`R6` each touch a declared `*@port` and `R7` is a rail stub.
+    ///
+    /// The negative control is the first assertion: on the shipping
+    /// default the pass leaves `R1` UNPINNED, i.e. its pose is whatever
+    /// the seed chooser and the SA settle on. (That is the right claim to
+    /// make: asserting "the default draws it backwards" would be
+    /// seed-dependent — measured on `stepped_attenuator`, the default
+    /// emits `R1` at rot 0 on SA seeds 1/2/3/11/13, rot 270 on seed 5 and
+    /// the shipped seed, and rot 90 on seed 7, while this arm pins rot 90
+    /// on all seven.)
+    #[test]
+    fn a_chain_interior_series_element_is_posed_and_pinned_only_under_k4() {
+        let src = "\
+chain-interior pose
+*@symbol Device:R for=R*
+*@symbol Simulation_SPICE:VDC for=VIN
+*@port t2=output
+VIN in 0  DC 0 AC 1
+R1  in t1 1k
+R2  t1 t2 1k
+R3  t2 0  1k
+.end
+";
+        let checked = checked_of(src);
+        let i_r1 = checked
+            .elements
+            .iter()
+            .position(|e| e.refdes == "R1")
+            .expect("R1 present");
+
+        let pinned_under = |placer: Placer| -> bool {
+            crate::refinement_meta(&checked, &crate::Hint::default(), placer)
+                .expect("refinement meta")
+                .pinned[i_r1]
+        };
+        // NEGATIVE CONTROL.
+        assert!(
+            !pinned_under(Placer::default()),
+            "the shipping default must leave R1 unpinned here; if it does \
+             not, some other case now reaches a chain-interior element and \
+             this test proves nothing"
+        );
+        assert!(
+            pinned_under(Placer::ChainInteriorPose),
+            "K4 must PIN the constructed pose — an unpinned orientation is \
+             one `pick_orientations`, the SA and phase 4.5 can each undo, \
+             and phase 4.5 demonstrably prefers the reversed pose"
+        );
+
+        let k4 = seed_with(&checked, Placer::ChainInteriorPose);
+        let o = orientation_of(&k4, &checked, "R1");
+        assert!(is_horizontal(o), "R1 must be drawn horizontal, got {o:?}");
+        let (up_x, _) = pin_at(&k4, &checked, "R1", "in");
+        let (down_x, _) = pin_at(&k4, &checked, "R1", "t1");
+        assert!(
+            up_x < down_x,
+            "the upstream pin must sit left, so the chain reads with the \
+             flow: {up_x} !< {down_x}"
+        );
+    }
+
+    /// K4's one structural exclusion: a two-terminal element whose two
+    /// nodes are both incident on the SAME multi-terminal device is drawn
+    /// ACROSS that device, not between two neighbours.
+    ///
+    /// Measured, not asserted: without this test's subject being excluded,
+    /// `opamp_inverting_real`'s `RF` is forced horizontal-and-pinned at a
+    /// cost of `wire.floor_ratio` 6.00 -> 7.17 and V16 B 3 -> 5.
+    #[test]
+    fn a_feedback_element_across_one_device_is_not_chain_interior() {
+        let src = "\
+feedback bridge
+*@symbol Device:R for=R*
+*@symbol Device:Q_NPN_BCE for=Q*
+*@symbol Simulation_SPICE:VDC for=VIN
+VIN in 0  DC 0 AC 1
+R1  in b  1k
+RF  b  c  100k
+Q1  c  b  0 QMOD
+.end
+";
+        let checked = checked_of(src);
+        let idx = |r: &str| {
+            checked
+                .elements
+                .iter()
+                .position(|e| e.refdes == r)
+                .expect("element present")
+        };
+        assert!(
+            bridges_one_device(&checked, idx("RF"), "b", "c"),
+            "RF spans two terminals of Q1, so it is drawn across the \
+             device, not between two neighbours"
+        );
+        assert!(
+            !bridges_one_device(&checked, idx("R1"), "in", "b"),
+            "R1 is a genuine chain link: nothing three-terminal touches \
+             both `in` and `b`"
+        );
+    }
+
+    /// K3 — series mid-span centring, and its negative control.
+    ///
+    /// `R2` is a `Construction::Recolumn` element: its downstream node
+    /// `n2` carries the ground shunt `C2`, which the pass moves onto
+    /// `R2`'s downstream pin. Nothing in the shipping pass touches the
+    /// UPSTREAM side, so the element ends up hard against `C2` with the
+    /// whole inter-stage gap spent on one wire back to `n1` — the
+    /// `lc_ladder_lpf` defect in miniature.
+    ///
+    /// The negative control is the first assertion, and it is the reason
+    /// this test can fail: on the shipping default the downstream slack is
+    /// exactly **zero** (glued) while the upstream slack is whole cells of
+    /// bare wire. Swap `Placer::SeriesMidspan` for `Placer::default()`
+    /// below and the balance assertion fails on a 5-cell difference.
+    #[test]
+    fn a_recolumn_series_element_centres_between_its_node_columns_only_under_k3() {
+        let src = "\
+series mid-span centring
+*@symbol Device:R for=R*
+*@symbol Device:C for=C*
+*@port in=input
+R1  in  n1 1k
+C1  n1  0  1n
+R2  n1  n2 1k
+C2  n2  0  1n
+R3  n2  n3 1k
+C3  n3  0  1n
+.end
+";
+        let checked = checked_of(src);
+        let step = GridPoint::STEP_MM;
+
+        // NEGATIVE CONTROL: the shipping default glues the element to its
+        // shunt and leaves every cell of slack on the upstream side.
+        let base = seed_with(&checked, Placer::default());
+        let (base_up, base_down) = recolumn_slack(&base, &checked, "R3", "n2", "n3", "C3");
+        assert!(
+            base_down.abs() < step / 2.0,
+            "the shipping default must leave R3 GLUED to C3 (downstream \
+             slack {base_down} mm); if it does not, `Recolumn` no longer \
+             re-columns the shunt onto the downstream pin and this test \
+             proves nothing"
+        );
+        assert!(
+            base_up >= 2.0 * step,
+            "the specimen must present at least 2 cells of upstream slack \
+             for half of it to be a legal grid move; got {base_up} mm"
+        );
+
+        // THE CONSTRUCTION: the element stands the same distance from
+        // each of its two node columns, to within the one cell integer
+        // halving can leave behind.
+        let k3 = seed_with(&checked, Placer::SeriesMidspan);
+        let (up, down) = recolumn_slack(&k3, &checked, "R3", "n2", "n3", "C3");
+        assert!(
+            (up - down).abs() <= step + f64::EPSILON,
+            "R3 must sit mid-span: upstream slack {up} mm vs downstream \
+             {down} mm (was {base_up} vs {base_down})"
+        );
+        // It closes the gap; it never opens one. The element only ever
+        // moves toward its upstream node.
+        assert!(
+            up < base_up,
+            "K3 must REDUCE the upstream run: {up} !< {base_up}"
+        );
+
+        // The shunt is deliberately NOT moved — the node keeps the column
+        // `Recolumn` gave it, and the element takes the whole correction.
+        let (base_c3, _) = pin_at(&base, &checked, "C3", "n3");
+        let (k3_c3, _) = pin_at(&k3, &checked, "C3", "n3");
+        assert!(
+            (base_c3 - k3_c3).abs() < step / 2.0,
+            "C3 must keep its column: {base_c3} -> {k3_c3}"
+        );
     }
 
     /// F1 case (a) — the shunt-bearing guard's terminal-net relaxation.

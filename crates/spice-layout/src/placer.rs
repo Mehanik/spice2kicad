@@ -660,6 +660,132 @@ pub enum Placer {
     /// answer, which is what makes any difference between this arm and
     /// the union of its parts an interaction rather than a new feature.
     ColumnStubsConet,
+
+    /// **Series mid-span centring (K3)** — `dc-series-column-pinned` plus
+    /// one post-pass inside [`crate::idioms::apply_series_horizontal`]:
+    /// an element the pass places with its `Recolumn` construction slides
+    /// into the MIDDLE of the span between its two node columns instead of
+    /// staying glued to the downstream one.
+    ///
+    /// # The defect
+    ///
+    /// `Recolumn` establishes the *downstream* column by construction (it
+    /// moves the shunt onto the series element's downstream pin) and says
+    /// nothing about the upstream one, which is wherever the layer seeder
+    /// left the element. On `lc_ladder_lpf` that draws every ladder arm
+    /// hard against the capacitor on its right with the whole inter-stage
+    /// gap spent on one wire back to the previous node — `L2` spans
+    /// 93.98 … 101.60 with `C3` at 101.60 and **22.86 mm** of bare wire
+    /// back to `C2`. The owner reported it verbatim: "sticks to right
+    /// component going down … it would be good to put it in the middle on
+    /// horizontal axis, like RS in the middle between VIN and C1, L1 in
+    /// between C1 and C2".
+    ///
+    /// Because the downstream column IS the element's own downstream pin,
+    /// centring reduces to closing half the upstream slack, which is
+    /// pin-anchored and carries no millimetre constant. See
+    /// [`crate::idioms::apply_series_horizontal`]'s post-pass.
+    ///
+    /// # Why it is an arm and not a default-path fix
+    ///
+    /// It is a genuine sideways Tier-2 trade, and the metric it trades
+    /// against is F6 — by construction. F6 measures a rail stub's lateral
+    /// run from the node's anchor pin, and the whole point of this pass is
+    /// to put horizontal wire between the series element's pin and the
+    /// shunt that hangs off the node. So `f6 / sallen_key_lpf` goes
+    /// 0 -> 5 and `f6 / sallen_key_driven` 2 -> 4, `crossings /
+    /// sallen_key_driven` 0 -> 1, `v16.branches` rises on four fixtures
+    /// (the topological floor argument ADR-41 records — a 3-pin node
+    /// drawn as a proper Steiner T instead of a degenerate collinear
+    /// chain), and two detour literals rise by a fraction of a percent.
+    /// Against that: `v16.bends` -1/-1/-5, `v5` -1 on four fixtures,
+    /// `wire.floor_ratio` -0.33 / -0.83 / -1.40, `f7 /
+    /// compensated_divider` 36 -> 29, `q3`, `q5` and `q6.cov` all down,
+    /// and `detour / sallen_key_driven` 1.224 -> 1.149.
+    ///
+    /// CLAUDE.md's ratchet policy forbids an ordinary change from raising
+    /// any of them, so the trade is stated rather than taken. Promotion is
+    /// the owner's decision under ADR-23.
+    ///
+    /// **Known residual.** `lc_ladder_lpf`'s own `RS` — the first element
+    /// the owner named — does NOT move. At seed time `VIN` has already
+    /// been columned onto `RS` by
+    /// [`crate::idioms::apply_rail_stub_columns`], so there is no gap to
+    /// halve; the 12.70 mm the shipped drawing shows is opened later by
+    /// the SA moving the (unpinned) source, and a seed-time construction
+    /// cannot see it. `L1`, `L2` and `L3` land exactly where the owner
+    /// asked.
+    SeriesMidspan,
+
+    /// **Chain-interior pose (K4)** — `dc-series-column-pinned` plus a
+    /// FOURTH acceptance case in
+    /// [`crate::idioms::apply_series_horizontal`], replacing its last
+    /// unconditional decline.
+    ///
+    /// # The defect
+    ///
+    /// That pass is the only mechanism in the tree that draws a series
+    /// element horizontally *and* **pins** it — the pin the SA and phase
+    /// 4.5 both respect. After [`Self::TerminalSeries`] and
+    /// [`Self::TerminalSeriesDivider`] relaxed its two guards, exactly one
+    /// decline is left: an element with a rail stub on NEITHER side of its
+    /// downstream node and a terminal net at NEITHER endpoint, i.e. one
+    /// whose two nodes are both *interior links of a signal chain*. It is
+    /// abandoned to the general orientation chooser, which poses it from
+    /// V5 alone — and V5 is blind to flow direction.
+    ///
+    /// On `stepped_attenuator`, whose seven-resistor string is the
+    /// suite's longest chain, that draws `R1` (`in` -> `t1`) at **rot 270
+    /// with `t1` on its LEFT pin and `in` on its right**, reading
+    /// backwards against `R2`..`R7`. The owner reported it verbatim: "In
+    /// the current circuit R1 orientation is very broken: is should be
+    /// flipped horisontally, otherwise it's acceptable". `R2`..`R6` are
+    /// all reached by the terminal-net case (`t2`/`t4`/`t6` carry declared
+    /// `*@port`s) and `R7` is a rail stub — `R1` is the one member of the
+    /// string no existing case covers.
+    ///
+    /// Nothing else in the tree could have repaired it. `chain.reversal`
+    /// (ADR-28 metric B) reports it and is `Tier::Info`;
+    /// `refine::is_facing_inverted` reads `dc_rank::device_facings`, which
+    /// covers Q / M / J only; and phase 4.5 cannot, because the phase
+    /// *already chose* rot 270 — measured `baseline v5=6 bends=6 -> final
+    /// v5=5 bends=9`, i.e. the router prefers the reversed pose at that
+    /// position, so a reach-only repair is refused on the acceptance
+    /// predicate. **Pinning is the only mechanism**, which is ADR-15's
+    /// "pinning is the only trivially-consistent hard mechanism" read
+    /// forward.
+    ///
+    /// # The construction
+    ///
+    /// Orient in place, upstream pin left, and pin. The origin is kept —
+    /// exactly as `Recolumn` keeps it — because a chain-interior element
+    /// has neighbours on BOTH sides: there is no empty half-plane to swing
+    /// into and nothing to re-column, and for the two horizontal poses of
+    /// a y-symmetric two-pin passive the occupied extent is identical. It
+    /// is the one case where an orientation-only change does not re-run
+    /// ADR-15 Stage 5's "axis is only half the constraint", because here
+    /// both halves are constrained: the pose is chosen by flow direction,
+    /// not by axis.
+    ///
+    /// ONE structural exclusion (`idioms::bridges_one_device`): an element
+    /// whose two nodes are both incident on the SAME multi-terminal device
+    /// is drawn *across* that device, not *between* two neighbours — an
+    /// op-amp feedback resistor, a Miller capacitor. Measured, not
+    /// assumed: without it `opamp_inverting_real`'s `RF` is forced
+    /// horizontal-and-pinned at a cost of `wire.floor_ratio` 6.00 -> 7.17
+    /// and V16 B 3 -> 5.
+    ///
+    /// # Why it is an arm and not a default-path fix
+    ///
+    /// `stepped_attenuator` improves on **every** metric that moves, and
+    /// `sallen_key_driven` improves on six against three — but three of
+    /// its Tier-2 literals RISE (`crossings` 0 -> 1, `f6` 2 -> 3,
+    /// `v16.branches` 0 -> 2), and CLAUDE.md's ratchet policy forbids an
+    /// ordinary change from raising a ratchet. The aggregate is strongly
+    /// negative (better), which is the global-improvement escape's shape —
+    /// and that escape needs owner sign-off. So the trade is stated rather
+    /// than taken. Promotion is the owner's decision under ADR-23.
+    ChainInteriorPose,
 }
 
 impl Placer {
@@ -688,6 +814,8 @@ impl Placer {
         Self::ConetLayerCollapse,
         Self::DcColumnNodeStubs,
         Self::ColumnStubsConet,
+        Self::SeriesMidspan,
+        Self::ChainInteriorPose,
     ];
 
     /// The name accepted by `--placer` and printed by the scoreboard.
@@ -716,6 +844,8 @@ impl Placer {
             Self::ConetLayerCollapse => "conet-layer-collapse",
             Self::DcColumnNodeStubs => "dc-column-node-stubs",
             Self::ColumnStubsConet => "column-stubs-conet",
+            Self::SeriesMidspan => "series-midspan",
+            Self::ChainInteriorPose => "chain-interior-pose",
         }
     }
 
@@ -803,6 +933,14 @@ impl Placer {
                 "the composition: co-net layer collapse AND the column \
                  carrying its shared nets' rail stubs"
             }
+            Self::SeriesMidspan => {
+                "dc-series-column-pinned plus series mid-span centring: a \
+                 Recolumn element sits midway between its two node columns"
+            }
+            Self::ChainInteriorPose => {
+                "dc-series-column-pinned plus the chain-interior case: a \
+                 series element between two interior links is posed and pinned"
+            }
         }
     }
 
@@ -858,6 +996,8 @@ impl Placer {
                 | Self::ConetLayerCollapse
                 | Self::DcColumnNodeStubs
                 | Self::ColumnStubsConet
+                | Self::SeriesMidspan
+                | Self::ChainInteriorPose
         )
     }
 
@@ -901,6 +1041,8 @@ impl Placer {
                 | Self::ConetLayerCollapse
                 | Self::DcColumnNodeStubs
                 | Self::ColumnStubsConet
+                | Self::SeriesMidspan
+                | Self::ChainInteriorPose
         )
     }
 
@@ -925,6 +1067,8 @@ impl Placer {
                 | Self::ConetLayerCollapse
                 | Self::DcColumnNodeStubs
                 | Self::ColumnStubsConet
+                | Self::SeriesMidspan
+                | Self::ChainInteriorPose
         )
     }
 
@@ -944,6 +1088,8 @@ impl Placer {
                 | Self::ConetLayerCollapse
                 | Self::DcColumnNodeStubs
                 | Self::ColumnStubsConet
+                | Self::SeriesMidspan
+                | Self::ChainInteriorPose
         )
     }
 
@@ -975,6 +1121,8 @@ impl Placer {
                 | Self::ConetLayerCollapse
                 | Self::DcColumnNodeStubs
                 | Self::ColumnStubsConet
+                | Self::SeriesMidspan
+                | Self::ChainInteriorPose
         )
     }
 
@@ -999,6 +1147,8 @@ impl Placer {
                 | Self::ConetLayerCollapse
                 | Self::DcColumnNodeStubs
                 | Self::ColumnStubsConet
+                | Self::SeriesMidspan
+                | Self::ChainInteriorPose
         )
     }
 
@@ -1020,6 +1170,8 @@ impl Placer {
                 | Self::ConetLayerCollapse
                 | Self::DcColumnNodeStubs
                 | Self::ColumnStubsConet
+                | Self::SeriesMidspan
+                | Self::ChainInteriorPose
         )
     }
 
@@ -1060,6 +1212,8 @@ impl Placer {
                 | Self::ConetLayerCollapse
                 | Self::DcColumnNodeStubs
                 | Self::ColumnStubsConet
+                | Self::SeriesMidspan
+                | Self::ChainInteriorPose
         )
     }
 
@@ -1080,6 +1234,8 @@ impl Placer {
                 | Self::ConetLayerCollapse
                 | Self::DcColumnNodeStubs
                 | Self::ColumnStubsConet
+                | Self::SeriesMidspan
+                | Self::ChainInteriorPose
         )
     }
 
@@ -1097,6 +1253,8 @@ impl Placer {
                 | Self::ConetLayerCollapse
                 | Self::DcColumnNodeStubs
                 | Self::ColumnStubsConet
+                | Self::SeriesMidspan
+                | Self::ChainInteriorPose
         )
     }
 
@@ -1141,6 +1299,40 @@ impl Placer {
         matches!(self, Self::DcColumnNodeStubs | Self::ColumnStubsConet)
     }
 
+    /// K3: does [`crate::idioms::apply_series_horizontal`] slide each
+    /// element it placed with its `Recolumn` construction into the MIDDLE
+    /// of the span between its two node columns, instead of leaving it
+    /// glued to the downstream one?
+    ///
+    /// Gating the whole construction on this one accessor is the entire
+    /// byte-identity argument for the shipping output:
+    /// `centre_recolumned_series` returns before reading a single position
+    /// unless this is `true`. `baseline_lock` is the empirical half.
+    ///
+    /// See [`Self::SeriesMidspan`] for what it repairs and what it costs.
+    #[must_use]
+    pub fn series_midspan_centring(self) -> bool {
+        matches!(self, Self::SeriesMidspan)
+    }
+
+    /// K4: does [`crate::idioms::apply_series_horizontal`] accept a
+    /// **chain-interior** series element — no rail stub on its downstream
+    /// node, no terminal net at either endpoint — orienting it horizontal
+    /// with the upstream pin left and PINNING the pose, instead of
+    /// declining outright?
+    ///
+    /// Gating the whole case on this one accessor is the entire
+    /// byte-identity argument for the shipping output: the branch is
+    /// unreachable unless it returns `true`, so the pass keeps its
+    /// unconditional decline. `baseline_lock` is the empirical half.
+    ///
+    /// See [`Self::ChainInteriorPose`] for what it repairs and what it
+    /// costs.
+    #[must_use]
+    pub fn chain_interior_series(self) -> bool {
+        matches!(self, Self::ChainInteriorPose)
+    }
+
     /// Look a placer up by the name `--placer` accepts.
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
@@ -1161,6 +1353,82 @@ impl Placer {
 #[cfg(test)]
 mod tests {
     use super::Placer;
+
+    /// K3 is a CHALLENGER, not the default. Eight Tier-2 literals rise
+    /// under it (F6 on two fixtures, V16 branches on four, crossings and
+    /// two detour ratios), and an ordinary change may not raise a
+    /// ratchet — so the shipping path must not reach it. This assertion
+    /// is the byte-identity argument in code; the `baseline_lock` empty
+    /// diff is its empirical half.
+    #[test]
+    fn series_midspan_centring_is_off_on_the_default_path() {
+        assert!(!Placer::default().series_midspan_centring());
+        for p in Placer::ALL {
+            assert_eq!(
+                p.series_midspan_centring(),
+                matches!(p, Placer::SeriesMidspan),
+                "{} must not reach the mid-span centring post-pass",
+                p.name()
+            );
+        }
+        // It composes ON the shipping default, so every arm the default
+        // switches on must still be switched on.
+        let d = Placer::default();
+        let k3 = Placer::SeriesMidspan;
+        assert_eq!(k3.dc_series_columns(), d.dc_series_columns());
+        assert_eq!(k3.dc_series_columns_pinned(), d.dc_series_columns_pinned());
+        assert_eq!(k3.signal_direction_filter(), d.signal_direction_filter());
+        assert_eq!(k3.terminal_net_series(), d.terminal_net_series());
+        assert_eq!(k3.divider_node_series(), d.divider_node_series());
+        assert_eq!(k3.rail_gated_dividers(), d.rail_gated_dividers());
+        assert_eq!(
+            k3.divider_tap_must_be_unloaded(),
+            d.divider_tap_must_be_unloaded()
+        );
+        assert_eq!(k3.facing_inverted_trigger(), d.facing_inverted_trigger());
+        assert_eq!(k3.unified_roots(), d.unified_roots());
+        assert_eq!(k3.flow_seed_layering(), d.flow_seed_layering());
+        // ...and every arm it does NOT compose stays off.
+        assert!(!k3.conet_layer_collapse());
+        assert!(!k3.dc_column_node_stubs());
+    }
+
+    /// K4 is a CHALLENGER, not the default. Three Tier-2 literals rise
+    /// under it on `sallen_key_driven`, and an ordinary change may not
+    /// raise a ratchet — so the shipping path must not reach it.
+    #[test]
+    fn the_chain_interior_case_is_off_on_the_default_path() {
+        assert!(!Placer::default().chain_interior_series());
+        for p in Placer::ALL {
+            assert_eq!(
+                p.chain_interior_series(),
+                matches!(p, Placer::ChainInteriorPose),
+                "{} must not reach the chain-interior case",
+                p.name()
+            );
+        }
+        // It composes ON the shipping default, so every arm the default
+        // switches on must still be switched on.
+        let d = Placer::default();
+        let k4 = Placer::ChainInteriorPose;
+        assert_eq!(k4.dc_series_columns(), d.dc_series_columns());
+        assert_eq!(k4.dc_series_columns_pinned(), d.dc_series_columns_pinned());
+        assert_eq!(k4.signal_direction_filter(), d.signal_direction_filter());
+        assert_eq!(k4.terminal_net_series(), d.terminal_net_series());
+        assert_eq!(k4.divider_node_series(), d.divider_node_series());
+        assert_eq!(k4.rail_gated_dividers(), d.rail_gated_dividers());
+        assert_eq!(
+            k4.divider_tap_must_be_unloaded(),
+            d.divider_tap_must_be_unloaded()
+        );
+        assert_eq!(k4.facing_inverted_trigger(), d.facing_inverted_trigger());
+        assert_eq!(k4.unified_roots(), d.unified_roots());
+        assert_eq!(k4.flow_seed_layering(), d.flow_seed_layering());
+        // ...and every arm it does NOT compose stays off.
+        assert!(!k4.conet_layer_collapse());
+        assert!(!k4.dc_column_node_stubs());
+        assert!(!k4.series_midspan_centring());
+    }
 
     #[test]
     fn default_is_the_dc_series_column_placer() {
