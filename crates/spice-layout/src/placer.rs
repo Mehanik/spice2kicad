@@ -635,6 +635,31 @@ pub enum Placer {
     /// fixtures, against every carried stub landing on its tap's own
     /// line. Promotion is the owner's decision under ADR-23.
     DcColumnNodeStubs,
+
+    /// **The composition** — [`Self::ConetLayerCollapse`] AND
+    /// [`Self::DcColumnNodeStubs`] together, on `dc-series-column-pinned`.
+    ///
+    /// Both are owner-reported repairs that graded Tier-0 clean and
+    /// Tier-1 +0.00 individually, and both were registered rather than
+    /// landed because their Tier-2 literals RISE. They are composed here
+    /// for two reasons.
+    ///
+    /// First, ADR-36's lesson: arms that are graded separately and then
+    /// shipped together have not been graded. The two touch disjoint
+    /// stages — one is inside `layers::assign_x_layers_with`'s rooted-DAG
+    /// path, the other inside `dc_column::apply_dc_columns` — but the
+    /// placer is a globally-coupled map and "disjoint code" is not
+    /// "disjoint output". Only a joint run measures the pair.
+    ///
+    /// Second, they answer four of the owner's six reported defects on
+    /// the 2026-09-05 eval render, and a single arm is what a visual
+    /// review can actually judge.
+    ///
+    /// Composition only: this variant adds NO construction of its own.
+    /// It answers `true` to exactly the accessors its two components
+    /// answer, which is what makes any difference between this arm and
+    /// the union of its parts an interaction rather than a new feature.
+    ColumnStubsConet,
 }
 
 impl Placer {
@@ -662,6 +687,7 @@ impl Placer {
         Self::DcSeriesColumnPinned,
         Self::ConetLayerCollapse,
         Self::DcColumnNodeStubs,
+        Self::ColumnStubsConet,
     ];
 
     /// The name accepted by `--placer` and printed by the scoreboard.
@@ -689,6 +715,7 @@ impl Placer {
             Self::DcSeriesColumnPinned => "dc-series-column-pinned",
             Self::ConetLayerCollapse => "conet-layer-collapse",
             Self::DcColumnNodeStubs => "dc-column-node-stubs",
+            Self::ColumnStubsConet => "column-stubs-conet",
         }
     }
 
@@ -772,6 +799,10 @@ impl Placer {
                 "dc-series-column-pinned plus the column carrying its \
                  shared nets' rail stubs, pin-anchored in BOTH axes"
             }
+            Self::ColumnStubsConet => {
+                "the composition: co-net layer collapse AND the column \
+                 carrying its shared nets' rail stubs"
+            }
         }
     }
 
@@ -826,6 +857,7 @@ impl Placer {
                 | Self::DcSeriesColumnPinned
                 | Self::ConetLayerCollapse
                 | Self::DcColumnNodeStubs
+                | Self::ColumnStubsConet
         )
     }
 
@@ -868,6 +900,7 @@ impl Placer {
                 | Self::DcSeriesColumnPinned
                 | Self::ConetLayerCollapse
                 | Self::DcColumnNodeStubs
+                | Self::ColumnStubsConet
         )
     }
 
@@ -891,6 +924,7 @@ impl Placer {
                 | Self::DcSeriesColumnPinned
                 | Self::ConetLayerCollapse
                 | Self::DcColumnNodeStubs
+                | Self::ColumnStubsConet
         )
     }
 
@@ -909,6 +943,7 @@ impl Placer {
                 | Self::DcSeriesColumnPinned
                 | Self::ConetLayerCollapse
                 | Self::DcColumnNodeStubs
+                | Self::ColumnStubsConet
         )
     }
 
@@ -939,6 +974,7 @@ impl Placer {
                 | Self::DcSeriesColumnPinned
                 | Self::ConetLayerCollapse
                 | Self::DcColumnNodeStubs
+                | Self::ColumnStubsConet
         )
     }
 
@@ -962,6 +998,7 @@ impl Placer {
                 | Self::DcSeriesColumnPinned
                 | Self::ConetLayerCollapse
                 | Self::DcColumnNodeStubs
+                | Self::ColumnStubsConet
         )
     }
 
@@ -982,6 +1019,7 @@ impl Placer {
                 | Self::DcSeriesColumnPinned
                 | Self::ConetLayerCollapse
                 | Self::DcColumnNodeStubs
+                | Self::ColumnStubsConet
         )
     }
 
@@ -1021,6 +1059,7 @@ impl Placer {
                 | Self::DcSeriesColumnPinned
                 | Self::ConetLayerCollapse
                 | Self::DcColumnNodeStubs
+                | Self::ColumnStubsConet
         )
     }
 
@@ -1040,6 +1079,7 @@ impl Placer {
                 | Self::DcSeriesColumnPinned
                 | Self::ConetLayerCollapse
                 | Self::DcColumnNodeStubs
+                | Self::ColumnStubsConet
         )
     }
 
@@ -1053,7 +1093,10 @@ impl Placer {
     pub fn dc_series_columns_pinned(self) -> bool {
         matches!(
             self,
-            Self::DcSeriesColumnPinned | Self::ConetLayerCollapse | Self::DcColumnNodeStubs
+            Self::DcSeriesColumnPinned
+                | Self::ConetLayerCollapse
+                | Self::DcColumnNodeStubs
+                | Self::ColumnStubsConet
         )
     }
 
@@ -1077,7 +1120,7 @@ impl Placer {
     /// ordinary change may not raise a ratchet.
     #[must_use]
     pub fn conet_layer_collapse(self) -> bool {
-        matches!(self, Self::ConetLayerCollapse)
+        matches!(self, Self::ConetLayerCollapse | Self::ColumnStubsConet)
     }
 
     /// Does the DC-series column also **carry the rail stubs of its own
@@ -1095,7 +1138,7 @@ impl Placer {
     /// costs.
     #[must_use]
     pub fn dc_column_node_stubs(self) -> bool {
-        matches!(self, Self::DcColumnNodeStubs)
+        matches!(self, Self::DcColumnNodeStubs | Self::ColumnStubsConet)
     }
 
     /// Look a placer up by the name `--placer` accepts.
@@ -1134,9 +1177,16 @@ mod tests {
     fn conet_layer_collapse_is_off_on_the_default_path() {
         assert!(!Placer::default().conet_layer_collapse());
         for p in Placer::ALL {
+            // Two arms answer `true`: the isolating challenger, and
+            // the composition that contains it. Until 2026-09-06 this
+            // read `*p == Placer::ConetLayerCollapse` — the exact
+            // one-arm form — and `column-stubs-conet` makes that false
+            // BY DESIGN, since composing the pass is the whole point of
+            // that variant. What must stay true is the property this
+            // test exists for: nothing on the SHIPPING path reaches it.
             assert_eq!(
                 p.conet_layer_collapse(),
-                *p == Placer::ConetLayerCollapse,
+                matches!(p, Placer::ConetLayerCollapse | Placer::ColumnStubsConet),
                 "{} must not reach the co-net collapse",
                 p.name()
             );
@@ -1237,9 +1287,14 @@ mod tests {
     fn the_carried_node_stubs_are_off_by_default() {
         assert!(!Placer::default().dc_column_node_stubs());
         for &p in Placer::ALL {
+            // Two arms answer `true`: the isolating challenger, and
+            // the composition that contains it. See the sibling note in
+            // `conet_layer_collapse_is_off_on_the_default_path` — the
+            // invariant under test is "dead on the SHIPPING path", not
+            // "exactly one variant".
             assert_eq!(
                 p.dc_column_node_stubs(),
-                p == Placer::DcColumnNodeStubs,
+                matches!(p, Placer::DcColumnNodeStubs | Placer::ColumnStubsConet),
                 "{} must not carry node stubs",
                 p.name()
             );
@@ -1442,6 +1497,73 @@ mod tests {
     /// shipping output: the composition adds no new mechanism, so if
     /// each constituent is unreachable by default then so is the
     /// composition. `baseline_lock` is the empirical half.
+    /// `column-stubs-conet` is a COMPOSITION and adds nothing of its
+    /// own: it answers `true` to exactly the union of the accessors its
+    /// two components answer, and `false` to everything else they both
+    /// answer `false` to.
+    ///
+    /// This is what makes the arm interpretable. If the composed arm
+    /// could switch on a pass neither component switches on, then any
+    /// difference between it and the union of its parts would be a new
+    /// feature rather than an interaction, and grading it would not tell
+    /// us whether the two constructions compose cleanly.
+    ///
+    /// Measured on the emitted output at the time this was written: the
+    /// two components move DISJOINT fixture sets (`conet-layer-collapse`
+    /// moves `compensated_divider` and `opamp_transimpedance`;
+    /// `dc-column-node-stubs` moves six others), and on every one of the
+    /// eight the composed arm's `.kicad_sch` is byte-identical to
+    /// whichever single component moves it. Zero interaction. That is an
+    /// empirical fact about today's fixtures, not a theorem — this test
+    /// pins the accessor half, which is the half that can be proved.
+    #[test]
+    fn the_composition_is_exactly_the_union_of_its_parts() {
+        type Acc = (&'static str, fn(Placer) -> bool);
+        let all: &[Acc] = &[
+            ("conet_layer_collapse", Placer::conet_layer_collapse),
+            ("dc_column_node_stubs", Placer::dc_column_node_stubs),
+            ("dc_series_columns", Placer::dc_series_columns),
+            ("dc_series_columns_pinned", Placer::dc_series_columns_pinned),
+            ("signal_direction_filter", Placer::signal_direction_filter),
+            ("terminal_net_series", Placer::terminal_net_series),
+            ("divider_node_series", Placer::divider_node_series),
+            ("rail_gated_dividers", Placer::rail_gated_dividers),
+            (
+                "divider_tap_must_be_unloaded",
+                Placer::divider_tap_must_be_unloaded,
+            ),
+            ("facing_inverted_trigger", Placer::facing_inverted_trigger),
+            ("flow_seed_layering", Placer::flow_seed_layering),
+            ("unified_roots", Placer::unified_roots),
+            ("unified_depth_roots", Placer::unified_depth_roots),
+            ("sa_rotate_v5_gate", Placer::sa_rotate_v5_gate),
+            ("page_frame_pin_y", Placer::page_frame_pin_y),
+            ("m3_signed_gate", Placer::m3_signed_gate),
+            ("m3_property_text", Placer::m3_property_text),
+            ("m3_signed_legalize", Placer::m3_signed_legalize),
+            ("m5_element_streams", Placer::m5_element_streams),
+        ];
+        let (a, b, c) = (
+            Placer::ConetLayerCollapse,
+            Placer::DcColumnNodeStubs,
+            Placer::ColumnStubsConet,
+        );
+        for &(name, f) in all {
+            assert_eq!(
+                f(c),
+                f(a) || f(b),
+                "column-stubs-conet must answer {name} as the union of \
+                 its two components ({} || {})",
+                f(a),
+                f(b)
+            );
+        }
+        // And it really is BOTH, not one of them wearing a new name.
+        assert!(c.conet_layer_collapse() && c.dc_column_node_stubs());
+        assert!(!a.dc_column_node_stubs());
+        assert!(!b.conet_layer_collapse());
+    }
+
     #[test]
     fn readable_v1_is_exactly_its_four_constituents() {
         type Acc = (&'static str, fn(Placer) -> bool);
