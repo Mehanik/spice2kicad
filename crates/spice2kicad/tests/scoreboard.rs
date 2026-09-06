@@ -443,6 +443,47 @@ const METRICS: &[Metric] = &[
         1.0,
         "F6 worst rail-stub lateral run (cells)",
     ),
+    // F7 — parallel-partner separation (ADR-41). Tier 2 and 1.0 point per
+    // cell, exactly like F6 above: both are drawn distances in grid cells
+    // with no threshold at which they become categorically wrong, which
+    // is CLAUDE.md's constraints-vs-costs decision rule placing a
+    // continuous gradient in Tier 2. Sharing F6's unit keeps them
+    // commensurable — one cell of stub drift trades against one cell of
+    // partner exile — and neither is worth more than a wire crossing.
+    m(
+        "f7",
+        Tier::T2,
+        1.0,
+        "F7 worst parallel-partner separation (cells)",
+    ),
+    // Wire against a PLACEMENT-INDEPENDENT floor (ADR-41). `detour`
+    // above divides by the HPWL of the EMITTED pins, so a placement
+    // defect cancels out of it; this divides by `Σ (pins-1) · 2.54 mm`,
+    // which no coordinate can move.
+    //
+    // Tier 2, with the same reasoning as `detour`: excess ink is a
+    // continuous quality gradient, and the project's own HPWL ablation
+    // says area is not an objective — only ink that wanders past what
+    // the drawing needed is a readability defect.
+    //
+    // **1.0 point per unit, NOT `detour`'s 100.0**, and the difference is
+    // deliberate. `detour` reads 1.0-1.9, so 100.0 makes one point one
+    // percentage point of excess wire. This ratio reads 1.5-9.0 against a
+    // deliberately loose absolute bound; at 100.0 a single fixture would
+    // contribute up to 800 points and one metric would outvote every
+    // other Tier-2 cell combined, converting the aggregate into a
+    // wire-length objective the project has explicitly rejected. It would
+    // also routinely break the `|T2| < TIER1_WEIGHT` condition the report
+    // checks, under which the scalar stops being order-isomorphic to the
+    // lexicographic `(T1, T2)` rule. At 1.0 one point is one whole
+    // floor-length of ink removed, which is the same order as a count.
+    // This weight is an assistant judgement; flagged for owner review.
+    m(
+        "wire.floor_ratio",
+        Tier::T2,
+        1.0,
+        "emitted wire over the placement-independent floor Σ(pins−1)·2.54 mm",
+    ),
     m(
         "p11b.movers",
         Tier::T2,
@@ -547,11 +588,25 @@ const METRICS: &[Metric] = &[
     // adjacency, so a chain shattered into separated columns scores a
     // perfect 0 on both. `port_shapes` is drawn as two vertical stacks
     // of two, 31.75 mm apart, and read 0/0.
+    // PROMOTED out of `Tier::Info` (ADR-41, 2026-09-06). It is now a
+    // per-fixture zero-slack ratchet
+    // (`readability_metrics.rs::chain_stranded_within_ratchet`), and an
+    // informational cell cannot back a ratchet: zero aggregate weight
+    // means a challenger that shatters a chain pays nothing for it in the
+    // promotion rule, which is the blindness ADR-28 was written about,
+    // one level up. Tier 2 and 1.0 point per stranded member — a count
+    // whose ideal is zero, so 1.0 is the registry's own non-arbitrary
+    // choice — on ADR-28's own reading ("its threshold is a judgement
+    // about spacing, which argues for Tier 2 rather than Tier 1").
+    //
+    // `chain.run_members` below stays informational: it is the
+    // DENOMINATOR, and weighting a denominator would score measuring
+    // more of the drawing as a regression.
     m(
         "chain.stranded",
-        Tier::Info,
-        0.0,
-        "series-chain members drawn away from the rest of their chain (informational)",
+        Tier::T2,
+        1.0,
+        "series-chain members drawn away from the rest of their chain",
     ),
     m(
         "chain.run_members",
