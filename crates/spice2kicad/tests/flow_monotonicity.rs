@@ -366,7 +366,10 @@ const Q3_FLOW_MONOTONICITY_BUDGET: &[(&str, u32)] = &[
     // partners instead of below them, which the X-only monotonicity
     // test reads as an inversion. Weighed against B 16 -> 5, detour
     // -13.66 pp, Q5 5 -> 1 and F5 3 -> 1 on the same fixture.
-    ("lc_ladder_lpf", 3),
+    // `Recolumn` shunt-row fix: `C4`/`RL` take deterministic
+    // pin-anchored slots on `out`, so `L3`/`RL` is no longer read as an
+    // inversion. Q3 3 -> 2, measured from the sink. Ratchet DOWN.
+    ("lc_ladder_lpf", 2),
     ("sallen_key_lpf", 2),
     // Zero — an oscillator has no forward direction to violate, which
     // is the control arm the other three are read against.
@@ -392,7 +395,10 @@ const Q3_FLOW_MONOTONICITY_BUDGET: &[(&str, u32)] = &[
     // ADR-40 PROMOTION re-record: literal 2 -> 0. Ratchet DOWN; the
     // control sink also reads 0, so nothing moved here.
     ("resistor_ladder_ref", 0),
-    ("compensated_divider", 3),
+    // `Recolumn` shunt-row fix: `R2`/`C2` take deterministic
+    // pin-anchored slots on `out`. Q3 3 -> 2, measured from the sink.
+    // Ratchet DOWN.
+    ("compensated_divider", 2),
 ];
 
 #[test]

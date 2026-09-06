@@ -909,6 +909,132 @@ pub(crate) fn anchored_column_x(
     anchor.x + f64::from(anchor.outward * cells) * GridPoint::STEP_MM
 }
 
+/// One slot of a re-columned shunt row in [`apply_series_horizontal`]'s
+/// `Recolumn` construction: which stub holds it, the pose the member is
+/// drawn at, and whether this pass will actually move it.
+struct ShuntSlot<'a> {
+    stub: &'a RailStub,
+    /// The pose the member will be *drawn* at — the V14-correct rail
+    /// facing for a member this pass moves, and the member's existing
+    /// pose for one it skips. Read for the row's stride either way, so a
+    /// skipped member's body still widens the pitch of the slot it holds.
+    pose: Orientation,
+    /// `Some(pin-x offset in cells)` for a member this pass will move;
+    /// `None` for one it skips.
+    offset: Option<i32>,
+}
+
+/// Geometry-derived horizontal pitch (cells) for a **row** of elements
+/// drawn side by side in the given order: the widest pair of adjacent
+/// extents plus [`crate::MIN_CLEARANCE_MM`], snapped up to the grid and
+/// floored at [`CELL_W`]. That is the smallest pitch at which no two
+/// neighbours in the row clip.
+///
+/// # Why this is shared and not inlined twice
+///
+/// Two passes spread the stubs of one node side by side about one
+/// column: [`apply_rail_stub_columns`] (grouped by `(signal net, side)`)
+/// and [`apply_series_horizontal`]'s `Recolumn` construction (the shunts
+/// on a series element's downstream node). They are the *same*
+/// construction, and only one of them had ever been written: the
+/// `Recolumn` branch wrote every member of its group to one identical
+/// origin and let `legalize` shove the collisions apart in its own search
+/// order. Giving the second site its own copy of this arithmetic would
+/// set up exactly the drift `roots.rs`'s module docs enumerate the cost
+/// of (three defects from two independently-evolved consumers of one
+/// policy), so it lives in one place instead. What legitimately differs
+/// between the two is where the row sits relative to its anchor, and that
+/// is named — see [`RowAnchor`].
+fn row_stride_cells(exts: &[WorldExtent]) -> i32 {
+    let mut stride = CELL_W;
+    for w in exts.windows(2) {
+        let gap_mm = w[0].max_x + (-w[1].min_x) + crate::MIN_CLEARANCE_MM;
+        stride = stride.max(crate::mm_up_to_cells(gap_mm));
+    }
+    stride
+}
+
+/// How a row of side-by-side stubs sits relative to its anchor column.
+///
+/// The two differ **only for even-sized rows** (for odd `count`, and for a
+/// single member, they are the same offsets), which is why the choice
+/// went unnoticed until a row of exactly two appeared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowAnchor {
+    /// The row's *midline* is the anchor column, so an even-sized row
+    /// straddles it and NO member stands on it. What
+    /// [`apply_rail_stub_columns`] does, and what it must keep doing: its
+    /// anchor is a *neighbour's* pin column reached through
+    /// [`anchored_column_x`], not a wire the row has to meet.
+    Straddle,
+    /// Slot `count / 2` lands exactly ON the anchor column and the rest
+    /// spread to its left, so one member always gets the column.
+    OnColumn,
+}
+
+/// Offset in cells of slot `slot` of `count` from the row's anchor
+/// column, at pitch `stride` (see [`row_stride_cells`]). Slot 0 is
+/// leftmost.
+///
+/// A single-member row has offset `0` under either anchor, so it lands
+/// exactly on the column — the property that keeps one-stub groups
+/// byte-identical to the pre-spread behaviour.
+///
+/// # Why `Recolumn` needs `OnColumn`, measured
+///
+/// The anchor of a `Recolumn` row is the series element's own downstream
+/// **pin**, and a member standing on it gets a straight vertical drop off
+/// that pin: zero bends (V16) and an outward-extending first segment
+/// (V5). A [`RowAnchor::Straddle`] row of two denies that drop to *both*
+/// members, and the suite prices it — three arms, whole-workspace runs,
+/// only the `baseline_lock` rows of the two 2-stub fixtures differing
+/// between them:
+///
+/// | row anchor (count = 2)      | ratchets |
+/// | --------------------------- | -------- |
+/// | `Straddle` (−s/2, +s/2)     | `lc_ladder_lpf` V16 B 5 → **6**; `compensated_divider` V5 3 → **5**, F6 9 → **12**, detour 1.071 → **1.185** |
+/// | `OnColumn` biased left (0, +s) | `compensated_divider` V16 J 2 → **3**, F6 9 → **15**, detour 1.071 → **1.103** |
+/// | **`OnColumn` as written (−s, 0)** | **clean — every ratchet holds** |
+///
+/// So "one member on the column" is necessary but not sufficient: the row
+/// must also extend *away* from the downstream half-plane the series
+/// element is flowing into. Growing it rightward pushes a member past the
+/// node and costs a branch; growing it leftward tucks it under the series
+/// body, where the node's own wire already runs.
+fn row_slot_offset_cells(slot: usize, count: usize, stride: i32, anchor: RowAnchor) -> i32 {
+    let slot_i = i32::try_from(slot).unwrap_or(0);
+    let n = i32::try_from(count).unwrap_or(1);
+    match anchor {
+        RowAnchor::Straddle => slot_i * stride - (n - 1) * stride / 2,
+        RowAnchor::OnColumn => (slot_i - n.div_euclid(2)) * stride,
+    }
+}
+
+/// Cells to subtract from a target column to get the origin that puts
+/// `e`'s pin on `net` **on** that column, at pose `orient`.
+///
+/// The X half of [`origin_placing_pin_at`], for the callers that own the
+/// Y themselves. Pin-anchoring is CLAUDE.md's layout invariant:
+/// "`place` and `align` describe relationships between *connecting pins*,
+/// not symbol centers". A two-pin passive drawn upright has its pins on
+/// the origin's x and the offset is `0`; anything else (a rotated pose, a
+/// multi-pin body) does not, and writing the origin to the column leaves
+/// the very wire the column exists to straighten with a jog in it — the
+/// defect ADR-40 fixed in `dc_column::column_pin_offsets`.
+///
+/// Rounded to the grid rather than declined off-grid (which is what
+/// `dc_column::shared_pin_x_cells` does): that function serves an
+/// *interior* column member with two shared pins that must agree, so an
+/// inexact offset makes the column's own geometry inconsistent. A rail
+/// stub has exactly one shared pin, so there is nothing to be
+/// inconsistent with, and the grid is a hard constraint on the origin
+/// either way.
+fn pin_offset_x_cells(e: &ResolvedElement, orient: Orientation, net: &str) -> Option<i32> {
+    let (dx, _) = pin_offset_world(e, orient, net)?;
+    #[allow(clippy::cast_possible_truncation)]
+    Some((dx / GridPoint::STEP_MM).round() as i32)
+}
+
 /// Move every unpinned rail stub into the column of the node it
 /// terminates, so the stub hangs straight off that node instead of
 /// jogging sideways to reach it.
@@ -1008,24 +1134,19 @@ pub(crate) fn apply_rail_stub_columns(
 
         // Geometry-derived horizontal stride: the widest pair of
         // adjacent extents in the group, so no two members clip.
-        let mut stride = CELL_W;
-        for w in movable.windows(2) {
-            let a = world_extent(
-                &checked.elements[w[0].element].symbol,
-                placement.elements[w[0].element].orientation,
-                None,
-            );
-            let b = world_extent(
-                &checked.elements[w[1].element].symbol,
-                placement.elements[w[1].element].orientation,
-                None,
-            );
-            let gap_mm = a.max_x + (-b.min_x) + crate::MIN_CLEARANCE_MM;
-            stride = stride.max(crate::mm_up_to_cells(gap_mm));
-        }
+        let exts: Vec<WorldExtent> = movable
+            .iter()
+            .map(|s| {
+                world_extent(
+                    &checked.elements[s.element].symbol,
+                    placement.elements[s.element].orientation,
+                    None,
+                )
+            })
+            .collect();
+        let stride = row_stride_cells(&exts);
 
         // Spread symmetrically about the anchor column.
-        let count = i32::try_from(movable.len()).unwrap_or(1);
         for (slot, s) in movable.iter().enumerate() {
             let el = s.element;
             let Some(cur_x) = world_pin_x_of(
@@ -1035,9 +1156,8 @@ pub(crate) fn apply_rail_stub_columns(
             ) else {
                 continue;
             };
-            let slot_i = i32::try_from(slot).unwrap_or(0);
-            // Offset in cells of this slot from the group centre.
-            let offset_cells = slot_i * stride - (count - 1) * stride / 2;
+            let offset_cells =
+                row_slot_offset_cells(slot, movable.len(), stride, RowAnchor::Straddle);
             let target_x = anchor_x + f64::from(offset_cells) * GridPoint::STEP_MM;
             #[allow(clippy::cast_possible_truncation)]
             let dx_cells = ((target_x - cur_x) / GridPoint::STEP_MM).round() as i32;
@@ -1455,23 +1575,79 @@ pub(crate) fn apply_series_horizontal(
         #[allow(clippy::cast_possible_truncation)]
         let down_x = (down_x_mm / GridPoint::STEP_MM).round() as i32;
         let series_ext = world_extent(&e.symbol, orient, None);
-        for s in stubs.iter().filter(|s| s.signal_net == down) {
-            if pinned[s.element] {
+
+        // PLAN the whole group before writing any of it, for the reason
+        // stated above the `origin` match: a construction that mutates as
+        // it decides leaves half-applied geometry behind when a later
+        // member declines.
+        //
+        // Deterministic order: `detect_rail_stubs` yields element-index
+        // order and `filter` preserves it, so the slot a member gets is a
+        // property of the netlist, not of iteration luck.
+        let group: Vec<ShuntSlot<'_>> = stubs
+            .iter()
+            .filter(|s| s.signal_net == down)
+            .map(|s| {
+                let se = &checked.elements[s.element];
+                let cur = placement.elements[s.element].orientation;
+                if pinned[s.element] {
+                    return ShuntSlot {
+                        stub: s,
+                        pose: cur,
+                        offset: None,
+                    };
+                }
+                // Orient the shunt V14-correct: its rail pin faces the band
+                // its rail lives in — screen-down for ground / a negative
+                // rail (the glyph hangs below), screen-**up** for a positive
+                // supply (the glyph sits above). Pinning skips
+                // `pick_orientations`, which would otherwise choose this, so
+                // we must set it here.
+                let s_orient = rail_facing_orientation(se, down, s.side).unwrap_or(cur);
+                if !v14_permits(allowed, s.element, s_orient, &se.refdes) {
+                    return ShuntSlot {
+                        stub: s,
+                        pose: cur,
+                        offset: None,
+                    };
+                }
+                ShuntSlot {
+                    stub: s,
+                    pose: s_orient,
+                    offset: pin_offset_x_cells(se, s_orient, down),
+                }
+            })
+            .collect();
+
+        // Spread the group across a row of slots at a geometry-derived
+        // pitch, anchored so that one member stands ON the downstream pin
+        // ([`RowAnchor::OnColumn`], which records the measurement behind
+        // the anchor choice). Before this, every member of the group was
+        // written to the ONE identical origin — `down_x` and the vertical
+        // stride below depend on the series element, not on `s` — and
+        // `legalize` then shoved the coincidences apart in its own search
+        // order, which is why two shunts on one node landed in columns
+        // nothing had chosen.
+        let exts: Vec<WorldExtent> = group
+            .iter()
+            .map(|g| world_extent(&checked.elements[g.stub.element].symbol, g.pose, None))
+            .collect();
+        let row_stride = row_stride_cells(&exts);
+        for (slot, g) in group.iter().enumerate() {
+            // A member this pass declines — already pinned by a stronger
+            // opinion, V14-unposeable, or with no derivable pin offset —
+            // still CONSUMES its slot: the row's frame is then a function
+            // of the netlist alone, not of which members happened to
+            // decline, so the members that do move keep the same columns
+            // whether or not a neighbour was pinned. `apply_rail_stub_columns`
+            // records the failure of the other choice — a member "skipped
+            // without consuming its slot" put the newcomer in the cached
+            // element's exact column on `tests/layout_cache.rs`.
+            let Some(off) = g.offset else {
                 continue;
-            }
-            let se = &checked.elements[s.element];
-            // Orient the shunt V14-correct: its rail pin faces the band its
-            // rail lives in — screen-down for ground / a negative rail (the
-            // glyph hangs below), screen-**up** for a positive supply (the
-            // glyph sits above). Pinning skips `pick_orientations`, which
-            // would otherwise choose this, so we must set it here.
-            let s_orient = rail_facing_orientation(se, down, s.side)
-                .unwrap_or(placement.elements[s.element].orientation);
-            if !v14_permits(allowed, s.element, s_orient, &se.refdes) {
-                continue;
-            }
-            placement.elements[s.element].orientation = s_orient;
-            let shunt_ext = world_extent(&se.symbol, s_orient, None);
+            };
+            let el = g.stub.element;
+            placement.elements[el].orientation = g.pose;
             // World Y grows *downward* (`world_extent` applies the eeschema
             // y-flip; `vertical_stride_cells(upper, lower)` takes the
             // smaller-world-Y element first). A Down-side stub drops BELOW
@@ -1480,19 +1656,24 @@ pub(crate) fn apply_series_horizontal(
             // stride is measured the other way round and applied as
             // `-stride`. Getting the argument order wrong here would silently
             // under-space the pair whenever the two extents differ.
-            let (stride, sign) = match s.side {
+            let (stride, sign) = match g.stub.side {
                 VertPref::Down => (
-                    vertical_stride_cells(&series_ext, &shunt_ext) + SHUNT_LABEL_MARGIN_DOWN_CELLS,
+                    vertical_stride_cells(&series_ext, &exts[slot]) + SHUNT_LABEL_MARGIN_DOWN_CELLS,
                     1,
                 ),
                 VertPref::Up => (
-                    vertical_stride_cells(&shunt_ext, &series_ext) + SHUNT_LABEL_MARGIN_UP_CELLS,
+                    vertical_stride_cells(&exts[slot], &series_ext) + SHUNT_LABEL_MARGIN_UP_CELLS,
                     -1,
                 ),
             };
             let new_y = placement.elements[i].origin.y + sign * stride;
-            placement.elements[s.element].origin = GridPoint::new(down_x, new_y);
-            pinned[s.element] = true;
+            // Pin-anchored (CLAUDE.md "Constraints are pin-anchored"): the
+            // slot is a column through the member's own shared-net PIN, so
+            // the origin sits `off` cells left of it.
+            let slot_x =
+                down_x + row_slot_offset_cells(slot, group.len(), row_stride, RowAnchor::OnColumn);
+            placement.elements[el].origin = GridPoint::new(slot_x - off, new_y);
+            pinned[el] = true;
         }
     }
 }
@@ -2872,5 +3053,118 @@ Q1  c b e   QGENERIC
                 "{r} was re-oriented; the divider members belong to the divider idiom"
             );
         }
+    }
+
+    /// The `Recolumn` construction's shunt row: two stubs on one
+    /// downstream node get **distinct, non-overlapping, pin-anchored**
+    /// slots.
+    ///
+    /// Before the row existed, `down_x` and the vertical stride were
+    /// both functions of the *series* element alone, so every member of
+    /// the group was written to the identical origin and `legalize`
+    /// shoved the coincidences apart in its own search order — measured
+    /// on `compensated_divider` (`R2`/`C2` on `out`) and `lc_ladder_lpf`
+    /// (`C4`/`RL` on `out`), whose columns were therefore chosen by
+    /// nothing.
+    #[test]
+    fn recolumned_shunts_get_distinct_pin_anchored_slots() {
+        let src = "\
+two shunts on one downstream node
+*@symbol Device:R_US for=R*
+*@symbol Device:C    for=C*
+*@port in=input
+VIN in  0   DC 0 AC 1 ;@ ignore
+R1  in  out 900k
+R2  out 0   100k
+C2  out 0   8p1
+.end
+";
+        let checked = checked_of(src);
+        let seed = seed_with(&checked, Placer::default());
+
+        let extent_of = |refdes: &str| -> (f64, f64) {
+            let i = checked
+                .elements
+                .iter()
+                .position(|e| e.refdes == refdes)
+                .expect("element present");
+            let pe = &seed.elements[i];
+            let ext = world_extent(&checked.elements[i].symbol, pe.orientation, None);
+            let ox = pe.origin.to_mm().0;
+            (ox + ext.min_x, ox + ext.max_x)
+        };
+
+        let (r2_x, _) = pin_at(&seed, &checked, "R2", "out");
+        let (c2_x, _) = pin_at(&seed, &checked, "C2", "out");
+        let (r1_x, _) = pin_at(&seed, &checked, "R1", "out");
+
+        // Distinct slots — the defect was one shared origin.
+        assert!(
+            (r2_x - c2_x).abs() >= GridPoint::STEP_MM,
+            "R2 and C2 must occupy distinct columns, both at x = {r2_x}"
+        );
+        // Non-overlapping: the row's pitch clears both bodies.
+        let (r2_lo, r2_hi) = extent_of("R2");
+        let (c2_lo, c2_hi) = extent_of("C2");
+        assert!(
+            r2_hi + crate::MIN_CLEARANCE_MM <= c2_lo || c2_hi + crate::MIN_CLEARANCE_MM <= r2_lo,
+            "R2 [{r2_lo}, {r2_hi}] and C2 [{c2_lo}, {c2_hi}] must clear each other"
+        );
+        // The slot ORDER is the netlist's, not the search order of
+        // whatever cleaned up after the coincidence. This is the
+        // assertion that fails on the pre-fix code: with both members
+        // written to `down_x`, `legalize` broke the tie by shoving `C2`
+        // to the LEFT of `R2`, reversing them.
+        assert!(
+            r2_x < c2_x,
+            "slot 0 (R2, the lower element index) must be the left column; \
+             got R2 at {r2_x}, C2 at {c2_x}"
+        );
+        // Pin-anchored, and anchored ON the column: the slots are lines
+        // through the members\' own `out` PINS, and the member at slot
+        // `count / 2` — here `C2`, the last of two — stands on the series
+        // element\'s downstream pin, so it drops straight off the node
+        // (see [`RowAnchor::OnColumn`]).
+        assert!(
+            (c2_x - r1_x).abs() <= GridPoint::STEP_MM / 2.0,
+            "C2\'s `out` pin must land on R1\'s downstream pin x = {r1_x}, got {c2_x}"
+        );
+        assert!(
+            (r2_x - r1_x).abs() > GridPoint::STEP_MM / 2.0,
+            "R2 must NOT share the column; the row is spread, not stacked"
+        );
+    }
+
+    /// [`row_slot_offset_cells`]'s two anchors, at the sizes that
+    /// distinguish them. They agree for one member and for odd counts;
+    /// they differ for even ones, which is the case the `Recolumn` row
+    /// exercises.
+    #[test]
+    fn row_slot_offsets_differ_only_for_even_rows() {
+        for n in [1_usize, 3, 5] {
+            for slot in 0..n {
+                assert_eq!(
+                    row_slot_offset_cells(slot, n, 6, RowAnchor::Straddle),
+                    row_slot_offset_cells(slot, n, 6, RowAnchor::OnColumn),
+                    "count {n}, slot {slot}"
+                );
+            }
+        }
+        // A row of two: `Straddle` puts NEITHER member on the column,
+        // `OnColumn` puts the last one there and grows leftward.
+        assert_eq!(
+            (
+                row_slot_offset_cells(0, 2, 6, RowAnchor::Straddle),
+                row_slot_offset_cells(1, 2, 6, RowAnchor::Straddle),
+            ),
+            (-3, 3)
+        );
+        assert_eq!(
+            (
+                row_slot_offset_cells(0, 2, 6, RowAnchor::OnColumn),
+                row_slot_offset_cells(1, 2, 6, RowAnchor::OnColumn),
+            ),
+            (-6, 0)
+        );
     }
 }
