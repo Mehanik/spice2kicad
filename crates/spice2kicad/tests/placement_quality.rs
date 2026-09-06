@@ -1587,7 +1587,11 @@ fn wire_detour_within_budget_across_fixtures() {
         // detour 1.1506 -> 1.0139. Ratchet DOWN: 13.66 pp of excess wire
         // removed, the largest Tier-2 gain of this promotion. A straight
         // ladder is very nearly its own rectilinear lower bound.
-        ("lc_ladder_lpf", 1.0139),
+        // `Recolumn` shunt-row fix: `C4`/`RL` now take deterministic
+        // pin-anchored slots on `out` instead of coincident origins
+        // separated by `legalize`. detour 1.0139 -> 1.0137 (measured
+        // 1.0136986301369861, zero slack at 4 dp). Ratchet DOWN.
+        ("lc_ladder_lpf", 1.0137),
         ("sallen_key_lpf", 1.1022),
         ("wien_bridge_osc", 1.0899),
         // --- F3 (Tier-0 router fix, ADR-24): promoted out of

@@ -390,7 +390,10 @@ const Q5_NEAR_MISS_BUDGET: &[(&str, u32)] = &[
     // Q5 5 -> 1. "A doubly-terminated ladder is nothing BUT shared axes,
     // and the placer snaps none of them" — it snaps them now. Ratchet
     // DOWN.
-    ("lc_ladder_lpf", 1),
+    // `Recolumn` shunt-row fix: `C4`/`RL` take deterministic
+    // pin-anchored slots on `out`, and the last near-miss snaps. Q5
+    // 1 -> 0, measured from the sink. Ratchet DOWN.
+    ("lc_ladder_lpf", 0),
     ("sallen_key_lpf", 2),
     ("wien_bridge_osc", 2),
     // --- F3 (Tier-0 router fix, ADR-24): the two fixtures promoted out of

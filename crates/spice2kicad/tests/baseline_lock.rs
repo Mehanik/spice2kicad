@@ -527,6 +527,26 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
     // The four "Rows APPENDED" protocol notes that used to sit inside the
     // table are folded into the history above: after a wholesale
     // regeneration they no longer mark a splice point.
+    //
+    // EIGHT ROWS EDITED (not regenerated) for the `Recolumn` shunt-row
+    // fix in `idioms::apply_series_horizontal`. That construction wrote
+    // EVERY downstream shunt of a node to the SAME origin -- `down_x` and
+    // the vertical stride are functions of the series element, not of the
+    // stub -- so a node with two shunts produced two exactly coincident
+    // elements and `legalize` shoved them apart in its own search order.
+    // The group is now laid out as a row of pin-anchored slots.
+    //
+    // Only the two fixtures with 2+ shunts on one re-columned node move,
+    // which is the containment argument: `compensated_divider` (`R2`/`C2`
+    // on `out`) and `lc_ladder_lpf` (`C4`/`RL` on `out`). In both the pair
+    // exchanges columns -- the assignment is now the netlist's element
+    // order rather than `legalize`'s search order -- and their GND glyphs
+    // follow. `lc_ladder_lpf`'s left slot also moves one cell out
+    // (125.73 -> 124.46) because the row's pitch is now the geometric
+    // stride rather than whatever gap the shove happened to leave. Every
+    // OTHER fixture, and every other row of these two, is byte-identical.
+    // Every ratchet in the suite holds; see the commit message for the
+    // per-fixture V16 (B, J) table.
     (
         "cascode_amp",
         "#FLG1",
@@ -679,7 +699,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "compensated_divider",
         "#PWR2",
         "power:GND",
-        43.18,
+        35.56,
         48.26,
         0.0,
         "",
@@ -688,7 +708,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "compensated_divider",
         "#PWR3",
         "power:GND",
-        35.56,
+        43.18,
         48.26,
         0.0,
         "",
@@ -706,7 +726,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "compensated_divider",
         "C2",
         "Device:C",
-        35.56,
+        43.18,
         44.45,
         0.0,
         "",
@@ -724,7 +744,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "compensated_divider",
         "R2",
         "Device:R_US",
-        43.18,
+        35.56,
         44.45,
         0.0,
         "",
@@ -799,7 +819,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "lc_ladder_lpf",
         "#PWR5",
         "power:GND",
-        132.08,
+        124.46,
         46.99,
         0.0,
         "",
@@ -808,7 +828,7 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
         "lc_ladder_lpf",
         "#PWR6",
         "power:GND",
-        125.73,
+        132.08,
         46.99,
         0.0,
         "",
@@ -816,11 +836,11 @@ const BASELINE: &[(&str, &str, &str, f64, f64, f64, &str)] = &[
     ("lc_ladder_lpf", "C1", "Device:C", 55.88, 44.45, 0.0, ""),
     ("lc_ladder_lpf", "C2", "Device:C", 71.12, 43.18, 0.0, ""),
     ("lc_ladder_lpf", "C3", "Device:C", 101.6, 43.18, 0.0, ""),
-    ("lc_ladder_lpf", "C4", "Device:C", 132.08, 43.18, 0.0, ""),
+    ("lc_ladder_lpf", "C4", "Device:C", 124.46, 43.18, 0.0, ""),
     ("lc_ladder_lpf", "L1", "Device:L", 67.31, 35.56, 90.0, ""),
     ("lc_ladder_lpf", "L2", "Device:L", 97.79, 35.56, 90.0, ""),
     ("lc_ladder_lpf", "L3", "Device:L", 128.27, 35.56, 90.0, ""),
-    ("lc_ladder_lpf", "RL", "Device:R_US", 125.73, 43.18, 0.0, ""),
+    ("lc_ladder_lpf", "RL", "Device:R_US", 132.08, 43.18, 0.0, ""),
     ("lc_ladder_lpf", "RS", "Device:R_US", 52.07, 35.56, 90.0, ""),
     (
         "lc_ladder_lpf",
