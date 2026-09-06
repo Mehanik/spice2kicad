@@ -30,6 +30,37 @@ test:
     # § "M4 reverted" — gate-set lesson).
     bash -c 'ulimit -v ${RUST_TEST_MAX_VSZ_KB:-4194304} && cargo test --workspace --no-fail-fast -- --test-threads=${RUST_TEST_THREADS:-2}'
 
+# The STRUCTURAL GATE (ADR-40 follow-up, "Challenger blindness").
+#
+# Every `spice-layout` integration test built its `LayoutOptions` with
+# `..LayoutOptions::default()`, so no test in the tree ever ran a
+# registered challenger. `dc-series-column-pinned` was graded end-to-end
+# by the scoreboard -- 22 fixtures, ~60 verifiers, a k=9 multi-seed
+# replay, a 1320-conversion seed sweep -- and still shipped a column
+# anchored on the barycenter of its members' ORIGINS rather than their
+# shared PINS, against CLAUDE.md's pin-anchored invariant. It surfaced
+# only when promotion made the arm the default: the moment the most
+# geometry is moving and the least attention is available per fixture.
+#
+# This runs the placer-agnostic STRUCTURAL checks (yes/no geometric facts
+# with one correct answer, in CLAUDE.md's constraints-vs-costs sense)
+# under ONE arm. `scoreboard-run` and `scoreboard-run-multi` depend on
+# it, so a challenger cannot be collected without passing it. Continuous
+# quality gradients stay aggregate and stay in the scoreboard; nothing
+# here is a ratchet, and this grants no exception to one.
+#
+# Cost: ~1 s per arm on a warm target dir (the sweep of all 25 arms is
+# ~18 s at --test-threads=2, and it runs on the ordinary `just test`
+# path too).
+#
+# `--nocapture` on purpose: the sweep reports through `eprintln!` which
+# deferred defects the arm REPAIRS, and cargo swallows that on a passing
+# test -- the trap CLAUDE.md records against the first two promotions.
+structural-gate placer="champion":
+    bash -c 'ulimit -v ${RUST_TEST_MAX_VSZ_KB:-8388608} && \
+      cargo test -p spice-layout --test challenger_structural -- \
+        --exact "arm_$(echo {{placer}} | tr - _)" --nocapture'
+
 # --- champion/challenger scoreboard (ADR-23) --------------------------------
 #
 # The ratchets answer "did this change break what we shipped?". The
@@ -42,7 +73,7 @@ test:
 # switched on. A challenger run is EXPECTED to be red (every zero-slack
 # ratchet is calibrated on the champion's output); `--no-fail-fast` is
 # what keeps the measurements complete anyway.
-scoreboard-run placer="champion" out="target/scoreboard":
+scoreboard-run placer="champion" out="target/scoreboard": (structural-gate placer)
     rm -rf {{out}}/{{placer}}
     mkdir -p {{out}}/{{placer}}
     -bash -c 'ulimit -v ${RUST_TEST_MAX_VSZ_KB:-8388608} && \
@@ -62,7 +93,7 @@ scoreboard-run placer="champion" out="target/scoreboard":
 # that spread (SE = sd/sqrt(k) ~ 0.5).
 #
 # Cost is linear: one full suite run per seed, ~8-12 min each.
-scoreboard-run-multi placer="flow-seed-v4" k="9" out="target/scoreboard":
+scoreboard-run-multi placer="flow-seed-v4" k="9" out="target/scoreboard": (structural-gate placer)
     rm -rf {{out}}/{{placer}}
     for s in $(seq 1 {{k}}); do       mkdir -p {{out}}/{{placer}}/seed-$s;       bash -c "ulimit -v ${RUST_TEST_MAX_VSZ_KB:-8388608} &&         S2K_PLACER={{placer}}         S2K_SA_SEED=$s         S2K_SCOREBOARD_DIR=\"$PWD/{{out}}/{{placer}}/seed-$s\"         cargo test --workspace --no-fail-fast -- --test-threads=${RUST_TEST_THREADS:-2}"         > {{out}}/{{placer}}/seed-$s.log 2>&1 || true;       echo "  seed $s done";     done
 
