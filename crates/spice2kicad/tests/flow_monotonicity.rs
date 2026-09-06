@@ -36,6 +36,34 @@
 //! handled gracefully — no two elements differ in layer, so the pair set
 //! is empty and the fixture scores 0.
 //!
+//! # Two metrics live here: `q3` (origin frame) and `q3.pin` (pin frame)
+//!
+//! `q3` is the original, kept verbatim below: it compares symbol-origin
+//! X. ADR-40 measured what that costs. `q3` and `q5` were the only two
+//! metrics in the suite reading origins, and the pin-anchored DC-series
+//! column — which puts its members' SHARED PINS on one x, exactly as
+//! CLAUDE.md § "Layout invariants" requires — offsets their ORIGINS by
+//! each symbol's own pin offset, flipping this strict origin-X
+//! comparison for pairs on adjacent layers.
+//!
+//! `q3.pin` compares where the upstream body **presents the shared net**
+//! against where the downstream body presents it: the two ends of the
+//! wire that carries the signal between them, so a violation is that
+//! wire running backwards. Note that **F3's mean-pin X would NOT fix
+//! this** — `Device:Q_NPN_BCE`'s three pins are near-symmetric about its
+//! origin, so its mean-pin X *is* its origin X. Only the shared pin
+//! removes the offset.
+//!
+//! Measured on the shipping default, `q3.pin` is lower on 10 of 22
+//! fixtures and higher on 1 (`wien_bridge_osc` 0 → 1, a real backward
+//! wire the body frame hid: `CP` presents net `np` at x = 48.26 mm while
+//! `X1`'s `np` pin is at 44.45 mm). Suite total 33 → 22.
+//!
+//! Unlike `q5`/`q5.pin`, the re-frame also improves the metric's
+//! agreement with routed ink. Fixture-centred across six registered
+//! placer arms × 18 common fixtures: `q3` r = +0.55 / +0.44 against
+//! `v16.bends` / `v16.branches`, `q3.pin` r = **+0.56 / +0.62**.
+//!
 //! # Distinct from what already exists
 //!
 //! * The SA-internal `flow_inversions` gate scores an *intermediate*
@@ -46,7 +74,10 @@
 //!   falsify the layer code, and uses mean-pin X.
 //!
 //! Q3 is the whole-sheet OUTPUT count keyed on the placer's OWN layer
-//! model and the symbol-origin X — a different question from all three.
+//! model — a different question from all three. `q3` reads the
+//! symbol-origin X; `q3.pin` reads the shared-net pin X (F3's mean-pin X
+//! is a third, distinct frame, and the one that does NOT repair the
+//! defect above).
 //!
 //! # Ratchet
 //!
@@ -61,6 +92,7 @@ mod common;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
+use common::pin_frame::PinFrame;
 use common::spice_to_kicad;
 use lexpr::Value;
 use spice_diagnostics::FileId;
@@ -158,9 +190,16 @@ struct FlowElem {
     x_mm: f64,
 }
 
+/// Everything one fixture contributes: the origin-frame bodies (Q3) and
+/// the pin frame `q3.pin` is measured over.
+struct FlowFixture {
+    elems: Vec<FlowElem>,
+    frame: PinFrame,
+}
+
 /// Build the Q3 flow bodies for a fixture: convert it, then join the
 /// placer's OWN layer assignment to the emitted symbol X coordinates.
-fn flow_elems(name: &str) -> Vec<FlowElem> {
+fn flow_elems(name: &str) -> FlowFixture {
     let dir = tempdir(name);
     let sch = spice_to_kicad(&fixtures_dir().join(format!("{name}.cir")), &dir)
         .unwrap_or_else(|e| panic!("convert {name}: {e}"));
@@ -207,7 +246,8 @@ fn flow_elems(name: &str) -> Vec<FlowElem> {
             x_mm,
         });
     }
-    out
+    let frame = PinFrame::build(&root, &checked.elements);
+    FlowFixture { elems: out, frame }
 }
 
 /// The load helper mirrors `flow_geometry.rs`: the same four fixture
@@ -268,6 +308,136 @@ fn q3_violations(elems: &[FlowElem]) -> Vec<(String, String)> {
         }
     }
     out.sort();
+    out
+}
+
+// --- Q3.pin — the same question, asked in the pin frame ------------------
+
+/// `(net, upstream mean pin x µm, downstream mean pin x µm)` for the
+/// worst inverting net of a pair — the diagnostic behind a `q3.pin`
+/// entry. Only used by the `S2K_Q3_DUMP` path.
+fn q3_pin_detail(
+    elems: &[FlowElem],
+    frame: &PinFrame,
+    up: &str,
+    down: &str,
+) -> Option<(String, i64, i64)> {
+    let eu = elems.iter().find(|e| e.refdes == up)?;
+    let ed = elems.iter().find(|e| e.refdes == down)?;
+    let mut best: Option<(String, i64, i64)> = None;
+    for net in &eu.signal_nets {
+        if !ed.signal_nets.contains(net) {
+            continue;
+        }
+        let (Some(pu), Some(pd)) = (frame.pins(up, net), frame.pins(down, net)) else {
+            continue;
+        };
+        let (su, nu): (i64, i64) = (
+            pu.iter().map(|p| p.0).sum(),
+            i64::try_from(pu.len()).unwrap_or(1),
+        );
+        let (sd, nd): (i64, i64) = (
+            pd.iter().map(|p| p.0).sum(),
+            i64::try_from(pd.len()).unwrap_or(1),
+        );
+        if su * nd > sd * nu {
+            let (ux, dx) = (su / nu, sd / nd);
+            if best.as_ref().is_none_or(|(_, u2, d2)| ux - dx > u2 - d2) {
+                best = Some((net.clone(), ux, dx));
+            }
+        }
+    }
+    best
+}
+
+/// **Q3.pin** — flow-monotonicity violations measured between the pins
+/// that share a net, rather than between symbol origins.
+///
+/// Same pair set (shared Signal net, different layers), same reference
+/// model (the placer's own `assign_x_layers`), same counting unit (one
+/// entry per offending pair). The frame is the difference: for each
+/// shared net the comparison is between **where the upstream body
+/// presents that net** and **where the downstream body presents it** —
+/// i.e. the two ends of the wire that carries the signal from one to the
+/// other. A violation is that wire running *backwards*.
+///
+/// # Why the shared pin and not the mean pin
+///
+/// `flow_geometry.rs` (F3) uses mean-pin X, and mean-pin X does NOT fix
+/// the defect ADR-40 recorded: `Device:Q_NPN_BCE`'s three pins are
+/// roughly symmetric about its origin, so its mean-pin X *is* its origin
+/// X to within a fraction of a cell. The offset that made a pin-collinear
+/// DC-series column read as an inversion survives the mean.
+///
+/// The shared pin removes it exactly. Two bodies stacked in one column
+/// with their shared pins on a common x measure `dx == 0` and, with the
+/// strict `>` below, are not an inversion — which is the right answer:
+/// a vertical stack has no left-to-right order to violate. A genuine
+/// inversion (upstream drawn bodily right of downstream) still reads as
+/// one, because every pin of the upstream body is then right of every
+/// pin of the downstream body.
+///
+/// A pair counts once if ANY of its shared Signal nets inverts. In the
+/// origin frame the question had no per-net answer, so this is a new
+/// degree of freedom rather than a changed one; "any" is the strict
+/// reading, matching `q5.pin`.
+fn q3_pin_violations(elems: &[FlowElem], frame: &PinFrame) -> Vec<(String, String)> {
+    let mut net_members: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (i, e) in elems.iter().enumerate() {
+        for net in &e.signal_nets {
+            net_members.entry(net.as_str()).or_default().push(i);
+        }
+    }
+
+    let mut out = Vec::new();
+    let mut nets: Vec<&&str> = net_members.keys().collect();
+    nets.sort_unstable();
+    for net in nets {
+        let members = &net_members[*net];
+        for &a in members {
+            for &b in members {
+                if a >= b {
+                    continue;
+                }
+                let (ea, eb) = (&elems[a], &elems[b]);
+                if ea.layer == eb.layer {
+                    continue;
+                }
+                let (up, down) = if ea.layer < eb.layer {
+                    (ea, eb)
+                } else {
+                    (eb, ea)
+                };
+                // Unreachable in practice, and NOT a silent skip: both
+                // bodies are drawn (that is how they entered `elems`) and
+                // both carry `net`, so an absent pin is recorded in
+                // `PinFrame::unresolved`, which the verifier asserts is
+                // empty before it reads this count.
+                let (Some(up_pins), Some(down_pins)) =
+                    (frame.pins(&up.refdes, net), frame.pins(&down.refdes, net))
+                else {
+                    continue;
+                };
+                // Mean pin X on this net, compared without dividing:
+                // `sum_up / n_up > sum_down / n_down`. Both counts are
+                // positive, so cross-multiplying is exact in i64 and
+                // avoids inventing a float tolerance.
+                let (su, nu): (i64, i64) = (
+                    up_pins.iter().map(|p| p.0).sum(),
+                    i64::try_from(up_pins.len()).unwrap_or(1),
+                );
+                let (sd, nd): (i64, i64) = (
+                    down_pins.iter().map(|p| p.0).sum(),
+                    i64::try_from(down_pins.len()).unwrap_or(1),
+                );
+                if su * nd > sd * nu {
+                    out.push((up.refdes.clone(), down.refdes.clone()));
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
     out
 }
 
@@ -405,7 +575,7 @@ const Q3_FLOW_MONOTONICITY_BUDGET: &[(&str, u32)] = &[
 fn flow_monotonicity_within_budget_across_fixtures() {
     let mut failures = Vec::new();
     for &(name, budget) in Q3_FLOW_MONOTONICITY_BUDGET {
-        let elems = flow_elems(name);
+        let elems = flow_elems(name).elems;
         let viol = q3_violations(&elems);
         let count = u32::try_from(viol.len()).unwrap_or(u32::MAX);
         common::scoreboard::record_count("q3", name, viol.len());
@@ -429,6 +599,88 @@ fn flow_monotonicity_within_budget_across_fixtures() {
     assert!(
         failures.is_empty(),
         "Q3 flow-monotonicity ratchet regressions:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// Every fixture, with its zero-slack **pin-frame** Q3 high-water mark
+/// measured on the shipping default (`dc-series-column-pinned`).
+///
+/// A separate table from `Q3_FLOW_MONOTONICITY_BUDGET` on purpose:
+/// `q3.pin` is a different metric wearing a related name, so its
+/// literals are its own and neither table's history transfers to the
+/// other. Zero slack, ratchets DOWN only.
+const Q3_PIN_FLOW_MONOTONICITY_BUDGET: &[(&str, u32)] = &[
+    ("rc_lowpass", 0),
+    ("rc_lowpass_ports", 0),
+    ("common_emitter", 0),
+    ("multivibrator", 3),
+    ("diff_pair", 1),
+    ("opamp_inverting", 0),
+    ("opamp_inverting_real", 0),
+    ("port_shapes", 0),
+    ("opamp_definition_level", 0),
+    ("named_rails", 0),
+    ("rc_phase_shift", 3),
+    ("two_stage_amp", 2),
+    ("cascode_amp", 1),
+    ("lc_ladder_lpf", 1),
+    ("sallen_key_lpf", 1),
+    ("wien_bridge_osc", 1),
+    ("sallen_key_driven", 1),
+    ("shunt_feedback_amp", 2),
+    ("stepped_attenuator", 0),
+    ("opamp_transimpedance", 4),
+    ("resistor_ladder_ref", 0),
+    ("compensated_divider", 2),
+];
+
+#[test]
+fn flow_monotonicity_pin_frame_within_budget_across_fixtures() {
+    let mut failures = Vec::new();
+    for &(name, budget) in Q3_PIN_FLOW_MONOTONICITY_BUDGET {
+        let fx = flow_elems(name);
+        // Coverage, not a formality: a join that resolved no pins would
+        // report 0 violations everywhere and read as a perfect score
+        // (ADR-23 D9, "a blind cell is not conservatively blind").
+        if fx.frame.pin_count() == 0 {
+            failures.push(format!(
+                "{name}: the pin frame resolved NO pins — the metric measured nothing"
+            ));
+        }
+        if !fx.frame.unresolved.is_empty() {
+            failures.push(format!(
+                "{name}: {} (refdes, net) pair(s) have no resolvable pin: {:?}. \
+                 Q3.pin would silently skip them.",
+                fx.frame.unresolved.len(),
+                fx.frame.unresolved
+            ));
+        }
+        let viol = q3_pin_violations(&fx.elems, &fx.frame);
+        let count = u32::try_from(viol.len()).unwrap_or(u32::MAX);
+        common::scoreboard::record_count("q3.pin", name, viol.len());
+        if std::env::var("S2K_Q3_DUMP").is_ok() {
+            println!("(\"{name}\", {count}),");
+            for (u, v) in &viol {
+                let d = q3_pin_detail(&fx.elems, &fx.frame, u, v);
+                println!("    Q3.pin violation: upstream {u} right of downstream {v} {d:?}");
+            }
+        }
+        if count > budget {
+            failures.push(format!(
+                "{name}: Q3.pin pin-frame flow-monotonicity violations rose to {count} \
+                 (budget {budget}): {viol:?}. Do NOT raise the budget — diagnose the \
+                 geometry regression."
+            ));
+        } else if count < budget {
+            eprintln!(
+                "Q3.pin {name}: improved — you may lower the ratchet to (\"{name}\", {count})"
+            );
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "Q3.pin pin-frame flow-monotonicity ratchet regressions:\n{}",
         failures.join("\n")
     );
 }

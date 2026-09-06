@@ -431,8 +431,64 @@ const METRICS: &[Metric] = &[
         100.0,
         "wire detour ratio (1 point = 1 pp of excess wire)",
     ),
-    m("q3", Tier::T2, 1.0, "Q3 flow-monotonicity violations"),
-    m("q5", Tier::T2, 1.0, "Q5 alignment near-misses"),
+    // --- Q3 / Q5, in two frames (ADR-46) ---------------------------
+    //
+    // `q3` and `q5` were the ONLY two metrics in this registry that
+    // measured symbol **origins**; every other cell reads pins or
+    // emitted ink. ADR-40 measured what that costs. The pin-anchored
+    // DC-series column puts its members' SHARED PINS on one x — exactly
+    // what CLAUDE.md § "Layout invariants" requires ("constraints are
+    // pin-anchored … not symbol centers") — which offsets their ORIGINS
+    // by each symbol's own pin offset. A `Device:Q_NPN_BCE` collector
+    // sits 2 cells off its origin and Q5's whole snap threshold is 2
+    // cells, so a correctly pin-collinear column read as an origin
+    // near-miss BY CONSTRUCTION. ADR-40 recorded `q5` +14 and `q3` +7 on
+    // a change where `v16.bends` −4, `v16.branches` −5, `v5` −5 and
+    // `crossings` −1.
+    //
+    // `q5.pin` / `q3.pin` ask the same questions between the pins that
+    // SHARE THE NET, which is the geometry both metrics' own
+    // postconditions are stated in. They carry the Tier-2 vote at the
+    // usual 1.0 point per violation.
+    //
+    // `q3` / `q5` are demoted to `Info`: still measured, still printed,
+    // and still backed by their own zero-slack per-fixture ratchets
+    // (which are independent of this tier), but no longer voting. The
+    // reason is narrow and is NOT "the pin frame correlates better with
+    // ink" — ADR-46 measured that and it is true of `q3.pin` and FALSE
+    // of `q5.pin`. It is that a cell must not vote on geometry the
+    // project's own placement invariant REQUIRES, and that four cells at
+    // 1.0 would count each phenomenon twice in the aggregate.
+    //
+    // **This demotion is scoreboard POLICY and is flagged for owner
+    // review** — reverting it is one word per row. ADR-42's converse
+    // rule ("an informational cell cannot back a ratchet") is satisfied
+    // here because the pin-frame twin backs the same phenomenon at full
+    // weight; it would NOT be satisfied by demoting these alone.
+    m(
+        "q3",
+        Tier::Info,
+        0.0,
+        "Q3 flow-monotonicity violations (origin frame)",
+    ),
+    m(
+        "q5",
+        Tier::Info,
+        0.0,
+        "Q5 alignment near-misses (origin frame)",
+    ),
+    m(
+        "q3.pin",
+        Tier::T2,
+        1.0,
+        "Q3 flow-monotonicity violations (shared-pin frame)",
+    ),
+    m(
+        "q5.pin",
+        Tier::T2,
+        1.0,
+        "Q5 alignment near-misses (shared-pin frame)",
+    ),
     m("f3", Tier::T2, 1.0, "F3 flow inversions"),
     m("f4", Tier::T2, 1.0, "F4 terminal-lane violations"),
     m("f5", Tier::T2, 1.0, "F5 series-pose violations"),

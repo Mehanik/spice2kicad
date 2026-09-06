@@ -15,6 +15,7 @@
 #![allow(dead_code)]
 
 pub mod ink;
+pub mod pin_frame;
 pub mod scoreboard;
 pub mod sexp;
 pub mod text_model;

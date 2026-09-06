@@ -11327,3 +11327,193 @@ conversion in 440 is REFUSED, and under the candidate none is.
 Caveat kept: the grading is single-seed apart from this refusal sweep. A
 k=9 ADR-32 multi-seed collection has NOT been run for this candidate.
 ADR-31 is the standing reminder of what one draw is worth.
+
+## ADR-46 — Q5 and Q3 re-framed onto the pins that share the net; and the "leading indicator" claim falsified
+
+**Status:** landed. **Purely a measurement change**: no file under
+`crates/spice-layout/`, `crates/spice-route/` or `crates/kicad-emitter/`
+is touched, `baseline_lock` is untouched, and **no existing budget
+literal moves**. Two new registered metric ids (`q5.pin`, `q3.pin`) with
+their own zero-slack per-fixture ratchets, one new shared helper
+(`tests/common/pin_frame.rs`), and two scoreboard tier changes.
+
+### The defect, verified against the code
+
+ADR-40 § "Q5 and Q3 measure symbol ORIGINS" flagged this and deliberately
+did nothing about it. Each part of that diagnosis was re-checked here
+before acting on it, and all of it holds:
+
+* **They read origins.** `alignment_quality.rs::drawn_symbol_origin`
+  (the only geometry Q5 consumes) and
+  `flow_monotonicity.rs::drawn_symbol_x` both read a top-level
+  `(symbol …)`'s `(at x y)` and nothing else.
+* **Nothing else in the suite does.** `electrical_safety::world_pins_for_sheet`,
+  `placement_quality::world_pins_by_net`, `flow_geometry`'s `BodyPin`,
+  every `common::ink` consumer — pins or emitted ink. `q5` and `q3` were
+  the only two origin-frame cells in `METRICS`.
+* **The arithmetic is exact, not approximate.** `NEAR_CELLS = 2`
+  (`alignment_quality.rs`), one cell = 1.27 mm, so the snap threshold is
+  2.54 mm; `Device:Q_NPN_BCE`'s collector and emitter both sit at
+  x = +2.54 mm from the origin. A DC-series column that puts its members'
+  **shared pins** on one x — which is what CLAUDE.md § "Layout
+  invariants" demands, and what ADR-40's own pin-anchoring follow-up
+  built — therefore offsets a BJT's origin by exactly the whole
+  threshold. Confirmed on the emitted sheets: under the shipping default
+  the origin-frame Q5 pairs on `common_emitter` are `Q1↔RC` and `Q1↔RE`,
+  and on `rc_phase_shift` `Q1↔RC`, `Q1↔RE`, `CE↔Q1` — the column, every
+  time. All of them are gone in the pin frame.
+
+### The re-frame
+
+`tests/common/pin_frame.rs` joins each emitted symbol's pose to the
+resolved element's `pin_mapping` and its own owned `Symbol` (not a
+re-`lookup` of the emitted `lib_id`, so the join cannot disagree with the
+placer about which pin is which), and answers one question: *where does
+this body present this net?*
+
+* **`q5.pin`** takes `dx`/`dy` between the two bodies' pins ON THE SHARED
+  NET. Aligned on either axis ⇒ the wire can run straight ⇒ not a
+  near-miss; else within the threshold on an axis ⇒ near-miss. Evaluated
+  per shared net (a pair straight on one net and jogging on another is
+  really jogging), counted once per pair.
+* **`q3.pin`** compares the upstream body's mean pin x on the shared net
+  against the downstream body's — the two ends of the wire, so a
+  violation is that wire running backwards.
+
+**The threshold was re-derived, not carried across.** In the pin frame
+the origin-frame coincidence cannot recur, and the frame supplies its own
+scale: a KiCad symbol's pin pitch is 100 mil = 2.54 mm = 2 cells, the
+smallest offset that can separate two pins of one body and therefore the
+smallest jog that can be deliberate. Numerically the same constant, from
+an unrelated argument.
+
+**F3's mean-pin X would NOT have fixed Q3.** `Q_NPN_BCE`'s three pins are
+near-symmetric about the origin, so its mean-pin X *is* its origin X to
+within a fraction of a cell. Only the shared pin removes the offset.
+
+### Per-fixture, shipping default, old frame → new
+
+| fixture | `q5` → `q5.pin` | `q3` → `q3.pin` |
+| --- | ---: | ---: |
+| cascode_amp | 5 → **4** | 2 → **1** |
+| common_emitter | 2 → **6** | 1 → **0** |
+| compensated_divider | 0 → **2** | 2 → 2 |
+| diff_pair | 2 → 2 | 2 → **1** |
+| lc_ladder_lpf | 0 → **1** | 2 → **1** |
+| multivibrator | 4 → **6** | 4 → **3** |
+| named_rails | 2 → 2 | 0 → 0 |
+| opamp_definition_level | 2 → 2 | 0 → 0 |
+| opamp_inverting | 0 → 0 | 0 → 0 |
+| opamp_inverting_real | 1 → 1 | 0 → 0 |
+| opamp_transimpedance | 2 → 2 | 4 → 4 |
+| port_shapes | 1 → **0** | 1 → **0** |
+| rc_lowpass / rc_lowpass_ports | 0 → 0 | 0 → 0 |
+| rc_phase_shift | 5 → **2** | 5 → **3** |
+| resistor_ladder_ref | 0 → 0 | 0 → 0 |
+| sallen_key_driven | 5 → **3** | 2 → **1** |
+| sallen_key_lpf | 2 → **0** | 2 → **1** |
+| shunt_feedback_amp | 4 → 4 | 2 → 2 |
+| stepped_attenuator | 0 → 0 | 0 → 0 |
+| two_stage_amp | 4 → **9** | 4 → **2** |
+| wien_bridge_osc | 2 → **4** | 0 → **1** |
+| **TOTAL** | **43 → 50** | **33 → 22** |
+
+### What got WORSE — real defects the origin frame was hiding
+
+This is the most useful half of the result, and it is why the re-frame is
+not simply "the counts go down".
+
+* **Q5 rises on six fixtures** (`two_stage_amp` +5, `common_emitter` +4,
+  `multivibrator` +2, `wien_bridge_osc` +2, `compensated_divider` +2,
+  `lc_ladder_lpf` +1). Every one is a pair whose ORIGINS are far apart on
+  both axes — invisible to the origin test — but whose SHARED PINS sit
+  within one pin pitch of a common axis. Worked example:
+  `common_emitter`'s `COUT ↔ Q1` on net `c` measures dy = **1.27 mm**
+  across a 13.97 mm run. That is a one-cell jog in a wire that is
+  otherwise straight, i.e. precisely the defect Q5's first paragraph
+  describes, and the origin frame could not see it.
+* **Q3 rises on one fixture**, `wien_bridge_osc` 0 → 1: `CP` presents
+  net `np` at x = 48.26 mm while `X1`'s `np` pin is at 44.45 mm, so the
+  wire into the opamp's non-inverting input runs three cells backwards.
+  The bodies are ordered correctly and the wire is not — the origin frame
+  graded the bodies.
+
+### The "leading indicator of V16 bends" claim is falsified in BOTH frames
+
+`alignment_quality.rs` claimed Q5 was "a **pre-routing leading
+indicator** of V16 bends". ADR-40 recorded `q5` +14 against `v16.bends`
+−4 on one construction. Measured again here across the six registered
+placer arms (`dc-series-column-pinned`, `champion`, `flow-seed`,
+`flow-seed-v4`, `readable-v1`, `column-stubs-conet-chain`) over the 18
+fixtures all six convert, **fixture-centred** so circuit size cannot
+carry the correlation:
+
+| metric | r vs `v16.bends` | r vs `v16.branches` |
+| --- | ---: | ---: |
+| `q5` (origins) | +0.47 | +0.26 |
+| `q5.pin` (pins) | **+0.01** | **+0.03** |
+| `q3` (origins) | +0.55 | +0.44 |
+| `q3.pin` (pins) | **+0.56** | **+0.62** |
+
+Re-framing *improves* Q3's agreement with routed ink and *removes* Q5's.
+The cause is in Q5's definition, not its frame: a **near**-miss is an
+INTERMEDIATE state, so a placer pulling connected parts together
+converts "far apart on both axes" (uncounted) into "close on one axis"
+(counted) on the way to "aligned" (uncounted). ADR-23's `flow-seed`
+promotion note already said this — "a placer that packs columns tighter
+naturally produces more of them" — without drawing the conclusion. The
+conclusion is: **Q5 must never be read as a bend forecast in either
+frame.** It stands on its other claim only, that an avoidable jog is a
+legibility defect whatever the router then does with it. The module doc
+now says so.
+
+### Negative control across arms (18 common fixtures)
+
+| metric | default | champion | flow-seed | flow-seed-v4 | readable-v1 | column-stubs-conet-chain |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `q5` | 41 | 46 | 49 | 44 | 38 | 35 |
+| `q5.pin` | 46 | **61** | 50 | 49 | 45 | 51 |
+| `q3` | 27 | 31 | 27 | 25 | 31 | 25 |
+| `q3.pin` | 16 | **27** | 19 | 17 | 23 | **15** |
+| `v16.bends` | 104 | 147 | 142 | 128 | 125 | 96 |
+
+Both new metrics separate the arms, so neither is measuring nothing.
+`champion`, `flow-seed` and `flow-seed-v4` cannot convert
+`stepped_attenuator`, which is why the table is 18 fixtures and not 22
+(pre-existing, ADR-42).
+
+### The landing form, and what is left to the owner
+
+**Both frames ship.** `q5` / `q3` keep their existing literals verbatim —
+no ratchet moves, so the "did this change break what we shipped?"
+instrument is untouched and this commit cannot launder a regression
+through a re-definition. `q5.pin` / `q3.pin` get their own zero-slack
+tables recorded at their measured values on the shipping default, which
+is the ADR-42 shape (a new metric is new geometry) and the only shape in
+which "the literals moved because the metric changed" is unambiguous.
+
+**One scoreboard policy change is taken, and is flagged for review.**
+`q5` and `q3` are demoted `Tier::T2 → Tier::Info`; `q5.pin` and `q3.pin`
+enter at `Tier::T2`, 1.0 point per violation. Reasons, both narrow:
+a proxy that fires on geometry the project's own placement invariant
+*requires* must not out-vote the frame that measures it correctly, and
+leaving all four at 1.0 would count each phenomenon twice in the
+aggregate. The ratchets are unaffected — a ratchet does not read the
+tier — so ADR-42's rule ("an informational cell cannot back a ratchet")
+is satisfied by the pin-frame twin carrying the same phenomenon at full
+weight. Reverting is one word per row.
+
+**Not done, deliberately:** ADR-40's suggested *monotone amendment* to
+the origin metric (exempt a pair whose shared pins are exactly collinear,
+before the origin test). It is subsumed — that amendment is the first
+clause of `q5.pin`'s own test — and applying it as well would change the
+origin literals, which is the one thing this commit is careful not to do.
+
+### What this does not do
+
+It adds no placer behaviour and takes no position on
+`column-stubs-conet-chain`. It does change how that candidate reads: on
+all 22 fixtures the candidate moves `q5` 43 → 39 but `q5.pin` 50 → 60,
+and `q3` 33 → 28 with `q3.pin` 22 → 19, against `v16.bends` 137 → 115.
+The `q5.pin` rise is the intermediate-state property above, not a
+verdict; the promotion decision remains the owner's on the printed table.
