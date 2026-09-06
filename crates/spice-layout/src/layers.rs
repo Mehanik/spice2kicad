@@ -5,7 +5,7 @@
 //! `LayerAssignment` whose `layers` vec is parallel to `checked.elements`.
 //! Used downstream by the seed placer to assign X coordinates.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use spice_policy::CheckedNetlist;
 use spice_resolve::PortDir;
@@ -96,6 +96,11 @@ pub fn assign_x_layers_with(
     // --- Step 1: build adjacency via Signal nets ---------------------------
     // net_to_elements[net] = list of element indices on that net
     let mut net_to_elements: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    // The **set** of Signal nets each element sits on, parallel to
+    // `checked.elements`. Two elements with the same set are incident on
+    // the same nodes of the signal graph, so they are at the same depth
+    // along it — see `collapse_conet_groups`.
+    let mut sig_nets: Vec<BTreeSet<&str>> = vec![BTreeSet::new(); n];
     for (idx, el) in checked.elements.iter().enumerate() {
         for net in &el.nodes {
             if classes
@@ -105,6 +110,7 @@ pub fn assign_x_layers_with(
                 == NetClass::Signal
             {
                 net_to_elements.entry(net.as_str()).or_default().push(idx);
+                sig_nets[idx].insert(net.as_str());
             }
         }
     }
@@ -171,7 +177,12 @@ pub fn assign_x_layers_with(
     }
     // Step 3-5: directed DAG, longest-path layering.
     let (dag, feedback_edges) = break_cycles(adj);
-    let layers = longest_path_layers(&dag, &sources, n);
+    let mut layers = longest_path_layers(&dag, &sources, n);
+    // Gated: only `--placer=conet-layer-collapse` (ADR-23 challenger).
+    if variant.conet_layer_collapse() {
+        collapse_conet_groups(&mut layers, &sig_nets);
+        compact_layers(&mut layers);
+    }
     let rank_in_layer = rank_by_layer(&layers, n);
     LayerAssignment {
         layers,
@@ -527,6 +538,67 @@ fn no_source_fallback(
         feedback_edges: Vec::new(),
         no_source_fallback: true,
         rooted: use_flow_roots,
+    }
+}
+
+/// Collapse **co-net groups**: elements incident on exactly the same set
+/// of Signal nets take the shallowest layer of the group.
+///
+/// This repairs the clique-expansion defect in the rooted-DAG path.
+/// `assign_x_layers_with` reduces the netlist *hypergraph* to a clique
+/// expansion — "every ordered pair of distinct elements sharing a Signal
+/// net gets an edge" — so a `k`-element net becomes a `k`-clique.
+/// `break_cycles` turns that clique into a *tournament* (Tarjan finds one
+/// SCC and reverses one edge at a time until it is acyclic), and
+/// `longest_path_layers` then walks the Hamiltonian path the tournament
+/// always contains: `layers[v] = max(layers[preds]) + 1` spreads the
+/// net's own members across up to `k - 1` layers.
+///
+/// X therefore stopped measuring *depth along the signal path* and
+/// started measuring *index within the largest net*, and `place_seed`
+/// multiplies every spurious layer gap by a full X stride
+/// (`X_STRIDE_FLOOR` = 12 cells = 15.24 mm). On `compensated_divider`
+/// the R-parallel-C arm — `R1` and `C1` between the *same* node pair —
+/// landed three layers apart and the sheet emitted 114.30 mm of wire
+/// against a 12.70 mm connectivity floor.
+///
+/// The repair is **structural**, not topological pattern-matching
+/// (CLAUDE.md principle 9): it never reads a refdes, an element kind or
+/// a named topology. Two elements incident on the same *set* of nodes
+/// are indistinguishable to any depth functional over the signal graph,
+/// so any layering that separates them is separating them on tie-break
+/// noise. Taking the **minimum** rather than the maximum keeps the
+/// group as close to its driver as the deepest constraint allows and
+/// never pushes an element further right than the pre-collapse layering
+/// already had it.
+///
+/// Elements on **no** Signal net (a decoupling cap between two rails)
+/// are skipped: they have no depth along the signal graph, and grouping
+/// them by their shared empty set would collapse unrelated parts.
+///
+/// Only the rooted-DAG path needs this. The `no_source_fallback` path
+/// layers by a shortest-hop BFS, which already assigns the same depth to
+/// every member of a net's frontier — its own spreads (e.g.
+/// `resistor_ladder_ref`'s six-resistor string) are genuine chain depth,
+/// a different mechanism this function does not touch.
+fn collapse_conet_groups(layers: &mut [u32], sig_nets: &[BTreeSet<&str>]) {
+    let mut groups: BTreeMap<&BTreeSet<&str>, Vec<usize>> = BTreeMap::new();
+    for (i, nets) in sig_nets.iter().enumerate() {
+        if nets.is_empty() {
+            continue;
+        }
+        groups.entry(nets).or_default().push(i);
+    }
+    for members in groups.values() {
+        if members.len() < 2 {
+            continue;
+        }
+        let Some(min) = members.iter().map(|&i| layers[i]).min() else {
+            continue;
+        };
+        for &i in members {
+            layers[i] = min;
+        }
     }
 }
 
@@ -886,6 +958,26 @@ mod tests {
             .collect()
     }
 
+    /// [`layer_str`] for a named placer, so a test can exercise the
+    /// **shipping** layering rather than the champion reference
+    /// [`assign_x_layers`] is deliberately pinned to.
+    fn layer_str_with(src: &str, variant: Placer) -> HashMap<String, u32> {
+        let file_id = FileId(0);
+        let parsed = spice_parser::parse(src, file_id)
+            .expect("parse failed")
+            .netlist;
+        let resolved = spice_resolve::resolve(&parsed, fixture_library()).expect("resolve failed");
+        let (checked, _warns) = check(resolved).expect("policy check failed");
+        let classes = classify_nets(&checked);
+        let asg = assign_x_layers_with(&checked, &classes, variant);
+        checked
+            .elements
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.refdes.clone(), asg.layers[i]))
+            .collect()
+    }
+
     /// RC low-pass: V1 drives `in`, R1 bridges `in`→`mid`, C1 bridges
     /// `mid`→`0`. Signal flows V1 → R1 → C1. Invariant: strict ordering.
     #[test]
@@ -1003,5 +1095,96 @@ mod tests {
         // the test terminates and both keys are present).
         let _ = m["Q1"];
         let _ = m["Q2"];
+    }
+
+    /// The co-net collapse, on the shape that motivated it: an
+    /// R-parallel-C arm (`compensated_divider`). `R1`/`C1` sit between
+    /// the *same* node pair and `R2`/`C2` between the next one, so each
+    /// pair is one node of the signal graph and belongs in one column.
+    ///
+    /// **This is the negative control.** Before the collapse the clique
+    /// expansion made the four-element net `in` a tournament and the
+    /// longest-path layering walked its Hamiltonian path: `VIN` 0, `R1`
+    /// 1, `C1` **4** — three empty-looking columns, each costing a full
+    /// `X_STRIDE_FLOOR` (12 cells = 15.24 mm) in `place_seed`. Run this
+    /// test against a tree without `collapse_conet_groups` and it fails
+    /// on the first assertion.
+    #[test]
+    fn parallel_arms_share_a_layer() {
+        let m = layer_str_with(
+            "compensated divider\n\
+             VIN in 0 DC 0 AC 1\n\
+             R1 in out 900k\n\
+             C1 in out 900f\n\
+             R2 out 0 100k\n\
+             C2 out 0 8.1p\n.end\n",
+            Placer::ConetLayerCollapse,
+        );
+        assert_eq!(
+            m["R1"], m["C1"],
+            "R1 (layer {}) and C1 (layer {}) bridge the same node pair \
+             and must share a column",
+            m["R1"], m["C1"]
+        );
+        assert_eq!(
+            m["R2"], m["C2"],
+            "R2 (layer {}) and C2 (layer {}) bridge the same node pair \
+             and must share a column",
+            m["R2"], m["C2"]
+        );
+        // The collapse takes the MINIMUM, so it may never push a group
+        // right: the divider still reads source -> upper arm -> lower arm.
+        assert!(
+            m["VIN"] < m["R1"] && m["R1"] < m["R2"],
+            "flow order lost: VIN {} R1 {} R2 {}",
+            m["VIN"],
+            m["R1"],
+            m["R2"]
+        );
+    }
+
+    /// The collapse groups on the **set** of Signal nets, so a series
+    /// chain — whose members share only ONE net with each neighbour — is
+    /// untouched and still reads left to right. This is the guard
+    /// against over-collapsing the whole sheet into one column.
+    #[test]
+    fn series_chain_is_not_collapsed() {
+        let src = "series\nV1 in 0 AC 1\nR1 in mid 1k\nR2 mid out 1k\nC1 out 0 1u\n.end\n";
+        // Both arms: the guard must hold under the collapse, and the
+        // shipping default must be unaffected by it either way.
+        for variant in [Placer::ConetLayerCollapse, Placer::default()] {
+            let m = layer_str_with(src, variant);
+            assert!(
+                m["V1"] < m["R1"] && m["R1"] < m["R2"] && m["R2"] <= m["C1"],
+                "series chain collapsed under {}: V1 {} R1 {} R2 {} C1 {}",
+                variant.name(),
+                m["V1"],
+                m["R1"],
+                m["R2"],
+                m["C1"]
+            );
+        }
+    }
+
+    /// The pure function, pinned directly: same set -> the group's
+    /// minimum, different set -> untouched, and the **empty** set is not
+    /// a group at all. An element on no Signal net (a decoupling cap
+    /// between two rails) has no depth along the signal graph, and
+    /// grouping every such element together would drag unrelated parts
+    /// onto one column.
+    #[test]
+    fn collapse_takes_the_minimum_and_skips_the_empty_set() {
+        let a: BTreeSet<&str> = ["in", "out"].into_iter().collect();
+        let b: BTreeSet<&str> = ["out"].into_iter().collect();
+        let empty: BTreeSet<&str> = BTreeSet::new();
+        let sig_nets = vec![a.clone(), a, b, empty.clone(), empty];
+        let mut layers = vec![1, 4, 2, 0, 7];
+        collapse_conet_groups(&mut layers, &sig_nets);
+        assert_eq!(
+            layers,
+            vec![1, 1, 2, 0, 7],
+            "same-set pair -> min(1, 4); the singleton and both \
+             empty-set elements untouched"
+        );
     }
 }

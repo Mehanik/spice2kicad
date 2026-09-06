@@ -560,6 +560,45 @@ pub enum Placer {
     /// discriminator.
     #[default]
     DcSeriesColumnPinned,
+    /// **Co-net layer collapse** — `dc-series-column-pinned` plus ONE
+    /// change inside [`crate::layers::assign_x_layers_with`]'s rooted-DAG
+    /// path: elements incident on exactly the same set of Signal nets
+    /// take the shallowest layer of the group.
+    ///
+    /// It repairs a clique-expansion defect in the layering. The
+    /// hypergraph is reduced to a clique expansion, `break_cycles` turns
+    /// each clique into a tournament, and the longest-path layering walks
+    /// the Hamiltonian path it always contains — so a `k`-element net
+    /// spreads its own members across up to `k - 1` layers and X stops
+    /// measuring depth along the signal path. `place_seed` then multiplies
+    /// every spurious gap by a full X stride.
+    ///
+    /// **Blast radius: two fixtures, and the other twenty are
+    /// byte-identical** (verified by `diff` over all 22 emitted
+    /// `.kicad_sch`, `--no-layout-cache`). Only four fixtures reach the
+    /// rooted-DAG path at all — a drawn stimulus with no declared
+    /// `*@port …=input` — and of those only `compensated_divider` (the
+    /// R-parallel-C arm) and `opamp_transimpedance` (`RF`/`CF`/`X1` all on
+    /// `{inv, out}`) present a co-net group. `resistor_ladder_ref`'s
+    /// six-layer spread is the `no_source_fallback` BFS and is NOT
+    /// touched.
+    ///
+    /// Graded per ADR-23 against `dc-series-column-pinned`, whole suite
+    /// each side, single shipped seed: **Tier 0 clean, Tier 1 +0.00** (no
+    /// Tier-0 or Tier-1 cell moves at all), **Tier 2 ≈ −9**. Wins:
+    /// `v16.bends` 12 → 5 and 5 → 4, `f6` −5, `q3` −3, `v5` −1, detour
+    /// −4.5 pts on `opamp_transimpedance`. Costs: `q5` 0 → 2 and detour
+    /// +9.5 pts on `compensated_divider`, `v16.branches` 2 → 3 on
+    /// `opamp_transimpedance`. Absolute emitted wire falls hard on both
+    /// (114.30 → 44.45 mm and 118.11 → 62.23 mm) — the detour *ratio*
+    /// rises on `compensated_divider` because its rectilinear ideal falls
+    /// further than its wire does.
+    ///
+    /// Registered rather than landed on the default path because those
+    /// three cells are RISES, and CLAUDE.md's ratchet rule forbids raising
+    /// a literal for an ordinary change. Promotion is an owner decision
+    /// under ADR-23 D4.
+    ConetLayerCollapse,
 }
 
 impl Placer {
@@ -585,6 +624,7 @@ impl Placer {
         Self::SignalDirection,
         Self::DcSeriesColumn,
         Self::DcSeriesColumnPinned,
+        Self::ConetLayerCollapse,
     ];
 
     /// The name accepted by `--placer` and printed by the scoreboard.
@@ -610,6 +650,7 @@ impl Placer {
             Self::ReadableV1 => "readable-v1",
             Self::DcSeriesColumn => "dc-series-column",
             Self::DcSeriesColumnPinned => "dc-series-column-pinned",
+            Self::ConetLayerCollapse => "conet-layer-collapse",
         }
     }
 
@@ -685,6 +726,10 @@ impl Placer {
                 "dc-series-column with the column pinned, so the SA and \
                  phase 4.5 leave the stack put (attribution arm)"
             }
+            Self::ConetLayerCollapse => {
+                "dc-series-column-pinned plus the co-net layer collapse: \
+                 elements on the same set of Signal nets share a column"
+            }
         }
     }
 
@@ -737,6 +782,7 @@ impl Placer {
                 | Self::ReadableV1
                 | Self::DcSeriesColumn
                 | Self::DcSeriesColumnPinned
+                | Self::ConetLayerCollapse
         )
     }
 
@@ -777,6 +823,7 @@ impl Placer {
                 | Self::ReadableV1
                 | Self::DcSeriesColumn
                 | Self::DcSeriesColumnPinned
+                | Self::ConetLayerCollapse
         )
     }
 
@@ -798,6 +845,7 @@ impl Placer {
                 | Self::ReadableV1
                 | Self::DcSeriesColumn
                 | Self::DcSeriesColumnPinned
+                | Self::ConetLayerCollapse
         )
     }
 
@@ -814,6 +862,7 @@ impl Placer {
                 | Self::ReadableV1
                 | Self::DcSeriesColumn
                 | Self::DcSeriesColumnPinned
+                | Self::ConetLayerCollapse
         )
     }
 
@@ -842,6 +891,7 @@ impl Placer {
                 | Self::ReadableV1
                 | Self::DcSeriesColumn
                 | Self::DcSeriesColumnPinned
+                | Self::ConetLayerCollapse
         )
     }
 
@@ -863,6 +913,7 @@ impl Placer {
                 | Self::ReadableV1
                 | Self::DcSeriesColumn
                 | Self::DcSeriesColumnPinned
+                | Self::ConetLayerCollapse
         )
     }
 
@@ -881,6 +932,7 @@ impl Placer {
                 | Self::ReadableV1
                 | Self::DcSeriesColumn
                 | Self::DcSeriesColumnPinned
+                | Self::ConetLayerCollapse
         )
     }
 
@@ -918,6 +970,7 @@ impl Placer {
                 | Self::ReadableV1
                 | Self::DcSeriesColumn
                 | Self::DcSeriesColumnPinned
+                | Self::ConetLayerCollapse
         )
     }
 
@@ -931,7 +984,10 @@ impl Placer {
     /// can change. `baseline_lock` is the empirical half.
     #[must_use]
     pub fn dc_series_columns(self) -> bool {
-        matches!(self, Self::DcSeriesColumn | Self::DcSeriesColumnPinned)
+        matches!(
+            self,
+            Self::DcSeriesColumn | Self::DcSeriesColumnPinned | Self::ConetLayerCollapse
+        )
     }
 
     /// Does that construction additionally **pin** the column, freezing
@@ -942,7 +998,30 @@ impl Placer {
     /// (CLAUDE.md's consistency requirement).
     #[must_use]
     pub fn dc_series_columns_pinned(self) -> bool {
-        matches!(self, Self::DcSeriesColumnPinned)
+        matches!(self, Self::DcSeriesColumnPinned | Self::ConetLayerCollapse)
+    }
+
+    /// Does [`crate::layers::assign_x_layers_with`]'s rooted-DAG path
+    /// collapse **co-net groups** — elements incident on exactly the same
+    /// set of Signal nets — onto the shallowest layer of the group?
+    ///
+    /// Without it the clique expansion the layering builds is turned into
+    /// a tournament by `break_cycles`, and the longest-path layering walks
+    /// the Hamiltonian path it always contains: a `k`-element net spreads
+    /// its own members over up to `k - 1` layers, each costing a full X
+    /// stride. See `layers::collapse_conet_groups` for the derivation.
+    ///
+    /// **Only [`Self::ConetLayerCollapse`] answers `true`**, and gating it
+    /// on this one accessor is the entire byte-identity argument for the
+    /// shipping output: the pass is unreachable otherwise, so no
+    /// default-path layer can change. `baseline_lock` is the empirical
+    /// half. It is a challenger because three Tier-2 literals RISE under
+    /// it (`q5 / compensated_divider` 0 -> 2, its detour ratio 1.0714 ->
+    /// 1.1667, and `v16.branches / opamp_transimpedance` 2 -> 3), and an
+    /// ordinary change may not raise a ratchet.
+    #[must_use]
+    pub fn conet_layer_collapse(self) -> bool {
+        matches!(self, Self::ConetLayerCollapse)
     }
 
     /// Look a placer up by the name `--placer` accepts.
@@ -970,6 +1049,34 @@ mod tests {
     fn default_is_the_dc_series_column_placer() {
         assert_eq!(Placer::default(), Placer::DcSeriesColumnPinned);
         assert_eq!(Placer::default().name(), "dc-series-column-pinned");
+    }
+
+    /// The co-net layer collapse is a CHALLENGER, not the default.
+    /// Three Tier-2 literals rise under it, and an ordinary change may
+    /// not raise a ratchet — so the shipping path must not reach it.
+    /// This assertion is the byte-identity argument in code; the
+    /// `baseline_lock` empty diff is its empirical half.
+    #[test]
+    fn conet_layer_collapse_is_off_on_the_default_path() {
+        assert!(!Placer::default().conet_layer_collapse());
+        for p in Placer::ALL {
+            assert_eq!(
+                p.conet_layer_collapse(),
+                *p == Placer::ConetLayerCollapse,
+                "{} must not reach the co-net collapse",
+                p.name()
+            );
+        }
+        // It composes ON the shipping default, so every arm the default
+        // switches on must still be switched on.
+        let d = Placer::default();
+        let c = Placer::ConetLayerCollapse;
+        assert_eq!(c.dc_series_columns(), d.dc_series_columns());
+        assert_eq!(c.dc_series_columns_pinned(), d.dc_series_columns_pinned());
+        assert_eq!(c.signal_direction_filter(), d.signal_direction_filter());
+        assert_eq!(c.terminal_net_series(), d.terminal_net_series());
+        assert_eq!(c.unified_roots(), d.unified_roots());
+        assert_eq!(c.page_frame_pin_y(), d.page_frame_pin_y());
     }
 
     /// Neither promotion retired its predecessor. ADR-23's promotion
